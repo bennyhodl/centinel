@@ -1,8 +1,16 @@
-export default function Page() {
-  return (
-    <section>
-      <h1 className="text-2xl font-semibold">Route: /findings</h1>
-      <p className="mt-2 text-sm opacity-70">TODO — placeholder stub.</p>
-    </section>
-  );
+import FindingsListView, {
+  isTab,
+  type TabKey,
+} from "./_components/FindingsListView";
+
+export const dynamic = "force-dynamic";
+
+export default async function FindingsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ stack?: string }>;
+}) {
+  const sp = await searchParams;
+  const activeTab: TabKey = isTab(sp?.stack) ? sp.stack : "all";
+  return <FindingsListView activeTab={activeTab} />;
 }
