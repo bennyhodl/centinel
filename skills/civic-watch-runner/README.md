@@ -1,6 +1,6 @@
 # civic-watch-runner
 
-Hermes skill for the **Watch Runner** role in the Tampa-DOGE civic-data system.
+Hermes skill for the **Watch Runner** role in the Centinel civic-data system.
 
 Continuous matchers over sitemap diffs and new wiki content. Hits classified into two lanes:
 
@@ -34,4 +34,4 @@ civic-watch-runner/
 - `civic-data-reporter` — owns `tampa.db`; data watches query through it (or directly read-only).
 - `civic-investigator` — produces wiki pages that watches scan.
 
-See `~/code/tampa-doge/docs/AGENT_ROSTER.md` for how this role fits in the whole system.
+See `~/code/centinel/docs/AGENT_ROSTER.md` for how this role fits in the whole system.

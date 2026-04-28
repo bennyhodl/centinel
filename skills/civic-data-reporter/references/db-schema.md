@@ -1,4 +1,4 @@
-# Tampa-DOGE DB schema (canonical)
+# Centinel DB schema (canonical)
 
 Location: `<wiki>/_data/tampa.db`. SQLite, WAL mode. The Data Reporter is the sole writer.
 

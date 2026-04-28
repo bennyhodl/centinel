@@ -1,5 +1,5 @@
 ---
-title: Tampa-DOGE — Scraper & Extractors (LOCKED, with deferred details)
+title: Centinel — Scraper & Extractors (LOCKED, with deferred details)
 status: 🔒 Interface locked v1 — extractor catalog deferred to post-spike
 created: 2026-04-26
 parent: README.md
@@ -123,7 +123,7 @@ Decision criteria from the spike:
 - Cost per representative day
 - Reliability (rate limits hit, timeouts, errors)
 
-Output: `~/plans/tampa-doge/research/scraper-comparison.md` after the spike.
+Output: `~/plans/centinel/research/scraper-comparison.md` after the spike.
 
 ### Fallback chain
 

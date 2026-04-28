@@ -4,7 +4,7 @@
 Prints a JSON array of {id, title, type, paused, severity, path, errors} to stdout.
 Usage:  python3 list_watches.py <watches_dir>
 
-Requires PyYAML (the wider Tampa-DOGE toolchain depends on it; this script
+Requires PyYAML (the wider Centinel toolchain depends on it; this script
 avoids stdlib YAML parsing because the watch files are user-authored and may
 include block scalars / multi-line strings).
 """

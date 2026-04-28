@@ -1,5 +1,5 @@
 ---
-title: Tampa-DOGE — Repo & Distribution (LOCKED)
+title: Centinel — Repo & Distribution (LOCKED)
 status: 🔒 Locked v1
 created: 2026-04-26
 parent: README.md
@@ -11,10 +11,10 @@ How a forker spins up `<their-city>-doge` from scratch. Locked 2026-04-26 (plan 
 
 ## Distribution model
 
-**GitHub template repo** at `lygos/tampa-doge-template` (public).
+**GitHub template repo** at `lygos/centinel-template` (public).
 
 ```
-gh repo create my-org/cleveland-doge --template lygos/tampa-doge-template
+gh repo create my-org/cleveland-doge --template lygos/centinel-template
 cd cleveland-doge
 ./bootstrap
 ```
@@ -24,7 +24,7 @@ Three commands → working `<city>-doge` instance. NPX-style installer (`npx civ
 ## Repo layout
 
 ```
-tampa-doge-template/                  # the public repo people fork
+centinel-template/                  # the public repo people fork
 ├── README.md                         # quickstart + philosophy
 ├── LICENSE                           # AGPL (civic-data project; viral copyleft fits the ethos)
 ├── CHANGELOG.md                      # breaking changes documented
@@ -33,12 +33,12 @@ tampa-doge-template/                  # the public repo people fork
 ├── doge.config.yaml.example          # city-specific config template
 │
 ├── skills/                           # Hermes skills, packaged
-│   ├── tampa-doge-cartographer/SKILL.md
-│   ├── tampa-doge-investigator/SKILL.md
-│   ├── tampa-doge-archivist/SKILL.md
-│   ├── tampa-doge-data-reporter/SKILL.md
-│   ├── tampa-doge-watch-runner/SKILL.md
-│   └── tampa-doge-editor/SKILL.md
+│   ├── centinel-cartographer/SKILL.md
+│   ├── centinel-investigator/SKILL.md
+│   ├── centinel-archivist/SKILL.md
+│   ├── centinel-data-reporter/SKILL.md
+│   ├── centinel-watch-runner/SKILL.md
+│   └── centinel-editor/SKILL.md
 │
 ├── lib/                              # shared Python the skills import
 │   ├── db/                           # schema, migrations, common queries
@@ -208,14 +208,36 @@ for preset in presets/watches/*.yaml; do
   cp -n "$preset" "$WIKI/Watches/_presets/"
 done
 
-# 7. Register Hermes cron jobs (paused, activated by wizard step 7)
-hermes cron register --name "${CITY_SLUG}-sitemap-lint"   --schedule "$SCHED_LINT"   --skill civic-doge/tampa-doge-cartographer  --paused
-hermes cron register --name "${CITY_SLUG}-watch-runner"   --schedule "$SCHED_WATCH"  --skill civic-doge/tampa-doge-watch-runner  --paused
-hermes cron register --name "${CITY_SLUG}-data-reporter"  --schedule "$SCHED_DATA"   --skill civic-doge/tampa-doge-data-reporter --paused
-hermes cron register --name "${CITY_SLUG}-vault-manifest" --schedule "$SCHED_VAULT"  --skill civic-doge/tampa-doge-archivist     --paused
-hermes cron register --name "${CITY_SLUG}-huddle-rollup"  --schedule "$SCHED_HUDDLE" --skill civic-doge/tampa-doge-editor        --paused
-hermes cron register --name "${CITY_SLUG}-briefings"      --schedule "$SCHED_BRIEF"  --skill humanized-writing                   --paused
-# Investigation crons get registered dynamically as operator creates investigations.
+# 7. Register Hermes cron jobs (real CLI is `hermes [--profile X] cron create`; `--profile`
+#    is the global flag placed BEFORE the subcommand, NOT a flag on `cron create` itself.
+#    The flag for skills is `--skill` (singular, repeatable), not `--skills`.)
+#    Pause immediately so they're inert until the wizard's Step 7 activates them.
+#    In practice `./bootstrap` defers all of this to `centinel setup-cron` (lib/cli.py),
+#    which is idempotent and centralizes the invocation logic. The block below
+#    documents the underlying call shape.
+register_cron() {
+  local name="$1" sched="$2" profile="$3" skill="$4" prompt="$5"
+  local profile_args=()
+  [ -n "$profile" ] && profile_args=(--profile "$profile")
+  hermes "${profile_args[@]}" cron create \
+    --name "$name" \
+    --skill "$skill" \
+    --deliver local \
+    "$sched" \
+    "$prompt"
+  # New jobs default to active; pause so wizard Step 7 controls activation.
+  local id
+  id=$(hermes "${profile_args[@]}" cron list --all | awk -v n="$name" '$0 ~ n {print $1; exit}')
+  [ -n "$id" ] && hermes "${profile_args[@]}" cron pause "$id"
+}
+register_cron "centinel-sitemap-lint"      "$SCHED_LINT"   ""              sitemap-builder      "lint sitemap at \$WIKI/Sitemap/"
+register_cron "centinel-watch-runner"      "$SCHED_WATCH"  watch-runner    civic-watch-runner   "run watches over latest diffs"
+register_cron "centinel-data-reporter"     "$SCHED_DATA"   data-reporter   civic-data-reporter  "refresh entity DB and methodology"
+register_cron "centinel-vault-manifest"    "$SCHED_VAULT"  archivist       civic-archivist      "rebuild vault manifest and OCR backlog"
+register_cron "centinel-investigator-tick" "$SCHED_INV"    investigator    civic-investigator   "drain investigator inbox; run pending tasks"
+register_cron "centinel-huddle-rollup"     "$SCHED_HUDDLE" ""              civic-doge-editor    "roll up daily huddle into operator queue"
+register_cron "centinel-briefings"         "$SCHED_BRIEF"  ""              humanized-writing    "draft weekly briefing"
+# Per-investigation crons get registered dynamically as operator creates investigations.
 
 # 8. Bring up runtime services
 docker compose up -d web datasette
@@ -239,7 +261,7 @@ echo "📖 Open the web app to run the setup wizard."
 | DB init | `CREATE TABLE IF NOT EXISTS`, then run migrations forward-only |
 | Skill symlinks | `ln -sfn` — refresh, idempotent |
 | Presets | `cp -n` — never overwrite (operator may have tuned them) |
-| Cron entries | `hermes cron register` is upsert-safe by name |
+| Cron entries | wrap `hermes cron create` in a `register_cron` helper that's upsert-safe by name (skip if a job with that name already exists) |
 | `doge.config.yaml`, `.env` | `cp` only if missing |
 
 Result: `git pull && ./bootstrap` brings in upstream skill/lib/preset updates without touching operator config or wiki content.
@@ -260,8 +282,8 @@ CHANGELOG.md documents breaking changes (DB schema migrations, skill API breaks,
 
 ```bash
 # Fork the upstream template:
-gh repo fork lygos/tampa-doge-template --clone
-cd tampa-doge-template
+gh repo fork lygos/centinel-template --clone
+cd centinel-template
 ./bootstrap                          # asks for city-specific config
 # operator visits http://localhost:3000 → setup wizard → kick off
 
@@ -308,7 +330,7 @@ Civic data, public-good project, defense against extractive private forks. AGPL 
 
 ## Ownership of the upstream template
 
-`lygos/tampa-doge-template` is the canonical upstream. Maintainers (Ben + collaborators) merge improvements from forks back upstream. Bitcoin Bay Foundation could be a co-maintainer org if civic-tech aligns with its scope (separate decision).
+`lygos/centinel-template` is the canonical upstream. Maintainers (Ben + collaborators) merge improvements from forks back upstream. Bitcoin Bay Foundation could be a co-maintainer org if civic-tech aligns with its scope (separate decision).
 
 ## What's NOT in the repo (deliberately)
 
@@ -334,7 +356,7 @@ The template ships **only the apparatus**. Every operator's content is theirs.
 
 ## Open questions (non-blocking)
 
-1. Multi-city in one Hermes install — should the cron names always be city-prefixed (yes, current design)? What if same operator runs `tampa-doge` and `cleveland-doge` side by side? Multiple wikis, multiple DBs, distinct skill dirs (`~/.hermes/skills/civic-doge-tampa/` vs `~/.hermes/skills/civic-doge-cleveland/`)? Defer until someone actually wants two cities.
+1. Multi-city in one Hermes install — should the cron names always be city-prefixed (yes, current design)? What if same operator runs `centinel` and `cleveland-doge` side by side? Multiple wikis, multiple DBs, distinct skill dirs (`~/.hermes/skills/civic-doge-tampa/` vs `~/.hermes/skills/civic-doge-cleveland/`)? Defer until someone actually wants two cities.
 2. Web app + Hermes on different machines? Default assumes co-located. Distributed setup is plausible (web app on a small VPS, Hermes + wiki on a beefier home server) — defer until needed.
 3. `tools/snapshot-backup` design — encrypted snapshot of wiki + DB + vault to S3-compatible storage. Lean on the systemd-weekly-backup skill conventions; specify post-v0.1.
 4. Auth upgrade path — when basic auth is no longer enough, prefer better-auth (already in scaffold skill) over rolling our own.

@@ -1,6 +1,6 @@
 # civic-archivist
 
-Tampa-DOGE Hermes skill. The Archivist — document intake, vault, OCR, sidecar generation, manifest maintenance.
+Centinel Hermes skill. The Archivist — document intake, vault, OCR, sidecar generation, manifest maintenance.
 
 ## Layout
 

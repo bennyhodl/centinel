@@ -1,6 +1,6 @@
 # sitemap-builder
 
-Tampa-DOGE Cartographer skill — builds and maintains a labeled sitemap of a city's `.gov` web surface.
+Centinel Cartographer skill — builds and maintains a labeled sitemap of a city's `.gov` web surface.
 
 This is a Hermes skill, loaded into the **default Hermes profile** alongside the Editor persona (see `docs/AGENT_ROSTER.md` in the parent repo). Same agent, two hats: Editor for chat / synthesis, Cartographer for sitemap upkeep.
 

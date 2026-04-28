@@ -1,5 +1,5 @@
 ---
-title: Tampa-DOGE — Civic Intelligence Agent
+title: Centinel — Civic Intelligence Agent
 status: 🧠 Thinking
 created: 2026-04-25
 updated: 2026-04-25
@@ -7,9 +7,9 @@ checkpoint: v10 (repo + distribution locked; web tooling defaults to Hermes buil
 owner: Ben
 ---
 
-# Tampa-DOGE — Civic Intelligence Agent
+# Centinel — Civic Intelligence Agent
 
-> A self-hosted Hermes template that crawls a city's `.gov` to build a **described, navigable sitemap** of the entire civic data surface. The sitemap is the entrypoint. From there, the human launches investigations — "track contractors in parks," "find funding flows to NGOs," "follow a single councilor" — and agents fan out, populate a wiki, and surface findings against user-defined and preset watch criteria. Distributed as **fork-your-own**. Tampa-DOGE is the reference deployment.
+> A self-hosted Hermes template that crawls a city's `.gov` to build a **described, navigable sitemap** of the entire civic data surface. The sitemap is the entrypoint. From there, the human launches investigations — "track contractors in parks," "find funding flows to NGOs," "follow a single councilor" — and agents fan out, populate a wiki, and surface findings against user-defined and preset watch criteria. Distributed as **fork-your-own**. Centinel is the reference deployment.
 
 ## Status
 
@@ -25,7 +25,7 @@ The sitemap is **the dashboard**. Investigations are **the tasks**. Findings are
 
 - **Sitemap-first, not crawl-first.** Earlier framing was "crawl everything." That ingests too much noise. Better: crawl-and-describe → human picks investigative paths → deep-crawl on those.
 - **Sitemap is dual-purpose.** It's the human's browsing entrypoint *and* the agent's launching pad for LLM-driven investigations.
-- **Agent does the work; human reviews and uses.** The agent ingests, structures, and presents. The human reads, picks threads, and writes their own stories with the raw material the agent surfaces. Tampa-DOGE is a tool, not a journalist.
+- **Agent does the work; human reviews and uses.** The agent ingests, structures, and presents. The human reads, picks threads, and writes their own stories with the raw material the agent surfaces. Centinel is a tool, not a journalist.
 - **Document vault** — every source document (PDF, HTML page, transcript) is saved to disk. The city's website may take pages down; the vault is the durable record.
 - **Wiki + Obsidian for storage.** Markdown, graph view, version-controllable, human-editable. `llm-wiki` skill produces it.
 - **Hermes template, fork-your-own.** Each operator runs their own. No central infra, no SaaS, no auth.
@@ -299,7 +299,7 @@ All work is agent-run on Hermes cron. Three new skills + reuse of existing.
 | Wiki maintenance | reuse | `llm-wiki` lint | weekly cron |
 | Web app + chat | Next.js app | n/a | always-on |
 
-Each new skill is documented in `~/plans/tampa-doge/research/skills/<name>.md` (TBD — next planning step).
+Each new skill is documented in `~/plans/centinel/research/skills/<name>.md` (TBD — next planning step).
 
 
 
@@ -385,7 +385,7 @@ Each new skill is documented in `~/plans/tampa-doge/research/skills/<name>.md` (
 ## Resolved
 
 - ~~Hosting~~ → fork-your-own Hermes template, public good
-- ~~Brand~~ → `tampa-doge` template, operators fork to `<city>-doge`
+- ~~Brand~~ → `centinel` template, operators fork to `<city>-doge`
 - ~~Funding~~ → public good, no billing
 - ~~People rule~~ → tag power, not citizens; 3+ mentions or official/leadership role
 - ~~Crawl strategy~~ → sitemap-first, investigations on demand

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-check_robots.py — robots.txt allow/deny check for the Tampa-DOGE Cartographer.
+check_robots.py — robots.txt allow/deny check for the Centinel Cartographer.
 
 stdlib only (urllib.robotparser). Reads ONE URL from stdin (or argv[1]),
-fetches that host's /robots.txt, evaluates against the Tampa-DOGE
+fetches that host's /robots.txt, evaluates against the Centinel
 user-agent, and prints exactly one of:
 
   ALLOW

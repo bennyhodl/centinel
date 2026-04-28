@@ -1,13 +1,13 @@
 ---
-title: Tampa-DOGE — Agent Roster (LOCKED)
+title: Centinel — Agent Roster (LOCKED)
 status: 🔒 Locked v1
 created: 2026-04-26
 parent: README.md
 ---
 
-# Tampa-DOGE Agent Roster
+# Centinel Agent Roster
 
-Mapping the Spotlight investigative model (`ORG_STRUCTURE_AND_WORKFLOW.md`) onto Tampa-DOGE's runtime agents. Locked 2026-04-26.
+Mapping the Spotlight investigative model (`ORG_STRUCTURE_AND_WORKFLOW.md`) onto Centinel's runtime agents. Locked 2026-04-26. See `AGENT_INVOCATION.md` for how each profile is actually launched.
 
 ## Principles
 
@@ -21,6 +21,8 @@ Mapping the Spotlight investigative model (`ORG_STRUCTURE_AND_WORKFLOW.md`) onto
 ## Hermes profile mapping
 
 Each agent is a **Hermes profile** under `~/.hermes/profiles/<name>/` with its own `config.yaml`, `skills/`, `memories/`, `sessions/`, and `cron/`. They communicate **only** through the wiki filesystem (`<wiki>/_runtime/inbox/<agent>/`, `outbox/<agent>/`, `status/<agent>.md`) per RUNTIME_PROTOCOL.md.
+
+Invocation is via thin `bin/centinel-<role>` wrappers that exec `hermes --profile <role>`; cron jobs use `hermes --profile <role> cron create '<sched>' --skill <skill> --name <n> "<prompt>"` (note: `--profile` is the global flag, BEFORE the subcommand; `--skill` is singular, repeatable). See `AGENT_INVOCATION.md`.
 
 | Profile | Skills loaded | Identity | Cron | Notes |
 |---|---|---|---|---|
@@ -40,7 +42,7 @@ Each agent is a **Hermes profile** under `~/.hermes/profiles/<name>/` with its o
 
 ## The roster (Spotlight mapping)
 
-| # | Spotlight role | Tampa-DOGE name | Who | Profile / Skill |
+| # | Spotlight role | Centinel name | Who | Profile / Skill |
 |---|---|---|---|---|
 | 1 | Executive Editor | **Operator-in-Chief** | 🧑 Human | — |
 | 2 | Deputy Managing Editor | *(collapsed into Operator)* | 🧑 Human | — |
@@ -119,4 +121,4 @@ The operator wears all the editorial-authority hats:
 
 ## Locked. Next planning step
 
-Spec the five new skills (`sitemap-builder`, `civic-investigator`, `civic-archivist`, `civic-data-reporter`, `civic-watch-runner`) under `~/plans/tampa-doge/research/skills/`. Deferred per operator direction — return to this when ready to build.
+Spec the five new skills (`sitemap-builder`, `civic-investigator`, `civic-archivist`, `civic-data-reporter`, `civic-watch-runner`) under `~/plans/centinel/research/skills/`. Deferred per operator direction — return to this when ready to build.

@@ -1,6 +1,6 @@
-# Tampa-DOGE
+# Centinel
 
-Civic transparency platform for tracking Tampa city government — sitemaps, investigations, vaulted documents, watches, and findings. Built as a self-hosted **Hermes plugin** so any city's accountability operation can fork it.
+Civic transparency platform for tracking city government — sitemaps, investigations, vaulted documents, watches, and findings. Built as a self-hosted **Hermes plugin** so any city's accountability operation can fork it. (Project formerly named "Centinel"; the GitHub repo and template repo retain that path for now.)
 
 > The web app NEVER originates state. It reads files + DB. Every "action" is a small, well-formed file write that an agent already knows how to react to.
 
@@ -9,7 +9,7 @@ Civic transparency platform for tracking Tampa city government — sitemaps, inv
 ## Repo layout
 
 ```
-tampa-doge/
+centinel/
 ├── app/                  # Next.js 16 viewer + control panel
 ├── docs/                 # locked design specs (the source of truth)
 │   ├── PLAN.md           # top-level plan & checkpoints
@@ -19,7 +19,10 @@ tampa-doge/
 │   ├── AGENT_ROSTER.md
 │   ├── ORG_STRUCTURE_AND_WORKFLOW.md  (Spotlight model reference)
 │   ├── REPO_AND_DISTRIBUTION.md
-│   └── SCRAPER_AND_EXTRACTORS.md
+│   ├── SCRAPER_AND_EXTRACTORS.md
+│   ├── INSTALLATION.md  (fresh-clone → first investigation, with current-state honesty)
+│   ├── AGENT_INVOCATION.md  (how agents are actually launched)
+│   └── EDITOR_ANSWER_SOURCES.md  (DB/vault/QMD priority for Editor answers)
 └── skills/               # Hermes skill specs for the agent stack
     ├── sitemap-builder.md       (Cartographer)
     ├── civic-investigator.md    (Investigator)
@@ -43,6 +46,8 @@ Each non-Editor agent is a separate **Hermes profile** (`~/.hermes/profiles/<nam
 Plus reused skills running in the default profile: `humanized-writing` (briefings), `llm-wiki` (vault lint).
 
 Humans wear all editorial/legal/source-protection hats — agents only do ingest/structure/present. See [`docs/AGENT_ROSTER.md`](docs/AGENT_ROSTER.md).
+
+Each role launches via a `bin/centinel-<role>` wrapper that resolves to `hermes --profile <role>` (operator terminal access only — not in the runtime loop). The Editor reaches specialists via `delegate_task` (sync) or the filesystem inbox (async). There is no `hermes session run X` primitive — sessions are composed from `(profile + skills + prompt)`. See [`docs/AGENT_INVOCATION.md`](docs/AGENT_INVOCATION.md) and [`docs/EDITOR_ANSWER_SOURCES.md`](docs/EDITOR_ANSWER_SOURCES.md).
 
 ## The web app
 
@@ -75,8 +80,9 @@ No ORM, no Postgres, no custom auth provider.
 
 | Var | Purpose | Default |
 |---|---|---|
-| `TAMPA_DOGE_PASSWORD` | shared password for basic-auth gate | _required_ |
-| `TAMPA_DOGE_WIKI_PATH` | path to the operator's wiki root | `~/wiki/Tampa` |
+| `CENTINEL_PASSWORD` | shared password for basic-auth gate | _required_ |
+| `CENTINEL_WIKI_PATH` | path to the operator's wiki root | `~/wiki/Tampa` |
+| `CENTINEL_EDITOR_PERSONA_PATH` | path to Editor persona markdown | `~/plans/centinel/EDITOR_PERSONA.md` |
 | `HERMES_API_URL` | OpenAI-compatible base URL for `/chat` | _required_ |
 | `HERMES_API_KEY` | API key for Hermes endpoint | _required_ |
 | `DATASETTE_URL` | optional Datasette base URL | `http://localhost:8001` |
@@ -85,14 +91,14 @@ Copy `.env.example` → `.env.local` and fill in.
 
 ## Develop
 
+**New here?** See [`docs/INSTALLATION.md`](docs/INSTALLATION.md) for the full fresh-clone walkthrough — what's wired today, what's still spec, and how to start your first investigation. Quick version:
+
 ```bash
-cd app
-pnpm install
-pnpm approve-builds   # once, to allow better-sqlite3 to compile
-pnpm dev
+./bootstrap                  # idempotent installer (profiles, cron, wiki tree)
+cd app && pnpm install && pnpm dev
 ```
 
-Open http://localhost:3000. The browser prompts for basic auth — user can be blank, password = `TAMPA_DOGE_PASSWORD`.
+Open http://localhost:3000. The browser prompts for basic auth — user can be blank, password = `CENTINEL_PASSWORD`.
 
 ## Build
 
@@ -116,7 +122,7 @@ The build is Dockerized output (`output: 'standalone'`), ready for Coolify or an
 - 🚧 Setup bootstrap shell-out → `sitemap-builder` skill (stubbed)
 - 🚧 Cron registration on activate (stubbed)
 - 🚧 Agent skills (specs locked in `skills/`, implementations TBD)
-- 🚧 `tampa-doge-cli` wrapper for shell-outs
+- 🚧 `bin/centinel-*` profile wrappers (one per role; replaces the old `centinel-cli` idea — see `docs/AGENT_INVOCATION.md`)
 
 ## License
 

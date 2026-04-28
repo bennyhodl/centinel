@@ -2,11 +2,11 @@
 name: civic-watch-runner
 description: Continuously scan sitemap diffs and new wiki content against operator-defined watch YAMLs. Fires every 4h after sitemap-builder lint completes. Hits classified as "raw" (one hard data point + citation → auto-publish to Findings/raw/) or "narrative" (a connection/pattern claim → always gated to Findings/draft/ for human review). Maps to the Spotlight News Researcher role plus a domain-specific anomaly detector. Watches are versioned YAML files in <wiki>/Watches/; operators edit them directly (or ask the Editor to tune them) and the Watch Runner picks up changes on the next run.
 version: 0.1.0
-author: Tampa-DOGE
+author: Centinel
 license: MIT
 metadata:
   hermes:
-    tags: [tampa-doge, civic, watches, news-researcher, monitors]
+    tags: [centinel, civic, watches, news-researcher, monitors]
     related_skills: [sitemap-builder, civic-investigator, civic-data-reporter]
 ---
 
@@ -24,6 +24,27 @@ False negatives (missing a hit) are worse than false positives (clutter in the E
 > Watches are versioned in git: the operator's wiki is a git repo; YAML diffs are the audit trail. If the operator asks the Editor to "tune watch X to fire above $100k", the Editor edits the YAML directly. You read it on next run. No in-memory state to flush.
 
 ---
+
+## Answer sources & QMD (mandatory)
+
+This skill follows Centinel's locked answer-source priority — see
+`docs/EDITOR_ANSWER_SOURCES.md`. When you are asked a question or need to
+ground a synthesis step in existing material:
+
+1. **Always run `qmd-search`** against the wiki before answering or acting.
+   QMD is BM25 + vector + reranker over the entire wiki and is the only
+   retrieval surface that catches narrative context the DB doesn't model.
+   Skipping QMD is forbidden — even if the DB has the answer, QMD runs too.
+2. Pull structured facts from `<wiki>/_data/<city>.db` via `db_query` /
+   `db_common_queries`.
+3. Pull evidence from `<wiki>/Vault/` sidecars (never raw bytes).
+4. Read relevant `Findings/`, `Investigations/`, `Entities/` pages.
+5. The sitemap is **not** an answer source — it's a crawl map. Cite vault
+   paths, DB methodology query IDs, or wiki pages. Never cite the sitemap
+   for a knowledge claim.
+
+**No citation = no claim.** "I don't have a source for that yet" is always
+a valid answer.
 
 ## When to activate
 

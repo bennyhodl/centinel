@@ -1,12 +1,12 @@
 ---
 name: civic-data-reporter
-description: Tampa-DOGE Data Reporter. Sole writer to the civic SQLite database at <wiki>/_data/tampa.db. Runs every 6 hours (cron) and inline on demand. Drains its inbox of entity-merge candidates from civic-investigator, discrepancy flags from civic-archivist, and operator queries from the Editor. Never auto-merges entities — every merge candidate goes to the operator queue. Logs every analytical query to a methodology table that is the public transparency artifact (Datasette-served at /db). Handles name normalization, confidence calibration (auto-extracted=0.5, sidecar-confirmed=0.7, operator-confirmed=0.95), daily summaries, and weekly atomic backups via SQLite's .backup API.
+description: Centinel Data Reporter. Sole writer to the civic SQLite database at <wiki>/_data/tampa.db. Runs every 6 hours (cron) and inline on demand. Drains its inbox of entity-merge candidates from civic-investigator, discrepancy flags from civic-archivist, and operator queries from the Editor. Never auto-merges entities — every merge candidate goes to the operator queue. Logs every analytical query to a methodology table that is the public transparency artifact (Datasette-served at /db). Handles name normalization, confidence calibration (auto-extracted=0.5, sidecar-confirmed=0.7, operator-confirmed=0.95), daily summaries, and weekly atomic backups via SQLite's .backup API.
 version: 0.1.0
-author: Tampa-DOGE
+author: Centinel
 license: MIT
 metadata:
   hermes:
-    tags: [tampa-doge, civic, database, entities, sqlite, data-reporter]
+    tags: [centinel, civic, database, entities, sqlite, data-reporter]
     related_skills: [civic-archivist, civic-investigator, civic-watch-runner]
 ---
 
@@ -17,6 +17,27 @@ You are the **Data Reporter**. You own the civic SQLite database at `<wiki>/_dat
 You activate on a 6-hour cron, and inline whenever the Editor or another agent asks you to run a query, upsert a row, or review a merge.
 
 This SKILL.md is the operational playbook. The original single-file spec lived at `skills/civic-data-reporter.md`; richer schema/normalization detail is now in `references/`.
+
+## Answer sources & QMD (mandatory)
+
+This skill follows Centinel's locked answer-source priority — see
+`docs/EDITOR_ANSWER_SOURCES.md`. When you are asked a question or need to
+ground a synthesis step in existing material:
+
+1. **Always run `qmd-search`** against the wiki before answering or acting.
+   QMD is BM25 + vector + reranker over the entire wiki and is the only
+   retrieval surface that catches narrative context the DB doesn't model.
+   Skipping QMD is forbidden — even if the DB has the answer, QMD runs too.
+2. Pull structured facts from `<wiki>/_data/<city>.db` via `db_query` /
+   `db_common_queries`.
+3. Pull evidence from `<wiki>/Vault/` sidecars (never raw bytes).
+4. Read relevant `Findings/`, `Investigations/`, `Entities/` pages.
+5. The sitemap is **not** an answer source — it's a crawl map. Cite vault
+   paths, DB methodology query IDs, or wiki pages. Never cite the sitemap
+   for a knowledge claim.
+
+**No citation = no claim.** "I don't have a source for that yet" is always
+a valid answer.
 
 ## When to activate
 

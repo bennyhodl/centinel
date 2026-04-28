@@ -1,11 +1,11 @@
 ---
-title: Tampa-DOGE — Web App Design (LOCKED)
+title: Centinel — Web App Design (LOCKED)
 status: 🔒 Locked v1
 created: 2026-04-26
 parent: README.md
 ---
 
-# Tampa-DOGE Web App Design
+# Centinel Web App Design
 
 The viewer + control panel. Locked 2026-04-26 (plan checkpoint v8).
 
@@ -36,10 +36,10 @@ No public/operator distinction. Everyone with the password gets the full app: vi
 
 ## Distribution shape
 
-**Hermes plugin in v0.1.** Operators self-host Hermes; `tampa-doge` lives as a plugin folder at `~/code/tampa-doge/`. Standalone bundled-everything fork is a stretch goal once there's evidence non-technical operators want it.
+**Hermes plugin in v0.1.** Operators self-host Hermes; `centinel` lives as a plugin folder at `~/code/centinel/`. Standalone bundled-everything fork is a stretch goal once there's evidence non-technical operators want it.
 
 ```
-git clone github.com/lygos/tampa-doge-template my-city-doge
+git clone github.com/lygos/centinel-template my-city-doge
 cd my-city-doge
 ./setup                        # registers Hermes skills + cron jobs (paused)
 docker compose up              # web app + Datasette
@@ -52,13 +52,13 @@ The wizard is the only thing rendered until `<wiki>/_runtime/setup-state.json` r
 
 ```
 Step 1: City.gov URL                    → tampa.gov
-Step 2: Project name + branding         → "Tampa-DOGE" + logo (defaults fine)
+Step 2: Project name + branding         → "Centinel" + logo (defaults fine)
 Step 3: Watch presets                   → checkboxes: errant-spending, corruption, policy-drift
 Step 4: Notification channel (optional) → Discord/Telegram for briefings only
 Step 5: Confirm → "Start Bootstrap"
         ↓
-        Server action shells out to:
-        hermes session run sitemap-builder --mode bootstrap --target tampa.gov
+        Server action shells out to (see docs/AGENT_INVOCATION.md):
+        hermes -s sitemap-builder chat -q "bootstrap mode: build sitemap for tampa.gov, write to $WIKI/Sitemap/"
         Tails the log to the browser via Server-Sent Events
         Live progress: pages crawled, classified, descriptions written
         ETA 30–90 minutes for a city like Tampa
@@ -108,8 +108,8 @@ All routes behind basic auth in v0.1. No anonymous access.
 - **Search**: `qmd` BM25 over the wiki via HTTP endpoint
 - **Status page rendering**: `chokidar` watches `status/board.md`; web app pushes to client via Server-Sent Events
 - **Wizard state**: `<wiki>/_runtime/setup-state.json`. Middleware redirects to `/setup` until `complete`.
-- **Hermes integration**: server actions shell out to `tampa-doge-cli` which writes files / toggles cron / starts sessions.
-- **Chat**: Vercel AI SDK or `openai` npm package, pointed at Hermes' OpenAI-compatible endpoint, system prompt loads from the `tampa-doge-editor` skill.
+- **Hermes integration**: server actions shell out to `centinel-cli` which writes files / toggles cron / starts sessions.
+- **Chat**: Vercel AI SDK or `openai` npm package, pointed at Hermes' OpenAI-compatible endpoint, system prompt loads from the `centinel-editor` skill.
 
 No ORM, no GraphQL, no custom auth provider, no CMS. ~5 npm dependencies that matter.
 
@@ -174,7 +174,7 @@ The vault is the evidence base. The wiki, DB, findings, and Editor's chat answer
 
 ## Setup wizard implementation detail
 
-The shell-out approach: the `/setup` server action calls `hermes session run sitemap-builder --mode bootstrap --target tampa.gov` and tails the log to the browser via SSE.
+The shell-out approach: the `/setup` server action invokes `bin/centinel bootstrap-sitemap <domain>` (which under the hood runs `hermes -s sitemap-builder chat -q "<bootstrap prompt>"`) and streams the log file to the browser via the SSE endpoint at `/api/setup/bootstrap-log`. See `docs/AGENT_INVOCATION.md` for the full invocation paradigm — there is no `hermes session run X` primitive.
 
 If the web process crashes mid-bootstrap, the bootstrap continues (it's a Hermes session, not a web request). On reconnect, web app reads the latest sitemap state and resumes its progress display from there.
 
@@ -186,8 +186,8 @@ Per RUNTIME_PROTOCOL.md, cron is dynamic — each investigation's `schedule:` fi
 
 When operator launches an investigation via web app or chat:
 1. Server action writes `<wiki>/Investigations/<slug>.md` with frontmatter
-2. Server action calls `hermes cron register --investigation <slug> --schedule "0 2 * * *"` (or whatever the YAML says)
-3. Cron entry starts in `paused: false` state — first run happens at next scheduled tick
+2. Server action calls `hermes --profile investigator cron create "<sched>" --name "centinel-investigation-<slug>" --skill civic-investigator "run investigation <slug>: read $WIKI/Investigations/<slug>.md and append results"` — in practice via `bin/centinel investigate register <slug>`, which parses the investigation YAML's `schedule:` field and constructs the call. The flag is `--skill` (singular, repeatable), and `--profile` is the global flag placed BEFORE the subcommand — there is no `--profile` argument on `cron create` and no `hermes cron register`.
+3. Cron entry runs at next scheduled tick. To temporarily disable: `hermes --profile investigator cron pause <id>` (or `centinel cron pause-all` for emergency stop).
 
 When operator pauses an investigation: edits frontmatter `status: paused`. Cron entry remains registered but next run sees `status: paused` and skips. (Lighter weight than unregistering cron.)
 

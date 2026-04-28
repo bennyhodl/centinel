@@ -48,7 +48,7 @@ Returns rendered markdown for static pages. Good for `.gov` agenda pages, contra
 
 ### Fallback (static): `curl` + `html2text` or `trafilatura`
 ```bash
-curl -L --fail -A 'tampa-doge-archivist/0.1 (+contact@example)' <url> -o <_tmp>/page.html
+curl -L --fail -A 'centinel-archivist/0.1 (+contact@example)' <url> -o <_tmp>/page.html
 trafilatura -i <_tmp>/page.html -o -        # preferred — strips chrome
 # or
 html2text <_tmp>/page.html

@@ -1,6 +1,6 @@
 # Vault Layout & Manifest Schema
 
-The vault is the evidence base. Every claim in Tampa-DOGE — every wiki entity page, every DB row, every published finding, every Editor chat answer — cites a vault path. Operator-in-Chief and external readers verify by clicking through to the original artifact at `/vault/[...path]` per `docs/WEB_APP_DESIGN.md`.
+The vault is the evidence base. Every claim in Centinel — every wiki entity page, every DB row, every published finding, every Editor chat answer — cites a vault path. Operator-in-Chief and external readers verify by clicking through to the original artifact at `/vault/[...path]` per `docs/WEB_APP_DESIGN.md`.
 
 **Three invariants the Archivist must never break:**
 1. **Append-only.** Files land; files never leave. Manifest grows forever.

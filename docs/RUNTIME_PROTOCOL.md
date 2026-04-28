@@ -1,11 +1,11 @@
 ---
-title: Tampa-DOGE — Runtime Protocol (LOCKED)
+title: Centinel — Runtime Protocol (LOCKED)
 status: 🔒 Locked v1
 created: 2026-04-26
 parent: README.md
 ---
 
-# Tampa-DOGE Runtime Protocol
+# Centinel Runtime Protocol
 
 How the agents communicate at runtime. Locked 2026-04-26 (plan checkpoint v7).
 
@@ -110,7 +110,7 @@ Each agent's run starts by sweeping its own inbox: any `expires` past current ti
 The single source of truth for "what's happening right now." Each agent updates its section at start and end of run. The web app renders this live at `/status` for public viewing — agents working in the open.
 
 ```markdown
-# Tampa-DOGE Runtime Status — 2026-04-26 14:32 EDT
+# Centinel Runtime Status — 2026-04-26 14:32 EDT
 
 ## In flight
 - [Investigator] parks-contractors run, page 23/47, ETA 2026-04-26 16:00
@@ -266,7 +266,7 @@ The `/status` page is the project's "show your work" surface — civic-data done
 
 ## Spotlight model mapping
 
-| Spotlight | Tampa-DOGE runtime |
+| Spotlight | Centinel runtime |
 |---|---|
 | Morning huddle (15–20 min, 4 prompts) | `huddle/<date>.md` rolled up nightly |
 | Status board (kanban in the locked room) | `status/board.md` (public) |

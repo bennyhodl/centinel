@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-normalize_url.py — canonicalize a URL for the Tampa-DOGE sitemap.
+normalize_url.py — canonicalize a URL for the Centinel sitemap.
 
 stdlib only. Reads ONE URL from stdin (or argv[1]), writes the canonical
 form to stdout, exits 0. Emits an error to stderr and exits 2 on parse failure.
