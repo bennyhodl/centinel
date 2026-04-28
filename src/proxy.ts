@@ -6,7 +6,7 @@ import { NextResponse, type NextRequest } from "next/server";
  * The /vault static-asset route is also gated — viewers need the password.
  * Setup wizard is gated too; it lives behind the same password.
  */
-export function middleware(req: NextRequest) {
+export function proxy(req: NextRequest) {
   const expected = process.env.TAMPA_DOGE_PASSWORD;
 
   // If no password is configured, fail closed.
