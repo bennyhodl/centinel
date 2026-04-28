@@ -1,8 +1,8 @@
-export default function Page() {
-  return (
-    <section>
-      <h1 className="text-2xl font-semibold">Route: /chat</h1>
-      <p className="mt-2 text-sm opacity-70">TODO — placeholder stub.</p>
-    </section>
-  );
+import { EDITOR_INTRO_MESSAGE } from "@/lib/editor-intro";
+import ChatClient from "./_components/ChatClient";
+
+export const dynamic = "force-dynamic";
+
+export default function ChatPage() {
+  return <ChatClient intro={EDITOR_INTRO_MESSAGE} />;
 }
