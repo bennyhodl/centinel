@@ -15,7 +15,7 @@ export default function Message({
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] whitespace-pre-wrap rounded-lg bg-tampa-cyan/10 px-3 py-2 text-sm ring-1 ring-tampa-cyan/20">
+        <div className="max-w-[85%] whitespace-pre-wrap border border-primary/20 bg-accent px-4 py-2 text-sm">
           {message.content}
         </div>
       </div>
@@ -23,20 +23,20 @@ export default function Message({
   }
   return (
     <div className="flex flex-col items-start gap-1">
-      <div className="text-xs uppercase tracking-wider text-tampa-cyan/80">
-        Editor
+      <div className="font-smallcaps text-[0.6rem] tracking-[0.15em] text-primary">
+        The Editor
       </div>
-      <div className="max-w-full rounded-lg bg-white/[0.02] px-3 py-2 ring-1 ring-white/10">
+      <div className="max-w-full border border-border bg-card px-4 py-3">
         {message.content ? (
           <ClientMarkdown
             source={message.content}
-            className="prose prose-sm prose-invert max-w-none prose-p:my-2 prose-headings:mt-3 prose-headings:mb-2 prose-pre:bg-black/40 prose-code:text-tampa-cyan"
+            className="prose prose-sm max-w-none prose-p:my-2 prose-headings:mt-3 prose-headings:mb-2 prose-headings:font-display prose-pre:bg-secondary prose-code:text-primary"
           />
         ) : (
-          <span className="text-sm opacity-60">…</span>
+          <span className="text-sm text-muted-foreground italic">…</span>
         )}
         {streaming && message.content && (
-          <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-tampa-cyan/60 align-middle" />
+          <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-primary/60 align-middle" />
         )}
       </div>
     </div>

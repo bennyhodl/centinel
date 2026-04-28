@@ -12,8 +12,9 @@ export default async function SitemapPage() {
     return (
       <section>
         <header className="mb-6">
-          <h1 className="text-2xl font-semibold">Sitemap</h1>
-          <p className="mt-1 text-sm opacity-60">
+          <h1 className="masthead text-3xl text-foreground">The Sitemap</h1>
+          <hr className="rule-double" />
+          <p className="text-sm text-muted-foreground italic">
             The labeled map of the city&apos;s .gov surface.
           </p>
         </header>
@@ -32,52 +33,44 @@ export default async function SitemapPage() {
   );
 
   return (
-    <section className="space-y-8">
-      <header>
-        <h1 className="text-2xl font-semibold">Sitemap</h1>
-        <p className="mt-1 text-sm opacity-60">
-          {doc.domain} · generated {doc.generated_at}
+    <section>
+      <header className="mb-6">
+        <h1 className="masthead text-3xl text-foreground">The Sitemap</h1>
+        <hr className="rule-double" />
+        <p className="text-sm text-muted-foreground italic">
+          {doc.domain} &middot; generated {doc.generated_at}
         </p>
       </header>
 
       {/* Stat strip */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Stat label="total URLs" value={stats.total} />
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 mb-8">
+        <Stat label="Total URLs" value={stats.total} />
+        <Stat label="Active" value={stats.byStatus.active} tone="emerald" />
         <Stat
-          label="active"
-          value={stats.byStatus.active}
-          tone="emerald"
-        />
-        <Stat
-          label="needs review"
+          label="Needs Review"
           value={stats.needsReview}
           tone="amber"
           href="/sitemap/needs-review"
         />
-        <Stat
-          label="broken"
-          value={stats.broken}
-          tone="red"
-          href="/sitemap/broken"
-        />
+        <Stat label="Broken" value={stats.broken} tone="red" href="/sitemap/broken" />
       </div>
 
       {/* By type */}
-      <div>
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider opacity-60">
-          By type
-        </h2>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
+      <div className="mb-8">
+        <div className="section-header">By Type</div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
           {sortedTypes.map(([type, count]) => (
             <Link
               key={type}
               href={`/sitemap/type/${type}`}
-              className="rounded-md border border-white/10 bg-white/[0.02] px-3 py-2 transition hover:border-tampa-cyan/40 hover:bg-white/[0.04]"
+              className="border border-border bg-card px-4 py-3 transition hover:bg-accent group"
             >
-              <div className="text-xs uppercase tracking-wider opacity-60">
+              <div className="font-smallcaps text-[0.6rem] tracking-[0.15em] text-muted-foreground">
                 {type}
               </div>
-              <div className="font-mono text-lg">{count}</div>
+              <div className="font-display text-xl font-bold mt-1 group-hover:text-primary transition-colors">
+                {count}
+              </div>
             </Link>
           ))}
         </div>
@@ -85,19 +78,17 @@ export default async function SitemapPage() {
 
       {/* Operator queue: needs review */}
       {needsReview.length > 0 && (
-        <div>
-          <div className="mb-3 flex items-baseline justify-between">
-            <h2 className="text-sm font-semibold uppercase tracking-wider opacity-60">
-              Awaiting review
-            </h2>
+        <div className="mb-8">
+          <div className="flex items-baseline justify-between mb-3">
+            <div className="section-header flex-1">Awaiting Review</div>
             <Link
               href="/sitemap/needs-review"
-              className="text-xs text-tampa-cyan hover:underline"
+              className="text-xs text-primary hover:underline italic ml-4"
             >
-              see all {stats.needsReview} →
+              see all {stats.needsReview} &rarr;
             </Link>
           </div>
-          <div className="grid gap-3">
+          <div className="space-y-3">
             {needsReview.map((e) => (
               <SitemapEntryCard key={e.url} entry={e} />
             ))}
@@ -106,8 +97,8 @@ export default async function SitemapPage() {
       )}
 
       {/* Status legend */}
-      <footer className="flex flex-wrap items-center gap-3 border-t border-white/10 pt-4 text-xs opacity-70">
-        <span>Statuses:</span>
+      <footer className="flex flex-wrap items-center gap-3 border-t-2 border-foreground/15 pt-4 text-xs text-muted-foreground">
+        <span className="italic">Statuses:</span>
         <StatusPill status="active" />
         <StatusPill status="needs_review" />
         <StatusPill status="broken" />
@@ -130,18 +121,18 @@ function Stat({
 }) {
   const toneClass =
     tone === "emerald"
-      ? "text-emerald-400"
+      ? "text-emerald-800"
       : tone === "amber"
-        ? "text-amber-400"
+        ? "text-amber-800"
         : tone === "red"
-          ? "text-red-400"
-          : "text-white";
+          ? "text-red-800"
+          : "text-foreground";
   const inner = (
-    <div className="rounded-lg border border-white/10 bg-white/[0.02] p-4">
-      <div className="text-xs uppercase tracking-wider opacity-60">
+    <div className="border border-border bg-card p-4 text-center">
+      <div className="font-smallcaps text-[0.6rem] tracking-[0.15em] text-muted-foreground">
         {label}
       </div>
-      <div className={`mt-1 font-mono text-2xl font-semibold ${toneClass}`}>
+      <div className={`mt-1 font-display text-2xl font-bold ${toneClass}`}>
         {value}
       </div>
     </div>

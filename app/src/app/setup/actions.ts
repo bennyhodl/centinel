@@ -44,7 +44,7 @@ export async function submitStep1(formData: FormData) {
 }
 
 export async function submitStep2(formData: FormData) {
-  const projectName = String(formData.get("projectName") ?? "").trim() || "Tampa-DOGE";
+  const projectName = String(formData.get("projectName") ?? "").trim() || "Centinel";
   const state = await readSetupState();
   await writeSetupState({ ...state, projectName, step: 3 });
   revalidatePath("/setup");

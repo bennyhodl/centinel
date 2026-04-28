@@ -36,16 +36,17 @@ export default async function FindingsListView({
   }
 
   return (
-    <section className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold">Findings</h1>
-        <p className="mt-1 text-sm opacity-60">
+    <section>
+      <header className="mb-6">
+        <h1 className="masthead text-3xl text-foreground">Findings</h1>
+        <hr className="rule-double" />
+        <p className="text-sm text-muted-foreground italic">
           Auto-published facts (raw), operator-promoted narratives (published),
           and editor-drafted pieces (draft).
         </p>
       </header>
 
-      <nav className="flex flex-wrap gap-1.5 border-b border-white/10">
+      <nav className="flex gap-0 border-b-2 border-foreground/20 mb-6">
         {TABS.map((t) => {
           const href =
             t.key === "draft"
@@ -58,10 +59,10 @@ export default async function FindingsListView({
             <Link
               key={t.key}
               href={href}
-              className={`rounded-t-md px-3 py-1.5 text-sm transition ${
+              className={`px-4 py-2 text-sm font-smallcaps tracking-wider transition border-b-2 -mb-[2px] ${
                 active
-                  ? "border border-b-0 border-white/10 bg-white/[0.04] text-tampa-cyan"
-                  : "opacity-70 hover:opacity-100"
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground hover:border-foreground/30"
               }`}
             >
               {t.label}
@@ -71,9 +72,9 @@ export default async function FindingsListView({
       </nav>
 
       {showDraftBanner && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">
-          <strong className="uppercase tracking-wider text-amber-300">
-            Draft —
+        <div className="border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 mb-6">
+          <strong className="font-smallcaps tracking-wider text-amber-700">
+            Draft &mdash;
           </strong>{" "}
           not yet reviewed by editor or counsel. Do not cite.
         </div>
@@ -90,35 +91,37 @@ export default async function FindingsListView({
                 ? "Published findings appear after operator review."
                 : activeTab === "draft"
                   ? "Drafts appear when the Editor stages a narrative."
-                  : "Launch one from /chat to begin."}
+                  : "Launch one from the Editor's Desk to begin."}
           </p>
         </EmptyState>
       ) : (
-        <ul className="grid gap-3">
+        <ul className="divide-y divide-border">
           {items.map((it) => (
             <li key={`${it.stack}/${it.slug}`}>
               <Link
                 href={`/findings/${it.slug}`}
-                className="block rounded-lg border border-white/10 bg-white/[0.02] p-4 transition hover:border-tampa-cyan/40 hover:bg-white/[0.04]"
+                className="block py-4 px-3 transition hover:bg-accent"
               >
-                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                   <Pill tone={statusTone(it.stack)}>{it.stack}</Pill>
-                  <span className="font-mono text-[11px] text-tampa-cyan">
+                  <span className="font-mono text-[0.65rem] text-primary">
                     {it.slug}
                   </span>
                 </div>
-                <h2 className="mt-2 text-base font-semibold">
+                <h2 className="mt-2 font-display text-lg font-semibold">
                   {(it.frontmatter.title as string | undefined) ?? it.slug}
                 </h2>
                 {(it.frontmatter.summary as string | undefined) && (
-                  <p className="mt-1 text-sm opacity-80">
+                  <p className="mt-1 text-sm text-foreground/80 leading-relaxed">
                     {String(it.frontmatter.summary)}
                   </p>
                 )}
                 {it.excerpt && !it.frontmatter.summary && (
-                  <p className="mt-1 text-sm opacity-70">{it.excerpt}</p>
+                  <p className="mt-1 text-sm text-muted-foreground leading-relaxed">
+                    {it.excerpt}
+                  </p>
                 )}
-                <footer className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] opacity-50">
+                <footer className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[0.65rem] text-muted-foreground">
                   {it.frontmatter.published_at != null && (
                     <span>published {String(it.frontmatter.published_at)}</span>
                   )}

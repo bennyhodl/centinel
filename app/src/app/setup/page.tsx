@@ -39,11 +39,12 @@ export default async function SetupPage({ searchParams }: PageProps) {
 
   return (
     <section className="mx-auto max-w-3xl space-y-6">
-      <header>
-        <h1 className="text-3xl font-semibold tracking-tight">
-          {state.projectName ?? "Tampa-DOGE"} setup
+      <header className="mb-6">
+        <h1 className="masthead text-3xl text-foreground">
+          {state.projectName ?? "Centinel"} Setup
         </h1>
-        <p className="mt-1 text-sm opacity-60">
+        <hr className="rule-double" />
+        <p className="text-sm text-muted-foreground italic">
           {state.status === "complete"
             ? "Setup complete — review or re-run below."
             : "Get the Cartographer pointed at your city. Takes ~5 minutes plus a 30–90 minute bootstrap crawl."}
@@ -90,7 +91,7 @@ function Step1({ state }: { state: SetupState }) {
     >
       <form action={submitStep1} className="space-y-4">
         <label className="block">
-          <span className="mb-1.5 block text-xs uppercase tracking-wider opacity-60">
+          <span className="mb-1.5 block text-xs uppercase tracking-wider text-muted-foreground">
             City domain
           </span>
           <input
@@ -99,12 +100,12 @@ function Step1({ state }: { state: SetupState }) {
             placeholder="www.tampa.gov"
             autoFocus
             required
-            className="w-full rounded-md border border-white/10 bg-black/40 px-3 py-2 font-mono text-sm placeholder:opacity-40 focus:border-tampa-cyan focus:outline-none"
+            className="w-full border border-border bg-secondary px-3 py-2 font-mono text-sm placeholder:text-muted-foreground focus:border-primary focus:outline-none"
           />
         </label>
-        <p className="text-xs opacity-50">
-          Examples: <code className="text-tampa-cyan">www.tampa.gov</code>,{" "}
-          <code className="text-tampa-cyan">www.cityofstpete.org</code>
+        <p className="text-xs text-muted-foreground">
+          Examples: <code className="text-primary">www.tampa.gov</code>,{" "}
+          <code className="text-primary">www.cityofstpete.org</code>
         </p>
         <div className="flex justify-end">
           <PrimaryButton>Continue →</PrimaryButton>
@@ -124,16 +125,16 @@ function Step2({ state }: { state: SetupState }) {
     >
       <form action={submitStep2} className="space-y-4">
         <label className="block">
-          <span className="mb-1.5 block text-xs uppercase tracking-wider opacity-60">
+          <span className="mb-1.5 block text-xs uppercase tracking-wider text-muted-foreground">
             Project name
           </span>
           <input
             name="projectName"
-            defaultValue={state.projectName ?? "Tampa-DOGE"}
-            className="w-full rounded-md border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-tampa-cyan focus:outline-none"
+            defaultValue={state.projectName ?? "Centinel"}
+            className="w-full border border-border bg-secondary px-3 py-2 text-sm focus:border-primary focus:outline-none"
           />
         </label>
-        <p className="text-xs opacity-50">
+        <p className="text-xs text-muted-foreground">
           Logo upload deferred to v0.2 — for now, the default text mark is used.
         </p>
         <div className="flex justify-end">
@@ -157,17 +158,17 @@ function Step3({ state }: { state: SetupState }) {
         {WATCH_PRESETS.map((p) => (
           <label
             key={p.id}
-            className="flex cursor-pointer items-start gap-3 rounded-md border border-white/10 bg-white/[0.02] p-3 transition hover:bg-white/[0.04]"
+            className="flex cursor-pointer items-start gap-3 border border-border bg-card p-3 transition hover:bg-accent"
           >
             <input
               type="checkbox"
               name={`preset:${p.id}`}
               defaultChecked={selected.has(p.id)}
-              className="mt-0.5 h-4 w-4 accent-tampa-cyan"
+              className="mt-0.5 h-4 w-4 accent-primary"
             />
             <span className="flex-1">
               <span className="block font-medium">{p.label}</span>
-              <span className="mt-0.5 block text-xs opacity-60">
+              <span className="mt-0.5 block text-xs text-muted-foreground">
                 {p.description}
               </span>
             </span>
@@ -195,14 +196,14 @@ function Step4({ state }: { state: SetupState }) {
           {(["none", "discord", "telegram"] as const).map((c) => (
             <label
               key={c}
-              className="flex cursor-pointer items-center gap-3 rounded-md border border-white/10 bg-white/[0.02] p-3 transition hover:bg-white/[0.04]"
+              className="flex cursor-pointer items-center gap-3 border border-border bg-card p-3 transition hover:bg-accent"
             >
               <input
                 type="radio"
                 name="channel"
                 value={c}
                 defaultChecked={channel === c}
-                className="h-4 w-4 accent-tampa-cyan"
+                className="h-4 w-4 accent-primary"
               />
               <span className="capitalize">
                 {c === "none" ? "No channel — read on /briefings" : c}
@@ -211,14 +212,14 @@ function Step4({ state }: { state: SetupState }) {
           ))}
         </fieldset>
         <label className="block">
-          <span className="mb-1.5 block text-xs uppercase tracking-wider opacity-60">
+          <span className="mb-1.5 block text-xs uppercase tracking-wider text-muted-foreground">
             Channel target (optional)
           </span>
           <input
             name="target"
             defaultValue={state.notification?.target ?? ""}
-            placeholder="#tampa-doge or chat-id"
-            className="w-full rounded-md border border-white/10 bg-black/40 px-3 py-2 font-mono text-sm placeholder:opacity-40 focus:border-tampa-cyan focus:outline-none"
+            placeholder="#centinel or chat-id"
+            className="w-full border border-border bg-secondary px-3 py-2 font-mono text-sm placeholder:text-muted-foreground focus:border-primary focus:outline-none"
           />
         </label>
         <div className="flex justify-end">
@@ -242,9 +243,9 @@ function Step5({ state }: { state: SetupState }) {
       subtitle="The Cartographer crawls every URL on the city's .gov surface, classifies content, and writes a labeled sitemap. Takes 30–90 minutes for a city like Tampa."
     >
       <div className="space-y-4">
-        <dl className="grid grid-cols-1 gap-2 rounded-md border border-white/10 bg-black/30 p-4 text-sm sm:grid-cols-2">
+        <dl className="grid grid-cols-1 gap-2 border border-border bg-secondary p-4 text-sm sm:grid-cols-2">
           <Field label="Domain" value={state.cityDomain ?? "—"} mono />
-          <Field label="Project" value={state.projectName ?? "Tampa-DOGE"} />
+          <Field label="Project" value={state.projectName ?? "Centinel"} />
           <Field label="Watches" value={presetLabels} />
           <Field
             label="Briefings"
@@ -258,11 +259,11 @@ function Step5({ state }: { state: SetupState }) {
           />
         </dl>
 
-        <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-xs">
-          <strong className="text-amber-400">Stub mode:</strong>{" "}
+        <div className="border border-amber-300 bg-amber-50 p-3 text-xs">
+          <strong className="text-amber-600">Stub mode:</strong>{" "}
           <span className="opacity-80">
             The real shell-out to{" "}
-            <code className="text-tampa-cyan">
+            <code className="text-primary">
               hermes session run sitemap-builder
             </code>{" "}
             isn&apos;t wired yet. This step writes a placeholder log so the
@@ -296,11 +297,11 @@ async function Step6({ state }: { state: SetupState }) {
       subtitle="Skim the sitemap, mark bulk categories active, then continue. You can come back and refine forever — this is just the first pass."
     >
       <div className="space-y-4">
-        <div className="rounded-md border border-white/10 bg-black/40 p-3">
-          <div className="mb-2 text-xs uppercase tracking-wider opacity-60">
+        <div className="border border-border bg-secondary p-3">
+          <div className="mb-2 text-xs uppercase tracking-wider text-muted-foreground">
             Bootstrap log
           </div>
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed opacity-80">
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-foreground/80">
 {log || "(no log yet)"}
           </pre>
         </div>
@@ -310,17 +311,17 @@ async function Step6({ state }: { state: SetupState }) {
             href="/sitemap"
             target="_blank"
             rel="noopener noreferrer"
-            className="rounded-md border border-white/15 bg-white/[0.03] px-4 py-3 text-sm transition hover:bg-white/[0.08]"
+            className="border border-border bg-card px-4 py-3 text-sm transition hover:bg-accent"
           >
-            Open <span className="text-tampa-cyan">/sitemap</span> →
+            Open <span className="text-primary">/sitemap</span> →
           </a>
           <a
             href="/sitemap/needs-review"
             target="_blank"
             rel="noopener noreferrer"
-            className="rounded-md border border-white/15 bg-white/[0.03] px-4 py-3 text-sm transition hover:bg-white/[0.08]"
+            className="border border-border bg-card px-4 py-3 text-sm transition hover:bg-accent"
           >
-            Triage <span className="text-tampa-cyan">needs-review</span> queue →
+            Triage <span className="text-primary">needs-review</span> queue →
           </a>
         </div>
 
@@ -350,16 +351,16 @@ function Step7({ state: _state }: { state: SetupState }) {
         ].map((line) => (
           <li
             key={line}
-            className="flex items-start gap-2 rounded-md border border-white/5 bg-white/[0.02] px-3 py-2"
+            className="flex items-start gap-2 border border-border/50 bg-card px-3 py-2"
           >
-            <span className="mt-1 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-tampa-cyan" />
+            <span className="mt-1 inline-block h-1.5 w-1.5 shrink-0 bg-primary" />
             <span>{line}</span>
           </li>
         ))}
       </ul>
 
-      <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-xs">
-        <strong className="text-amber-400">Stub mode:</strong>{" "}
+      <div className="border border-amber-300 bg-amber-50 p-3 text-xs">
+        <strong className="text-amber-600">Stub mode:</strong>{" "}
         <span className="opacity-80">
           Cron registration isn&apos;t wired to Hermes yet. Marking setup
           complete unlocks the rest of the app; cron activation comes online
@@ -384,8 +385,8 @@ function CompletedView({ state }: { state: SetupState }) {
         state.completedAt?.slice(0, 10) ?? "—"
       }.`}
     >
-      <p className="mb-4 text-sm opacity-80">
-        The agent stack is live. Visit <a href="/sitemap" className="text-tampa-cyan hover:underline">the sitemap</a> to start working, or open <a href="/chat" className="text-tampa-cyan hover:underline">/chat</a> to talk to the Editor.
+      <p className="mb-4 text-sm text-foreground/80">
+        The agent stack is live. Visit <a href="/sitemap" className="text-primary hover:underline">the sitemap</a> to start working, or open <a href="/chat" className="text-primary hover:underline">/chat</a> to talk to the Editor.
       </p>
       <form action={resetSetup} className="flex justify-end">
         <SecondaryButton>Reset setup</SecondaryButton>
@@ -407,7 +408,7 @@ function Field({
 }) {
   return (
     <div>
-      <dt className="text-[10px] uppercase tracking-wider opacity-50">
+      <dt className="text-[10px] uppercase tracking-wider text-muted-foreground">
         {label}
       </dt>
       <dd className={`mt-0.5 ${mono ? "font-mono" : ""}`}>{value}</dd>

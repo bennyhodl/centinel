@@ -107,8 +107,8 @@ export default async function SitemapDrillPage({ params, searchParams }: Props) 
 
 function BackLink() {
   return (
-    <Link href="/sitemap" className="mb-4 inline-block text-xs text-tampa-cyan hover:underline">
-      ← back to sitemap
+    <Link href="/sitemap" className="mb-4 inline-block text-xs text-primary hover:underline italic">
+      &larr; back to sitemap
     </Link>
   );
 }
@@ -129,9 +129,10 @@ function DrillView({
   return (
     <section className="space-y-6">
       <BackLink />
-      <header>
-        <h1 className="text-2xl font-semibold">{title}</h1>
-        <p className="mt-1 text-sm opacity-60">{subtitle}</p>
+      <header className="mb-6">
+        <h1 className="masthead text-3xl text-foreground">{title}</h1>
+        <hr className="rule-double" />
+        <p className="text-sm text-muted-foreground italic">{subtitle}</p>
       </header>
 
       {searchScope && (
@@ -140,11 +141,11 @@ function DrillView({
             name="q"
             defaultValue={searchQuery ?? ""}
             placeholder="filter by URL, description, or contains…"
-            className="flex-1 rounded-md border border-white/10 bg-white/[0.02] px-3 py-2 text-sm placeholder:opacity-40 focus:border-tampa-cyan focus:outline-none"
+            className="flex-1 border border-border bg-card px-3 py-2 text-sm placeholder:text-muted-foreground focus:border-primary focus:outline-none"
           />
           <button
             type="submit"
-            className="rounded-md bg-tampa-cyan px-3 py-2 text-sm font-medium text-tampa-ink hover:opacity-90"
+            className="bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:opacity-90"
           >
             filter
           </button>
@@ -152,7 +153,7 @@ function DrillView({
       )}
 
       {entries.length === 0 ? (
-        <p className="rounded-md border border-dashed border-white/10 bg-white/[0.02] p-6 text-center text-sm opacity-60">
+        <p className="border border-dashed border-border bg-card p-6 text-center text-sm text-muted-foreground">
           No entries match.
         </p>
       ) : (

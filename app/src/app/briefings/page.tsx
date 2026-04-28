@@ -8,10 +8,13 @@ export default async function BriefingsPage() {
   const items = await listBriefings();
 
   return (
-    <section className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold">Briefings</h1>
-        <p className="mt-1 text-sm opacity-60">
+    <section>
+      <header className="mb-6">
+        <h1 className="masthead text-3xl text-foreground">
+          Weekly Briefings
+        </h1>
+        <hr className="rule-double" />
+        <p className="text-sm text-muted-foreground italic">
           Weekly digests of what changed across the city&apos;s surface.
         </p>
       </header>
@@ -20,28 +23,29 @@ export default async function BriefingsPage() {
         <EmptyState title="No briefings yet">
           <p>
             Briefings are produced weekly by the digest agent and land in{" "}
-            <code className="font-mono text-tampa-cyan">
+            <code className="font-mono text-primary text-xs">
               &lt;wiki&gt;/Briefings/
             </code>
             .
           </p>
-          <pre className="mx-auto mt-4 overflow-auto rounded bg-black/40 p-3 text-left font-mono text-xs text-tampa-cyan">
+          <pre className="mx-auto mt-4 overflow-auto border border-border bg-secondary p-3 text-left font-mono text-xs text-foreground/80">
             hermes session run weekly-digest
           </pre>
         </EmptyState>
       ) : (
-        <ul className="grid gap-3">
+        <ul className="divide-y divide-border">
           {items.map((b) => (
-            <li
-              key={b.slug}
-              className="rounded-lg border border-white/10 bg-white/[0.02] p-4"
-            >
-              <div className="font-mono text-[11px] text-tampa-cyan">
+            <li key={b.slug} className="py-5 px-3">
+              <div className="font-smallcaps text-[0.6rem] tracking-[0.15em] text-muted-foreground">
                 {b.date}
               </div>
-              <h2 className="mt-1 text-base font-semibold">{b.headline}</h2>
+              <h2 className="mt-1 font-display text-xl font-semibold">
+                {b.headline}
+              </h2>
               {b.excerpt && (
-                <p className="mt-1 text-sm opacity-75">{b.excerpt}</p>
+                <p className="mt-2 text-sm text-muted-foreground leading-relaxed">
+                  {b.excerpt}
+                </p>
               )}
             </li>
           ))}

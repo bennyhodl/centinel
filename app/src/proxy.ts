@@ -7,11 +7,11 @@ import { NextResponse, type NextRequest } from "next/server";
  * Setup wizard is gated too; it lives behind the same password.
  */
 export function proxy(req: NextRequest) {
-  const expected = process.env.TAMPA_DOGE_PASSWORD;
+  const expected = process.env.CENTINEL_PASSWORD;
 
   // If no password is configured, fail closed.
   if (!expected) {
-    return new NextResponse("Server misconfigured: TAMPA_DOGE_PASSWORD unset", {
+    return new NextResponse("Server misconfigured: CENTINEL_PASSWORD unset", {
       status: 500,
     });
   }
@@ -32,7 +32,7 @@ export function proxy(req: NextRequest) {
 
   return new NextResponse("Auth required", {
     status: 401,
-    headers: { "WWW-Authenticate": 'Basic realm="Tampa-DOGE"' },
+    headers: { "WWW-Authenticate": 'Basic realm="Centinel"' },
   });
 }
 

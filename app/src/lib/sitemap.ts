@@ -5,7 +5,7 @@ import { wikiPath } from "./config";
 
 /**
  * Sitemap schema — must match the contract emitted by the `sitemap-builder` skill.
- * See: ~/plans/tampa-doge/research/skills/sitemap-builder.md
+ * See: ~/plans/centinel/research/skills/sitemap-builder.md
  */
 
 export const SitemapEntryStatus = z.enum([

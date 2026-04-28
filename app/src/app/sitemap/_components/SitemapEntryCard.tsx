@@ -1,10 +1,10 @@
 import type { SitemapEntry, SitemapEntryStatus } from "@/lib/sitemap";
 
 const STATUS_STYLES: Record<SitemapEntryStatus, string> = {
-  active: "bg-emerald-500/10 text-emerald-400 ring-1 ring-emerald-500/20",
-  broken: "bg-red-500/10 text-red-400 ring-1 ring-red-500/20",
-  excluded: "bg-zinc-500/10 text-zinc-400 ring-1 ring-zinc-500/20",
-  needs_review: "bg-amber-500/10 text-amber-400 ring-1 ring-amber-500/20",
+  active: "border-emerald-700/40 text-emerald-800 bg-emerald-50",
+  broken: "border-red-700/40 text-red-800 bg-red-50",
+  excluded: "border-foreground/20 text-muted-foreground bg-secondary",
+  needs_review: "border-amber-700/40 text-amber-800 bg-amber-50",
 };
 
 const STATUS_LABEL: Record<SitemapEntryStatus, string> = {
@@ -17,7 +17,7 @@ const STATUS_LABEL: Record<SitemapEntryStatus, string> = {
 export function StatusPill({ status }: { status: SitemapEntryStatus }) {
   return (
     <span
-      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider ${STATUS_STYLES[status]}`}
+      className={`inline-flex items-center border px-2 py-0.5 font-smallcaps text-[0.6rem] tracking-[0.12em] uppercase ${STATUS_STYLES[status]}`}
     >
       {STATUS_LABEL[status]}
     </span>
@@ -36,13 +36,13 @@ export function SitemapEntryCard({ entry }: { entry: SitemapEntry }) {
   }
 
   return (
-    <article className="rounded-lg border border-white/10 bg-white/[0.02] p-4 transition hover:border-tampa-cyan/40 hover:bg-white/[0.04]">
+    <article className="border border-border bg-card p-4 transition hover:bg-accent">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-tampa-cyan">
+        <span className="border border-primary/30 bg-primary/5 px-1.5 py-0.5 font-smallcaps text-[0.55rem] tracking-[0.12em] text-primary uppercase">
           {entry.type}
         </span>
         <StatusPill status={entry.status} />
-        <span className="text-[10px] uppercase tracking-wider opacity-50">
+        <span className="font-smallcaps text-[0.55rem] tracking-[0.12em] text-muted-foreground">
           {entry.content_kind}
         </span>
       </div>
@@ -51,24 +51,24 @@ export function SitemapEntryCard({ entry }: { entry: SitemapEntry }) {
         href={entry.url}
         target="_blank"
         rel="noopener noreferrer"
-        className="mt-2 block break-all font-mono text-sm text-white hover:text-tampa-cyan"
+        className="mt-2 block break-all font-mono text-sm text-foreground hover:text-primary transition-colors"
       >
-        <span className="opacity-50">{host}</span>
+        <span className="text-muted-foreground">{host}</span>
         <span>{pathOnly}</span>
       </a>
 
       {entry.description && (
-        <p className="mt-2 text-sm leading-relaxed opacity-80">
+        <p className="mt-2 text-sm leading-relaxed text-foreground/80">
           {entry.description}
         </p>
       )}
 
       {entry.contains.length > 0 && (
-        <ul className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+        <ul className="mt-2 flex flex-wrap gap-1.5 text-[0.65rem]">
           {entry.contains.map((c, i) => (
             <li
               key={i}
-              className="rounded bg-white/5 px-1.5 py-0.5 opacity-70"
+              className="border border-border bg-secondary px-1.5 py-0.5 text-muted-foreground"
             >
               {c}
             </li>
@@ -76,7 +76,7 @@ export function SitemapEntryCard({ entry }: { entry: SitemapEntry }) {
         </ul>
       )}
 
-      <footer className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] opacity-50">
+      <footer className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[0.65rem] text-muted-foreground">
         <span>last crawled {entry.last_crawled}</span>
         {entry.crawl_freq && <span>freq: {entry.crawl_freq}</span>}
         {entry.parser && <span>parser: {entry.parser}</span>}

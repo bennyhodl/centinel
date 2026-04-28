@@ -13,10 +13,11 @@ export default async function StatusPage() {
   const empty = !board.body.trim() && activity.length === 0;
 
   return (
-    <section className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold">Status board</h1>
-        <p className="mt-1 text-sm opacity-60">
+    <section>
+      <header className="mb-6">
+        <h1 className="masthead text-3xl text-foreground">Status Board</h1>
+        <hr className="rule-double" />
+        <p className="text-sm text-muted-foreground italic">
           What every agent is doing — live. Updates within seconds of any
           edit to{" "}
           <code className="font-mono text-xs">
@@ -27,7 +28,7 @@ export default async function StatusPage() {
       </header>
 
       {empty ? (
-        <div className="rounded-lg border border-white/10 bg-white/[0.02] p-6 text-sm opacity-70">
+        <div className="border border-border bg-card p-6 text-sm text-muted-foreground">
           No agent activity yet. After setup completes and cron activates,
           this page shows what every agent is doing in real time.
         </div>
@@ -40,9 +41,7 @@ export default async function StatusPage() {
             />
           </div>
           <aside>
-            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider opacity-60">
-              7-day activity
-            </h2>
+            <div className="section-header">7-Day Activity</div>
             <ActivityFeed items={activity} />
           </aside>
         </div>

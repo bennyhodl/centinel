@@ -2,10 +2,10 @@ import Link from "next/link";
 import type { ActivityItem } from "@/lib/status";
 
 const TYPE_TONE: Record<string, string> = {
-  request: "bg-cyan-500/10 text-cyan-300 border-cyan-400/30",
-  response: "bg-emerald-500/10 text-emerald-300 border-emerald-400/30",
-  notify: "bg-zinc-500/10 text-zinc-300 border-zinc-400/30",
-  escalation: "bg-amber-500/10 text-amber-300 border-amber-400/30",
+  request: "bg-cyan-100 text-cyan-700 border-cyan-300",
+  response: "bg-emerald-100 text-emerald-700 border-emerald-300",
+  notify: "bg-zinc-200 text-zinc-600 border-zinc-300",
+  escalation: "bg-amber-100 text-amber-700 border-amber-300",
 };
 
 function relTime(iso: string): string {
@@ -29,7 +29,7 @@ function refHref(ref: string): string {
 export default function ActivityFeed({ items }: { items: ActivityItem[] }) {
   if (items.length === 0) {
     return (
-      <div className="rounded-lg border border-white/10 bg-white/[0.02] p-4 text-sm opacity-60">
+      <div className="border border-border bg-card p-4 text-sm text-muted-foreground">
         No activity in the last 7 days.
       </div>
     );
@@ -39,31 +39,31 @@ export default function ActivityFeed({ items }: { items: ActivityItem[] }) {
       {items.map((it) => {
         const tone =
           TYPE_TONE[it.type] ??
-          "bg-white/5 text-white/70 border-white/20";
+          "bg-secondary text-muted-foreground border-border";
         return (
           <li
             key={it.id}
-            className="rounded-lg border border-white/10 bg-white/[0.02] p-3"
+            className="border border-border bg-card p-3"
           >
             <div className="flex flex-wrap items-center gap-2 text-xs">
               <span className="opacity-60">{relTime(it.timestamp)}</span>
               <span className="opacity-40">·</span>
-              <span className="font-mono text-white/80">{it.from}</span>
+              <span className="font-mono text-foreground/80">{it.from}</span>
               <span className="opacity-40">→</span>
-              <span className="font-mono text-white/80">{it.to}</span>
+              <span className="font-mono text-foreground/80">{it.to}</span>
               <span
-                className={`ml-1 rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wider ${tone}`}
+                className={`ml-1 border px-2 py-0.5 text-[10px] uppercase tracking-wider ${tone}`}
               >
                 {it.type}
               </span>
               {it.priority && it.priority !== "normal" && (
-                <span className="rounded-full border border-white/20 px-2 py-0.5 text-[10px] uppercase tracking-wider opacity-70">
+                <span className="border border-border px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
                   {it.priority}
                 </span>
               )}
             </div>
             {it.summary && (
-              <p className="mt-1.5 text-sm text-white/80">{it.summary}</p>
+              <p className="mt-1.5 text-sm text-foreground/80">{it.summary}</p>
             )}
             {it.references.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1.5">
@@ -71,7 +71,7 @@ export default function ActivityFeed({ items }: { items: ActivityItem[] }) {
                   <Link
                     key={r}
                     href={refHref(r)}
-                    className="rounded-md border border-white/10 bg-white/[0.03] px-2 py-0.5 font-mono text-[11px] text-white/70 transition hover:border-tampa-cyan/40 hover:text-tampa-cyan"
+                    className="border border-border bg-card px-2 py-0.5 font-mono text-[11px] text-muted-foreground transition hover:border-primary/40 hover:text-primary"
                   >
                     {r}
                   </Link>

@@ -31,41 +31,42 @@ export default async function FindingDetailPage({
 
   return (
     <section className="space-y-6">
-      <header>
-        <div className="text-xs opacity-50">
-          <Link href="/findings" className="hover:text-tampa-cyan">
-            ← Findings
+      <header className="mb-6">
+        <div className="text-xs text-muted-foreground">
+          <Link href="/findings" className="hover:text-primary italic">
+            &larr; Findings
           </Link>
         </div>
-        <div className="mt-2 flex flex-wrap items-center gap-2">
+        <div className="mt-2 flex flex-wrap items-center gap-3">
           <Pill tone={statusTone(doc.stack)}>{doc.stack}</Pill>
-          <span className="font-mono text-[11px] text-tampa-cyan">{slug}</span>
+          <span className="font-mono text-[0.65rem] text-primary">{slug}</span>
         </div>
-        <h1 className="mt-2 text-2xl font-semibold">
+        <h1 className="mt-2 masthead text-3xl text-foreground">
           {(fm.title as string | undefined) ?? slug}
         </h1>
-        {summary && <p className="mt-2 text-base opacity-80">{summary}</p>}
+        <hr className="rule-double" />
+        {summary && <p className="text-base text-foreground/80 leading-relaxed">{summary}</p>}
       </header>
 
       {isDraft && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">
-          <strong className="uppercase tracking-wider text-amber-300">
-            Draft —
+        <div className="border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+          <strong className="font-smallcaps tracking-wider text-amber-700">
+            Draft &mdash;
           </strong>{" "}
           not yet reviewed by editor or counsel. Do not cite.
         </div>
       )}
 
-      <article className="rounded-lg border border-white/10 bg-white/[0.02] p-5">
+      <article className="border border-border bg-card p-5">
         <MarkdownView source={doc.body} />
       </article>
 
       <section>
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider opacity-60">
+        <h2 className="mb-3 section-header">
           Sources
         </h2>
         {doc.sources.length === 0 ? (
-          <p className="text-sm opacity-50">No sources recorded.</p>
+          <p className="text-sm text-muted-foreground">No sources recorded.</p>
         ) : (
           <ul className="space-y-2">
             {doc.sources.map((s, i) => {
@@ -76,7 +77,7 @@ export default async function FindingDetailPage({
                       href={s}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="break-all font-mono text-sm text-tampa-cyan hover:underline"
+                      className="break-all font-mono text-sm text-primary hover:underline"
                     >
                       {s}
                     </a>
@@ -87,7 +88,7 @@ export default async function FindingDetailPage({
                 <li key={i}>
                   <Link
                     href={vaultHref(s)}
-                    className="break-all font-mono text-sm text-tampa-cyan hover:underline"
+                    className="break-all font-mono text-sm text-primary hover:underline"
                   >
                     {s}
                   </Link>
@@ -98,7 +99,7 @@ export default async function FindingDetailPage({
         )}
       </section>
 
-      <footer className="flex flex-wrap gap-x-4 gap-y-1 border-t border-white/10 pt-4 text-[11px] opacity-50">
+      <footer className="flex flex-wrap gap-x-4 gap-y-1 border-t-2 border-foreground/15 pt-4 text-[0.65rem] text-muted-foreground">
         {fm.generated_at != null && (
           <span>generated {String(fm.generated_at)}</span>
         )}

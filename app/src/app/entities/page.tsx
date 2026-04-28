@@ -9,10 +9,13 @@ export default async function EntitiesPage() {
   const total = types.reduce((s, t) => s + t.count, 0);
 
   return (
-    <section className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold">Entities</h1>
-        <p className="mt-1 text-sm opacity-60">
+    <section>
+      <header className="mb-6">
+        <h1 className="masthead text-3xl text-foreground">
+          Entities &amp; Persons
+        </h1>
+        <hr className="rule-double" />
+        <p className="text-sm text-muted-foreground italic">
           Contractors, people, organizations, and projects extracted from
           findings.
         </p>
@@ -23,28 +26,28 @@ export default async function EntitiesPage() {
           <p>
             Entities are extracted automatically from findings as the
             civic-investigator runs. They populate{" "}
-            <code className="font-mono text-tampa-cyan">
+            <code className="font-mono text-primary text-xs">
               &lt;wiki&gt;/Entities/
             </code>
             . Launch an investigation from{" "}
-            <Link href="/chat" className="text-tampa-cyan hover:underline">
-              /chat
+            <Link href="/chat" className="text-primary hover:underline">
+              the Editor&apos;s Desk
             </Link>{" "}
             to start.
           </p>
         </EmptyState>
       ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           {types.map((t) => (
             <Link
               key={t.type}
               href={`/entities/${t.type}`}
-              className="rounded-lg border border-white/10 bg-white/[0.02] p-4 transition hover:border-tampa-cyan/40 hover:bg-white/[0.04]"
+              className="border border-border bg-card p-5 text-center transition hover:bg-accent group"
             >
-              <div className="text-xs uppercase tracking-wider opacity-60">
+              <div className="font-smallcaps text-[0.65rem] tracking-[0.15em] text-muted-foreground uppercase">
                 {t.label}
               </div>
-              <div className="mt-1 font-mono text-2xl font-semibold">
+              <div className="mt-2 font-display text-3xl font-bold text-foreground group-hover:text-primary transition-colors">
                 {t.count}
               </div>
             </Link>

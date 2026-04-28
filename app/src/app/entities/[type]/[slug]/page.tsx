@@ -36,27 +36,28 @@ export default async function EntityDetailPage({
 
   return (
     <section className="space-y-6">
-      <header>
-        <div className="text-xs opacity-50">
-          <Link href="/entities" className="hover:text-tampa-cyan">
+      <header className="mb-6">
+        <div className="text-xs text-muted-foreground italic">
+          <Link href="/entities" className="hover:text-primary">
             Entities
           </Link>{" "}
           /{" "}
           <Link
             href={`/entities/${type}`}
-            className="hover:text-tampa-cyan"
+            className="hover:text-primary"
           >
             {ENTITY_TYPE_LABELS[type]}
           </Link>
         </div>
-        <h1 className="mt-2 text-2xl font-semibold">
+        <h1 className="mt-2 masthead text-3xl text-foreground">
           {(fm.title as string | undefined) ?? slug}
         </h1>
+        <hr className="rule-double" />
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-tampa-cyan">
+          <span className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-primary">
             {type}
           </span>
-          <span className="font-mono text-[11px] opacity-60">{slug}</span>
+          <span className="font-mono text-[11px] text-muted-foreground">{slug}</span>
         </div>
 
         {aliases.length > 0 && (
@@ -64,7 +65,7 @@ export default async function EntityDetailPage({
             {aliases.map((a) => (
               <li
                 key={a}
-                className="rounded-full bg-white/5 px-2 py-0.5 text-[11px] opacity-80"
+                className="bg-secondary px-2 py-0.5 text-[11px] text-foreground/80"
               >
                 {a}
               </li>
@@ -78,9 +79,9 @@ export default async function EntityDetailPage({
           {stats.map((s) => (
             <div
               key={s.label}
-              className="rounded-md border border-white/10 bg-white/[0.02] px-3 py-2"
+              className="border border-border bg-card px-3 py-2"
             >
-              <div className="text-[10px] uppercase tracking-wider opacity-60">
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
                 {s.label}
               </div>
               <div className="mt-0.5 font-mono text-sm">{s.value}</div>
@@ -89,7 +90,7 @@ export default async function EntityDetailPage({
         </dl>
       )}
 
-      <article className="rounded-lg border border-white/10 bg-white/[0.02] p-5">
+      <article className="border border-border bg-card p-5">
         <MarkdownView source={doc.body} />
       </article>
     </section>

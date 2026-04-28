@@ -14,11 +14,12 @@ export default async function OperatorQueuePage() {
 
   return (
     <section className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold">Operator queue</h1>
-        <p className="mt-1 text-sm opacity-60">
+      <header className="mb-6">
+        <h1 className="masthead text-3xl text-foreground">Operator Queue</h1>
+        <hr className="rule-double" />
+        <p className="text-sm text-muted-foreground italic">
           Items awaiting human judgment. Resolutions happen via{" "}
-          <code className="font-mono text-tampa-cyan">/chat</code>; this surface
+          <code className="font-mono text-primary text-xs">/chat</code>; this surface
           is read-only.
         </p>
       </header>
@@ -35,15 +36,15 @@ export default async function OperatorQueuePage() {
           {groups.map((g) => (
             <div key={g.bucket}>
               <div className="mb-3 flex items-baseline gap-2">
-                <h2 className="text-sm font-semibold uppercase tracking-wider opacity-60">
+                <h2 className="section-header">
                   {g.label}
                 </h2>
-                <span className="font-mono text-xs opacity-50">
+                <span className="font-mono text-xs text-muted-foreground">
                   {g.items.length}
                 </span>
               </div>
               {g.items.length === 0 ? (
-                <p className="text-xs opacity-40">empty</p>
+                <p className="text-xs text-muted-foreground">empty</p>
               ) : (
                 <ul className="grid gap-3">
                   {g.items.map((it) => {
@@ -52,20 +53,20 @@ export default async function OperatorQueuePage() {
                     return (
                       <li
                         key={`${g.bucket}/${it.slug}`}
-                        className={`rounded-lg border bg-white/[0.02] p-4 ${
+                        className={`border bg-card p-4 ${
                           aging
-                            ? "border-amber-500/40"
-                            : "border-white/10"
+                            ? "border-amber-400"
+                            : "border-border"
                         }`}
                       >
                         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                          <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-tampa-cyan">
+                          <span className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-primary">
                             {g.bucket}
                           </span>
                           <Pill tone={statusTone(it.status)}>{it.status}</Pill>
                           <span
                             className={`text-[11px] ${
-                              aging ? "text-amber-400" : "opacity-50"
+                              aging ? "text-amber-600" : "opacity-50"
                             }`}
                           >
                             {formatAge(it.ageMs)}
@@ -75,11 +76,11 @@ export default async function OperatorQueuePage() {
                           {it.title}
                         </h3>
                         {it.excerpt && (
-                          <p className="mt-1 text-sm opacity-75">
+                          <p className="mt-1 text-sm text-foreground/80">
                             {it.excerpt}
                           </p>
                         )}
-                        <div className="mt-2 font-mono text-[11px] opacity-40">
+                        <div className="mt-2 font-mono text-[11px] text-muted-foreground">
                           {it.slug}
                         </div>
                       </li>

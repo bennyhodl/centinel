@@ -46,11 +46,11 @@ export default async function DbPage() {
   if (up) {
     return (
       <section className="-mx-4 flex h-[calc(100vh-8rem)] flex-col">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-2 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2 text-xs">
           <div className="flex items-center gap-2">
             <span className="inline-flex h-2 w-2 rounded-full bg-emerald-400" />
-            <span className="opacity-60">datasette</span>
-            <code className="font-mono text-white/80">{url}</code>
+            <span className="text-muted-foreground">datasette</span>
+            <code className="font-mono text-foreground/80">{url}</code>
           </div>
           <div className="flex items-center gap-3">
             <span className="opacity-60">
@@ -60,7 +60,7 @@ export default async function DbPage() {
               href={url}
               target="_blank"
               rel="noreferrer noopener"
-              className="text-tampa-cyan hover:underline"
+              className="text-primary hover:underline"
             >
               open in new tab ↗
             </a>
@@ -78,20 +78,20 @@ export default async function DbPage() {
   return (
     <section className="space-y-6">
       <header>
-        <h1 className="text-2xl font-semibold">Database</h1>
-        <p className="mt-1 text-sm opacity-60">
+        <h1 className="masthead text-3xl text-foreground">Database</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
           Datasette is not running. Bring it up and this page will embed it.
         </p>
       </header>
 
-      <div className="rounded-lg border border-amber-400/30 bg-amber-500/5 p-4 text-sm">
+      <div className="border border-amber-300 bg-amber-50 p-4 text-sm">
         <div className="flex items-center gap-2">
-          <span className="inline-flex h-2 w-2 rounded-full bg-amber-400" />
-          <span className="font-semibold uppercase tracking-wider text-amber-300">
+          <span className="inline-flex h-2 w-2 rounded-full bg-amber-500" />
+          <span className="font-semibold uppercase tracking-wider text-amber-700">
             offline
           </span>
         </div>
-        <p className="mt-2 opacity-80">
+        <p className="mt-2 text-foreground/80">
           Probed{" "}
           <code className="font-mono text-xs">
             {url}/-/versions.json
@@ -110,13 +110,13 @@ export default async function DbPage() {
       </div>
 
       <div>
-        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider opacity-60">
+        <h2 className="mb-2 section-header">
           docker compose snippet
         </h2>
-        <pre className="overflow-x-auto rounded-lg border border-white/10 bg-black/40 p-4 font-mono text-xs leading-relaxed">
+        <pre className="overflow-x-auto border border-border bg-secondary p-4 font-mono text-xs leading-relaxed">
           {COMPOSE_SNIPPET}
         </pre>
-        <p className="mt-2 text-xs opacity-60">
+        <p className="mt-2 text-xs text-muted-foreground">
           Replace <code className="font-mono">&lt;wiki&gt;</code> with your
           wiki path. The container mounts{" "}
           <code className="font-mono">tampa.db</code> read-only and applies{" "}
@@ -141,12 +141,12 @@ function Field({
   hint?: string;
 }) {
   return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
-      <div className="text-xs uppercase tracking-wider opacity-60">
+    <div className="border border-border bg-card p-3">
+      <div className="text-xs uppercase tracking-wider text-muted-foreground">
         {label}
       </div>
       <div className="mt-1 break-all font-mono text-sm">{value}</div>
-      {hint && <div className="mt-1 text-xs opacity-50">{hint}</div>}
+      {hint && <div className="mt-1 text-xs text-muted-foreground">{hint}</div>}
     </div>
   );
 }

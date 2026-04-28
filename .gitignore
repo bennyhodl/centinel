@@ -30,3 +30,5 @@
 # typescript
 **/*.tsbuildinfo
 **/next-env.d.ts
+wiki
+.pnpm-store

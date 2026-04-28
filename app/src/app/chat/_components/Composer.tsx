@@ -41,7 +41,7 @@ export default function Composer({
   }
 
   return (
-    <div className="border-t border-white/10 bg-black/40 px-3 py-3 backdrop-blur sm:px-4">
+    <div className="border-t border-border bg-secondary px-3 py-3 backdrop-blur sm:px-4">
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -57,13 +57,13 @@ export default function Composer({
           disabled={disabled}
           rows={1}
           placeholder="Ask the Editor…  (⌘/Ctrl+Enter to send)"
-          className="flex-1 resize-none rounded-md border border-white/10 bg-white/[0.03] px-3 py-2 text-sm placeholder:text-white/30 focus:border-tampa-cyan/50 focus:outline-none focus:ring-1 focus:ring-tampa-cyan/40"
+          className="flex-1 resize-none border border-border bg-card px-3 py-2 text-sm placeholder:text-muted-foreground focus:border-primary/50 focus:outline-none focus:ring-1 focus:ring-primary/40"
         />
         {isStreaming ? (
           <button
             type="button"
             onClick={onStop}
-            className="rounded-md border border-red-400/40 bg-red-400/10 px-3 py-2 text-sm font-medium text-red-300 transition hover:bg-red-400/20"
+            className="border border-red-300 bg-red-100 px-3 py-2 text-sm font-medium text-red-700 transition hover:bg-red-200"
           >
             Stop
           </button>
@@ -71,7 +71,7 @@ export default function Composer({
           <button
             type="submit"
             disabled={disabled || !value.trim()}
-            className="rounded-md border border-tampa-cyan/40 bg-tampa-cyan/10 px-3 py-2 text-sm font-medium text-tampa-cyan transition hover:bg-tampa-cyan/20 disabled:cursor-not-allowed disabled:opacity-40"
+            className="border border-primary/40 bg-accent px-3 py-2 text-sm font-medium text-primary transition hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
           >
             Send
           </button>

@@ -72,7 +72,7 @@ export default function LiveBoard({
             }`}
           />
         </span>
-        <span className="uppercase tracking-wider opacity-60">
+        <span className="uppercase tracking-wider text-muted-foreground">
           {connected ? "live" : "reconnecting"}
         </span>
         <span className="opacity-40">·</span>
@@ -82,7 +82,7 @@ export default function LiveBoard({
       {markdown.trim() ? (
         <ClientMarkdown source={markdown} />
       ) : (
-        <div className="rounded-lg border border-white/10 bg-white/[0.02] p-6 text-sm opacity-60">
+        <div className="border border-border bg-card p-6 text-sm text-muted-foreground">
           No board yet. Once an agent runs, it will write{" "}
           <code className="font-mono text-xs">_runtime/status/board.md</code>{" "}
           and this view will update live.

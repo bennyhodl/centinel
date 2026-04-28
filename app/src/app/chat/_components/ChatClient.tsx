@@ -119,7 +119,7 @@ export default function ChatClient({ intro }: { intro: string }) {
             ))
           )}
           {error && (
-            <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-300">
+            <div className="border border-red-300 bg-red-100 px-3 py-2 text-sm text-red-700">
               {error}
             </div>
           )}

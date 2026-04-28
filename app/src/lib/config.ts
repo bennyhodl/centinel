@@ -9,10 +9,10 @@ function expandHome(p: string): string {
 
 /**
  * Resolves the path of the user's wiki — root for all markdown reads & DB.
- * Override with TAMPA_DOGE_WIKI_PATH; defaults to ~/wiki/Tampa.
+ * Override with CENTINEL_WIKI_PATH; defaults to ~/wiki/Tampa.
  */
 export function wikiPath(): string {
-  const raw = process.env.TAMPA_DOGE_WIKI_PATH ?? "~/wiki/Tampa";
+  const raw = process.env.CENTINEL_WIKI_PATH ?? "~/wiki/Tampa";
   return path.resolve(expandHome(raw));
 }
 
@@ -40,5 +40,5 @@ export const config = {
   vaultPath,
   hermesApiUrl: () => process.env.HERMES_API_URL ?? "",
   hermesApiKey: () => process.env.HERMES_API_KEY ?? "",
-  authPassword: () => process.env.TAMPA_DOGE_PASSWORD ?? "",
+  authPassword: () => process.env.CENTINEL_PASSWORD ?? "",
 };

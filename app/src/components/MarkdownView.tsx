@@ -26,7 +26,7 @@ export interface MarkdownViewProps {
 export default function MarkdownView({ source, className }: MarkdownViewProps) {
   const rewritten = rewriteWikilinks(source);
   return (
-    <div className={className ?? "prose prose-neutral dark:prose-invert max-w-none"}>
+    <div className={className ?? "prose prose-neutral max-w-none prose-headings:font-display prose-a:text-primary prose-pre:bg-secondary prose-pre:border prose-pre:border-border"}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{

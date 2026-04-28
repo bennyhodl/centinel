@@ -23,17 +23,17 @@ export function StepNav({ state }: { state: SetupState }) {
           <div
             className={`flex flex-col items-center gap-1 rounded-md px-2 py-2 text-center transition ${
               active
-                ? "bg-tampa-cyan/15 ring-1 ring-tampa-cyan/40"
+                ? "bg-accent ring-1 ring-primary/40"
                 : reached
-                  ? "bg-white/5"
-                  : "bg-white/[0.02] opacity-40"
+                  ? "bg-secondary"
+                  : "bg-card text-muted-foreground"
             }`}
           >
             <span
-              className={`flex h-6 w-6 items-center justify-center rounded-full font-mono text-xs ${
+              className={`flex h-6 w-6 items-center justify-center font-mono text-xs ${
                 reached
-                  ? "bg-tampa-cyan text-tampa-ink"
-                  : "bg-white/10 text-white/50"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-secondary text-muted-foreground"
               }`}
             >
               {s.n}
@@ -72,11 +72,11 @@ export function StepFrame({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-xl border border-white/10 bg-white/[0.02] p-6">
-      <header className="mb-5 border-b border-white/10 pb-4">
+    <div className="border border-border bg-card p-6">
+      <header className="mb-5 border-b border-border pb-4">
         <h2 className="text-xl font-semibold">{title}</h2>
         {subtitle && (
-          <p className="mt-1 text-sm opacity-60">{subtitle}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>
         )}
       </header>
       {children}
@@ -88,7 +88,7 @@ export function PrimaryButton({ children }: { children: React.ReactNode }) {
   return (
     <button
       type="submit"
-      className="rounded-md bg-tampa-cyan px-4 py-2 text-sm font-medium text-tampa-ink transition hover:opacity-90"
+      className="bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:opacity-90"
     >
       {children}
     </button>
@@ -102,7 +102,7 @@ export function SecondaryButton({
   return (
     <button
       {...props}
-      className="rounded-md border border-white/15 bg-white/[0.03] px-4 py-2 text-sm font-medium transition hover:bg-white/[0.08]"
+      className="border border-border bg-card px-4 py-2 text-sm font-medium transition hover:bg-accent"
     >
       {children}
     </button>

@@ -10,13 +10,13 @@ export type Tone =
   | "sky";
 
 const TONE_STYLES: Record<Tone, string> = {
-  emerald: "bg-emerald-500/10 text-emerald-400 ring-1 ring-emerald-500/20",
-  amber: "bg-amber-500/10 text-amber-400 ring-1 ring-amber-500/20",
-  red: "bg-red-500/10 text-red-400 ring-1 ring-red-500/20",
-  cyan: "bg-tampa-cyan/10 text-tampa-cyan ring-1 ring-tampa-cyan/20",
-  zinc: "bg-zinc-500/10 text-zinc-400 ring-1 ring-zinc-500/20",
-  violet: "bg-violet-500/10 text-violet-400 ring-1 ring-violet-500/20",
-  sky: "bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/20",
+  emerald: "border-emerald-700/40 text-emerald-800 bg-emerald-50",
+  amber: "border-amber-700/40 text-amber-800 bg-amber-50",
+  red: "border-red-700/40 text-red-800 bg-red-50",
+  cyan: "border-primary/40 text-primary bg-primary/5",
+  zinc: "border-foreground/20 text-muted-foreground bg-secondary",
+  violet: "border-violet-700/40 text-violet-800 bg-violet-50",
+  sky: "border-sky-700/40 text-sky-800 bg-sky-50",
 };
 
 export function Pill({
@@ -30,7 +30,7 @@ export function Pill({
 }) {
   return (
     <span
-      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider ${TONE_STYLES[tone]} ${className ?? ""}`}
+      className={`inline-flex items-center border px-2 py-0.5 font-smallcaps text-[0.6rem] tracking-[0.12em] uppercase ${TONE_STYLES[tone]} ${className ?? ""}`}
     >
       {children}
     </span>
