@@ -10,7 +10,7 @@ Civic transparency platform for tracking Tampa city government — sitemaps, inv
 
 ```
 tampa-doge/
-├── src/                  # Next.js 16 app — viewer + control panel
+├── app/                  # Next.js 16 viewer + control panel
 ├── docs/                 # locked design specs (the source of truth)
 │   ├── PLAN.md           # top-level plan & checkpoints
 │   ├── WEB_APP_DESIGN.md # the web app spec
@@ -20,14 +20,12 @@ tampa-doge/
 │   ├── ORG_STRUCTURE_AND_WORKFLOW.md  (Spotlight model reference)
 │   ├── REPO_AND_DISTRIBUTION.md
 │   └── SCRAPER_AND_EXTRACTORS.md
-├── skills/               # Hermes skill specs for the agent stack
-│   ├── sitemap-builder.md       (Cartographer)
-│   ├── civic-investigator.md    (Investigator)
-│   ├── civic-archivist.md       (Archivist)
-│   ├── civic-data-reporter.md   (Data Reporter)
-│   └── civic-watch-runner.md    (Watch Runner)
-├── public/
-└── ...
+└── skills/               # Hermes skill specs for the agent stack
+    ├── sitemap-builder.md       (Cartographer)
+    ├── civic-investigator.md    (Investigator)
+    ├── civic-archivist.md       (Archivist)
+    ├── civic-data-reporter.md   (Data Reporter)
+    └── civic-watch-runner.md    (Watch Runner)
 ```
 
 ## The agent stack
@@ -89,6 +87,7 @@ Copy `.env.example` → `.env.local` and fill in.
 ## Develop
 
 ```bash
+cd app
 pnpm install
 pnpm approve-builds   # once, to allow better-sqlite3 to compile
 pnpm dev
@@ -99,6 +98,7 @@ Open http://localhost:3000. The browser prompts for basic auth — user can be b
 ## Build
 
 ```bash
+cd app
 pnpm run build
 pnpm start
 ```
