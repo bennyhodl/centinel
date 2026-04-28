@@ -28,6 +28,15 @@ CORP_SUFFIXES = {
     "co", "company", "ltd", "limited", "lp", "llp", "pllc",
     "pa", "na",
 }
+# Canonical output forms for corp suffix tokens.
+CORP_SUFFIX_OUT = {
+    "llc": "LLC", "llp": "LLP", "lp": "LP", "pllc": "PLLC",
+    "pa": "PA", "na": "NA",
+    "inc": "Inc", "incorporated": "Incorporated",
+    "corp": "Corp", "corporation": "Corporation",
+    "co": "Co", "company": "Company",
+    "ltd": "Ltd", "limited": "Limited",
+}
 PARTICLES = {"van", "de", "la", "von", "del", "der", "bin", "ibn",
              "da", "das", "do", "dos", "du"}
 
@@ -36,12 +45,14 @@ def _strip_dots(tok: str) -> str:
     return tok.replace(".", "")
 
 
-def _is_acronym(tok: str) -> bool:
+def _is_acronym(tok: str, preserve_acronyms: bool) -> bool:
+    if not preserve_acronyms:
+        return False
     return 2 <= len(tok) <= 6 and tok.isupper() and tok.isalpha()
 
 
-def _titlecase_token(tok: str, force_acronym: bool = False) -> str:
-    if force_acronym or _is_acronym(tok):
+def _titlecase_token(tok: str, preserve_acronyms: bool = False) -> str:
+    if _is_acronym(tok, preserve_acronyms):
         return tok
     if tok.lower() in PARTICLES:
         return tok.lower()
@@ -93,7 +104,8 @@ def normalize_person(name: str) -> str:
         if len(t) == 1 and t.isalpha():
             out_tokens.append(t.upper())
         else:
-            out_tokens.append(_titlecase_token(t))
+            # Person names: never preserve all-caps as acronym.
+            out_tokens.append(_titlecase_token(t, preserve_acronyms=False))
 
     canonical = " ".join(out_tokens)
     if trailing_suffix:
@@ -121,25 +133,27 @@ def normalize_org(name: str) -> str:
     # Strip commas immediately preceding corporate suffix tokens.
     s = re.sub(r",\s*(?=\w)", " ", s)
 
+    s = s.strip()
     tokens = [t for t in re.split(r"\s+", s) if t]
     if not tokens:
         return ""
 
+    # Preserve a genuine acronym only when it stands alone (e.g. "IBM",
+    # "NAACP"). In multi-word names we titlecase any all-caps tokens
+    # because the source is most likely shouting (`ACME Construction LLC`).
+    bare_tokens = [_strip_dots(t) for t in tokens]
+    non_suffix = [t for t in bare_tokens if t.lower() not in CORP_SUFFIXES and t != "&"]
+    preserve_acronyms = len(non_suffix) == 1
+
     out = []
-    for t in tokens:
-        bare = _strip_dots(t)
+    for bare in bare_tokens:
         low = bare.lower()
         if low in CORP_SUFFIXES:
-            # Re-emit canonicalized suffix without dots, uppercase if 2-3 letters,
-            # else titlecase. (LLC, Inc, Corp, Ltd...)
-            if len(bare) <= 3:
-                out.append(bare.upper())
-            else:
-                out.append(bare.capitalize())
+            out.append(CORP_SUFFIX_OUT.get(low, bare.capitalize()))
         elif bare == "&":
             out.append("&")
         else:
-            out.append(_titlecase_token(bare))
+            out.append(_titlecase_token(bare, preserve_acronyms=preserve_acronyms))
     canonical = re.sub(r"\s+", " ", " ".join(out)).strip()
     return canonical
 
