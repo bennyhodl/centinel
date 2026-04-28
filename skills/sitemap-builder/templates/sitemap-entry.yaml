@@ -1,0 +1,55 @@
+# Fully-populated sitemap entry — schema reference for sitemap.json
+#
+# Every entry in <wiki>/Sitemap/sitemap.json conforms to this shape. When emitting
+# new entries during bootstrap / lint / register, fill in every field. Use null
+# for genuinely unknown values (don't omit keys — keeps the JSON shape stable).
+
+- url: https://www.tampa.gov/procurement/awards
+  # Canonical URL (run through scripts/normalize_url.py before storing).
+
+  type: contracts
+  # One of: meetings, contracts, rfps, budget, boards, permits, ethics, press,
+  # personnel, project, document, profile, calendar, form, general
+
+  description: |
+    Page lists awarded city contracts grouped by department, updated quarterly.
+    Each row links to a contract PDF. As of crawl, 47 awards spanning FY2024-FY2026.
+  # 2-3 sentences from the description-pass LLM call. Be concrete: counts, dates,
+  # vendor hints. Avoid "this page lists contracts" pap.
+
+  content_kind: index
+  # One of: index, document, listing, form, profile, news, calendar, search
+
+  contains:
+    - awarded contracts (table)
+    - PDF links to award docs
+    - quarterly date filter
+  # 1-5 short phrases from the description pass.
+
+  linked_entities: []
+  # Filled in later by civic-investigator / civic-data-reporter once the page has
+  # been ingested. Cartographer leaves [] on first registration.
+
+  last_crawled: 2026-04-25
+  # ISO-8601 date of the most recent successful fetch.
+
+  content_hash: sha256:abc123def456...
+  # sha256 of the normalized body. Used by lint mode to detect change cheaply.
+
+  parser: contracts-portal-tampa
+  # parser_suggestion from the description pass. May be null if no specific parser
+  # applies. The parser itself may not exist yet — this is a hint for downstream
+  # skills, not a contract that the parser is implemented.
+
+  crawl_freq: weekly
+  # weekly | daily | monthly | on_demand
+  # v0.1 default: weekly for everything. Tune per-type after first month.
+
+  status: needs_review
+  # active | broken | excluded | needs_review
+  # New entries land as needs_review. Operator promotes to active.
+
+  notes:
+    - "Discovered during bootstrap 2026-04-25"
+    - "Suspected JS-rendered table; rendered DOM via browser_navigate"
+  # Append-only audit trail. Keep notes short. Don't delete old notes.
