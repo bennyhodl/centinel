@@ -25,15 +25,15 @@ export default function RootLayout({
   return (
     <html lang="en" className="h-full antialiased">
       <body className="min-h-full flex flex-col">
-        <header className="border-b border-black/10 dark:border-white/10">
+        <header className="border-b border-white/10">
           <nav className="mx-auto max-w-6xl flex flex-wrap items-center gap-x-5 gap-y-2 px-4 py-3">
             <Link href="/" className="font-semibold text-tampa-cyan tracking-tight">
               Tampa-DOGE
             </Link>
-            <ul className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+            <ul className="flex flex-wrap gap-x-4 gap-y-1 text-sm opacity-80">
               {NAV.map((n) => (
                 <li key={n.href}>
-                  <Link href={n.href} className="hover:text-tampa-cyan">
+                  <Link href={n.href} className="hover:text-tampa-cyan transition">
                     {n.label}
                   </Link>
                 </li>
@@ -42,7 +42,7 @@ export default function RootLayout({
           </nav>
         </header>
         <main className="flex-1 mx-auto w-full max-w-6xl px-4 py-6">{children}</main>
-        <footer className="border-t border-black/10 dark:border-white/10 text-xs text-black/50 dark:text-white/50">
+        <footer className="border-t border-white/10 text-xs text-white/50">
           <div className="mx-auto max-w-6xl px-4 py-3">
             Tampa-DOGE · Hermes plugin · v0.1
           </div>

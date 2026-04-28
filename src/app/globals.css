@@ -1,13 +1,8 @@
 @import "tailwindcss";
 
-:root {
-  --background: #FCFCFE;
-  --foreground: #050505;
-}
-
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-background: #050505;
+  --color-foreground: #FCFCFE;
   --color-tampa-cyan: #00ACC1;
   --color-tampa-ink: #050505;
   --color-tampa-pearl: #FCFCFE;
@@ -15,15 +10,8 @@
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #050505;
-    --foreground: #FCFCFE;
-  }
-}
-
-body {
-  background: var(--background);
-  color: var(--foreground);
+html, body {
+  background: var(--color-background);
+  color: var(--color-foreground);
   font-family: var(--font-sans);
 }
