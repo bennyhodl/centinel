@@ -64,8 +64,15 @@ export const SetupState = z.object({
       startedAt: z.string().optional(),
       finishedAt: z.string().optional(),
       logPath: z.string().optional(),
-      // STUB: real shell-out writes more here (pages crawled, classified, etc.)
+      // True only for the legacy stub path (synthetic log). Real runs set false.
       stubMode: z.boolean().optional(),
+    })
+    .optional(),
+  activation: z
+    .object({
+      attemptedAt: z.string(),
+      output: z.string().optional(),
+      error: z.string().nullable().optional(),
     })
     .optional(),
   startedAt: z.string().optional(),

@@ -13,7 +13,7 @@ export function SitemapEmptyState() {
         runs against it.
       </p>
       <pre className="mx-auto mt-4 max-w-md overflow-auto border border-border bg-secondary p-3 text-left font-mono text-xs text-foreground/80">
-        hermes session run sitemap-builder --mode bootstrap --target tampa.gov
+        hermes -s sitemap-builder chat -q "bootstrap: build sitemap for tampa.gov"
       </pre>
       <p className="mt-3 text-xs text-muted-foreground italic">
         Or use the setup wizard at <a href="/setup" className="text-primary underline">/setup</a>.

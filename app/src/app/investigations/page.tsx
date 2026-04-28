@@ -40,7 +40,7 @@ export default async function InvestigationsPage() {
             or via:
           </p>
           <pre className="mx-auto mt-4 overflow-auto border border-border bg-secondary p-3 text-left font-mono text-xs text-foreground/80">
-            hermes session run civic-investigator
+            centinel-investigator "&lt;prompt&gt;"
           </pre>
         </EmptyState>
       ) : (

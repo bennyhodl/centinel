@@ -21,6 +21,7 @@ import {
   StepFrame,
   StepNav,
 } from "./_components/StepShell";
+import { BootstrapLogStream } from "./_components/BootstrapLogStream";
 
 export const dynamic = "force-dynamic";
 
@@ -259,20 +260,19 @@ function Step5({ state }: { state: SetupState }) {
           />
         </dl>
 
-        <div className="border border-amber-300 bg-amber-50 p-3 text-xs">
-          <strong className="text-amber-600">Stub mode:</strong>{" "}
-          <span className="opacity-80">
-            The real shell-out to{" "}
+        <div className="border border-border bg-card p-3 text-xs">
+          <strong className="text-foreground">Live shell-out:</strong>{" "}
+          <span className="text-muted-foreground">
+            Pressing the button spawns{" "}
             <code className="text-primary">
-              hermes session run sitemap-builder
+              ../bin/centinel bootstrap-sitemap {state.cityDomain ?? "<domain>"}
             </code>{" "}
-            isn&apos;t wired yet. This step writes a placeholder log so the
-            wizard can advance and the rest of the app can be exercised end-to-end.
+            detached. Step 6 streams the log via SSE so you can watch progress in real time. Closing the browser does not stop the bootstrap.
           </span>
         </div>
 
         <form action={startBootstrap} className="flex justify-end gap-2">
-          <PrimaryButton>Start bootstrap (stub) →</PrimaryButton>
+          <PrimaryButton>Start bootstrap →</PrimaryButton>
         </form>
       </div>
     </StepFrame>
@@ -282,12 +282,12 @@ function Step5({ state }: { state: SetupState }) {
 /* ─────────────────────  STEP 6: Review  ───────────────────── */
 
 async function Step6({ state }: { state: SetupState }) {
-  let log = "";
+  let seed = "";
   if (state.bootstrap?.logPath) {
     try {
-      log = await fs.readFile(state.bootstrap.logPath, "utf-8");
+      seed = await fs.readFile(state.bootstrap.logPath, "utf-8");
     } catch {
-      log = "(log file not found)";
+      seed = "(log file not found)";
     }
   }
 
@@ -297,14 +297,7 @@ async function Step6({ state }: { state: SetupState }) {
       subtitle="Skim the sitemap, mark bulk categories active, then continue. You can come back and refine forever — this is just the first pass."
     >
       <div className="space-y-4">
-        <div className="border border-border bg-secondary p-3">
-          <div className="mb-2 text-xs uppercase tracking-wider text-muted-foreground">
-            Bootstrap log
-          </div>
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-foreground/80">
-{log || "(no log yet)"}
-          </pre>
-        </div>
+        <BootstrapLogStream seed={seed} />
 
         <div className="grid gap-2 sm:grid-cols-2">
           <a
@@ -335,7 +328,8 @@ async function Step6({ state }: { state: SetupState }) {
 
 /* ─────────────────────  STEP 7: Activate  ───────────────────── */
 
-function Step7({ state: _state }: { state: SetupState }) {
+function Step7({ state }: { state: SetupState }) {
+  const lastError = state.activation?.error;
   return (
     <StepFrame
       title="Step 7 — Activate cron"
@@ -344,9 +338,10 @@ function Step7({ state: _state }: { state: SetupState }) {
       <ul className="mb-5 space-y-2 text-sm">
         {[
           "Cartographer — weekly sitemap lint",
-          "Investigator — hourly tick on active investigations",
+          "Investigator — every-4h tick on inbox + active investigations",
           "Archivist — vaults documents as they appear",
           "Watch Runner — runs preset watches over every diff",
+          "Data Reporter — refreshes entity DB every 6h",
           "Briefings Writer — weekly digest",
         ].map((line) => (
           <li
@@ -359,17 +354,32 @@ function Step7({ state: _state }: { state: SetupState }) {
         ))}
       </ul>
 
-      <div className="border border-amber-300 bg-amber-50 p-3 text-xs">
-        <strong className="text-amber-600">Stub mode:</strong>{" "}
-        <span className="opacity-80">
-          Cron registration isn&apos;t wired to Hermes yet. Marking setup
-          complete unlocks the rest of the app; cron activation comes online
-          once the agent skills land.
+      <div className="border border-border bg-card p-3 text-xs">
+        <strong className="text-foreground">Live activation:</strong>{" "}
+        <span className="text-muted-foreground">
+          Submitting runs{" "}
+          <code className="text-primary">../bin/centinel cron resume-all</code>{" "}
+          synchronously, which flips every Centinel-owned cron job from paused →
+          active across all profiles. Returns in ~1s.
         </span>
       </div>
 
+      {lastError && (
+        <div className="mt-3 border border-red-300 bg-red-50 p-3 text-xs">
+          <strong className="text-red-600">Last activation failed:</strong>{" "}
+          <span className="opacity-80">{lastError}</span>
+          {state.activation?.output && (
+            <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap font-mono text-[10px] leading-relaxed">
+              {state.activation.output}
+            </pre>
+          )}
+        </div>
+      )}
+
       <form action={completeSetup} className="mt-4 flex justify-end">
-        <PrimaryButton>Activate & finish →</PrimaryButton>
+        <PrimaryButton>
+          {lastError ? "Retry activation →" : "Activate & finish →"}
+        </PrimaryButton>
       </form>
     </StepFrame>
   );
