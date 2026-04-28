@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Centinel dispatcher entrypoint.
+# Defers to lib/cli.py — keep this file dumb so we can rewrite the impl freely.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$HERE")"
+exec python3 -m lib.cli "$@"

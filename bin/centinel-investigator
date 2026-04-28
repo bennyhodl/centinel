@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Operator terminal entry into the investigator profile.
+# Not used by the web app or cron — pure ergonomic for `cd && centinel-investigator "..."`.
+exec hermes --profile investigator "$@"

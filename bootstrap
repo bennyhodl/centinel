@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# Centinel one-time installer.
+#
+# Idempotent. Safe to re-run after `git pull` to pick up new skills, presets,
+# and migrations. Honors operator config in `doge.config.yaml` and `.env`.
+#
+# What this does (per docs/REPO_AND_DISTRIBUTION.md):
+#   1. Sanity-checks dependencies (hermes, python3, yq).
+#   2. Creates `doge.config.yaml` from example if missing.
+#   3. Creates `.env` from example if missing (then prompts for required vars).
+#   4. Creates the wiki directory tree at the configured path.
+#   5. Initializes the SQLite DB (no-op if already there).
+#   6. Symlinks bundled skills into ~/.hermes/skills/centinel/.
+#   7. Runs `centinel setup-profiles` (idempotent — creates investigator, archivist, etc.).
+#   8. Runs `centinel setup-cron` (idempotent — registers paused recurring jobs).
+#   9. Brings up Docker services (web + Datasette).
+#  10. Prints the next-step URL.
+#
+# Operator activates cron via the web wizard's Step 7 (which calls
+# `centinel cron resume-all`). Until then, all cron jobs stay paused.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT"
+
+# ───────────────────────── helpers ─────────────────────────
+
+c_red()    { printf "\033[31m%s\033[0m\n" "$*"; }
+c_green()  { printf "\033[32m%s\033[0m\n" "$*"; }
+c_yellow() { printf "\033[33m%s\033[0m\n" "$*"; }
+c_dim()    { printf "\033[2m%s\033[0m\n" "$*"; }
+
+err()  { c_red "❌ $*" >&2; exit 1; }
+ok()   { c_green "✅ $*"; }
+info() { printf "→ %s\n" "$*"; }
+warn() { c_yellow "⚠️  $*"; }
+
+require_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        err "Missing required command: $1. ${2:-}"
+    fi
+}
+
+prompt_if_unset() {
+    # prompt_if_unset VARNAME PROMPT_TEXT [DEFAULT]
+    local var="$1" prompt="$2" default="${3:-}"
+    if [ -z "${!var:-}" ]; then
+        local input
+        if [ -n "$default" ]; then
+            read -r -p "$prompt [$default]: " input
+            input="${input:-$default}"
+        else
+            read -r -p "$prompt: " input
+        fi
+        export "$var=$input"
+    fi
+}
+
+# ───────────────────────── 1. dependencies ─────────────────────────
+
+info "Checking dependencies"
+require_command hermes  "Install Hermes Agent first: https://hermes-agent.nousresearch.com/docs/"
+require_command python3 "Install Python 3.11+"
+require_command docker  "Install Docker"
+# yq is optional (we fall back to python+pyyaml), but warn if missing.
+if ! command -v yq >/dev/null 2>&1; then
+    warn "yq not found — will use python+pyyaml fallback for config reads"
+fi
+# pyyaml is required for lib/config.py
+if ! python3 -c "import yaml" 2>/dev/null; then
+    info "Installing PyYAML…"
+    python3 -m pip install --user pyyaml >/dev/null
+fi
+ok "dependencies"
+
+# ───────────────────────── 2. doge.config.yaml ─────────────────────────
+
+if [ ! -f doge.config.yaml ]; then
+    if [ ! -f doge.config.yaml.example ]; then
+        err "Neither doge.config.yaml nor doge.config.yaml.example found"
+    fi
+    info "Creating doge.config.yaml from example"
+    cp doge.config.yaml.example doge.config.yaml
+    warn "Edit doge.config.yaml to set city.name, city.slug, city.domain before continuing."
+    warn "Press ENTER to open in \$EDITOR, or Ctrl-C to exit and edit later."
+    read -r _
+    "${EDITOR:-vi}" doge.config.yaml
+fi
+ok "doge.config.yaml present"
+
+# ───────────────────────── 3. .env ─────────────────────────
+
+if [ ! -f .env ]; then
+    if [ -f .env.example ]; then
+        cp .env.example .env
+    else
+        cat > .env <<'EOF'
+# Centinel runtime secrets — never commit this file.
+CENTINEL_PASSWORD=
+HERMES_API_URL=http://localhost:8000/v1
+HERMES_API_KEY=
+EOF
+    fi
+    warn ".env created — fill in CENTINEL_PASSWORD and HERMES_API_KEY before starting the web app."
+fi
+ok ".env present"
+
+# ───────────────────────── 4. wiki dirs ─────────────────────────
+
+# Resolve wiki path from doge.config.yaml using lib/config.py (single source of truth).
+WIKI_PATH="$(python3 -c "from lib import config; print(config.load().wiki_path)")"
+CITY_SLUG="$(python3 -c "from lib import config; print(config.load().city.slug)")"
+info "Wiki: $WIKI_PATH"
+info "City slug: $CITY_SLUG"
+
+mkdir -p \
+    "$WIKI_PATH/Sitemap" \
+    "$WIKI_PATH/Investigations" \
+    "$WIKI_PATH/Findings/raw" \
+    "$WIKI_PATH/Findings/draft" \
+    "$WIKI_PATH/Findings/published" \
+    "$WIKI_PATH/Vault/pdfs" \
+    "$WIKI_PATH/Vault/html" \
+    "$WIKI_PATH/Vault/transcripts" \
+    "$WIKI_PATH/Vault/images" \
+    "$WIKI_PATH/Watches/_presets" \
+    "$WIKI_PATH/Entities" \
+    "$WIKI_PATH/Briefings" \
+    "$WIKI_PATH/_runtime/inbox/investigator" \
+    "$WIKI_PATH/_runtime/inbox/archivist" \
+    "$WIKI_PATH/_runtime/inbox/data-reporter" \
+    "$WIKI_PATH/_runtime/inbox/watch-runner" \
+    "$WIKI_PATH/_runtime/outbox/investigator" \
+    "$WIKI_PATH/_runtime/outbox/archivist" \
+    "$WIKI_PATH/_runtime/outbox/data-reporter" \
+    "$WIKI_PATH/_runtime/outbox/watch-runner" \
+    "$WIKI_PATH/_runtime/status" \
+    "$WIKI_PATH/_runtime/operator-queue" \
+    "$WIKI_PATH/_runtime/huddle" \
+    "$WIKI_PATH/_runtime/logs" \
+    "$WIKI_PATH/_data"
+
+# Idempotent runtime state files.
+[ -f "$WIKI_PATH/_runtime/setup-state.json" ] || echo '{"status":"pending","step":1,"watchPresets":[]}' > "$WIKI_PATH/_runtime/setup-state.json"
+[ -f "$WIKI_PATH/log.md" ] || cat > "$WIKI_PATH/log.md" <<'EOF'
+# Centinel log
+
+Append-only log of state-changing actions. Initialized by ./bootstrap.
+EOF
+
+ok "wiki tree created"
+
+# ───────────────────────── 5. DB init ─────────────────────────
+
+DB_PATH="$WIKI_PATH/_data/$CITY_SLUG.db"
+if [ ! -f "$DB_PATH" ]; then
+    info "Initializing SQLite DB at $DB_PATH"
+    # Schema TBD — for now, create an empty DB so the doctor + Datasette can find it.
+    # When lib/db/init.py lands, swap this for: python3 -m lib.db.init "$DB_PATH"
+    sqlite3 "$DB_PATH" "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT);" 2>/dev/null \
+        || warn "sqlite3 CLI not found — DB will be created on first agent run"
+fi
+[ -f "$DB_PATH" ] && ok "db: $DB_PATH"
+
+# ───────────────────────── 6. skill symlinks ─────────────────────────
+
+HERMES_SKILLS_DIR="$HOME/.hermes/skills/centinel"
+mkdir -p "$HERMES_SKILLS_DIR"
+for skill_dir in skills/*/; do
+    name=$(basename "$skill_dir")
+    [ -f "$skill_dir/SKILL.md" ] || continue
+    target="$HERMES_SKILLS_DIR/$name"
+    ln -sfn "$(realpath "$skill_dir")" "$target"
+done
+ok "skills symlinked into $HERMES_SKILLS_DIR/"
+
+# ───────────────────────── 7. profiles ─────────────────────────
+
+info "Creating Hermes profiles (investigator, archivist, data-reporter, watch-runner)"
+"$REPO_ROOT/bin/centinel" setup-profiles
+ok "profiles ready"
+
+# ───────────────────────── 8. cron jobs ─────────────────────────
+
+info "Registering paused cron jobs"
+"$REPO_ROOT/bin/centinel" setup-cron
+ok "cron jobs registered (paused — wizard Step 7 activates them)"
+
+# ───────────────────────── 9. PATH hint ─────────────────────────
+
+# We don't auto-modify the operator's shell rc. But we can hint.
+case ":${PATH}:" in
+    *":$REPO_ROOT/bin:"*) ok "$REPO_ROOT/bin already on PATH" ;;
+    *)
+        warn "Add this to your shell rc to use centinel-* wrappers globally:"
+        echo "      export PATH=\"$REPO_ROOT/bin:\$PATH\""
+        ;;
+esac
+
+# ───────────────────────── 10. docker / next steps ─────────────────────────
+
+if [ -f docker-compose.yml ]; then
+    info "Starting docker services (web + datasette)"
+    docker compose up -d 2>/dev/null || warn "docker compose not yet wired — skipping"
+fi
+
+cat <<EOF
+
+$(c_green "🎉 Bootstrap complete.")
+
+Next:
+  1. Edit ${REPO_ROOT}/.env if you haven't (CENTINEL_PASSWORD, HERMES_API_KEY).
+  2. Open the web app and run the setup wizard:
+       cd app && pnpm dev
+       open http://localhost:3000/setup
+  3. Wizard Step 5 will call: ./bin/centinel bootstrap-sitemap <domain>
+  4. Wizard Step 7 will call: ./bin/centinel cron resume-all
+  5. After that, the browser can close — agents run on schedule.
+
+Health check:
+  ./bin/centinel doctor
+EOF
