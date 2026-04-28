@@ -1,0 +1,340 @@
+---
+title: Tampa-DOGE — Repo & Distribution (LOCKED)
+status: 🔒 Locked v1
+created: 2026-04-26
+parent: README.md
+---
+
+# Repo & Distribution
+
+How a forker spins up `<their-city>-doge` from scratch. Locked 2026-04-26 (plan checkpoint v10).
+
+## Distribution model
+
+**GitHub template repo** at `lygos/tampa-doge-template` (public).
+
+```
+gh repo create my-org/cleveland-doge --template lygos/tampa-doge-template
+cd cleveland-doge
+./bootstrap
+```
+
+Three commands → working `<city>-doge` instance. NPX-style installer (`npx civic-doge init`) deferred to v0.2 if the template-repo flow proves clunky. Hermes-native plugin install is a stretch goal pending Hermes plugin loader support.
+
+## Repo layout
+
+```
+tampa-doge-template/                  # the public repo people fork
+├── README.md                         # quickstart + philosophy
+├── LICENSE                           # AGPL (civic-data project; viral copyleft fits the ethos)
+├── CHANGELOG.md                      # breaking changes documented
+├── bootstrap                         # the one entry script
+├── .env.example                      # secrets template
+├── doge.config.yaml.example          # city-specific config template
+│
+├── skills/                           # Hermes skills, packaged
+│   ├── tampa-doge-cartographer/SKILL.md
+│   ├── tampa-doge-investigator/SKILL.md
+│   ├── tampa-doge-archivist/SKILL.md
+│   ├── tampa-doge-data-reporter/SKILL.md
+│   ├── tampa-doge-watch-runner/SKILL.md
+│   └── tampa-doge-editor/SKILL.md
+│
+├── lib/                              # shared Python the skills import
+│   ├── db/                           # schema, migrations, common queries
+│   ├── extractors/                   # extractor catalog (post-spike)
+│   ├── runtime/                      # inbox/outbox/status board helpers
+│   ├── adapters/                     # ONLY if Hermes built-ins don't suffice (see below)
+│   ├── doge.py                       # CLI used by web app server actions
+│   └── __version__.py
+│
+├── web/                              # Next.js app
+│   ├── app/
+│   ├── package.json
+│   └── ...
+│
+├── presets/                          # shipped, city-agnostic
+│   ├── watches/
+│   │   ├── errant-spending.yaml
+│   │   ├── corruption-signals.yaml
+│   │   └── policy-drift.yaml         # disabled by default
+│   └── investigations/
+│       ├── topic-dig.yaml
+│       ├── contractor-profile.yaml
+│       └── person-follow.yaml
+│
+├── city-overlay/                     # operator territory — survives upstream pulls
+│   ├── README.md                     # explains the overlay rule
+│   ├── extractors/                   # city-specific overrides
+│   ├── watches/                      # operator's custom watches
+│   └── exclude-patterns.yaml         # paths to skip on this city.gov
+│
+├── docker-compose.yml                # web + Datasette
+├── docker-compose.dev.yml            # local dev overrides
+└── tools/
+    ├── doctor                        # health check
+    ├── activate-cron                 # flips paused → active
+    ├── reset-wiki                    # nuke + re-bootstrap (dangerous, prompts)
+    └── snapshot-backup
+```
+
+**Not shipped in the repo:**
+- `plans/` — internal design docs stay in private workspace, not part of the public template
+- `~/wiki/<City>/` — created by bootstrap, lives at operator's chosen path, never in repo
+- `.env` — secrets, `.gitignore`d
+
+## Three layers of config
+
+| Layer | Where | Owned by | Survives `git pull`? |
+|---|---|---|---|
+| **Template defaults** | `presets/`, `lib/`, `skills/`, `web/` | Upstream maintainers | No — pulls bring updates |
+| **Operator config** | `doge.config.yaml`, `city-overlay/` | Operator (committed to their fork) | Yes — never overwritten |
+| **Secrets** | `.env` | Operator (gitignored) | Yes — never in git |
+
+### `doge.config.yaml` (operator-edited, committed)
+
+```yaml
+city:
+  name: Cleveland
+  slug: cleveland
+  domain: clevelandohio.gov
+  timezone: America/New_York
+
+wiki:
+  path: ~/wiki/Cleveland
+
+watch_presets:
+  - errant-spending
+  - corruption-signals
+
+cron_schedule_overrides:
+  sitemap_lint: "0 3 * * 1"            # weekly Monday 3am
+  watch_runner: "0 4 * * *"            # daily 4am
+  briefings:    "0 9 * * 1"            # Monday 9am
+
+confidential_investigations: []        # slugs to suppress from public /status
+```
+
+### `.env` (gitignored, never committed)
+
+```bash
+WEB_BASIC_AUTH_PASSWORD=xxxxxx
+HERMES_OPENAI_API_BASE=http://localhost:8000/v1
+HERMES_OPENAI_API_KEY=sk-local
+NOTIFICATION_DISCORD_WEBHOOK=         # optional
+# Adapter API keys (only if used — see Web tooling section below)
+FIRECRAWL_API_KEY=
+TAVILY_API_KEY=
+```
+
+### `city-overlay/` (operator-edited, committed)
+
+The escape hatch for city-specific knowledge. Operator adds:
+
+- `city-overlay/watches/utility-billing.yaml` — Cleveland-specific watch
+- `city-overlay/extractors/cleveland-budget-pdf.yaml` — Cleveland's specific budget book layout
+- `city-overlay/exclude-patterns.yaml` — paths that shouldn't be crawled on this domain
+
+Skills load `presets/<thing>` first, then merge `city-overlay/<thing>` on top. Operator changes never collide with upstream updates.
+
+## Web tooling (revised)
+
+Hermes already provides production-quality web tools. Skills use them directly:
+
+| Need | Hermes built-in | Adapter required? |
+|---|---|---|
+| Fetch HTML page → markdown | `web_extract` | No |
+| Fetch PDF → markdown | `web_extract` (handles PDFs) | No |
+| Search the web | `web_search` | No |
+| Render JS-heavy SPA | `browser_navigate` + `browser_snapshot` | No |
+| Take screenshot | `browser_vision` | No |
+| Extract images from page | `browser_get_images` | No |
+| Crawl a domain (sitemap.xml + recursive) | Not built-in | **Maybe** — `lib/adapters/site_mapper.py` |
+
+The only place we may need a third-party adapter is **bulk site-mapping** — Firecrawl `/map` produces a more complete URL list than walking sitemap.xml + recursive crawl with built-in tools. Verdict from the spike will tell us whether built-ins suffice or we need a thin Firecrawl/Tavily adapter for that one case.
+
+**Default assumption: Hermes built-ins suffice for v0.1.** Adapters get added under `lib/adapters/` only if the spike surfaces concrete gaps, with operator-supplied API keys in `.env`.
+
+This is a meaningful simplification: no `Scraper` interface, no Firecrawl/Tavily/Playwright juggling. Skills just call `web_extract(url)` and trust Hermes' runtime.
+
+## How `bootstrap` works
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. Sanity checks
+require_command hermes      # min version check via lib/__version__.py
+require_command docker
+require_command python3.11
+
+# 2. Read or generate config
+[ -f doge.config.yaml ] || cp doge.config.yaml.example doge.config.yaml
+[ -f .env ] || cp .env.example .env
+prompt_if_unset_in_yaml "city.domain"
+prompt_if_unset_in_yaml "city.name"
+prompt_if_unset_in_yaml "city.slug"
+prompt_if_unset_in_yaml "wiki.path"
+prompt_if_unset_in_env  "WEB_BASIC_AUTH_PASSWORD"
+
+# 3. Create wiki structure
+WIKI=$(yq '.wiki.path' doge.config.yaml | envsubst)
+ensure_dir "$WIKI/Sitemap"
+ensure_dir "$WIKI/Investigations"
+ensure_dir "$WIKI/Vault/{pdfs,html,transcripts,images}"
+ensure_dir "$WIKI/Watches/_presets"
+ensure_dir "$WIKI/_runtime/{inbox,outbox,status,operator-queue,huddle}"
+ensure_dir "$WIKI/_data"
+write_if_missing "$WIKI/SCHEMA.md" templates/SCHEMA.md
+write_if_missing "$WIKI/log.md"    templates/log.md
+write_if_missing "$WIKI/_runtime/setup-state.json"  '{"status":"pending"}'
+
+# 4. Initialize SQLite database
+python3 -m lib.db.init    "$WIKI/_data/$CITY_SLUG.db"
+python3 -m lib.db.migrate "$WIKI/_data/$CITY_SLUG.db"
+
+# 5. Install skills into Hermes
+#    Hermes handles "shipped vs customized" semantics natively — we just place
+#    the skill files where Hermes looks. Hermes' upgrade flow leaves customized
+#    skills alone and updates pristine ones in place.
+mkdir -p ~/.hermes/skills/civic-doge
+for skill_dir in skills/*/; do
+  name=$(basename "$skill_dir")
+  ln -sfn "$(realpath "$skill_dir")" ~/.hermes/skills/civic-doge/"$name"
+done
+
+# 6. Copy presets idempotently (cp -n: never overwrite operator edits)
+for preset in presets/watches/*.yaml; do
+  cp -n "$preset" "$WIKI/Watches/_presets/"
+done
+
+# 7. Register Hermes cron jobs (paused, activated by wizard step 7)
+hermes cron register --name "${CITY_SLUG}-sitemap-lint"   --schedule "$SCHED_LINT"   --skill civic-doge/tampa-doge-cartographer  --paused
+hermes cron register --name "${CITY_SLUG}-watch-runner"   --schedule "$SCHED_WATCH"  --skill civic-doge/tampa-doge-watch-runner  --paused
+hermes cron register --name "${CITY_SLUG}-data-reporter"  --schedule "$SCHED_DATA"   --skill civic-doge/tampa-doge-data-reporter --paused
+hermes cron register --name "${CITY_SLUG}-vault-manifest" --schedule "$SCHED_VAULT"  --skill civic-doge/tampa-doge-archivist     --paused
+hermes cron register --name "${CITY_SLUG}-huddle-rollup"  --schedule "$SCHED_HUDDLE" --skill civic-doge/tampa-doge-editor        --paused
+hermes cron register --name "${CITY_SLUG}-briefings"      --schedule "$SCHED_BRIEF"  --skill humanized-writing                   --paused
+# Investigation crons get registered dynamically as operator creates investigations.
+
+# 8. Bring up runtime services
+docker compose up -d web datasette
+
+# 9. Final report
+echo
+echo "✅ Bootstrap complete."
+echo "🌐 Web app: http://localhost:3000"
+echo "🗄️  Datasette: http://localhost:8001"
+echo "📖 Open the web app to run the setup wizard."
+```
+
+### Idempotency rules (for re-runs and upstream pulls)
+
+`bootstrap` must be safe to re-run. After upstream pulls, operator runs it again to pick up new skills/presets/migrations.
+
+| Action | Behavior on re-run |
+|---|---|
+| Wiki dirs | Created if missing, never destroyed |
+| `SCHEMA.md`, `log.md` | `cp -n` — never overwrite |
+| DB init | `CREATE TABLE IF NOT EXISTS`, then run migrations forward-only |
+| Skill symlinks | `ln -sfn` — refresh, idempotent |
+| Presets | `cp -n` — never overwrite (operator may have tuned them) |
+| Cron entries | `hermes cron register` is upsert-safe by name |
+| `doge.config.yaml`, `.env` | `cp` only if missing |
+
+Result: `git pull && ./bootstrap` brings in upstream skill/lib/preset updates without touching operator config or wiki content.
+
+## Skill update model (Hermes-native)
+
+Hermes already handles the "pristine vs customized" question for skills. We piggyback on that:
+
+- Skills shipped in `skills/<name>/SKILL.md` are pristine.
+- If operator edits the symlinked skill in `~/.hermes/skills/civic-doge/<name>/SKILL.md`, Hermes treats it as customized and won't auto-overwrite.
+- Operator who wants a custom variant copies it to `~/.hermes/skills/personal/<name>-customized/` and edits there; the symlinked civic-doge version stays pristine.
+- `git pull` updates the canonical files in `skills/`; the symlink resolves to the new content automatically.
+- If a customization is in the symlinked target itself, the operator's edits stay — but they should expect upstream conflicts, same as any source-controlled file.
+
+CHANGELOG.md documents breaking changes (DB schema migrations, skill API breaks, runtime protocol changes). The `tools/doctor` script runs on every bootstrap and reports any version mismatches between `lib/__version__.py` and what the wiki expects.
+
+## Forking & upgrading
+
+```bash
+# Fork the upstream template:
+gh repo fork lygos/tampa-doge-template --clone
+cd tampa-doge-template
+./bootstrap                          # asks for city-specific config
+# operator visits http://localhost:3000 → setup wizard → kick off
+
+# Pull upstream improvements over time:
+git pull lygos main
+# resolve merge conflicts in: skills/, lib/, presets/  (rare)
+# city-overlay/ and doge.config.yaml are untouched
+./bootstrap                          # idempotent re-run picks up new migrations + presets
+./tools/doctor                       # verify health
+```
+
+## `tools/doctor` — health check
+
+Idempotent health check. Run after bootstrap, after pulls, when something's off.
+
+Checks:
+- Hermes installed, version >= minimum
+- Docker running
+- All cron entries registered and in expected paused/active state
+- Wiki path exists, all expected subdirectories present
+- DB exists, schema version matches `lib/__version__.py`
+- Skill symlinks valid (no broken links)
+- `<wiki>/_runtime/setup-state.json` consistent (status=complete iff wizard done)
+- Web app responding on configured port
+- Datasette responding on configured port
+- Latest `<wiki>/Vault/manifest.jsonl` line parses as JSON
+- All active investigation YAMLs parse cleanly
+- All active watch YAMLs parse cleanly
+- Last successful agent run timestamps are within expected freshness windows
+
+Output: green/yellow/red per check, suggested fix command for each red.
+
+## Versioning conventions
+
+- `lib/__version__.py` is the canonical version (`__version__ = "0.3.1"`)
+- Tagged releases on GitHub: `v0.3.1`
+- DB migrations under `lib/db/migrations/<version>__<description>.sql`, forward-only
+- `CHANGELOG.md` follows Keep a Changelog format with breaking changes called out
+- Skills carry `version:` in frontmatter; doctor reports if any skill is older than `__version__` minimum
+
+## License: AGPL-3.0
+
+Civic data, public-good project, defense against extractive private forks. AGPL forces any hosted variant (e.g., a private SaaS spin-off) to publish their changes back. If a contributor objects, drop to MIT — but I'd start AGPL and only loosen if it bites.
+
+## Ownership of the upstream template
+
+`lygos/tampa-doge-template` is the canonical upstream. Maintainers (Ben + collaborators) merge improvements from forks back upstream. Bitcoin Bay Foundation could be a co-maintainer org if civic-tech aligns with its scope (separate decision).
+
+## What's NOT in the repo (deliberately)
+
+- `plans/` — design docs stay private to the maintainers' workspace
+- `~/wiki/<City>/` — operator's wiki content is theirs, never in the template repo
+- `.env` — gitignored
+- The vault — never anywhere near git
+- Any city-specific data in the template defaults
+
+The template ships **only the apparatus**. Every operator's content is theirs.
+
+## Acceptance criteria
+
+- ✅ Fresh clone of template + `./bootstrap` produces a working web app + paused cron in <10 minutes
+- ✅ Wizard at localhost:3000 walks operator through bootstrap → first sitemap → cron activation
+- ✅ Re-running `./bootstrap` after upstream pull is safe (idempotent, never destroys operator data)
+- ✅ Operator edits to `doge.config.yaml`, `city-overlay/`, `.env` survive `git pull`
+- ✅ Operator edits to a symlinked skill are preserved by Hermes (no auto-overwrite)
+- ✅ A new city forker (e.g., cleveland-doge) needs to edit only `doge.config.yaml`, `.env`, and optionally `city-overlay/`
+- ✅ `tools/doctor` reports green on a healthy install
+- ✅ DB migration on upgrade is forward-only and non-destructive
+- ✅ AGPL license file present and acknowledged in README
+
+## Open questions (non-blocking)
+
+1. Multi-city in one Hermes install — should the cron names always be city-prefixed (yes, current design)? What if same operator runs `tampa-doge` and `cleveland-doge` side by side? Multiple wikis, multiple DBs, distinct skill dirs (`~/.hermes/skills/civic-doge-tampa/` vs `~/.hermes/skills/civic-doge-cleveland/`)? Defer until someone actually wants two cities.
+2. Web app + Hermes on different machines? Default assumes co-located. Distributed setup is plausible (web app on a small VPS, Hermes + wiki on a beefier home server) — defer until needed.
+3. `tools/snapshot-backup` design — encrypted snapshot of wiki + DB + vault to S3-compatible storage. Lean on the systemd-weekly-backup skill conventions; specify post-v0.1.
+4. Auth upgrade path — when basic auth is no longer enough, prefer better-auth (already in scaffold skill) over rolling our own.
