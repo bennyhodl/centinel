@@ -30,18 +30,17 @@ tampa-doge/
 
 ## The agent stack
 
-Five specialist agents + one Editor persona. Filesystem is the bus — agents read/write markdown and SQLite; no message broker.
+Each non-Editor agent is a separate **Hermes profile** (`~/.hermes/profiles/<name>/`) with its own config, skills, memory, and cron. They coordinate via the wiki filesystem only — no shared memory, no message broker.
 
-| Agent | Skill | Role |
+| Profile | Skills | Role |
 |---|---|---|
-| **Cartographer** | `sitemap-builder` | crawl + describe `.gov` |
-| **Investigator** | `civic-investigator` | depth-crawl from seeds |
-| **Archivist** | `civic-archivist` | document intake, OCR, vault |
-| **Data Reporter** | `civic-data-reporter` | entity DB, queries |
-| **Watch Runner** | `civic-watch-runner` | continuous matchers over diffs |
-| **Editor** (chat persona) | `editor` system prompt | synthesis + draft findings |
+| **default** (main agent) | `sitemap-builder` + Editor persona | **Editor + Cartographer** — fronts `/chat` API, owns the sitemap |
+| `investigator` | `civic-investigator` | depth-crawl from seeds |
+| `archivist` | `civic-archivist` | document intake, OCR, vault |
+| `data-reporter` | `civic-data-reporter` | entity DB, queries |
+| `watch-runner` | `civic-watch-runner` | continuous matchers over diffs |
 
-Plus reused: `humanized-writing` (briefings), `llm-wiki` (vault lint).
+Plus reused skills running in the default profile: `humanized-writing` (briefings), `llm-wiki` (vault lint).
 
 Humans wear all editorial/legal/source-protection hats — agents only do ingest/structure/present. See [`docs/AGENT_ROSTER.md`](docs/AGENT_ROSTER.md).
 
