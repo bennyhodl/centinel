@@ -1,6 +1,6 @@
 # Centinel
 
-Civic transparency platform for tracking city government — sitemaps, investigations, vaulted documents, watches, and findings. Built as a self-hosted **Hermes plugin** so any city's accountability operation can fork it. (Project formerly named "Centinel"; the GitHub repo and template repo retain that path for now.)
+Civic transparency platform for tracking city government — sitemaps, investigations, vaulted documents, watches, and findings. Built as a self-hosted **Hermes plugin** so any city's accountability operation can fork it.
 
 > The web app NEVER originates state. It reads files + DB. Every "action" is a small, well-formed file write that an agent already knows how to react to.
 

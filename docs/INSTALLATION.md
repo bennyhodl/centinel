@@ -34,12 +34,11 @@ uses whatever the default profile is configured for.
 ## Step 1 — Clone
 
 ```bash
-git clone https://github.com/bennyhodl/tampa-doge centinel
+git clone https://github.com/bennyhodl/centinel
 cd centinel
 ```
 
-The repo path is still `tampa-doge` on GitHub for now; the project itself is
-**Centinel**.
+The repo lives at [`bennyhodl/centinel`](https://github.com/bennyhodl/centinel). Centinel is the project name; the GitHub URL matches.
 
 ## Step 2 — Run `./bootstrap` ✅
 
