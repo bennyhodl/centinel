@@ -3,7 +3,7 @@ title: Centinel — Agent Invocation Model
 status: 🔒 Locked v2
 created: 2026-04-28
 updated: 2026-04-28
-parent: README.md
+parent: ABOUT.md
 ---
 
 # Agent Invocation Model

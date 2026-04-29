@@ -2,7 +2,7 @@
 title: Centinel — Scraper & Extractors (LOCKED, with deferred details)
 status: 🔒 Interface locked v1 — extractor catalog deferred to post-spike
 created: 2026-04-26
-parent: README.md
+parent: ABOUT.md
 ---
 
 # Scraper & Extractors

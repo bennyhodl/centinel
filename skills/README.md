@@ -2,7 +2,7 @@
 title: Centinel — Skill Specs
 status: 🧠 Specced (not yet built)
 created: 2026-04-26
-parent: ../README.md
+parent: ../ABOUT.md
 ---
 
 # Skill Specs

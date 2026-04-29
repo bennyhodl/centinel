@@ -2,7 +2,7 @@
 title: Centinel — Installation & First Investigation
 status: 📝 living doc (current state)
 created: 2026-04-28
-parent: README.md
+parent: ABOUT.md
 ---
 
 # Installation & First Investigation

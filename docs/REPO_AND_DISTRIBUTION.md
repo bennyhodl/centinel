@@ -2,7 +2,7 @@
 title: Centinel — Repo & Distribution (LOCKED)
 status: 🔒 Locked v1
 created: 2026-04-26
-parent: README.md
+parent: ABOUT.md
 ---
 
 # Repo & Distribution

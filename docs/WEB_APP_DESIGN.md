@@ -2,7 +2,7 @@
 title: Centinel — Web App Design (LOCKED)
 status: 🔒 Locked v1
 created: 2026-04-26
-parent: README.md
+parent: ABOUT.md
 ---
 
 # Centinel Web App Design
