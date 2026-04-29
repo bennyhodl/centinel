@@ -1,0 +1,101 @@
+# Centinel — local self-host stack
+#
+# Two services:
+#   web        Next.js 16 web app + Python dispatcher (bin/centinel)
+#   datasette  Read-only SQL browser for <wiki>/_data/<city>.db
+#
+# Wiki + Hermes config are mounted from the host. Hermes itself runs on the
+# host (it owns profiles, cron, MCP — too coupled to host state to live in a
+# container). The web container shells out to the host's hermes via the
+# mounted ~/.hermes config and the hermes binary mounted at /usr/local/bin.
+#
+# Quick start:
+#   1. cp .env.example .env  &&  fill in CENTINEL_PASSWORD + TAVILY_API_KEY
+#   2. Set HERMES_BIN_PATH to the absolute path of `which hermes` on your host
+#      (defaults below assume Hermes is installed at ~/.local/bin/hermes).
+#   3. docker compose up
+#   4. Open http://localhost:3000 → setup wizard
+#
+# Datasette UI:    http://localhost:8001
+# Web app:         http://localhost:3000
+
+name: centinel
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    image: centinel-web:local
+    ports:
+      - "3000:3000"
+    environment:
+      # Wiki path INSIDE the container.
+      CENTINEL_WIKI_PATH: /wiki
+      # Dispatcher path INSIDE the container.
+      CENTINEL_BIN: /repo/bin/centinel
+      # Hermes endpoint — host-relative URL works thanks to host-gateway alias.
+      HERMES_API_URL: ${HERMES_API_URL:-http://host.docker.internal:8000/v1}
+      HERMES_API_KEY: ${HERMES_API_KEY:-}
+      HERMES_MODEL: ${HERMES_MODEL:-}
+      # Web auth.
+      CENTINEL_PASSWORD: ${CENTINEL_PASSWORD:?CENTINEL_PASSWORD required in .env}
+      # Tavily for sitemap-builder skill (used by dispatcher → hermes on host).
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      # Make `hermes` resolvable to the mounted host binary.
+      PATH: /usr/local/bin:/usr/bin:/bin:/repo/bin
+    volumes:
+      # Wiki — read+write. Web writes Investigations/<slug>.md, agents read it.
+      - ${CENTINEL_WIKI_PATH:-${HOME}/wiki/Tampa}:/wiki
+      # Repo — gives the container access to bin/centinel and lib/.
+      # Read-only is fine: dispatcher only reads + shells out to hermes.
+      - .:/repo:ro
+      # Hermes config — read+write because hermes writes session history,
+      # cron entries, profile state.
+      - ${HERMES_CONFIG_PATH:-${HOME}/.hermes}:/root/.hermes
+      # Hermes binary on host → /usr/local/bin/hermes inside container.
+      - ${HERMES_BIN_PATH:-${HOME}/.local/bin/hermes}:/usr/local/bin/hermes:ro
+    extra_hosts:
+      # Lets the container reach Hermes' OpenAI-compatible API on the host
+      # (host.docker.internal). Linux needs this; Mac/Windows have it built in.
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    depends_on:
+      datasette:
+        condition: service_started
+
+  datasette:
+    image: datasetteproject/datasette:0.65.1
+    ports:
+      - "8001:8001"
+    volumes:
+      # Mount only _data/ read-only. Datasette serves the city DB and any
+      # operator-supplied metadata/views from this directory.
+      - ${CENTINEL_WIKI_PATH:-${HOME}/wiki/Tampa}/_data:/data:ro
+    # NOTE: city slug defaults to "tampa". Override via CITY_SLUG in .env.
+    # Datasette boots even if the DB is missing (operator hasn't run setup yet)
+    # — once the file appears in _data/ it becomes browsable on next restart.
+    command:
+      - sh
+      - -c
+      - |
+        DB="/data/${CITY_SLUG:-tampa}.db"
+        if [ ! -f "$$DB" ]; then
+          echo "centinel: $$DB not present yet — Datasette will idle on /-/health"
+          # Serve an empty in-memory DB so health checks pass; restart the
+          # container after setup to pick up the real city DB.
+          exec datasette serve --host 0.0.0.0 --port 8001 --memory --cors
+        fi
+        EXTRA=""
+        if [ -f "/data/datasette-metadata.json" ]; then
+          EXTRA="$$EXTRA --metadata /data/datasette-metadata.json"
+        fi
+        exec datasette serve "$$DB" \
+          --host 0.0.0.0 --port 8001 \
+          --immutable "$$DB" \
+          --setting default_page_size 50 \
+          --setting truncate_cells_html 200 \
+          --cors $$EXTRA
+    environment:
+      CITY_SLUG: ${CITY_SLUG:-tampa}
+    restart: unless-stopped

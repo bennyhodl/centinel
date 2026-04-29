@@ -1,4 +1,4 @@
-import { EDITOR_INTRO_MESSAGE } from "@/lib/editor-intro";
+import { EDITOR_INTRO_MESSAGE } from "@/lib/chat-prompt";
 import ChatClient from "./_components/ChatClient";
 
 export const dynamic = "force-dynamic";

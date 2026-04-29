@@ -2,7 +2,8 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 import OpenAI from "openai";
 import { config } from "@/lib/config";
-import { buildSystemPrompt } from "@/lib/editor-persona";
+import { buildChatPrompt } from "@/lib/chat-prompt";
+import { qmdQuery, renderHitsAsContext } from "@/lib/wiki-search";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -52,10 +53,19 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let systemPrompt: string;
+  // ── Pre-RAG: run QMD on the latest user message ─────────────────────────
+  // Per docs/EDITOR_ANSWER_SOURCES.md: "QMD always runs." The chat is a
+  // wiki Q&A surface, so retrieval is mandatory, not optional. We pull the
+  // most recent user message (skip trailing assistant placeholders) and use
+  // it as the search query.
+  const lastUser = [...parsed.data.messages].reverse().find((m) => m.role === "user");
+  const userQuery = lastUser?.content ?? "";
+  const hits = await qmdQuery(userQuery, 6);
+  const contextBlock = renderHitsAsContext(hits);
+  const systemPrompt = buildChatPrompt(contextBlock);
+
   let client: OpenAI;
   try {
-    systemPrompt = await buildSystemPrompt();
     client = getClient();
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

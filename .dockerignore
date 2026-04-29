@@ -1,0 +1,34 @@
+# Build-time excludes. Keeps `docker compose build` fast and rebuilds clean.
+.git
+.gitignore
+.next
+node_modules
+**/node_modules
+**/.next
+**/dist
+**/build
+**/.turbo
+**/coverage
+*.log
+.env
+.env.local
+.env.*.local
+.DS_Store
+
+# Tooling caches
+.pytest_cache
+__pycache__
+*.pyc
+.mypy_cache
+.ruff_cache
+
+# Editor
+.vscode
+.idea
+
+# Repo-only assets that shouldn't be in the image
+assets/centinel-watchman.jpg
+assets/centinel-window.jpg
+docs/
+README.md
+ABOUT.md
