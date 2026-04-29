@@ -5,6 +5,7 @@ import {
 } from "@/lib/operator-queue";
 import { EmptyState } from "@/components/EmptyState";
 import { Pill, statusTone } from "@/components/Pill";
+import { ResolveButtons } from "./_components/ResolveButtons";
 
 export const dynamic = "force-dynamic";
 
@@ -18,9 +19,9 @@ export default async function OperatorQueuePage() {
         <h1 className="masthead text-3xl text-foreground">Operator Queue</h1>
         <hr className="rule-double" />
         <p className="text-sm text-muted-foreground italic">
-          Items awaiting human judgment. Resolutions happen via{" "}
-          <code className="font-mono text-primary text-xs">/chat</code>; this surface
-          is read-only.
+          Items awaiting human judgment. Resolve inline — bookkeeping
+          decisions apply immediately; agent-required actions queue an
+          inbox directive for the next cron tick.
         </p>
       </header>
 
@@ -82,6 +83,13 @@ export default async function OperatorQueuePage() {
                         )}
                         <div className="mt-2 font-mono text-[11px] text-muted-foreground">
                           {it.slug}
+                        </div>
+                        <div className="mt-3">
+                          <ResolveButtons
+                            bucket={g.bucket}
+                            slug={it.slug}
+                            status={it.status}
+                          />
                         </div>
                       </li>
                     );

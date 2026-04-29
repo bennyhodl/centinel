@@ -30,8 +30,8 @@ export default async function EntitiesPage() {
               &lt;wiki&gt;/Entities/
             </code>
             . Launch an investigation from{" "}
-            <Link href="/chat" className="text-primary hover:underline">
-              the Editor&apos;s Desk
+            <Link href="/investigations" className="text-primary hover:underline">
+              the Investigations page
             </Link>{" "}
             to start.
           </p>
