@@ -100,11 +100,19 @@ if [ ! -f .env ]; then
 CENTINEL_PASSWORD=
 HERMES_API_URL=http://localhost:8000/v1
 HERMES_API_KEY=
+TAVILY_API_KEY=
 EOF
     fi
-    warn ".env created — fill in CENTINEL_PASSWORD and HERMES_API_KEY before starting the web app."
+    warn ".env created — fill in CENTINEL_PASSWORD, HERMES_API_KEY, and TAVILY_API_KEY before bootstrapping a sitemap."
 fi
 ok ".env present"
+
+# Soft-check Tavily key (sitemap-builder bootstrap will fail without it,
+# but the rest of Centinel still works).
+if ! grep -q '^TAVILY_API_KEY=tvly-' .env 2>/dev/null; then
+    warn "TAVILY_API_KEY not set in .env — sitemap-builder bootstrap will fail."
+    warn "Get a free key at https://tavily.com (1000 credits/mo, ~10K pages)."
+fi
 
 # ───────────────────────── 4. wiki dirs ─────────────────────────
 

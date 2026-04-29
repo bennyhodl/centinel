@@ -20,12 +20,13 @@ debugging something that was never built.
 | Tool | Version | Why |
 |---|---|---|
 | [Hermes Agent](https://hermes-agent.nousresearch.com/) | latest | The runtime every agent runs in |
-| Python | ≥ 3.11 | Dispatcher (`bin/centinel`), config loader |
-| `pyyaml` | latest | Auto-installed by `./bootstrap` if missing |
+| Python | ≥ 3.11 | Dispatcher (`bin/centinel`), config loader, Tavily wrapper |
+| `pyyaml` + `requests` | latest | Auto-installed on first use |
 | Node.js | ≥ 20 | Web app |
 | `pnpm` | ≥ 9 | Web app package manager |
 | Docker (optional) | latest | For Datasette + production deploy |
 | `sqlite3` CLI (optional) | any | Bootstrap DB init falls back gracefully if missing |
+| **Tavily API key** | free tier OK | Required for sitemap-builder bootstrap. [tavily.com](https://tavily.com) — 1000 credits/mo free (~10K pages). Without it, the rest of Centinel still works but you can't crawl. |
 
 Configure Hermes with a working model first (`hermes setup` or `hermes model`).
 Centinel doesn't pin a provider — anything Hermes supports works. The Editor
@@ -59,6 +60,8 @@ What it does (idempotent — safe to re-run after `git pull`):
 4. Copies `.env.example` → `.env` (or creates a stub). You fill:
    - `CENTINEL_PASSWORD` — basic-auth password for the web app
    - `HERMES_API_KEY` — for the `/chat` Editor endpoint
+   - `TAVILY_API_KEY` — for sitemap-builder bootstrap/lint
+     ([tavily.com](https://tavily.com), free tier 1000 credits/mo)
 5. Creates the entire wiki tree at `wiki.path`.
 6. Initializes an empty SQLite DB at `<wiki>/_data/<slug>.db`.
 7. Symlinks `skills/*` into `~/.hermes/skills/centinel/`.
@@ -182,7 +185,7 @@ What you can expect each skill to actually do today:
 
 | Skill | Spec | Implementation | What runs |
 |---|---|---|---|
-| `sitemap-builder` | ✅ | 🟡 | Crawls and writes partial sitemap; classification works, descriptions partial |
+| `sitemap-builder` | ✅ | 🟡 | Tavily Crawl wrapper (`scripts/crawl.py`) wired; classification + description-pass partial |
 | `civic-investigator` | ✅ | 🚧 | Will load and start; produces partial output until tools land |
 | `civic-archivist` | ✅ | 🚧 | Same — needs `vault_*` tools to fully function |
 | `civic-data-reporter` | ✅ | 🚧 | Needs `db_query` tool to land |
@@ -251,7 +254,8 @@ older than `profile` support. Update Hermes: `hermes update`.
 **Step 5 spawns but log shows nothing** — open
 `<wiki>/_runtime/logs/bootstrap-sitemap.log` directly. The SSE endpoint
 streams that file; if the dispatcher crashed at startup, the log will show
-why.
+why. Common cause: `TAVILY_API_KEY` not set. The sitemap-builder skill needs
+this to run the crawl — get a free key at [tavily.com](https://tavily.com).
 
 **Step 7 errors with "cron job not found"** — the paused jobs were never
 created. Run `./bin/centinel setup-cron` from a terminal and try Step 7 again.

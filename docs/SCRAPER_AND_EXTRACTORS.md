@@ -1,13 +1,42 @@
 ---
-title: Centinel — Scraper & Extractors (LOCKED, with deferred details)
-status: 🔒 Interface locked v1 — extractor catalog deferred to post-spike
+title: Centinel — Scraper & Extractors
+status: 🔒 v0.1 locked — Tavily Crawl for bulk; Hermes built-ins for per-URL
 created: 2026-04-26
 parent: ABOUT.md
 ---
 
 # Scraper & Extractors
 
-## Decision (revised 2026-04-26)
+## Decision (locked 2026-04-28)
+
+**Bulk crawling: Tavily Crawl.** The spike landed. Hermes' `web_extract` is great for *single-URL detail* but doesn't have a graph-based site traversal primitive, and rolling one with `web_search` + recursive `web_extract` produces sparse, slow, and expensive results.
+
+Tavily Crawl is the right primitive for sitemap bootstrap and subtree re-crawls:
+- Graph traversal in parallel (hundreds of paths simultaneously).
+- Regex `select_paths` / `select_domains` / `exclude_paths` server-side — most filtering happens before pages are fetched, saving credits.
+- Tunable `max_depth` (1–5), `max_breadth` (1–500), `limit`.
+- Returns `{url, raw_content, favicon}` per result; cost-aware (`include_usage: true`).
+- Free tier 1000 credits/mo (~10K pages); paid tiers from $30/mo for 4K credits.
+
+**Single-URL detail and per-page reads: Hermes built-ins.** `web_extract`, `browser_navigate`, `web_search` remain the right tools for the Investigator/Archivist when fetching one URL at a time — they handle JS rendering, PDFs, and screenshots. We don't replace them with Tavily for those cases.
+
+**The rule:**
+
+| Need | Tool |
+|---|---|
+| Bulk crawl a domain or subtree (sitemap-builder bootstrap, subtree, lint) | `scripts/crawl.py` (Tavily Crawl wrapper) |
+| Fetch one URL → markdown | `web_extract` |
+| Render a JS-heavy SPA | `browser_navigate` + `browser_snapshot` |
+| Screenshot a page | `browser_vision` |
+| Find URLs given a query (no domain) | `web_search` |
+
+The Tavily wrapper lives in the `sitemap-builder` skill (`scripts/crawl.py`) rather than `lib/adapters/` because the call shape is Centinel-specific (regex filters from city-overlay/exclude-patterns, domain confinement to `<city>.gov`). Operators set `TAVILY_API_KEY` in `.env`. Absent key = sitemap-builder fails loudly with a clear message; the rest of Centinel still works.
+
+The legacy decision and spike notes follow below for historical context.
+
+---
+
+## Decision (revised 2026-04-26 — superseded above)
 
 **Use Hermes' built-in web tools first** (`web_extract`, `web_search`, browser tools). They already cover HTML→markdown, PDF→markdown, JS rendering, and screenshots — there is no need for a custom Scraper layer in v0.1.
 

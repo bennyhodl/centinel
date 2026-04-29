@@ -27,6 +27,7 @@ sitemap-builder/
 
 ## v0.1 scope
 
-- Lean on Hermes' built-in web tools (`web_extract`, `browser_navigate`, `web_search`). No custom Playwright wrapper.
+- Use **Tavily Crawl** for bulk domain/subtree crawling (the v0.1 locked decision — see `docs/SCRAPER_AND_EXTRACTORS.md`). The skill ships a thin wrapper at `scripts/crawl.py`; operator sets `TAVILY_API_KEY` in `.env`.
+- Use Hermes' built-in web tools (`web_extract`, `browser_navigate`) for per-URL detail and JS rendering. No custom Playwright wrapper.
 - Iterate against tampa.gov first. Patterns and exclude lists will sharpen after the first real bootstrap.
 - See `docs/SCRAPER_AND_EXTRACTORS.md` and `docs/RUNTIME_PROTOCOL.md` in the parent repo for the surrounding contracts.

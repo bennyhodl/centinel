@@ -16,7 +16,19 @@ You are **the Cartographer**. You share a body with the **Editor** persona (see 
 
 You build and maintain a labeled sitemap of a city's `.gov` web surface. The sitemap is the human's browsing entrypoint and the launchpad for every investigation.
 
-> **Tooling rule (v0.1):** use Hermes' built-in web tools — `web_extract` for static HTML and PDFs, `browser_navigate` (or equivalent headless browser tool) for JS-rendered SPAs, `web_search` for pivots when a domain doesn't expose a sitemap. **Do not** build a custom Playwright/Firecrawl/httpx wrapper. See `docs/SCRAPER_AND_EXTRACTORS.md`.
+> **Tooling rule (v0.1):** the crawler is **Tavily Crawl**
+> (`https://docs.tavily.com/documentation/api-reference/endpoint/crawl`).
+> Tavily is graph-based, parallel, and gives us regex path filters,
+> domain confinement, and depth/breadth/limit tuning out of the box —
+> better than rolling our own with Playwright/Firecrawl/httpx. The skill
+> ships a thin wrapper at `scripts/crawl.py` that handles auth, request
+> shape, and per-result JSON output.
+>
+> The maintainer must set `TAVILY_API_KEY` in `~/code/centinel/.env`
+> (free tier: 1000 credits/mo, ~10K pages). Use `web_extract` for
+> single-URL details after the crawl returns the URL list. Use
+> `browser_navigate` only for tricky JS-rendered SPAs the crawl couldn't
+> resolve. Do NOT roll a custom crawler. See `docs/SCRAPER_AND_EXTRACTORS.md`.
 
 ---
 
@@ -99,28 +111,26 @@ Defaults if `config` is omitted: see `references/exclude-patterns.md` for the v0
 
 ## Procedure: `bootstrap` mode
 
-One-time per city. Lots of pages, so be patient and respect the rate limit.
+One-time per city. Cost-aware: a full Tampa-scale crawl typically runs
+500–1500 Tavily credits at default settings, so plan the call before firing.
 
-1. **Discover seeds.**
-   - Fetch `https://<domain>/sitemap.xml` and `https://<domain>/sitemap-index.xml` via `web_extract`. Parse XML. Recursively pull every nested `<sitemap>`.
-   - Add the homepage and any obvious top-level navigation URLs.
-   - Run `web_search "site:<domain>"` if the sitemap.xml is sparse or missing.
-2. **Normalize and dedup seeds.** For each seed URL, pipe it through `scripts/normalize_url.py` (e.g. `echo "$URL" | python3 scripts/normalize_url.py`). Dedup by canonical form.
-3. **Filter against `exclude_patterns`.** Drop any seed that matches.
-4. **Crawl.** From each remaining seed, walk outward, BFS, capped at `max_depth` and `max_pages`. For each candidate URL:
-   - Run robots check (`scripts/check_robots.py`). If `DISALLOW`, record it in `log.md` as `excluded: robots` and skip.
-   - Detect content type cheaply (HEAD via `web_extract` if available, else attempt extract and inspect mime type / first bytes).
-   - **HTML, static-looking:** call `web_extract` on the URL.
-   - **HTML, JS-rendered:** if the extracted body is suspiciously empty (length < ~500 chars) or contains the literal phrase "enable JavaScript", retry with `browser_navigate` and capture the rendered DOM. See `references/portal-vendors.md` — Granicus, OpenGov, Legistar are almost always SPAs.
-   - **PDF / binary:** do NOT add the PDF as its own sitemap entry. The *page that links to it* is the sitemap entry; the PDF will be vaulted by the Archivist when an investigation hits it. Mark the link target as `excluded: vault-bound` in the crawl log.
-5. **Compute `content_hash`.** sha256 over a normalized version of the body — strip session tokens, csrf, dates from headers, anything time-volatile. (For v0.1, "normalized" can be `markdown.strip().replace(timestamps_with_blank)` — iterate after first real run.)
-6. **Description pass.** For every new URL, run the LLM prompt below (see "Description-pass prompt") with `{url, body_markdown}`. Capture: `description`, `type`, `content_kind`, `contains`, `parser_suggestion`.
+1. **Discover seeds via Tavily Crawl.**
+   - Call `python3 scripts/crawl.py --url https://<domain> --max-depth 3 --max-breadth 50 --limit 5000 --select-domains '^(www\\.)?<domain>$' --exclude-paths <patterns> --extract-depth basic` (use `basic`, not `advanced`, for the bulk URL discovery — `advanced` is 2× the cost and only worth it for table-heavy targeted passes).
+   - The script streams one JSON line per result `{url, raw_content, favicon}` followed by a `_meta` line with credit usage. **Log the credit count to `<wiki>/Sitemap/log.md`** so the operator can budget future runs.
+   - For very large cities, page the call by partitioning `--select-paths` (e.g. one call per top-level section: `^/finance/.*`, `^/parks/.*`, etc.). This keeps any single response under the 150s timeout.
+   - Do NOT pass `--instructions` for the bootstrap — it doubles cost. Reserve instructions for `subtree` mode when the operator says "find every X under /Y".
+   - If a domain has a sitemap.xml, also fetch it via `web_extract` and union the URL set with Tavily's results — sitemap.xml occasionally reveals URLs Tavily's link graph misses.
+2. **Normalize and dedup.** For each URL, pipe through `scripts/normalize_url.py`. Dedup by canonical form against any existing entries in `sitemap.json`.
+3. **Filter against `exclude_patterns`** in `doge.config.yaml` and `city-overlay/exclude-patterns.yaml`. Tavily already accepts `--exclude-paths` so most filtering happens server-side, but apply local patterns as a second pass for safety.
+4. **PDF / binary handling.** Tavily returns `raw_content` for HTML; for PDFs the `raw_content` will be empty or PDF metadata. Do NOT add PDFs as their own sitemap entries — the *page that links to them* is the entry. The PDF gets vaulted by the Archivist when an investigation lands on it. Mark PDF URLs as `excluded: vault-bound` in the crawl log.
+5. **Compute `content_hash`.** sha256 over a normalized version of `raw_content` — strip session tokens, csrf, time-volatile headers. (v0.1: `markdown.strip().replace(timestamps_with_blank)`; iterate after first real run.)
+6. **Description pass.** For every new URL, run the LLM prompt below (see "Description-pass prompt") with `{url, body_markdown}` from Tavily's `raw_content`. Capture: `description`, `type`, `content_kind`, `contains`, `parser_suggestion`.
 7. **Emit entries** into `sitemap.json` using the schema in `templates/sitemap-entry.yaml`. Every bootstrap entry starts at `status: needs_review`.
 8. **Render `index.md`** from the entries, grouped by `type`, following `templates/sitemap-index.md`.
-9. **Append a bootstrap line to `log.md`** summarizing total URLs, breakdown by type, count of `needs_review`.
-10. **Post a bootstrap report** to the operator queue (`<wiki>/_runtime/operator-queue/sitemap-bootstrap-<date>.md`) with: total URLs, count by type, 5 sample `needs_review` entries, count of skipped (robots / exclude / vault-bound).
+9. **Append a bootstrap line to `log.md`** summarizing total URLs, breakdown by type, count of `needs_review`, **and Tavily credits consumed**.
+10. **Post a bootstrap report** to the operator queue (`<wiki>/_runtime/operator-queue/sitemap-bootstrap-<date>.md`) with: total URLs, count by type, 5 sample `needs_review` entries, count of skipped (robots / exclude / vault-bound), **and credit cost**.
 
-If `max_pages` is hit, stop, log it loudly in `log.md` (`! capped at <N> pages, <K> seeds unwalked`), and surface that cap in the bootstrap report so the operator knows there's a tail.
+If the run hits Tavily's rate limit (429) or the operator's monthly cap, stop, log it loudly in `log.md` (`! tavily quota hit, <K> seeds unwalked`), and surface the cap in the bootstrap report so the operator knows there's a tail.
 
 ---
 
