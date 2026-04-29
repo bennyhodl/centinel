@@ -4,13 +4,45 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Message, { type ChatMessage } from "./Message";
 import Composer from "./Composer";
 
+const SESSION_KEY = "centinel.chat.sessionId";
+
+function generateSessionId(): string {
+  // Short, URL-safe, regex-friendly id matching the route's validation.
+  return (
+    "web-" +
+    Math.random().toString(36).slice(2, 10) +
+    Date.now().toString(36)
+  );
+}
+
+function loadOrCreateSessionId(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    const existing = window.localStorage.getItem(SESSION_KEY);
+    if (existing && /^[A-Za-z0-9._-]+$/.test(existing)) return existing;
+    const fresh = generateSessionId();
+    window.localStorage.setItem(SESSION_KEY, fresh);
+    return fresh;
+  } catch {
+    // localStorage unavailable (e.g., SSR or private mode) — fall back to
+    // ephemeral; loses continuity across reloads but chat still works.
+    return generateSessionId();
+  }
+}
+
 export default function ChatClient({ intro }: { intro: string }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string>("");
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Resolve session id once the component mounts (client-only).
+  useEffect(() => {
+    setSessionId(loadOrCreateSessionId());
+  }, []);
 
   // Auto-scroll on new content.
   useEffect(() => {
@@ -51,6 +83,7 @@ export default function ChatClient({ intro }: { intro: string }) {
           messages: next
             .slice(0, -1) // omit the empty assistant placeholder
             .map((m) => ({ role: m.role, content: m.content })),
+          sessionId: sessionId || undefined,
         }),
         signal: controller.signal,
       });
@@ -95,7 +128,7 @@ export default function ChatClient({ intro }: { intro: string }) {
       abortRef.current = null;
       setIsStreaming(false);
     }
-  }, [input, isStreaming, messages]);
+  }, [input, isStreaming, messages, sessionId]);
 
   return (
     <div className="-mx-4 -my-6 flex h-[calc(100vh-9rem)] flex-col sm:h-[calc(100vh-10rem)]">
