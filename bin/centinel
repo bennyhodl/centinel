@@ -4,4 +4,6 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$HERE")"
+# Run from REPO_ROOT so `python3 -m lib.cli` resolves regardless of caller cwd.
+cd "$REPO_ROOT"
 exec python3 -m lib.cli "$@"
