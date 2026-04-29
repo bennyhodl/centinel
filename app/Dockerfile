@@ -29,7 +29,9 @@ RUN pnpm build
 
 # ──── runner (production server + python3 dispatcher) ─────────────────────────
 FROM node:20-alpine AS runner
-RUN apk add --no-cache python3 py3-yaml \
+# bash: required by bin/centinel (#!/usr/bin/env bash) — alpine ships ash only.
+# py3-yaml: lib/config.py reads doge.config.yaml.
+RUN apk add --no-cache bash python3 py3-yaml \
     && corepack enable
 WORKDIR /app/app
 ENV NODE_ENV=production
