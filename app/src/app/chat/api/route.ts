@@ -12,31 +12,26 @@ const MessageSchema = z.object({
 
 const RequestSchema = z.object({
   messages: z.array(MessageSchema).min(1),
-  // Stable session name so multi-turn context persists. The web client
-  // generates a UUID once per browser tab and keeps it in localStorage;
-  // we pass it to `hermes chat --continue <name>` so each turn resumes
-  // the same Hermes session.
-  sessionId: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
 });
 
 const HERMES_BIN = process.env.HERMES_BIN_PATH || "hermes";
 const SKILL_NAME = "centinel-operator";
+// Single, fixed session name. Hermes' --continue handles all multi-turn
+// state — we don't manage session ids per-tab or per-message. Operator
+// can wipe history with `hermes sessions delete centinel-web-chat`.
+const SESSION_NAME = "centinel-web-chat";
 
 /**
- * /chat is now a real Hermes session — no more pre-RAG QMD injection or
- * OpenAI tool-calling. The `centinel-operator` skill teaches the agent
- * how to use the bin/centinel CLI; Hermes' built-in terminal/file/qmd
- * tools provide the execution and retrieval surface.
+ * /chat is a thin streaming wrapper around `hermes chat`. Every request
+ * resumes the same Hermes session via --continue, so multi-turn context,
+ * skill memory, and tool history are all owned by Hermes — not by us.
  *
- * Request shape: standard {messages: [...]}. The handler:
- *   1. Pulls the latest user message (only one per turn).
- *   2. Spawns `hermes chat -q -Q -s centinel-operator --continue <session>`.
- *   3. Streams stdout back to the browser as text/plain.
+ *   1. Take the latest user message.
+ *   2. Spawn `hermes chat -q -Q -s centinel-operator --continue centinel-web-chat`.
+ *   3. Stream stdout to the browser.
  *
- * Continuity: passing `--continue <sessionId>` resumes a named session
- * across messages, so the agent has the prior turns as context. The web
- * client owns the session id (stored in localStorage) so it's stable
- * for the life of the tab.
+ * Hermes auto-creates the named session on first run and resumes it on
+ * every subsequent run. We don't track ids client-side.
  */
 export async function POST(req: NextRequest) {
   let body: unknown;
@@ -60,10 +55,6 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "empty_message" }, { status: 400 });
   }
 
-  // Default session if the client didn't provide one. Single-operator
-  // case ends up with one shared session — fine for v0.1.
-  const sessionId = parsed.data.sessionId ?? "centinel-web-chat";
-
   const args = [
     "chat",
     "-q",
@@ -72,7 +63,7 @@ export async function POST(req: NextRequest) {
     "-s",
     SKILL_NAME,
     "--continue",
-    sessionId,
+    SESSION_NAME,
   ];
 
   let child: ReturnType<typeof spawn>;
@@ -118,8 +109,6 @@ export async function POST(req: NextRequest) {
       });
 
       child.stderr?.on("data", (chunk: Buffer) => {
-        // Surface stderr inline (italicized) so the user sees agent errors
-        // rather than them silently disappearing.
         const text = chunk.toString("utf-8");
         if (text.trim()) {
           safeEnqueue(encoder.encode(`\n\n_[hermes stderr: ${text.trim()}]_`));
