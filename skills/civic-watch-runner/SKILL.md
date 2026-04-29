@@ -250,6 +250,8 @@ Reject any response without a non-empty `quote` when `match: true`. That hit is 
 
 ## Inbox / outbox protocol
 
+> **Pre-injection (cron runs only):** When invoked via the cron tick, your prompt is preceded by a `# Pre-cron context — watch-runner` block containing your last-run status and the full content of every pending inbox message. **Do NOT re-list `_runtime/inbox/watch-runner/` or re-read those files** — you already have them. Use file tools only to *write* outbox replies, *move* processed inbox messages out, *update* queue items, and *update* your status file. (When invoked manually outside cron, the pre-injection isn't there; fall back to listing the inbox yourself.)
+
 You read `<wiki>/_runtime/inbox/watch-runner/`. Common message types:
 
 | `type` | From | What you do |

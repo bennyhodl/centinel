@@ -178,6 +178,8 @@ Readers (data-reporter, the web app, the editor) fold these forward when they qu
 
 ## Inbox / outbox
 
+> **Pre-injection (cron runs only):** When invoked via the cron tick, your prompt is preceded by a `# Pre-cron context — archivist` block containing your last-run status and the full content of every pending inbox message. **Do NOT re-list `_runtime/inbox/archivist/` or re-read those files** — you already have them. Use file tools only to *write* outbox replies, *move* processed inbox messages out, *update* queue items, and *update* your status file. (When invoked manually outside cron, the pre-injection isn't there; fall back to listing the inbox yourself.)
+
 - **Inbox** — `<wiki>/_runtime/inbox/archivist/*.md`. Senders: `investigator`, `watch-runner`, `cartographer`, occasionally operator. Message body is a list of URLs (or `vault_path` for re-extract). See `docs/RUNTIME_PROTOCOL.md` for the message envelope.
 - **Outbox** — `<wiki>/_runtime/outbox/archivist/<YYYY-MM>/...`. One file per response. Rotates monthly.
 - **Status** — `<wiki>/_runtime/status/archivist.md`, single file, overwritten each run.

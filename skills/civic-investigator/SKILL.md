@@ -234,6 +234,8 @@ Date prefix → claim → Source link → Vault path. If the vault path is `pend
 
 ## Inbox / outbox
 
+> **Pre-injection (cron runs only):** When invoked via the cron tick, your prompt is preceded by a `# Pre-cron context — investigator` block containing your last-run status and the full content of every pending inbox message. **Do NOT re-list `_runtime/inbox/investigator/` or re-read those files** — you already have them. Use file tools only to *write* outbox replies, *move* processed inbox messages out, *update* queue items, and *update* your status file. (When invoked manually outside cron, the pre-injection isn't there; fall back to listing the inbox yourself.)
+
 You both **send** and **receive** messages. Format per `docs/RUNTIME_PROTOCOL.md`.
 
 ### Messages you EMIT

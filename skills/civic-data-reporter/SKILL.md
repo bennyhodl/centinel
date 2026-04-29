@@ -75,6 +75,8 @@ Every fact-bearing row carries `source_vault_path` and `confidence`. Rows lackin
 
 ### A. Drain inbox
 
+> **Pre-injection (cron runs only):** When invoked via the cron tick, your prompt is preceded by a `# Pre-cron context — data-reporter` block containing your last-run status and the full content of every pending inbox message. **Do NOT re-list `_runtime/inbox/data-reporter/` or re-read those files** — you already have them. Use file tools only to *write* outbox replies, *move* processed inbox messages out, *update* queue items, and *update* your status file. (When invoked manually outside cron, the pre-injection isn't there; fall back to listing the inbox yourself.)
+
 For each message in `<wiki>/_runtime/inbox/data-reporter/*.md` sorted by priority then created:
 
 Parse YAML frontmatter. The `type` field disambiguates:

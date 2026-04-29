@@ -35,6 +35,34 @@ from . import config as cfg
 
 CRON_NAME_PREFIX = "centinel"  # all jobs we create are namespaced
 
+# Per-role pre-cron preload scripts. Hermes runs these before the cron tick
+# and injects their stdout into the prompt as context — so the agent sees
+# its inbox + last-run status immediately, no list-dir round-trip needed.
+# A role with no entry here gets no preload script (defaults to bare prompt).
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PRELOAD_SCRIPTS: dict[str, Path] = {
+    "investigator":  REPO_ROOT / "scripts" / "cron" / "preload_investigator.py",
+    "watch-runner":  REPO_ROOT / "scripts" / "cron" / "preload_watch_runner.py",
+    "data-reporter": REPO_ROOT / "scripts" / "cron" / "preload_data_reporter.py",
+    "archivist":     REPO_ROOT / "scripts" / "cron" / "preload_archivist.py",
+}
+
+
+def _preload_script_for(profile: str | None) -> str | None:
+    """Return absolute path to the preload script for `profile`, or None.
+
+    Returns None for the default profile (no role-specific inbox) and for
+    any role we haven't built a script for yet.
+    """
+    if not profile:
+        return None
+    p = PRELOAD_SCRIPTS.get(profile)
+    if not p:
+        return None
+    if not p.exists():
+        return None
+    return str(p)
+
 
 def _err(msg: str) -> None:
     print(f"❌ {msg}", file=sys.stderr)
@@ -192,9 +220,11 @@ def cmd_setup_cron(args: argparse.Namespace) -> int:
             "--name", name,
             "--skill", skill,
             "--deliver", "local",
-            schedule,
-            prompt,
         ]
+        preload = _preload_script_for(profile)
+        if preload:
+            cmd += ["--script", preload]
+        cmd += [schedule, prompt]
         _run(cmd, check=False)
         # New jobs default to active; pause them so the wizard's Step 7 can activate.
         # We resolve the id by re-listing — simplest reliable approach.
@@ -345,9 +375,11 @@ def cmd_investigate_register(args: argparse.Namespace) -> int:
         "--name", name,
         "--skill", "civic-investigator",
         "--deliver", "local",
-        schedule,
-        prompt,
     ]
+    preload = _preload_script_for("investigator")
+    if preload:
+        cmd += ["--script", preload]
+    cmd += [schedule, prompt]
     _run(cmd, check=False)
     _ok(f"Registered cron {name} ({schedule}) for {slug}")
     return 0
