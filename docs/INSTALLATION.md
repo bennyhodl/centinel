@@ -40,23 +40,32 @@ user message; Hermes owns the session via the `X-Hermes-Session-Id` header.
 
 **One-time Hermes config:**
 
-1. **Enable the api_server platform** in `~/.hermes/config.yaml`:
+> **Note:** Hermes' api_server platform is currently configured via
+> **environment variables only**. `config.yaml` support is on the roadmap
+> but not yet shipped — `platforms.api_server` blocks in YAML are silently
+> ignored. See [api_server docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/api-server).
 
-   ```yaml
-   platforms:
-     # ... whatever else you have ...
-     api_server:
-       enabled: true
-       extra:
-         port: 8000                 # any free port; Centinel defaults to this
-         api_key: <long-random-hex> # required for X-Hermes-Session-Id session continuity
+1. **Enable + configure the api_server platform** via env vars. Add to
+   `~/.bashrc` (or `~/.zshrc`) so they persist across logins:
+
+   ```bash
+   export API_SERVER_ENABLED=true
+   export API_SERVER_PORT=8000              # any free port; Centinel defaults to 8000
+   export API_SERVER_KEY=<long-random-hex>  # bearer token for /v1/* requests
+   # Optional:
+   # export API_SERVER_HOST=127.0.0.1       # bind addr (default localhost-only)
+   # export API_SERVER_CORS_ORIGINS=...     # comma-separated browser origins
+   # export API_SERVER_MODEL_NAME=hermes-agent
    ```
 
    Generate a key with `openssl rand -hex 32`. Same value goes into
    Centinel's `.env` as `HERMES_API_KEY`.
 
+   Then reload: `source ~/.bashrc`.
+
 2. **Pick the toolsets the Centinel chat agent gets** in
-   `platform_toolsets.api_server`:
+   `~/.hermes/config.yaml` under `platform_toolsets.api_server`
+   (this part *is* config-driven):
 
    ```yaml
    platform_toolsets:
@@ -79,19 +88,26 @@ user message; Hermes owns the session via the `X-Hermes-Session-Id` header.
    symlinked into `~/.hermes/skills/centinel/` by `./bootstrap` in step 2
    below.)
 
-4. **Restart the gateway** so the api_server adapter starts:
+4. **Restart the gateway** so the api_server adapter starts with the new
+   env vars:
 
    ```bash
-   hermes gateway restart
+   pkill -f "hermes_cli.main gateway"; sleep 2
+   hermes gateway run --replace &
    ```
+
+   (Or `hermes gateway restart` if you've installed it as a service.)
 
 5. **Verify it's listening:**
 
    ```bash
-   curl -s http://localhost:8000/v1/models -H "Authorization: Bearer $HERMES_API_KEY"
+   ss -tlnp | grep 8000
+   curl -s http://localhost:8000/v1/models -H "Authorization: Bearer $API_SERVER_KEY"
    ```
 
-   Should return JSON with at least one model id.
+   Should return JSON with at least one model id. If port 8000 isn't bound,
+   check `hermes logs | tail -50` — common cause is env vars not exported in
+   the shell that started the gateway.
 
 If the gateway isn't installed as a service yet, run `hermes gateway install`
 once. See [Hermes gateway docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/api-server)
