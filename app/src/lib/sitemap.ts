@@ -85,7 +85,24 @@ export async function loadSitemap(): Promise<SitemapDoc | null> {
   try {
     const raw = await fs.readFile(sitemapJsonPath(), "utf-8");
     const parsed = JSON.parse(raw);
-    return SitemapDoc.parse(parsed);
+    // Tolerant load: some sitemap-builder runs emit a bare array of entries
+    // instead of the wrapped {domain, generated_at, entries} doc. Coerce so
+    // the web UI never blows up over a recoverable shape mismatch — and
+    // rewrite the file in canonical form so downstream readers see the doc.
+    let doc: unknown = parsed;
+    if (Array.isArray(parsed)) {
+      doc = {
+        domain: "",
+        generated_at: new Date().toISOString(),
+        entries: parsed,
+      };
+      try {
+        await fs.writeFile(sitemapJsonPath(), JSON.stringify(doc, null, 2));
+      } catch {
+        // best-effort canonicalization; don't fail the load if write is denied
+      }
+    }
+    return SitemapDoc.parse(doc);
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
     if (e.code === "ENOENT") return null;

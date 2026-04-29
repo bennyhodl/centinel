@@ -179,9 +179,28 @@ For each URL in `target.urls`:
 
 ---
 
+## Output: sitemap.json file shape
+
+**`sitemap.json` is a single JSON object — NOT a bare array.** The web UI's
+loader rejects bare arrays. Always wrap entries in this envelope:
+
+```json
+{
+  "domain": "www.tampa.gov",
+  "generated_at": "2026-04-29T22:18:00Z",
+  "entries": [
+    { "url": "...", "type": "...", ... },
+    ...
+  ]
+}
+```
+
+If you're appending to an existing `sitemap.json`, load it, mutate
+`.entries`, bump `generated_at`, and write the same envelope back.
+
 ## Output: sitemap entry schema
 
-Every entry in `sitemap.json` follows this shape (full populated example: `templates/sitemap-entry.yaml`):
+Every element of `entries[]` follows this shape (full populated example: `templates/sitemap-entry.yaml`):
 
 ```yaml
 - url: https://www.tampa.gov/procurement/awards
