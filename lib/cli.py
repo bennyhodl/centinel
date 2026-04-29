@@ -40,28 +40,50 @@ CRON_NAME_PREFIX = "centinel"  # all jobs we create are namespaced
 # its inbox + last-run status immediately, no list-dir round-trip needed.
 # A role with no entry here gets no preload script (defaults to bare prompt).
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PRELOAD_SCRIPTS: dict[str, Path] = {
-    "investigator":  REPO_ROOT / "scripts" / "cron" / "preload_investigator.py",
-    "watch-runner":  REPO_ROOT / "scripts" / "cron" / "preload_watch_runner.py",
-    "data-reporter": REPO_ROOT / "scripts" / "cron" / "preload_data_reporter.py",
-    "archivist":     REPO_ROOT / "scripts" / "cron" / "preload_archivist.py",
+HERMES_SCRIPTS_DIR = Path.home() / ".hermes" / "scripts" / "centinel"
+PRELOAD_SCRIPTS: dict[str, str] = {
+    # Filenames only — the actual files live at REPO_ROOT/scripts/cron/ and
+    # are symlinked into ~/.hermes/scripts/centinel/ by _ensure_preload_symlinks().
+    # Hermes requires --script paths to be relative to ~/.hermes/scripts/.
+    "investigator":  "centinel/preload_investigator.py",
+    "watch-runner":  "centinel/preload_watch_runner.py",
+    "data-reporter": "centinel/preload_data_reporter.py",
+    "archivist":     "centinel/preload_archivist.py",
 }
 
 
-def _preload_script_for(profile: str | None) -> str | None:
-    """Return absolute path to the preload script for `profile`, or None.
+def _ensure_preload_symlinks() -> None:
+    """Symlink centinel's preload scripts into ~/.hermes/scripts/centinel/.
 
-    Returns None for the default profile (no role-specific inbox) and for
-    any role we haven't built a script for yet.
+    Hermes' cron `--script` flag rejects absolute paths and home-relative
+    paths; scripts must live under ~/.hermes/scripts/. We symlink rather
+    than copy so `git pull` updates propagate.
     """
+    HERMES_SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+    src_dir = REPO_ROOT / "scripts" / "cron"
+    if not src_dir.is_dir():
+        return
+    for src in src_dir.glob("preload_*.py"):
+        link = HERMES_SCRIPTS_DIR / src.name
+        try:
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            link.symlink_to(src.resolve())
+        except OSError:
+            # Non-fatal — preload is optional; bare prompt still works.
+            pass
+
+
+def _preload_script_for(profile: str | None) -> str | None:
+    """Return the ~/.hermes/scripts/-relative path for `profile`, or None."""
     if not profile:
         return None
-    p = PRELOAD_SCRIPTS.get(profile)
-    if not p:
+    rel = PRELOAD_SCRIPTS.get(profile)
+    if not rel:
         return None
-    if not p.exists():
+    if not (HERMES_SCRIPTS_DIR.parent / rel).exists():
         return None
-    return str(p)
+    return rel
 
 
 def _err(msg: str) -> None:
@@ -202,6 +224,7 @@ def cmd_setup_cron(args: argparse.Namespace) -> int:
     """
     config = cfg.load()
     hermes = _hermes_bin()
+    _ensure_preload_symlinks()
 
     def register(name: str, schedule: str, profile: str | None, skill: str, prompt: str) -> None:
         # Skip if a job with this name already exists.
@@ -225,22 +248,27 @@ def cmd_setup_cron(args: argparse.Namespace) -> int:
         if preload:
             cmd += ["--script", preload]
         cmd += [schedule, prompt]
-        _run(cmd, check=False)
+        # Capture stdout so we can parse the job id from `Created job: <id>`.
+        _info(" ".join(_shell_quote(c) for c in cmd))
+        result = subprocess.run(cmd, check=False, text=True, capture_output=True)
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+        if result.returncode != 0:
+            return
         # New jobs default to active; pause them so the wizard's Step 7 can activate.
-        # We resolve the id by re-listing — simplest reliable approach.
-        listing = subprocess.run(
-            [hermes, *(["--profile", profile] if profile else []), "cron", "list"],
-            check=False, text=True, capture_output=True,
-        ).stdout
-        for line in listing.splitlines():
-            if name in line:
-                # Job IDs in `hermes cron list` are the first whitespace-delimited token.
-                job_id = line.strip().split()[0]
-                _run(
-                    [hermes, *(["--profile", profile] if profile else []), "cron", "pause", job_id],
-                    check=False,
-                )
+        job_id = None
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Created job:"):
+                job_id = stripped.split(":", 1)[1].strip().split()[0]
                 break
+        if job_id:
+            _run(
+                [hermes, *(["--profile", profile] if profile else []), "cron", "pause", job_id],
+                check=False,
+            )
 
     s = config.cron
     register(_job_name("sitemap-lint"),    s.sitemap_lint,   None,            "sitemap-builder",     f"Lint sitemap at {config.wiki_path}/Sitemap/.")
@@ -319,19 +347,28 @@ def _bulk_cron_state(*, action: str) -> int:
             cmd += ["--profile", profile]
         cmd += ["cron", "list", "--all"]
         listing = subprocess.run(cmd, check=False, text=True, capture_output=True).stdout
+        # Parse multi-line blocks: header "<id> [<status>]" then "Name: <name>".
+        current_id: str | None = None
         for line in listing.splitlines():
-            if CRON_NAME_PREFIX + "-" not in line:
+            stripped = line.strip()
+            if not stripped:
                 continue
-            tokens = line.strip().split()
-            if not tokens:
+            tokens = stripped.split()
+            if len(tokens) >= 2 and tokens[1].startswith("[") and tokens[1].endswith("]"):
+                current_id = tokens[0]
                 continue
-            job_id = tokens[0]
+            if not stripped.startswith("Name:") or current_id is None:
+                continue
+            job_name = stripped.split(":", 1)[1].strip()
+            if not job_name.startswith(CRON_NAME_PREFIX + "-"):
+                continue
             cmd2 = [hermes]
             if profile:
                 cmd2 += ["--profile", profile]
-            cmd2 += ["cron", action, job_id]
+            cmd2 += ["cron", action, current_id]
             _run(cmd2, check=False)
             touched += 1
+            current_id = None  # consume so we don't double-toggle
     _ok(f"{action}d {touched} Centinel cron jobs")
     return 0
 
@@ -435,9 +472,17 @@ def cmd_investigate_register(args: argparse.Namespace) -> int:
 
 
 def _find_cron_job_id(profile: str | None, name: str) -> str | None:
-    """Return the cron job id (first whitespace-delimited token) matching `name`.
+    """Return the cron job id for the job with `Name: <name>`, or None.
 
-    Searches `hermes --profile <p> cron list --all`.
+    `hermes cron list --all` formats jobs as multi-line blocks:
+
+        f79edb5c7db2 [active]
+          Name:      <name>
+          Schedule:  ...
+          ...
+
+    We track the most recent id-bearing line and return it when we hit a
+    `Name: <name>` line that matches.
     """
     hermes = _hermes_bin()
     cmd = [hermes]
@@ -445,11 +490,20 @@ def _find_cron_job_id(profile: str | None, name: str) -> str | None:
         cmd += ["--profile", profile]
     cmd += ["cron", "list", "--all"]
     listing = subprocess.run(cmd, check=False, text=True, capture_output=True).stdout
+    current_id: str | None = None
     for line in listing.splitlines():
-        if name in line:
-            tokens = line.strip().split()
-            if tokens:
-                return tokens[0]
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Header line: "<id> [<status>]" — id is first token, second is bracketed.
+        tokens = stripped.split()
+        if len(tokens) >= 2 and tokens[1].startswith("[") and tokens[1].endswith("]"):
+            current_id = tokens[0]
+            continue
+        if stripped.startswith("Name:"):
+            job_name = stripped.split(":", 1)[1].strip()
+            if job_name == name:
+                return current_id
     return None
 
 
