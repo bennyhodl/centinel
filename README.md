@@ -12,9 +12,7 @@
 
 **[ABOUT.md](ABOUT.md)** — Architecture of agents. The Editor + four specialists, how they coordinate through the wiki filesystem, the web app, the data layer, and the philosophy that holds it all together.
 
-![Centinel architecture](assets/centinel-org-architecture.png)
-
-Six-agent civic-investigation roster, file-based message bus, operator-in-the-loop control planes. ([interactive HTML](assets/centinel-org-architecture.html))
+**[Architecture diagram ↗](assets/centinel-org-architecture.png)** — Six-agent civic-investigation roster, file-based message bus, operator-in-the-loop control planes. ([interactive HTML](assets/centinel-org-architecture.html))
 
 ---
 
