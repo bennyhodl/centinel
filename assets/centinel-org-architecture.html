@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Centinel Organization & Interactions</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'JetBrains Mono', monospace; background: #020617; min-height: 100vh; padding: 2rem; color: white; }
+    .container { max-width: 1280px; margin: 0 auto; }
+    .header { margin-bottom: 2rem; }
+    .header-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+    .pulse-dot { width: 12px; height: 12px; background: #22d3ee; border-radius: 50%; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.025em; }
+    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-left: 1.75rem; }
+    .diagram-container { background: rgba(15, 23, 42, 0.5); border-radius: 1rem; border: 1px solid #1e293b; padding: 1.5rem; overflow-x: auto; }
+    svg { width: 100%; min-width: 1100px; display: block; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-top: 2rem; }
+    .card { background: rgba(15, 23, 42, 0.5); border-radius: 0.75rem; border: 1px solid #1e293b; padding: 1.25rem; }
+    .card-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .card-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .card-dot.cyan { background: #22d3ee; }
+    .card-dot.emerald { background: #34d399; }
+    .card-dot.violet { background: #a78bfa; }
+    .card-dot.amber { background: #fbbf24; }
+    .card-dot.rose { background: #fb7185; }
+    .card-dot.orange { background: #fb923c; }
+    .card h3 { font-size: 0.875rem; font-weight: 600; }
+    .card ul { list-style: none; color: #94a3b8; font-size: 0.75rem; }
+    .card li { margin-bottom: 0.375rem; }
+    .footer { text-align: center; margin-top: 1.5rem; color: #475569; font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-row">
+        <div class="pulse-dot"></div>
+        <h1>Centinel — Organization Chart & Interactions</h1>
+      </div>
+      <p class="subtitle">Six-agent civic-investigation roster, file-based message passing, operator-in-the-loop control planes</p>
+    </div>
+
+    <div class="diagram-container">
+      <svg viewBox="0 0 1200 1000">
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+          </marker>
+          <marker id="arrowhead-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee" />
+          </marker>
+          <marker id="arrowhead-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#34d399" />
+          </marker>
+          <marker id="arrowhead-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa" />
+          </marker>
+          <marker id="arrowhead-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fb923c" />
+          </marker>
+          <marker id="arrowhead-amber" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24" />
+          </marker>
+          <marker id="arrowhead-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fb7185" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- =========== ARROWS (drawn first so boxes overlay) =========== -->
+
+        <!-- Operator → web UI surfaces -->
+        <line x1="600" y1="80" x2="180" y2="118" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead-cyan)"/>
+        <line x1="600" y1="80" x2="440" y2="118" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead-cyan)"/>
+        <line x1="600" y1="80" x2="730" y2="118" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead-cyan)"/>
+        <!-- Operator → terminal shim -->
+        <line x1="650" y1="80" x2="1040" y2="118" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead-cyan)"/>
+
+        <!-- /chat → Hermes API Server -->
+        <line x1="180" y1="178" x2="180" y2="218" stroke="#fb7185" stroke-width="1.5" marker-end="url(#arrowhead-rose)"/>
+        <text x="195" y="201" fill="#94a3b8" font-size="9">POST /v1/chat/completions</text>
+
+        <!-- /investigations + /operator-queue → bin/centinel -->
+        <line x1="440" y1="178" x2="440" y2="218" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+        <text x="455" y="201" fill="#94a3b8" font-size="9">execFile (server actions)</text>
+
+        <!-- /findings + /vault — read-only direct file access (curve) -->
+        <path d="M 730 178 Q 730 200 760 200 L 1080 200 Q 1100 200 1100 218" fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead-violet)"/>
+        <text x="900" y="195" fill="#94a3b8" font-size="9">read-only file + DB</text>
+
+        <!-- terminal shim → Hermes profile (curved down to roster) -->
+        <path d="M 1040 178 Q 1040 240 1100 240 L 1100 290 Q 1100 310 1080 310" fill="none" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead-cyan)"/>
+
+        <!-- Hermes API → Editor (carries centinel-operator skill load) -->
+        <line x1="180" y1="278" x2="135" y2="365" stroke="#fb7185" stroke-width="1.5" marker-end="url(#arrowhead-rose)"/>
+        <text x="60" y="320" fill="#fb7185" font-size="8">+ centinel-operator</text>
+        <text x="60" y="332" fill="#fb7185" font-size="8">  + X-Hermes-Session-Id</text>
+
+        <!-- bin/centinel → Hermes Cron Scheduler -->
+        <line x1="540" y1="248" x2="700" y2="248" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+        <text x="610" y="241" fill="#94a3b8" font-size="9" text-anchor="middle">register / pause / resume</text>
+
+        <!-- bin/centinel → Inbox bus (drops type:request directly) -->
+        <path d="M 380 278 Q 380 480 380 530" fill="none" stroke="#fb923c" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead-orange)"/>
+        <text x="265" y="500" fill="#fb923c" font-size="8">trigger / queue resolution</text>
+
+        <!-- Hermes Cron → roster (preload + tick fan-out) -->
+        <line x1="800" y1="278" x2="800" y2="305" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+        <text x="815" y="298" fill="#94a3b8" font-size="8">cron tick (--script preload)</text>
+
+        <!-- Roster → Inbox/Outbox bus (one collective arrow) -->
+        <line x1="600" y1="450" x2="600" y2="535" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arrowhead-orange)"/>
+        <text x="610" y="495" fill="#fb923c" font-size="9">files (atomic write)</text>
+
+        <!-- Roster ← Inbox bus (preload pulls back) -->
+        <line x1="540" y1="535" x2="540" y2="450" stroke="#fb923c" stroke-width="1" stroke-dasharray="3,3" marker-end="url(#arrowhead-orange)"/>
+        <text x="425" y="495" fill="#94a3b8" font-size="8">preload injects</text>
+
+        <!-- Inbox/Outbox bus → Wiki, DB, Vault -->
+        <line x1="200" y1="585" x2="200" y2="638" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead-violet)"/>
+        <line x1="560" y1="585" x2="560" y2="638" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead-violet)"/>
+        <line x1="900" y1="585" x2="900" y2="638" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead-violet)"/>
+
+        <!-- Operator-Queue lives inside Wiki — annotation -->
+
+        <!-- Datasette ← DB (read-only) -->
+        <line x1="680" y1="668" x2="1010" y2="668" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrowhead-amber)"/>
+        <text x="845" y="660" fill="#94a3b8" font-size="9" text-anchor="middle">--immutable read</text>
+
+        <!-- Web /db iframe ← Datasette (curve up) -->
+        <path d="M 1100 638 Q 1100 200 1100 178" fill="none" stroke="#fbbf24" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="1110" y="420" fill="#94a3b8" font-size="8">/db iframe</text>
+
+        <!-- Sitemap Builder → Tavily (external) -->
+        <path d="M 1090 410 Q 1100 760 200 760" fill="none" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead-amber)"/>
+        <text x="1115" y="600" fill="#94a3b8" font-size="8">crawl()</text>
+
+        <!-- Roster → LLM Provider (collective) -->
+        <path d="M 600 450 Q 600 720 580 760" fill="none" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead-amber)"/>
+        <text x="635" y="720" fill="#94a3b8" font-size="8">tool calls</text>
+
+        <!-- Archivist → Mistral OCR (optional, hybrid mode) -->
+        <path d="M 870 410 Q 1000 720 950 760" fill="none" stroke="#fbbf24" stroke-width="1" stroke-dasharray="2,3" marker-end="url(#arrowhead-amber)"/>
+        <text x="980" y="720" fill="#94a3b8" font-size="8">optional</text>
+
+        <!-- =========== COMPONENTS =========== -->
+
+        <!-- Operator (top) -->
+        <rect x="500" y="20" width="200" height="60" rx="6" fill="#0f172a"/>
+        <rect x="500" y="20" width="200" height="60" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="600" y="42" fill="white" font-size="13" font-weight="600" text-anchor="middle">Operator</text>
+        <text x="600" y="58" fill="#94a3b8" font-size="9" text-anchor="middle">civic-data journalist (the human)</text>
+        <text x="600" y="72" fill="#94a3b8" font-size="8" text-anchor="middle">browser · terminal</text>
+
+        <!-- Frontend Surfaces row -->
+        <rect x="80" y="118" width="200" height="60" rx="6" fill="#0f172a"/>
+        <rect x="80" y="118" width="200" height="60" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="180" y="139" fill="white" font-size="11" font-weight="600" text-anchor="middle">/chat</text>
+        <text x="180" y="155" fill="#94a3b8" font-size="9" text-anchor="middle">Wiki Q&amp;A + lifecycle ops</text>
+        <text x="180" y="170" fill="#22d3ee" font-size="8" text-anchor="middle">Next.js · streams SSE</text>
+
+        <rect x="320" y="118" width="240" height="60" rx="6" fill="#0f172a"/>
+        <rect x="320" y="118" width="240" height="60" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="440" y="139" fill="white" font-size="11" font-weight="600" text-anchor="middle">Web UI surfaces</text>
+        <text x="440" y="155" fill="#94a3b8" font-size="9" text-anchor="middle">/investigations /operator-queue</text>
+        <text x="440" y="170" fill="#22d3ee" font-size="8" text-anchor="middle">/findings /sitemap /status /setup</text>
+
+        <rect x="600" y="118" width="260" height="60" rx="6" fill="#0f172a"/>
+        <rect x="600" y="118" width="260" height="60" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="730" y="139" fill="white" font-size="11" font-weight="600" text-anchor="middle">/vault /db /briefings</text>
+        <text x="730" y="155" fill="#94a3b8" font-size="9" text-anchor="middle">read-only viewing surfaces</text>
+        <text x="730" y="170" fill="#22d3ee" font-size="8" text-anchor="middle">stable URLs for citations</text>
+
+        <rect x="940" y="118" width="200" height="60" rx="6" fill="#0f172a"/>
+        <rect x="940" y="118" width="200" height="60" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="1040" y="139" fill="white" font-size="11" font-weight="600" text-anchor="middle">centinel-&lt;role&gt;</text>
+        <text x="1040" y="155" fill="#94a3b8" font-size="9" text-anchor="middle">operator's terminal shim</text>
+        <text x="1040" y="170" fill="#22d3ee" font-size="8" text-anchor="middle">hermes --profile &lt;role&gt;</text>
+
+        <!-- Gateway tier -->
+        <rect x="80" y="218" width="200" height="60" rx="6" fill="#0f172a"/>
+        <rect x="80" y="218" width="200" height="60" rx="6" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="180" y="240" fill="white" font-size="11" font-weight="600" text-anchor="middle">Hermes API Server</text>
+        <text x="180" y="256" fill="#94a3b8" font-size="9" text-anchor="middle">OpenAI-compat · :8000</text>
+        <text x="180" y="270" fill="#fb7185" font-size="8" text-anchor="middle">api_server platform · API_KEY</text>
+
+        <rect x="320" y="218" width="240" height="60" rx="6" fill="#0f172a"/>
+        <rect x="320" y="218" width="240" height="60" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="440" y="240" fill="white" font-size="11" font-weight="600" text-anchor="middle">bin/centinel (dispatcher)</text>
+        <text x="440" y="256" fill="#94a3b8" font-size="9" text-anchor="middle">Python CLI · lib/cli.py</text>
+        <text x="440" y="270" fill="#34d399" font-size="8" text-anchor="middle">setup · cron · investigate · queue · watch</text>
+
+        <rect x="700" y="218" width="200" height="60" rx="6" fill="#0f172a"/>
+        <rect x="700" y="218" width="200" height="60" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="800" y="240" fill="white" font-size="11" font-weight="600" text-anchor="middle">Hermes Cron</text>
+        <text x="800" y="256" fill="#94a3b8" font-size="9" text-anchor="middle">scheduler + --script preload</text>
+        <text x="800" y="270" fill="#34d399" font-size="8" text-anchor="middle">profile-isolated jobs</text>
+
+        <!-- ============= AGENT ROSTER BOUNDARY ============= -->
+        <rect x="40" y="290" width="1120" height="160" rx="12" fill="rgba(251, 191, 36, 0.04)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="55" y="306" fill="#fbbf24" font-size="10" font-weight="600">Hermes Agent Roster — profile + skill</text>
+
+        <!-- Agent boxes (6 in a row) -->
+        <rect x="60" y="320" width="170" height="120" rx="6" fill="#0f172a"/>
+        <rect x="60" y="320" width="170" height="120" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="145" y="339" fill="white" font-size="11" font-weight="600" text-anchor="middle">Editor</text>
+        <text x="145" y="356" fill="#94a3b8" font-size="8" text-anchor="middle">profile: default</text>
+        <text x="145" y="368" fill="#34d399" font-size="8" text-anchor="middle">centinel-operator</text>
+        <text x="145" y="386" fill="#94a3b8" font-size="8" text-anchor="middle">— Q&amp;A on wiki</text>
+        <text x="145" y="398" fill="#94a3b8" font-size="8" text-anchor="middle">— calls bin/centinel</text>
+        <text x="145" y="410" fill="#94a3b8" font-size="8" text-anchor="middle">— delegates to specialists</text>
+        <text x="145" y="430" fill="#fb7185" font-size="7" text-anchor="middle">confirms before destructive</text>
+
+        <rect x="245" y="320" width="170" height="120" rx="6" fill="#0f172a"/>
+        <rect x="245" y="320" width="170" height="120" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="330" y="339" fill="white" font-size="11" font-weight="600" text-anchor="middle">Investigator</text>
+        <text x="330" y="356" fill="#94a3b8" font-size="8" text-anchor="middle">profile: investigator</text>
+        <text x="330" y="368" fill="#34d399" font-size="8" text-anchor="middle">civic-investigator</text>
+        <text x="330" y="386" fill="#94a3b8" font-size="8" text-anchor="middle">— crawls .gov seeds</text>
+        <text x="330" y="398" fill="#94a3b8" font-size="8" text-anchor="middle">— extracts entities</text>
+        <text x="330" y="410" fill="#94a3b8" font-size="8" text-anchor="middle">— drafts findings</text>
+        <text x="330" y="430" fill="#fbbf24" font-size="7" text-anchor="middle">cron: investigator-tick + per-slug</text>
+
+        <rect x="430" y="320" width="170" height="120" rx="6" fill="#0f172a"/>
+        <rect x="430" y="320" width="170" height="120" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="515" y="339" fill="white" font-size="11" font-weight="600" text-anchor="middle">Watch Runner</text>
+        <text x="515" y="356" fill="#94a3b8" font-size="8" text-anchor="middle">profile: watch-runner</text>
+        <text x="515" y="368" fill="#34d399" font-size="8" text-anchor="middle">civic-watch-runner</text>
+        <text x="515" y="386" fill="#94a3b8" font-size="8" text-anchor="middle">— evals YAML watches</text>
+        <text x="515" y="398" fill="#94a3b8" font-size="8" text-anchor="middle">— hits → Findings/raw</text>
+        <text x="515" y="410" fill="#94a3b8" font-size="8" text-anchor="middle">— applies tunings</text>
+        <text x="515" y="430" fill="#fbbf24" font-size="7" text-anchor="middle">cron: watch-runner (4h default)</text>
+
+        <rect x="615" y="320" width="170" height="120" rx="6" fill="#0f172a"/>
+        <rect x="615" y="320" width="170" height="120" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="700" y="339" fill="white" font-size="11" font-weight="600" text-anchor="middle">Data Reporter</text>
+        <text x="700" y="356" fill="#94a3b8" font-size="8" text-anchor="middle">profile: data-reporter</text>
+        <text x="700" y="368" fill="#34d399" font-size="8" text-anchor="middle">civic-data-reporter</text>
+        <text x="700" y="386" fill="#94a3b8" font-size="8" text-anchor="middle">— sole DB writer</text>
+        <text x="700" y="398" fill="#94a3b8" font-size="8" text-anchor="middle">— applies entity merges</text>
+        <text x="700" y="410" fill="#94a3b8" font-size="8" text-anchor="middle">— logs methodology</text>
+        <text x="700" y="430" fill="#fbbf24" font-size="7" text-anchor="middle">cron: data-reporter (6h default)</text>
+
+        <rect x="800" y="320" width="170" height="120" rx="6" fill="#0f172a"/>
+        <rect x="800" y="320" width="170" height="120" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="885" y="339" fill="white" font-size="11" font-weight="600" text-anchor="middle">Archivist</text>
+        <text x="885" y="356" fill="#94a3b8" font-size="8" text-anchor="middle">profile: archivist</text>
+        <text x="885" y="368" fill="#34d399" font-size="8" text-anchor="middle">civic-archivist</text>
+        <text x="885" y="386" fill="#94a3b8" font-size="8" text-anchor="middle">— vaults PDFs / HTML</text>
+        <text x="885" y="398" fill="#94a3b8" font-size="8" text-anchor="middle">— sha256 + sidecar</text>
+        <text x="885" y="410" fill="#94a3b8" font-size="8" text-anchor="middle">— OCR routing</text>
+        <text x="885" y="430" fill="#fbbf24" font-size="7" text-anchor="middle">cron: vault-manifest (15m)</text>
+
+        <rect x="985" y="320" width="170" height="120" rx="6" fill="#0f172a"/>
+        <rect x="985" y="320" width="170" height="120" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="1070" y="339" fill="white" font-size="11" font-weight="600" text-anchor="middle">Sitemap Builder</text>
+        <text x="1070" y="356" fill="#94a3b8" font-size="8" text-anchor="middle">profile: default</text>
+        <text x="1070" y="368" fill="#34d399" font-size="8" text-anchor="middle">sitemap-builder</text>
+        <text x="1070" y="386" fill="#94a3b8" font-size="8" text-anchor="middle">— Tavily Crawl</text>
+        <text x="1070" y="398" fill="#94a3b8" font-size="8" text-anchor="middle">— classifies URLs</text>
+        <text x="1070" y="410" fill="#94a3b8" font-size="8" text-anchor="middle">— writes Sitemap/</text>
+        <text x="1070" y="430" fill="#fbbf24" font-size="7" text-anchor="middle">cron: sitemap-lint (Mon 03:00)</text>
+
+        <!-- Inbox/Outbox Message Bus -->
+        <rect x="120" y="535" width="960" height="50" rx="6" fill="#0f172a"/>
+        <rect x="120" y="535" width="960" height="50" rx="6" fill="rgba(251, 146, 60, 0.3)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="600" y="555" fill="white" font-size="11" font-weight="600" text-anchor="middle">Inbox / Outbox / Operator-Queue Bus  (file-based, atomic writes)</text>
+        <text x="600" y="572" fill="#94a3b8" font-size="9" text-anchor="middle">_runtime/inbox/&lt;role&gt;/  ·  _runtime/outbox/&lt;role&gt;/&lt;YYYY-MM&gt;/  ·  _runtime/operator-queue/&lt;bucket&gt;/  ·  _runtime/status/&lt;role&gt;.md</text>
+
+        <!-- Storage tier -->
+        <rect x="80" y="638" width="240" height="100" rx="6" fill="#0f172a"/>
+        <rect x="80" y="638" width="240" height="100" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="200" y="660" fill="white" font-size="11" font-weight="600" text-anchor="middle">Wiki vault</text>
+        <text x="200" y="676" fill="#94a3b8" font-size="8" text-anchor="middle">$CENTINEL_WIKI_PATH</text>
+        <text x="200" y="694" fill="#94a3b8" font-size="8" text-anchor="middle">• Investigations/  • Findings/</text>
+        <text x="200" y="706" fill="#94a3b8" font-size="8" text-anchor="middle">• Entities/  • Sitemap/</text>
+        <text x="200" y="718" fill="#94a3b8" font-size="8" text-anchor="middle">• Briefings/  • _runtime/</text>
+        <text x="200" y="732" fill="#a78bfa" font-size="7" text-anchor="middle">QMD-indexed (BM25 + vec)</text>
+
+        <rect x="440" y="638" width="240" height="100" rx="6" fill="#0f172a"/>
+        <rect x="440" y="638" width="240" height="100" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="560" y="660" fill="white" font-size="11" font-weight="600" text-anchor="middle">SQLite DB</text>
+        <text x="560" y="676" fill="#94a3b8" font-size="8" text-anchor="middle">_data/&lt;city-slug&gt;.db</text>
+        <text x="560" y="694" fill="#94a3b8" font-size="8" text-anchor="middle">• entities  • transactions</text>
+        <text x="560" y="706" fill="#94a3b8" font-size="8" text-anchor="middle">• events  • methodology</text>
+        <text x="560" y="718" fill="#94a3b8" font-size="8" text-anchor="middle">• aliases  • relationships</text>
+        <text x="560" y="732" fill="#fb7185" font-size="7" text-anchor="middle">Data Reporter is sole writer</text>
+
+        <rect x="780" y="638" width="240" height="100" rx="6" fill="#0f172a"/>
+        <rect x="780" y="638" width="240" height="100" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="900" y="660" fill="white" font-size="11" font-weight="600" text-anchor="middle">Vault (immutable)</text>
+        <text x="900" y="676" fill="#94a3b8" font-size="8" text-anchor="middle">Vault/{pdfs,html,screenshots}/</text>
+        <text x="900" y="694" fill="#94a3b8" font-size="8" text-anchor="middle">• raw bytes (sha256-named)</text>
+        <text x="900" y="706" fill="#94a3b8" font-size="8" text-anchor="middle">• sidecar.md per artifact</text>
+        <text x="900" y="718" fill="#94a3b8" font-size="8" text-anchor="middle">• vault-manifest.json</text>
+        <text x="900" y="732" fill="#fb7185" font-size="7" text-anchor="middle">Archivist is sole writer</text>
+
+        <!-- Datasette (cloud) -->
+        <rect x="1040" y="638" width="120" height="100" rx="6" fill="#0f172a"/>
+        <rect x="1040" y="638" width="120" height="100" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="1100" y="660" fill="white" font-size="11" font-weight="600" text-anchor="middle">Datasette</text>
+        <text x="1100" y="676" fill="#94a3b8" font-size="8" text-anchor="middle">:8001</text>
+        <text x="1100" y="694" fill="#94a3b8" font-size="8" text-anchor="middle">read-only</text>
+        <text x="1100" y="706" fill="#94a3b8" font-size="8" text-anchor="middle">SQL browser</text>
+        <text x="1100" y="724" fill="#fbbf24" font-size="7" text-anchor="middle">public-views.sql</text>
+
+        <!-- External services -->
+        <rect x="80" y="760" width="200" height="60" rx="6" fill="#0f172a"/>
+        <rect x="80" y="760" width="200" height="60" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="180" y="781" fill="white" font-size="11" font-weight="600" text-anchor="middle">Tavily Crawl</text>
+        <text x="180" y="797" fill="#94a3b8" font-size="9" text-anchor="middle">tavily-python SDK</text>
+        <text x="180" y="811" fill="#94a3b8" font-size="8" text-anchor="middle">free tier · 1k credits/mo</text>
+
+        <rect x="480" y="760" width="200" height="60" rx="6" fill="#0f172a"/>
+        <rect x="480" y="760" width="200" height="60" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="580" y="781" fill="white" font-size="11" font-weight="600" text-anchor="middle">LLM Provider</text>
+        <text x="580" y="797" fill="#94a3b8" font-size="9" text-anchor="middle">via Hermes (any backend)</text>
+        <text x="580" y="811" fill="#94a3b8" font-size="8" text-anchor="middle">Anthropic / OpenRouter / etc</text>
+
+        <rect x="850" y="760" width="200" height="60" rx="6" fill="#0f172a"/>
+        <rect x="850" y="760" width="200" height="60" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="950" y="781" fill="white" font-size="11" font-weight="600" text-anchor="middle">Mistral OCR</text>
+        <text x="950" y="797" fill="#94a3b8" font-size="9" text-anchor="middle">cloud / hybrid mode</text>
+        <text x="950" y="811" fill="#94a3b8" font-size="8" text-anchor="middle">scanned PDFs only</text>
+
+        <!-- Legend (below all boundaries) -->
+        <rect x="80" y="870" width="1080" height="110" rx="6" fill="rgba(15, 23, 42, 0.6)" stroke="#1e293b" stroke-width="1"/>
+        <text x="100" y="890" fill="white" font-size="10" font-weight="600">Legend</text>
+
+        <rect x="100" y="900" width="14" height="9" rx="2" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1"/>
+        <text x="120" y="908" fill="#94a3b8" font-size="8">Frontend (Web UI)</text>
+
+        <rect x="100" y="918" width="14" height="9" rx="2" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1"/>
+        <text x="120" y="926" fill="#94a3b8" font-size="8">Backend / Agent</text>
+
+        <rect x="100" y="936" width="14" height="9" rx="2" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="120" y="944" fill="#94a3b8" font-size="8">Storage</text>
+
+        <rect x="100" y="954" width="14" height="9" rx="2" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1"/>
+        <text x="120" y="962" fill="#94a3b8" font-size="8">Cloud / Cron / Datasette</text>
+
+        <rect x="280" y="900" width="14" height="9" rx="2" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1"/>
+        <text x="300" y="908" fill="#94a3b8" font-size="8">Auth / Security boundary</text>
+
+        <rect x="280" y="918" width="14" height="9" rx="2" fill="rgba(251, 146, 60, 0.3)" stroke="#fb923c" stroke-width="1"/>
+        <text x="300" y="926" fill="#94a3b8" font-size="8">Message Bus (file-based)</text>
+
+        <rect x="280" y="936" width="14" height="9" rx="2" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+        <text x="300" y="944" fill="#94a3b8" font-size="8">External / Human</text>
+
+        <rect x="280" y="954" width="14" height="9" rx="2" fill="rgba(251, 191, 36, 0.04)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="4,2"/>
+        <text x="300" y="962" fill="#94a3b8" font-size="8">Logical boundary (Roster)</text>
+
+        <line x1="500" y1="906" x2="540" y2="906" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="548" y="909" fill="#94a3b8" font-size="8">Operator action (UI click)</text>
+
+        <line x1="500" y1="924" x2="540" y2="924" stroke="#34d399" stroke-width="1.5"/>
+        <text x="548" y="927" fill="#94a3b8" font-size="8">Process spawn / cron register</text>
+
+        <line x1="500" y1="942" x2="540" y2="942" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="548" y="945" fill="#94a3b8" font-size="8">File drop (inbox / queue)</text>
+
+        <line x1="500" y1="960" x2="540" y2="960" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="548" y="963" fill="#94a3b8" font-size="8">Authenticated API call</text>
+
+        <line x1="780" y1="906" x2="820" y2="906" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="828" y="909" fill="#94a3b8" font-size="8">Read / write durable store</text>
+
+        <line x1="780" y1="924" x2="820" y2="924" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="828" y="927" fill="#94a3b8" font-size="8">Cron tick / external HTTPS</text>
+
+        <line x1="780" y1="942" x2="820" y2="942" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="4,4"/>
+        <text x="828" y="945" fill="#94a3b8" font-size="8">Optional / dashed = external dep</text>
+
+        <line x1="780" y1="960" x2="820" y2="960" stroke="#fb923c" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="828" y="963" fill="#94a3b8" font-size="8">Pre-cron preload (--script inject)</text>
+      </svg>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot cyan"></div>
+          <h3>Operator control planes</h3>
+        </div>
+        <ul>
+          <li>• /chat — agentic Q&amp;A + lifecycle ops via Hermes API</li>
+          <li>• /investigations — create + pause/resume/trigger</li>
+          <li>• /operator-queue — approve/reject/dismiss/snooze</li>
+          <li>• /findings — promote draft → published</li>
+          <li>• centinel-&lt;role&gt; — direct terminal session per profile</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot orange"></div>
+          <h3>Inter-agent message passing</h3>
+        </div>
+        <ul>
+          <li>• All comms via files in _runtime/{inbox,outbox}/</li>
+          <li>• Frontmatter envelope: id, type, from, to, status</li>
+          <li>• Per-cron --script preloads inbox into context</li>
+          <li>• Operator-queue is just inbox for the human</li>
+          <li>• Approvals → web → inbox file → next agent tick</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot violet"></div>
+          <h3>Editorial firewall (writers)</h3>
+        </div>
+        <ul>
+          <li>• Data Reporter — sole DB writer + methodology log</li>
+          <li>• Archivist — sole Vault writer (immutable bytes)</li>
+          <li>• Investigator — drafts only, never published</li>
+          <li>• Watch Runner — Findings/raw OK, narrative = draft</li>
+          <li>• Operator — promotes drafts via /findings</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot rose"></div>
+          <h3>Authority &amp; gates</h3>
+        </div>
+        <ul>
+          <li>• Hermes API key gates X-Hermes-Session-Id</li>
+          <li>• Entity merges require operator approval (via queue)</li>
+          <li>• Watch tunings require operator approval</li>
+          <li>• Editor confirms before destructive CLI ops</li>
+          <li>• Citations mandatory (no source = no claim)</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot amber"></div>
+          <h3>Schedules (defaults, in cron)</h3>
+        </div>
+        <ul>
+          <li>• investigator-tick — every 4h</li>
+          <li>• watch-runner — every 4h</li>
+          <li>• data-reporter — every 6h</li>
+          <li>• vault-manifest (archivist) — every 15m</li>
+          <li>• sitemap-lint — Mon 03:00</li>
+          <li>• briefings — Mon 09:00 · huddle-rollup — daily 18:00</li>
+          <li>• snooze-sweep — daily 06:00</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot emerald"></div>
+          <h3>Web → agent boundaries</h3>
+        </div>
+        <ul>
+          <li>• Web NEVER originates state — only file writes</li>
+          <li>• /investigations create → atomic .md + register cron</li>
+          <li>• /operator-queue approve → drop inbox + flip status</li>
+          <li>• /chat → Hermes API → real agent loop</li>
+          <li>• Lifecycle CLI = bin/centinel via execFile (30s timeout)</li>
+        </ul>
+      </div>
+    </div>
+
+    <p class="footer">
+      Centinel v0.1 · 6-agent civic-investigation roster · file-based message passing · operator-in-the-loop control
+    </p>
+  </div>
+</body>
+</html>

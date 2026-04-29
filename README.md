@@ -12,6 +12,8 @@
 
 **[ABOUT.md](ABOUT.md)** — Architecture of agents. The Editor + four specialists, how they coordinate through the wiki filesystem, the web app, the data layer, and the philosophy that holds it all together.
 
+**[Architecture diagram ↗](https://htmlpreview.github.io/?https://github.com/bennyhodl/centinel/blob/master/assets/centinel-org-architecture.html)** — Live-rendered org chart showing the six-agent roster, file-based message bus, and operator control planes. ([source HTML](assets/centinel-org-architecture.html))
+
 ---
 
 > *"The federal government will... necessarily absorb the state legislatures."*
