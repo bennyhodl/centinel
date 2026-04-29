@@ -216,7 +216,7 @@ if [ -f docker-compose.yml ]; then
         warn "Most likely your user isn't in the 'docker' group. Fix:"
         warn "    sudo usermod -aG docker \$USER && newgrp docker"
         warn "Then re-run: docker compose up -d"
-    elif ! docker compose up -d; then
+    elif ! docker compose up -d --build; then
         warn "docker compose failed to start — see error above."
         warn "Most common cause: required env vars not set in .env"
         warn "(CENTINEL_PASSWORD). Fix .env and re-run: docker compose up -d"
