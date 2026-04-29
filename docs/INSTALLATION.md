@@ -32,6 +32,71 @@ Configure Hermes with a working model first (`hermes setup` or `hermes model`).
 Centinel doesn't pin a provider — anything Hermes supports works. The Editor
 uses whatever the default profile is configured for.
 
+### Hermes API server (required for `/chat`) ✅
+
+Centinel's `/chat` page proxies to Hermes' built-in OpenAI-compatible API
+server (`POST /v1/chat/completions`). The chat client sends only the new
+user message; Hermes owns the session via the `X-Hermes-Session-Id` header.
+
+**One-time Hermes config:**
+
+1. **Enable the api_server platform** in `~/.hermes/config.yaml`:
+
+   ```yaml
+   platforms:
+     # ... whatever else you have ...
+     api_server:
+       enabled: true
+       extra:
+         port: 8000                 # any free port; Centinel defaults to this
+         api_key: <long-random-hex> # required for X-Hermes-Session-Id session continuity
+   ```
+
+   Generate a key with `openssl rand -hex 32`. Same value goes into
+   Centinel's `.env` as `HERMES_API_KEY`.
+
+2. **Pick the toolsets the Centinel chat agent gets** in
+   `platform_toolsets.api_server`:
+
+   ```yaml
+   platform_toolsets:
+     api_server:
+       - terminal       # required — runs bin/centinel and qmd
+       - file           # required — reads wiki files
+       - web            # optional but useful
+       - delegation     # optional
+       - clarify        # optional
+       - skills         # optional but useful
+   ```
+
+3. **Enable the `centinel-operator` skill on the api_server platform:**
+
+   ```bash
+   hermes skills config
+   ```
+
+   Toggle `centinel-operator` to enabled for `api_server`. (The skill is
+   symlinked into `~/.hermes/skills/centinel/` by `./bootstrap` in step 2
+   below.)
+
+4. **Restart the gateway** so the api_server adapter starts:
+
+   ```bash
+   hermes gateway restart
+   ```
+
+5. **Verify it's listening:**
+
+   ```bash
+   curl -s http://localhost:8000/v1/models -H "Authorization: Bearer $HERMES_API_KEY"
+   ```
+
+   Should return JSON with at least one model id.
+
+If the gateway isn't installed as a service yet, run `hermes gateway install`
+once. See [Hermes gateway docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/api-server)
+for full details.
+
 ## Step 1 — Clone
 
 ```bash
@@ -260,10 +325,26 @@ this to run the crawl — get a free key at [tavily.com](https://tavily.com).
 **Step 7 errors with "cron job not found"** — the paused jobs were never
 created. Run `./bin/centinel setup-cron` from a terminal and try Step 7 again.
 
-**The web app loads but `/chat` returns 500** — `HERMES_API_URL` /
-`HERMES_API_KEY` in `.env` aren't pointing at a reachable Hermes endpoint.
-Test with `curl`. If you're running Hermes locally, default is
-`http://localhost:8000/v1`.
+**The web app loads but `/chat` returns 502** — Hermes' api_server platform
+isn't running, or `HERMES_API_URL` / `HERMES_API_KEY` in `.env` are wrong.
+
+1. Verify the upstream:
+   ```bash
+   curl -s http://localhost:8000/v1/models -H "Authorization: Bearer $HERMES_API_KEY"
+   ```
+   If this 401s, the API key in `.env` doesn't match `platforms.api_server.extra.api_key`
+   in `~/.hermes/config.yaml`. If it fails to connect, the api_server platform
+   isn't enabled — re-read the "Hermes API server" section of Prerequisites.
+
+2. Verify the gateway is running:
+   ```bash
+   hermes gateway status
+   ```
+   If `inactive`, run `hermes gateway start` (or `hermes gateway install`
+   first if it's not installed as a service yet).
+
+3. After enabling api_server in config, you must `hermes gateway restart`
+   for the new adapter to bind its port.
 
 **`PromiseWithResolvers` TypeScript errors** — pre-existing tsconfig issue,
 unrelated to functionality. Build still works via Next's bundler.

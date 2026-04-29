@@ -1,6 +1,6 @@
-import { spawn } from "node:child_process";
 import { NextRequest } from "next/server";
 import { z } from "zod";
+import { config } from "@/lib/config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,24 +14,25 @@ const RequestSchema = z.object({
   messages: z.array(MessageSchema).min(1),
 });
 
-const HERMES_BIN = process.env.HERMES_BIN_PATH || "hermes";
-const SKILL_NAME = "centinel-operator";
-// Single, fixed session name. Hermes' --continue handles all multi-turn
-// state — we don't manage session ids per-tab or per-message. Operator
-// can wipe history with `hermes sessions delete centinel-web-chat`.
-const SESSION_NAME = "centinel-web-chat";
+// Stable session id passed via X-Hermes-Session-Id so Hermes loads the
+// session's history server-side. The web client sends only the new
+// user message; Hermes owns multi-turn context.
+const SESSION_ID = "centinel-web-chat";
 
 /**
- * /chat is a thin streaming wrapper around `hermes chat`. Every request
- * resumes the same Hermes session via --continue, so multi-turn context,
- * skill memory, and tool history are all owned by Hermes — not by us.
+ * /chat is a thin streaming proxy to Hermes' OpenAI-compatible API server
+ * (`gateway/platforms/api_server.py` — POST /v1/chat/completions).
  *
  *   1. Take the latest user message.
- *   2. Spawn `hermes chat -q -Q -s centinel-operator --continue centinel-web-chat`.
- *   3. Stream stdout to the browser.
+ *   2. POST to <HERMES_API_URL>/chat/completions with stream=true and
+ *      X-Hermes-Session-Id: centinel-web-chat for session continuity.
+ *   3. Translate the SSE stream from OpenAI's chat-completions format
+ *      to plain text for the browser, extracting `delta.content` chunks.
  *
- * Hermes auto-creates the named session on first run and resumes it on
- * every subsequent run. We don't track ids client-side.
+ * The Hermes API server is responsible for skill loading (controlled by
+ * `platform_toolsets.api_server` in ~/.hermes/config.yaml plus
+ * `hermes skills config` enabling the centinel-operator skill), session
+ * state (per X-Hermes-Session-Id), and tool execution. We just stream.
  */
 export async function POST(req: NextRequest) {
   let body: unknown;
@@ -55,22 +56,36 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "empty_message" }, { status: 400 });
   }
 
-  const args = [
-    "chat",
-    "-q",
-    userQuery,
-    "-Q", // quiet: suppress banner/spinner/tool previews
-    "-s",
-    SKILL_NAME,
-    "--continue",
-    SESSION_NAME,
-  ];
+  const baseURL = config.hermesApiUrl();
+  const apiKey = config.hermesApiKey();
+  if (!baseURL) {
+    return Response.json(
+      { error: "server_misconfigured", detail: "HERMES_API_URL is not configured" },
+      { status: 500 },
+    );
+  }
 
-  let child: ReturnType<typeof spawn>;
+  const url = baseURL.replace(/\/$/, "") + "/chat/completions";
+  // We send only the new user message — the Hermes session has the
+  // prior turns. The model field is informational; Hermes routes to
+  // whatever the api_server platform is configured for.
+  const payload = {
+    model: process.env.HERMES_MODEL ?? "hermes-default",
+    messages: [{ role: "user", content: userQuery }],
+    stream: true,
+  };
+
+  let upstream: Response;
   try {
-    child = spawn(HERMES_BIN, args, {
-      env: { ...process.env },
-      stdio: ["ignore", "pipe", "pipe"],
+    upstream = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey || "missing"}`,
+        "X-Hermes-Session-Id": SESSION_ID,
+      },
+      body: JSON.stringify(payload),
+      signal: req.signal,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -80,60 +95,92 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  if (!upstream.ok || !upstream.body) {
+    let detail = `HTTP ${upstream.status}`;
+    try {
+      const text = await upstream.text();
+      detail = text.slice(0, 1000) || detail;
+    } catch {
+      /* ignore */
+    }
+    return Response.json(
+      { error: "hermes_error", detail },
+      { status: 502 },
+    );
+  }
+
   const encoder = new TextEncoder();
-  const abort = req.signal;
+  const decoder = new TextDecoder();
 
   const readable = new ReadableStream<Uint8Array>({
-    start(controller) {
+    async start(controller) {
       let closed = false;
-      const safeEnqueue = (chunk: Uint8Array) => {
-        if (closed) return;
-        try {
-          controller.enqueue(chunk);
-        } catch {
-          // already closed
-        }
-      };
+      const reader = upstream.body!.getReader();
+      let buffer = "";
+
       const closeOnce = () => {
         if (closed) return;
         closed = true;
         try {
           controller.close();
         } catch {
-          // already closed
+          /* already closed */
         }
       };
 
-      child.stdout?.on("data", (chunk: Buffer) => {
-        safeEnqueue(chunk);
-      });
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
 
-      child.stderr?.on("data", (chunk: Buffer) => {
-        const text = chunk.toString("utf-8");
-        if (text.trim()) {
-          safeEnqueue(encoder.encode(`\n\n_[hermes stderr: ${text.trim()}]_`));
+          // SSE frames are separated by blank lines.
+          let sep: number;
+          while ((sep = buffer.indexOf("\n\n")) !== -1) {
+            const frame = buffer.slice(0, sep);
+            buffer = buffer.slice(sep + 2);
+
+            // Each frame may have multiple `data: ...` lines. We
+            // concatenate the data payloads per the SSE spec.
+            const dataLines = frame
+              .split(/\r?\n/)
+              .filter((l) => l.startsWith("data:"))
+              .map((l) => l.slice(5).trimStart());
+            if (dataLines.length === 0) continue;
+
+            const dataPayload = dataLines.join("\n");
+            if (dataPayload === "[DONE]") {
+              closeOnce();
+              return;
+            }
+
+            try {
+              const parsed = JSON.parse(dataPayload) as {
+                choices?: { delta?: { content?: string | null } }[];
+              };
+              const delta = parsed.choices?.[0]?.delta?.content;
+              if (delta) {
+                controller.enqueue(encoder.encode(delta));
+              }
+            } catch {
+              // Malformed frame — skip silently rather than blow up the stream.
+            }
+          }
         }
-      });
-
-      child.on("error", (err: Error) => {
-        safeEnqueue(
-          encoder.encode(`\n\n_[hermes failed to start: ${err.message}]_`),
-        );
-        closeOnce();
-      });
-
-      child.on("close", () => {
-        closeOnce();
-      });
-
-      abort.addEventListener("abort", () => {
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // noop
+      } catch (e) {
+        if (!closed) {
+          const msg = e instanceof Error ? e.message : String(e);
+          try {
+            controller.enqueue(
+              encoder.encode(`\n\n_[stream error: ${msg}]_`),
+            );
+          } catch {
+            /* ignore */
+          }
         }
+      } finally {
         closeOnce();
-      });
+      }
     },
   });
 
