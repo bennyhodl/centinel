@@ -1,8 +1,9 @@
 """Tavily Crawl wrapper for Centinel's sitemap-builder skill.
 
-Calls Tavily's /crawl endpoint and emits JSON the agent can parse line-by-line.
-The agent is responsible for higher-level decisions (mode, paging across multiple
-crawl calls for very large cities, classification of returned URLs).
+Uses the official `tavily-python` SDK (TavilyClient.crawl). Emits JSON the agent
+can parse line-by-line. The agent is responsible for higher-level decisions
+(mode, paging across multiple crawl calls for very large cities, classification
+of returned URLs).
 
 Why this lives in the skill rather than as a Hermes built-in:
     Tavily is operator-supplied (not bundled), and the crawl call shape is
@@ -22,7 +23,7 @@ Usage:
         --url https://www.tampa.gov \\
         --max-depth 3 --max-breadth 50 --limit 500 \\
         --select-domains '^(www\\.)?tampa\\.gov$' \\
-        --exclude-paths '/calendar/print' '/search\\\\?'
+        --exclude-paths '/calendar/print' '/search\\?'
 
     # With instructions (costs 2x; only for focused passes):
     python3 crawl.py \\
@@ -44,13 +45,10 @@ import sys
 from typing import Any
 
 try:
-    import requests
+    from tavily import TavilyClient
 except ImportError:
-    print("ERROR: `requests` not installed. pip install requests", file=sys.stderr)
+    print("ERROR: `tavily-python` not installed. pip install tavily-python", file=sys.stderr)
     sys.exit(2)
-
-
-TAVILY_ENDPOINT = "https://api.tavily.com/crawl"
 
 
 def main() -> int:
@@ -87,8 +85,9 @@ def main() -> int:
         print("  export TAVILY_API_KEY=tvly-...", file=sys.stderr)
         return 2
 
-    body: dict[str, Any] = {
-        "url": args.url,
+    client = TavilyClient(api_key=api_key)
+
+    kwargs: dict[str, Any] = {
         "max_depth": args.max_depth,
         "max_breadth": args.max_breadth,
         "limit": args.limit,
@@ -101,8 +100,8 @@ def main() -> int:
         "include_usage": True,
     }
     if args.instructions:
-        body["instructions"] = args.instructions
-        body["chunks_per_source"] = args.chunks_per_source
+        kwargs["instructions"] = args.instructions
+        kwargs["chunks_per_source"] = args.chunks_per_source
     for opt, key in [
         (args.select_paths, "select_paths"),
         (args.select_domains, "select_domains"),
@@ -110,30 +109,20 @@ def main() -> int:
         (args.exclude_domains, "exclude_domains"),
     ]:
         if opt:
-            body[key] = opt
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+            kwargs[key] = opt
 
     try:
-        r = requests.post(TAVILY_ENDPOINT, json=body, headers=headers, timeout=args.timeout + 30)
-    except requests.RequestException as e:
-        print(f"ERROR: Tavily request failed: {e}", file=sys.stderr)
+        payload = client.crawl(args.url, **kwargs)
+    except Exception as e:  # SDK raises various exceptions; surface uniformly
+        msg = str(e)
+        if "401" in msg or "unauthorized" in msg.lower():
+            print("ERROR: Tavily 401 unauthorized — check TAVILY_API_KEY", file=sys.stderr)
+        elif "429" in msg:
+            print("ERROR: Tavily 429 rate limit — retry later", file=sys.stderr)
+        else:
+            print(f"ERROR: Tavily crawl failed: {e}", file=sys.stderr)
         return 1
 
-    if r.status_code == 401:
-        print("ERROR: Tavily 401 unauthorized — check TAVILY_API_KEY", file=sys.stderr)
-        return 1
-    if r.status_code == 429:
-        print("ERROR: Tavily 429 rate limit — retry later", file=sys.stderr)
-        return 1
-    if r.status_code >= 400:
-        print(f"ERROR: Tavily {r.status_code}: {r.text[:500]}", file=sys.stderr)
-        return 1
-
-    payload = r.json()
     for entry in payload.get("results", []):
         print(json.dumps(entry, ensure_ascii=False))
     meta = {
