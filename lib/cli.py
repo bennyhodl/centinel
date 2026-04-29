@@ -260,15 +260,16 @@ def cmd_bootstrap_sitemap(args: argparse.Namespace) -> int:
     """Wizard Step 5. Run the sitemap-builder skill in bootstrap mode.
 
     Calls Hermes' HTTP API (not the `hermes` binary) so this works from
-    inside the web container without mounting the host venv. Logs stream
-    to disk so the web app can tail via SSE.
+    inside the web container without mounting the host venv.
+
+    Streams output to stdout — the web app captures stdout/stderr into
+    the bootstrap log file it opened, and tails that file via SSE. The
+    dispatcher must NOT open its own log file, or it would overwrite
+    the web app's handle and break the live tail.
     """
     config = cfg.load()
     domain = args.domain or config.city.domain
     wiki = config.wiki_path
-
-    log_path = config.runtime_dir / "logs" / "bootstrap-sitemap.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
 
     prompt = (
         f"Bootstrap mode: build the full sitemap for {domain}.\n"
@@ -280,16 +281,14 @@ def cmd_bootstrap_sitemap(args: argparse.Namespace) -> int:
         f"(or just `centinel <subcommand>` if the repo's bin/ is on PATH)."
     )
 
-    _info(f"Logging to {log_path}")
-    with log_path.open("w") as logf:
-        rc = _hermes_chat_stream(
-            prompt=prompt,
-            skills=["sitemap-builder"],
-            log=logf,
-            extra_env_hint={"CENTINEL_WIKI_PATH": str(wiki)},
-        )
+    rc = _hermes_chat_stream(
+        prompt=prompt,
+        skills=["sitemap-builder"],
+        log=sys.stdout,
+        extra_env_hint={"CENTINEL_WIKI_PATH": str(wiki)},
+    )
     if rc != 0:
-        _err(f"sitemap-builder exited with {rc}; see {log_path}")
+        _err(f"sitemap-builder exited with {rc}")
         return rc
     _ok(f"Sitemap bootstrap complete for {domain}")
     return 0
