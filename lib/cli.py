@@ -280,11 +280,43 @@ def cmd_cron_list(args: argparse.Namespace) -> int:
     return 0
 
 
+# Map the skill's friendly schedule words to actual cron expressions.
+# `manual` means no cron at all — operator triggers via inbox only.
+SCHEDULE_WORD_TO_CRON: dict[str, str] = {
+    "daily":   "0 2 * * *",    # 02:00 every day
+    "weekly":  "0 2 * * 1",    # Monday 02:00
+    "monthly": "0 2 1 * *",    # 1st of month 02:00
+}
+
+
+def _resolve_schedule(raw: str | None) -> str | None:
+    """Translate `daily|weekly|monthly|manual` to a cron expression.
+
+    Returns:
+        cron expression string, or None if `manual` (no cron should be registered),
+        or the raw value if it looks like a cron expression already (contains spaces).
+    """
+    if not raw:
+        return SCHEDULE_WORD_TO_CRON["daily"]
+    word = raw.strip().lower()
+    if word == "manual":
+        return None
+    if word in SCHEDULE_WORD_TO_CRON:
+        return SCHEDULE_WORD_TO_CRON[word]
+    # Assume it's already a cron expression (e.g. "0 4 * * *").
+    if " " in raw:
+        return raw
+    # Unknown word — fall back to daily and warn.
+    _info(f"unknown schedule word '{raw}', defaulting to daily (0 2 * * *)")
+    return SCHEDULE_WORD_TO_CRON["daily"]
+
+
 def cmd_investigate_register(args: argparse.Namespace) -> int:
     """Register a per-investigation cron job in the investigator profile.
 
     Reads `<wiki>/Investigations/<slug>.md` frontmatter for `schedule:` field.
-    Falls back to `0 2 * * *` (daily 02:00) if not specified.
+    Schedule words (`daily | weekly | monthly | manual`) translate to cron
+    expressions; `manual` skips registration entirely.
     """
     config = cfg.load()
     hermes = _hermes_bin()
@@ -295,7 +327,11 @@ def cmd_investigate_register(args: argparse.Namespace) -> int:
         _err(f"Investigation file not found: {inv_path}")
         return 1
 
-    schedule = _parse_frontmatter_field(inv_path, "schedule") or "0 2 * * *"
+    raw_schedule = _parse_frontmatter_field(inv_path, "schedule")
+    schedule = _resolve_schedule(raw_schedule)
+    if schedule is None:
+        _ok(f"Schedule is 'manual' for {slug} — no cron registered (operator triggers only)")
+        return 0
 
     name = _job_name("investigation", slug=slug)
     prompt = (

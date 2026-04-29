@@ -2,6 +2,7 @@ import Link from "next/link";
 import { listInvestigations } from "@/lib/investigations";
 import { EmptyState } from "@/components/EmptyState";
 import { Pill, statusTone } from "@/components/Pill";
+import { NewInvestigationForm } from "./_components/NewInvestigationForm";
 
 export const dynamic = "force-dynamic";
 
@@ -19,29 +20,16 @@ export default async function InvestigationsPage() {
         </p>
       </header>
 
-      <div className="flex justify-end mb-4">
-        <Link
-          href="/chat"
-          className="border border-primary/40 bg-primary/5 px-3 py-1.5 text-sm text-primary transition hover:bg-primary/10 font-smallcaps tracking-wider"
-          title="Editor registers new investigations from the chat surface."
-        >
-          + New Investigation
-        </Link>
-      </div>
+      <NewInvestigationForm />
 
       {items.length === 0 ? (
         <EmptyState title="No investigations yet">
           <p>
-            Investigations are persistent sessions registered by the Editor.
-            Launch one from{" "}
-            <Link href="/chat" className="text-primary hover:underline">
-              the Editor&apos;s Desk
-            </Link>{" "}
-            or via:
+            Click <strong>+ New Investigation</strong> above to launch your
+            first one. Each investigation is a markdown file in{" "}
+            <code>Investigations/</code> plus a registered cron job — the
+            Investigator agent picks it up on its next tick.
           </p>
-          <pre className="mx-auto mt-4 overflow-auto border border-border bg-secondary p-3 text-left font-mono text-xs text-foreground/80">
-            centinel-investigator "&lt;prompt&gt;"
-          </pre>
         </EmptyState>
       ) : (
         <ul className="divide-y divide-border">
