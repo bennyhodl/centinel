@@ -210,7 +210,12 @@ esac
 
 if [ -f docker-compose.yml ]; then
     info "Starting docker services (web + datasette)"
-    docker compose up -d 2>/dev/null || warn "docker compose not yet wired — skipping"
+    # Don't 2>/dev/null the real error — operators need to see why it failed.
+    if ! docker compose up -d; then
+        warn "docker compose failed to start — most common cause: required env"
+        warn "vars not set in .env (CENTINEL_PASSWORD). Fix .env and re-run:"
+        warn "    docker compose up -d"
+    fi
 fi
 
 cat <<EOF
