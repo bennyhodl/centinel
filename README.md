@@ -2,6 +2,14 @@
 
 *A civic transparency platform — built on the warnings of a Pennsylvania watchman.*
 
+---
+
+**[docs/INSTALLATION.md](docs/INSTALLATION.md)** — How to get started. Fresh-clone walkthrough from `git clone` to your first investigation, with honest current-state status (what's wired, what's still spec).
+
+**[ABOUT.md](ABOUT.md)** — Architecture of agents. The Editor + four specialists, how they coordinate through the wiki filesystem, the web app, the data layer, and the philosophy that holds it all together.
+
+---
+
 > *"The federal government will... necessarily absorb the state legislatures."*
 > — Centinel, 1787
 
@@ -30,9 +38,6 @@ Centinel is a self-hosted civic transparency platform built on three principles 
 - **Never trust memory.** Agents cannot answer from training or recall. Before every question, they run a fresh search across the wiki — no exception, no shortcut. The watchman does not say *"I remember."* He says *"I have read it again, and here is the passage."*
 
 - **Predict the specific abuse.** Watches are not abstract concerns. They are concrete predictions — "no-bid awards above $50K," "donors who win contracts within 90 days," "ordinances passed without a vote." Bryan did not warn that *something* would go wrong. He named the way it would go wrong, and he was right. So do these.
-
-> 📖 **[ABOUT.md](ABOUT.md)** — what's inside. The agent stack, the web app, the architecture.
-> 🚀 **[docs/INSTALLATION.md](docs/INSTALLATION.md)** — fresh-clone walkthrough → first investigation.
 
 Bryan lost the immediate fight. Pennsylvania ratified the Constitution in December 1787. But the pressure he and his fellow dissenters generated forced the **Bill of Rights** into existence — protections the powerful had not wanted to grant.
 
