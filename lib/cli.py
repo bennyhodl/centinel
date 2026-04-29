@@ -23,8 +23,10 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, TextIO
 
 from . import config as cfg
 
@@ -160,10 +162,106 @@ def _cron_jobs() -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _hermes_api_url() -> str:
+    """Return the Hermes OpenAI-compatible base URL.
+
+    Honors HERMES_API_URL (set by docker-compose to host.docker.internal:8000/v1
+    when running in a container) and falls back to localhost.
+    """
+    return os.environ.get("HERMES_API_URL", "http://localhost:8000/v1").rstrip("/")
+
+
+def _hermes_api_key() -> str | None:
+    return os.environ.get("HERMES_API_KEY") or None
+
+
+def _hermes_chat_stream(
+    *,
+    prompt: str,
+    skills: list[str],
+    log: TextIO,
+    extra_env_hint: dict[str, str] | None = None,
+) -> int:
+    """POST a chat completion request to Hermes' OpenAI-compatible API and stream
+    the response into `log` line by line.
+
+    Returns 0 on success, non-zero on transport/HTTP error. The remote agent
+    runs in its own session — env hints (e.g. CENTINEL_WIKI_PATH) are encoded
+    into the prompt because we can't push env vars across the API boundary.
+    """
+    if extra_env_hint:
+        hints = "\n".join(f"- {k}={v}" for k, v in extra_env_hint.items())
+        prompt = f"{prompt}\n\nEnvironment hints (use these as if exported):\n{hints}"
+
+    body = {
+        "model": os.environ.get("HERMES_MODEL", "hermes-agent"),
+        "stream": True,
+        "messages": [{"role": "user", "content": prompt}],
+        # Hermes-specific extension: load these skills into the session.
+        "skills": skills,
+    }
+    headers = {"Content-Type": "application/json"}
+    key = _hermes_api_key()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+
+    url = f"{_hermes_api_url()}/chat/completions"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    log.write(f"→ POST {url}\n→ skills: {', '.join(skills)}\n\n")
+    log.flush()
+
+    try:
+        with urllib.request.urlopen(req, timeout=None) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8", errors="replace")
+                if not line.startswith("data:"):
+                    continue
+                payload = line[len("data:"):].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    log.write(payload + "\n")
+                    log.flush()
+                    continue
+                # OpenAI delta shape: choices[0].delta.content
+                for choice in chunk.get("choices", []) or []:
+                    delta = choice.get("delta") or {}
+                    content = delta.get("content")
+                    if content:
+                        log.write(content)
+                        log.flush()
+            log.write("\n")
+            log.flush()
+        return 0
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        log.write(f"\n❌ HTTP {e.code} {e.reason}\n{body}\n")
+        log.flush()
+        return e.code or 1
+    except urllib.error.URLError as e:
+        log.write(f"\n❌ Cannot reach Hermes API at {url}: {e.reason}\n")
+        log.write(
+            "   Make sure the gateway is running and API_SERVER_ENABLED=true,\n"
+            "   API_SERVER_PORT matches HERMES_API_URL, API_SERVER_KEY matches\n"
+            "   HERMES_API_KEY in .env.\n"
+        )
+        log.flush()
+        return 1
+
+
 def cmd_bootstrap_sitemap(args: argparse.Namespace) -> int:
     """Wizard Step 5. Run the sitemap-builder skill in bootstrap mode.
 
-    Sync, log-streaming. The web app tails the log file via SSE.
+    Calls Hermes' HTTP API (not the `hermes` binary) so this works from
+    inside the web container without mounting the host venv. Logs stream
+    to disk so the web app can tail via SSE.
     """
     config = cfg.load()
     domain = args.domain or config.city.domain
@@ -173,26 +271,26 @@ def cmd_bootstrap_sitemap(args: argparse.Namespace) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     prompt = (
-        f"Bootstrap mode: build the full sitemap for {domain}. "
-        f"Write outputs to {wiki}/Sitemap/ (index.md + sitemap.json). "
-        f"Resolve the wiki via $CENTINEL_WIKI_PATH={wiki}."
+        f"Bootstrap mode: build the full sitemap for {domain}.\n"
+        f"Write outputs to {wiki}/Sitemap/ (index.md + sitemap.json).\n"
+        f"Resolve the wiki via $CENTINEL_WIKI_PATH={wiki}.\n"
+        f"\n"
+        f"Use the sitemap-builder skill. When you need to invoke the centinel\n"
+        f"dispatcher CLI, run `{Path(__file__).resolve().parent.parent}/bin/centinel <subcommand>`\n"
+        f"(or just `centinel <subcommand>` if the repo's bin/ is on PATH)."
     )
-    cmd = [
-        _hermes_bin(),
-        "chat",
-        "--quiet",
-        "--skills", "sitemap-builder",
-        "--query", prompt,
-    ]
-    env = os.environ.copy()
-    env["CENTINEL_WIKI_PATH"] = str(wiki)
 
     _info(f"Logging to {log_path}")
     with log_path.open("w") as logf:
-        proc = subprocess.run(cmd, env=env, stdout=logf, stderr=subprocess.STDOUT)
-    if proc.returncode != 0:
-        _err(f"sitemap-builder exited with {proc.returncode}; see {log_path}")
-        return proc.returncode
+        rc = _hermes_chat_stream(
+            prompt=prompt,
+            skills=["sitemap-builder"],
+            log=logf,
+            extra_env_hint={"CENTINEL_WIKI_PATH": str(wiki)},
+        )
+    if rc != 0:
+        _err(f"sitemap-builder exited with {rc}; see {log_path}")
+        return rc
     _ok(f"Sitemap bootstrap complete for {domain}")
     return 0
 
