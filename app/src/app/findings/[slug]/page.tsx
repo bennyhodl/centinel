@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { findFindingAcrossStacks } from "@/lib/findings";
 import MarkdownView from "@/components/MarkdownView";
 import { Pill, statusTone } from "@/components/Pill";
+import { PromoteButton } from "../_components/PromoteButton";
 
 export const dynamic = "force-dynamic";
 
@@ -49,11 +50,14 @@ export default async function FindingDetailPage({
       </header>
 
       {isDraft && (
-        <div className="border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
-          <strong className="font-smallcaps tracking-wider text-amber-700">
-            Draft &mdash;
-          </strong>{" "}
-          not yet reviewed by editor or counsel. Do not cite.
+        <div className="space-y-3 border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+          <div>
+            <strong className="font-smallcaps tracking-wider text-amber-700">
+              Draft &mdash;
+            </strong>{" "}
+            not yet reviewed by editor or counsel. Do not cite.
+          </div>
+          <PromoteButton slug={slug} />
         </div>
       )}
 
