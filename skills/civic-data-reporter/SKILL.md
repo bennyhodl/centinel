@@ -80,6 +80,7 @@ For each message in `<wiki>/_runtime/inbox/data-reporter/*.md` sorted by priorit
 Parse YAML frontmatter. The `type` field disambiguates:
 
 - `type: entity-merge-candidate` (sender: `investigator`) → §B
+- `type: entity-merge-resolution` (sender: `operator`, via web app) → §B'
 - `type: discrepancy-flag` (sender: `archivist`) → §C
 - `type: operator-query` (sender: `editor` or operator) → §D
 - `type: upsert-entity` / `upsert-transaction` / `upsert-relationship` (any sender, inline path) → process directly using the entity/txn upsert helpers in `init_db.py`-adjacent code; idempotent via slug + source_vault_path; write a methodology row only when the upsert is non-trivial (e.g., creates a new entity) for traceability.
@@ -94,6 +95,42 @@ You:
 1. Recompute the similarity using `scripts/normalize_name.py` for both names → token overlap + Levenshtein on canonical forms (rules in `references/name-normalization.md`).
 2. **Never auto-merge.** Always drop into `<wiki>/_runtime/operator-queue/entity-merges/<YYYY-MM-DD>-<sha8>.md` with frontmatter `id, type: entity-merge, from: data-reporter, status: open, references: { entities: [<id_a>, <id_b>], confidence: <0.0–1.0> }` and a body listing both rows verbatim, the disambiguating signals (same address? same EIN? overlapping transactions?), and the three options (confirm / reject / defer). Even a 0.99 score for an organization waits for the operator — auto-merge is the failure mode that destroys evidentiary integrity.
 3. Reply to Investigator on the outbox with `status: queued-for-operator, queue_path: <...>`.
+
+### B'. Entity merge resolution (operator-approved, web-app origin)
+
+When the operator clicks **Approve** on an entity-merge item in the `/operator-queue` web view, the web app drops a directive into your inbox:
+
+- `type: entity-merge-resolution`
+- `from: operator`
+- `to: data-reporter`
+- `references.operator_queue: _runtime/operator-queue/entity-merges/<slug>.md`
+- `correlation_id: <queue item id>`
+- Body: directive text + an optional `## Operator note` section + a pointer to the queue item
+
+This is the **only** message that authorizes an actual DB merge. (Investigator and your own §B never trigger merges — they only flag candidates.) On receipt:
+
+1. **Open the referenced queue item.** Read `references.operator_queue` from the directive frontmatter, then read that queue file. Its frontmatter `references.entities` lists the two slugs/IDs to merge. Body lists the disambiguating signals already presented to the operator. (`references.entities` may also be a structured object with `from` and `into` keys — prefer the `into` slug as the canonical target if present; otherwise pick the lower-confidence slug as the source and the higher-confidence as the target.)
+
+2. **Verify both rows still exist** in `entities`. If either has been deleted/merged since the candidate was queued, abort with a methodology note explaining the race and reply on outbox with `status: skipped-stale`. Do not invent.
+
+3. **Perform the merge** as a single SQLite transaction:
+   - Pick `target` = canonical slug (higher confidence; ties → lower ID).
+   - Pick `source` = the other slug.
+   - For every row referencing `source.id` in `transactions`, `events`, `relationships`, `aliases`, etc., update the FK to `target.id`.
+   - Insert an `aliases` row recording `source.canonical_name` as a former alias of `target`.
+   - Set `source.merged_into_id = target.id` and `source.confidence = 0.0` — **do not delete the source row**, evidentiary integrity requires the merge to be reversible from the DB alone.
+   - Bump `target.confidence` to `0.95` (operator-confirmed, per the calibration ladder) if it isn't already higher.
+   - Commit.
+
+4. **Write a methodology row** with `query_label = "entity-merge-<source_slug>-into-<target_slug>"`, `sql` = the merge transaction SQL verbatim, `asked_by = operator`, `notes` = the operator's `## Operator note` (if present) plus the `correlation_id`.
+
+5. **Flip the queue item** at `references.operator_queue` from `status: approved` to `status: complete`. Stamp `completed_at` and `merged_into_id`. Atomic write (`*.tmp` → rename).
+
+6. **Reply on outbox** at `<wiki>/_runtime/outbox/data-reporter/<YYYY-MM>/<filename>.md` with `correlation_id`, the methodology id (`M-<id>`), the resulting `target_slug`, and a one-line summary suitable for the activity feed.
+
+7. **Move the inbox directive** to `<wiki>/_runtime/outbox/operator/<YYYY-MM>/` with `status: done`.
+
+If the operator picks **Reject** or **Snooze** in the web app, no inbox directive is sent — the queue item's status alone changes. You take no action; on your next tick you simply observe the new status and skip the candidate. There is nothing to drain.
 
 ### C. Discrepancy review
 
@@ -174,7 +211,7 @@ The public Datasette views (`<wiki>/_data/public-views.sql`, see `references/pub
 
 ## Inbox / outbox / status
 
-- **Inbox** — `<wiki>/_runtime/inbox/data-reporter/*.md`. Senders: `investigator` (merge candidates, upserts), `archivist` (discrepancies), `editor` (operator queries), `watch-runner` (criteria queries).
+- **Inbox** — `<wiki>/_runtime/inbox/data-reporter/*.md`. Senders: `investigator` (merge candidates, upserts), `archivist` (discrepancies), `editor` (operator queries), `watch-runner` (criteria queries), `operator` (merge resolutions and confidence bumps via the web app).
 - **Outbox** — `<wiki>/_runtime/outbox/data-reporter/<YYYY-MM>/...`, monthly rotation.
 - **Status** — `<wiki>/_runtime/status/data-reporter.md`, single file, overwritten each run; `state: idle | working`, `last_run_at`, `last_run_summary`.
 - **Operator drops** — `<wiki>/_runtime/operator-queue/entity-merges/`, `<wiki>/_runtime/operator-queue/discrepancies/`. You drop, never drain.

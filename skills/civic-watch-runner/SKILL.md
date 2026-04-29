@@ -257,8 +257,43 @@ You read `<wiki>/_runtime/inbox/watch-runner/`. Common message types:
 | `request` (run) | operator (via Editor) | Run the named watch (or all if unspecified) outside the cron schedule. |
 | `notify` (yaml edited) | editor | No-op; the YAML edit is already in git. Acknowledge by moving to outbox. |
 | `tune` | editor | Same as above — Editor edited a YAML; you'll pick it up next run. |
+| `watch-tuning-apply` | operator (via web app `/operator-queue`) | Apply the tuning recommendation referenced in the queue item. See **Watch tuning resolution** below. |
 
 After processing, **move** the file from `inbox/watch-runner/` to `outbox/watch-runner/<YYYY-MM>/` and set `status: done`.
+
+### Watch tuning resolution (operator-approved, web-app origin)
+
+When the operator clicks **Approve** on a watch-tuning item in the `/operator-queue` web view, the web app drops a directive into your inbox:
+
+- `type: watch-tuning-apply`
+- `from: operator`
+- `to: watch-runner`
+- `references.operator_queue: _runtime/operator-queue/watch-tuning/<slug>.md`
+- `correlation_id: <queue item id>`
+- Body: directive text + an optional `## Operator note` section + a pointer to the queue item
+
+This is the **only** message that authorizes you to mutate a watch YAML on behalf of the operator. (Your own auto-pause from §Pitfalls "Noisy watches" only writes `paused: true`; it never edits thresholds, match rules, or schedules.)
+
+On receipt:
+
+1. **Open the referenced queue item.** Read `references.operator_queue`, then read that queue file. Its frontmatter `references.watch_id` names the watch to tune; the body lists the recommended changes (which fields, old vs. new values, why) the operator already saw and approved.
+
+2. **Locate the watch YAML** at `<wiki>/Watches/<watch_id>.yaml`. If it doesn't exist or its frontmatter `paused: true` is set with no recovery plan in the queue item, abort: reply on outbox with `status: skipped-missing` or `status: skipped-paused` and a one-line reason. Do not invent.
+
+3. **Apply the tuning** as a YAML edit, atomic write (`*.tmp` → rename):
+   - Update only the fields listed in the queue item's recommendation. Preserve everything else verbatim — the operator did not authorize blanket changes.
+   - Append a `## Tuning history` block at the bottom of the YAML if not already present, then add an entry: `- <ISO timestamp>: <fields changed> — applied per operator queue <slug> (correlation: <id>)`.
+   - If the queue item recommends `paused: false` (recover a previously broken watch), clear any `status: broken` in the watch's metadata file and reset `consecutive_failures` to 0.
+
+4. **Reset the watch's baseline** if the tuning changed match thresholds, regex, or value bands — old `last_run` deltas are no longer apples-to-apples. Set `last_run: null` and `backfill_requested: true` so the next tick treats it as a fresh watch (per the "Backfill on new watch" pitfall, this normally requires explicit operator request — the tuning approval IS that request).
+
+5. **Flip the queue item** at `references.operator_queue` from `status: approved` to `status: complete`. Stamp `completed_at` and a brief `applied_changes` summary. Atomic write.
+
+6. **Reply on outbox** at `<wiki>/_runtime/outbox/watch-runner/<YYYY-MM>/<filename>.md` with `correlation_id`, the watch id, the field-by-field diff, and a one-line summary suitable for the activity feed.
+
+7. **Move the inbox directive** to `<wiki>/_runtime/outbox/operator/<YYYY-MM>/` with `status: done`.
+
+If the operator picks **Reject** or **Snooze** in the web app, no inbox directive is sent — the queue item's status alone changes. You take no action.
 
 You **send** to:
 
