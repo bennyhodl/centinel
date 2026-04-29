@@ -250,9 +250,53 @@ def cmd_setup_cron(args: argparse.Namespace) -> int:
     register(_job_name("data-reporter"),   s.data_reporter,  "data-reporter", "civic-data-reporter", "Refresh entity DB and methodology log.")
     register(_job_name("vault-manifest"),  s.vault_manifest, "archivist",     "civic-archivist",     "Drain archivist inbox; rebuild vault manifest if stale.")
     register(_job_name("investigator-tick"), s.investigator_tick, "investigator", "civic-investigator", "Drain investigator inbox; run pending tasks.")
+    # Snooze sweep is a dispatcher subcommand, not a Hermes session — runs as
+    # plain shell out via cron. Daily at 06:00 local.
+    _register_dispatcher_cron(name=_job_name("snooze-sweep"), schedule="0 6 * * *",
+                              dispatcher_args=["queue", "sweep-snoozed"])
 
     _ok("Cron jobs registered (paused). Run `centinel cron resume-all` to activate.")
     return 0
+
+
+def _register_dispatcher_cron(*, name: str, schedule: str, dispatcher_args: list[str]) -> None:
+    """Register a cron job that shells out to `bin/centinel <args>`.
+
+    Used for maintenance tasks that don't need an LLM session — Hermes still
+    owns the schedule, but the prompt is just a shell directive the agent
+    follows literally (`run the listed shell command and exit`).
+
+    We use Hermes cron rather than system cron so it shows up in `cron list`,
+    can be paused/resumed via the same controls, and the audit trail lands
+    in the same place.
+    """
+    hermes = _hermes_bin()
+    bin_centinel = REPO_ROOT / "bin" / "centinel"
+    args_str = " ".join(dispatcher_args)
+    existing = subprocess.run(
+        [hermes, "cron", "list", "--all"],
+        check=False, text=True, capture_output=True,
+    ).stdout
+    if name in existing:
+        _info(f"cron {name} already registered, skipping")
+        return
+    prompt = (
+        f"Run this exact shell command and exit, reporting only its stdout/stderr:\n"
+        f"\n"
+        f"```bash\n{bin_centinel} {args_str}\n```\n"
+    )
+    cmd = [
+        hermes,
+        "cron", "create",
+        "--name", name,
+        "--deliver", "local",
+        schedule,
+        prompt,
+    ]
+    _run(cmd, check=False)
+    job_id = _find_cron_job_id(None, name)
+    if job_id:
+        _run([hermes, "cron", "pause", job_id], check=False)
 
 
 def cmd_cron_resume_all(args: argparse.Namespace) -> int:
@@ -385,6 +429,272 @@ def cmd_investigate_register(args: argparse.Namespace) -> int:
     return 0
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-investigation lifecycle: pause / resume / trigger
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _find_cron_job_id(profile: str | None, name: str) -> str | None:
+    """Return the cron job id (first whitespace-delimited token) matching `name`.
+
+    Searches `hermes --profile <p> cron list --all`.
+    """
+    hermes = _hermes_bin()
+    cmd = [hermes]
+    if profile:
+        cmd += ["--profile", profile]
+    cmd += ["cron", "list", "--all"]
+    listing = subprocess.run(cmd, check=False, text=True, capture_output=True).stdout
+    for line in listing.splitlines():
+        if name in line:
+            tokens = line.strip().split()
+            if tokens:
+                return tokens[0]
+    return None
+
+
+def _patch_frontmatter_field(path: Path, field: str, value: str) -> bool:
+    """Atomically set a single top-level frontmatter field on `path`.
+
+    Returns True if the field was updated or added, False if the file has
+    no frontmatter to patch. Body is preserved verbatim.
+    """
+    try:
+        text = path.read_text()
+    except OSError as e:
+        _err(f"cannot read {path}: {e}")
+        return False
+    if not text.startswith("---"):
+        return False
+    end = text.find("\n---", 3)
+    if end < 0:
+        return False
+    block = text[3:end]
+    body = text[end + 4 :]  # skip the closing fence + newline
+    lines = block.splitlines()
+    new_line = f"{field}: {value}"
+    found = False
+    for i, line in enumerate(lines):
+        # Match top-level keys only (no leading whitespace).
+        if line and not line[0].isspace() and ":" in line:
+            key, _, _ = line.partition(":")
+            if key.strip() == field:
+                lines[i] = new_line
+                found = True
+                break
+    if not found:
+        # Append before closing fence.
+        lines.append(new_line)
+    new_text = "---\n" + "\n".join(lines).rstrip("\n") + "\n---" + body
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(new_text)
+    tmp.replace(path)
+    return True
+
+
+def cmd_investigate_pause(args: argparse.Namespace) -> int:
+    """Pause an investigation: flip its file frontmatter + pause its cron job."""
+    config = cfg.load()
+    hermes = _hermes_bin()
+    slug = args.slug
+    inv_path = config.wiki_path / "Investigations" / f"{slug}.md"
+    if not inv_path.exists():
+        _err(f"Investigation file not found: {inv_path}")
+        return 1
+
+    if not _patch_frontmatter_field(inv_path, "status", "paused"):
+        _err(f"Could not patch frontmatter on {inv_path}")
+        return 1
+    _ok(f"Set status: paused on {inv_path}")
+
+    name = _job_name("investigation", slug=slug)
+    job_id = _find_cron_job_id("investigator", name)
+    if not job_id:
+        _info(f"No cron job named {name} (manual schedule, or never registered)")
+        return 0
+    _run([hermes, "--profile", "investigator", "cron", "pause", job_id], check=False)
+    _ok(f"Paused cron {job_id} ({name})")
+    return 0
+
+
+def cmd_investigate_resume(args: argparse.Namespace) -> int:
+    """Resume an investigation: flip its file frontmatter + resume its cron job."""
+    config = cfg.load()
+    hermes = _hermes_bin()
+    slug = args.slug
+    inv_path = config.wiki_path / "Investigations" / f"{slug}.md"
+    if not inv_path.exists():
+        _err(f"Investigation file not found: {inv_path}")
+        return 1
+
+    if not _patch_frontmatter_field(inv_path, "status", "active"):
+        _err(f"Could not patch frontmatter on {inv_path}")
+        return 1
+    _ok(f"Set status: active on {inv_path}")
+
+    name = _job_name("investigation", slug=slug)
+    job_id = _find_cron_job_id("investigator", name)
+    if not job_id:
+        # Schedule may be 'manual' — try to register, which is idempotent.
+        _info(f"No cron job for {slug}, attempting to register from frontmatter schedule")
+        return cmd_investigate_register(argparse.Namespace(slug=slug))
+    _run([hermes, "--profile", "investigator", "cron", "resume", job_id], check=False)
+    _ok(f"Resumed cron {job_id} ({name})")
+    return 0
+
+
+def cmd_investigate_trigger(args: argparse.Namespace) -> int:
+    """Trigger an investigation now by dropping a request into the investigator inbox.
+
+    The investigator's preloaded inbox will surface this on its next tick, which
+    is bounded by the `investigator-tick` cron (defaults to every 4 hours). For
+    foreground 'run right now' use `centinel-investigator -q "<prompt>"` from
+    the terminal — this dispatcher command does NOT spawn a session.
+    """
+    config = cfg.load()
+    slug = args.slug
+    inv_path = config.wiki_path / "Investigations" / f"{slug}.md"
+    if not inv_path.exists():
+        _err(f"Investigation file not found: {inv_path}")
+        return 1
+
+    return _drop_inbox_request(
+        role="investigator",
+        sender="operator",
+        request_body=(
+            f"# Operator trigger: re-run investigation `{slug}`\n\n"
+            f"Operator requested an out-of-schedule run. Read "
+            f"`Investigations/{slug}.md`, resume from its last `## Run log` "
+            f"entry, fan out from seeds, append findings.\n\n"
+            f"## Reply\nUpdate the investigation's run log and write a "
+            f"completion notice to `_runtime/outbox/investigator/<YYYY-MM>/`."
+        ),
+        slug_hint=f"investigation-{slug}",
+    )
+
+
+def cmd_watch_trigger(args: argparse.Namespace) -> int:
+    """Trigger a watch (or all watches) now by dropping a request into the watch-runner inbox."""
+    watch_id = args.watch_id
+    body_target = (
+        f"watch `{watch_id}`" if watch_id else "all watches"
+    )
+    return _drop_inbox_request(
+        role="watch-runner",
+        sender="operator",
+        request_body=(
+            f"# Operator trigger: run {body_target}\n\n"
+            f"Operator requested an out-of-schedule watch run. "
+            f"{'Run only the named watch.' if watch_id else 'Run all configured watches.'}\n\n"
+            f"## Reply\nWrite the run summary to "
+            f"`_runtime/outbox/watch-runner/<YYYY-MM>/`."
+        ),
+        slug_hint=f"watch-{watch_id or 'all'}",
+        extra_fm={"watch_id": watch_id} if watch_id else None,
+    )
+
+
+def _drop_inbox_request(
+    *,
+    role: str,
+    sender: str,
+    request_body: str,
+    slug_hint: str,
+    extra_fm: dict | None = None,
+) -> int:
+    """Drop a `type: request` message into `_runtime/inbox/<role>/<ts>-<sender>-<slug>.md`."""
+    import hashlib
+    from datetime import datetime
+
+    config = cfg.load()
+    inbox_dir = config.inbox_dir / role
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now()
+    ts = now.strftime("%Y-%m-%d-%H%M")
+    short = hashlib.sha256(f"{role}|{sender}|{slug_hint}|{ts}".encode()).hexdigest()[:8]
+    filename = f"{ts}-{sender}-{slug_hint}-{short}.md"
+    out_path = inbox_dir / filename
+
+    fm_lines = [
+        f"id: {ts}-{short}",
+        f"from: {sender}",
+        f"to: {role}",
+        "type: request",
+        "priority: normal",
+        f"created: {now.isoformat()}",
+    ]
+    if extra_fm:
+        for k, v in extra_fm.items():
+            if v is not None:
+                fm_lines.append(f"{k}: {v}")
+
+    text = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + request_body.rstrip() + "\n"
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp.write_text(text)
+    tmp.replace(out_path)
+    _ok(f"Dropped trigger at {out_path.relative_to(config.wiki_path)}")
+    _info(f"{role} will pick this up on its next cron tick.")
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Operator-queue snooze sweep
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def cmd_queue_sweep_snoozed(args: argparse.Namespace) -> int:
+    """Re-open queue items where snooze_until <= today.
+
+    Walks `<wiki>/_runtime/operator-queue/<bucket>/` for `*.md` files with
+    `status: snoozed`. If `snooze_until` is past, flips status back to `open`
+    and stamps `unsnoozed_at`. Atomic write per file.
+    """
+    from datetime import date
+
+    config = cfg.load()
+    queue_root = config.wiki_path / "_runtime" / "operator-queue"
+    if not queue_root.exists():
+        _info("No operator-queue directory — nothing to sweep")
+        return 0
+
+    today = date.today()
+    swept = 0
+    skipped = 0
+
+    for bucket_dir in sorted(queue_root.iterdir()):
+        if not bucket_dir.is_dir():
+            continue
+        for f in sorted(bucket_dir.glob("*.md")):
+            status = _parse_frontmatter_field(f, "status")
+            if status != "snoozed":
+                continue
+            until = _parse_frontmatter_field(f, "snooze_until")
+            if not until:
+                continue
+            try:
+                # Accept YYYY-MM-DD; ignore any time component.
+                until_date = date.fromisoformat(until.split("T", 1)[0])
+            except ValueError:
+                _info(f"Skipping {f.relative_to(config.wiki_path)} — bad snooze_until: {until!r}")
+                skipped += 1
+                continue
+            if until_date > today:
+                continue
+            _patch_frontmatter_field(f, "status", "open")
+            _patch_frontmatter_field(f, "unsnoozed_at", _iso_now())
+            _ok(f"Re-opened {f.relative_to(config.wiki_path)} (snoozed until {until_date})")
+            swept += 1
+
+    _ok(f"Snooze sweep complete: {swept} re-opened, {skipped} skipped")
+    return 0
+
+
+def _iso_now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def _parse_frontmatter_field(path: Path, field: str) -> str | None:
     """Tiny YAML frontmatter parser — pulls `field: value` from the first block."""
     try:
@@ -493,6 +803,28 @@ def build_parser() -> argparse.ArgumentParser:
     inv_reg = inv_sub.add_parser("register", help="Register a per-investigation cron entry")
     inv_reg.add_argument("slug", help="Investigation slug (matches Investigations/<slug>.md)")
     inv_reg.set_defaults(func=cmd_investigate_register)
+    inv_pause = inv_sub.add_parser("pause", help="Pause an investigation (frontmatter + cron)")
+    inv_pause.add_argument("slug")
+    inv_pause.set_defaults(func=cmd_investigate_pause)
+    inv_resume = inv_sub.add_parser("resume", help="Resume an investigation (frontmatter + cron)")
+    inv_resume.add_argument("slug")
+    inv_resume.set_defaults(func=cmd_investigate_resume)
+    inv_trig = inv_sub.add_parser("trigger", help="Drop an inbox request — runs on next investigator tick")
+    inv_trig.add_argument("slug")
+    inv_trig.set_defaults(func=cmd_investigate_trigger)
+
+    watch = sub.add_parser("watch", help="Watch lifecycle commands")
+    watch_sub = watch.add_subparsers(dest="watch_action", required=True)
+    watch_trig = watch_sub.add_parser("trigger", help="Drop an inbox request — runs on next watch-runner tick")
+    watch_trig.add_argument("watch_id", nargs="?", default=None, help="Watch id (omit to run all)")
+    watch_trig.set_defaults(func=cmd_watch_trigger)
+
+    queue = sub.add_parser("queue", help="Operator-queue maintenance")
+    queue_sub = queue.add_subparsers(dest="queue_action", required=True)
+    queue_sub.add_parser(
+        "sweep-snoozed",
+        help="Re-open queue items where snooze_until <= today",
+    ).set_defaults(func=cmd_queue_sweep_snoozed)
 
     sp = sub.add_parser("doctor", help="Health check")
     sp.set_defaults(func=cmd_doctor)

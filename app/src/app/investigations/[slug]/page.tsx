@@ -4,6 +4,7 @@ import { extractFindingLinks, readInvestigation } from "@/lib/investigations";
 import MarkdownView from "@/components/MarkdownView";
 import { Pill, statusTone } from "@/components/Pill";
 import { resolveWikilink } from "@/lib/wiki";
+import { InvestigationControls } from "./_components/InvestigationControls";
 
 export const dynamic = "force-dynamic";
 
@@ -36,6 +37,9 @@ export default async function InvestigationDetailPage({
         <div className="flex flex-wrap items-center gap-3">
           <Pill tone={statusTone(status)}>{status}</Pill>
           <span className="font-mono text-[0.65rem] text-primary">{slug}</span>
+        </div>
+        <div className="mt-3">
+          <InvestigationControls slug={slug} status={status} />
         </div>
       </header>
 
