@@ -11,7 +11,9 @@ EnvironmentFile=-%h/code/centinel/.env
 Environment=NODE_ENV=production
 Environment=NEXT_TELEMETRY_DISABLED=1
 Environment=PORT=3000
-ExecStart=/usr/bin/env pnpm start
+# %%PNPM_PATH%% is replaced at install time by `centinel install-services`
+# with the absolute path to pnpm (resolved from $PATH or nvm/corepack).
+ExecStart=%%PNPM_PATH%% start
 Restart=on-failure
 RestartSec=5
 # Tail logs with: journalctl --user -u centinel-web -f

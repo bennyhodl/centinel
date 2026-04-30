@@ -88,6 +88,32 @@ def _http_ok(url: str, timeout: float = 2.0) -> tuple[bool, Optional[int]]:
         return (False, None)
 
 
+def _resolve_pnpm() -> Optional[str]:
+    """Find an absolute path to pnpm. systemd --user doesn't load the user's
+    shell rc, so corepack/nvm bins aren't on the unit's $PATH. Check common
+    locations and resolve symlinks."""
+    # 1. Plain $PATH (works if user has corepack on system PATH)
+    found = shutil.which("pnpm")
+    if found:
+        return str(Path(found).resolve())
+    # 2. Common nvm/corepack/install locations
+    home = Path.home()
+    candidates = [
+        home / ".local" / "share" / "pnpm" / "pnpm",
+        home / ".nvm" / "current" / "bin" / "pnpm",
+        Path("/usr/local/bin/pnpm"),
+    ]
+    # nvm: ~/.nvm/versions/node/*/bin/pnpm — pick newest
+    nvm_versions = home / ".nvm" / "versions" / "node"
+    if nvm_versions.is_dir():
+        for d in sorted(nvm_versions.iterdir(), reverse=True):
+            candidates.append(d / "bin" / "pnpm")
+    for c in candidates:
+        if c.exists():
+            return str(c.resolve())
+    return None
+
+
 # ─── install-services ─────────────────────────────────────────────────────────
 
 
@@ -109,16 +135,33 @@ def cmd_install_services(args) -> int:
         _warn(f"datasette setup failed: {e}")
         _warn("continuing without datasette — install it later and re-run install-services")
 
-    # 2. Copy units, substituting the actual repo path so it works regardless
-    #    of where the repo lives (~/centinel, ~/code/centinel, /opt/..., etc).
+    # 2. Copy units, substituting placeholders so they work regardless of
+    #    where the repo lives or where pnpm is installed.
     repo_str = str(REPO_ROOT)
+    pnpm_path = _resolve_pnpm()
+    if not pnpm_path:
+        _err("pnpm not found on PATH. Install with: corepack enable && corepack prepare pnpm@latest --activate")
+        return 1
+    _ok(f"resolved pnpm: {pnpm_path}")
+
     for unit in ALL_UNITS:
         src = SYSTEMD_SRC / unit
         dst = SYSTEMD_DST / unit
         if not src.exists():
             _err(f"unit template missing: {src}")
             return 1
-        text = src.read_text().replace("%h/code/centinel", repo_str)
+        text = src.read_text() \
+            .replace("%h/code/centinel", repo_str) \
+            .replace("%%PNPM_PATH%%", pnpm_path)
+        # Prepend pnpm's dir to PATH so node/npm/etc are findable.
+        # systemd allows multiple Environment= lines and merges them.
+        pnpm_dir = str(Path(pnpm_path).parent)
+        if "Environment=PATH=" not in text and "[Service]" in text:
+            text = text.replace(
+                "[Service]\n",
+                f"[Service]\nEnvironment=PATH={pnpm_dir}:/usr/local/bin:/usr/bin:/bin\n",
+                1,
+            )
         dst.write_text(text)
         _ok(f"installed {dst}")
 
