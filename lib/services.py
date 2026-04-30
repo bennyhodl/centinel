@@ -102,6 +102,17 @@ def _resolve_node_dir() -> Optional[str]:
     return None
 
 
+def _resolve_hermes_dir() -> Optional[str]:
+    """Find the directory containing `hermes` so the web app can shell to it."""
+    found = shutil.which("hermes")
+    if found:
+        return str(Path(found).resolve().parent)
+    for cand in (Path.home() / ".local" / "bin" / "hermes", Path("/usr/local/bin/hermes")):
+        if cand.exists():
+            return str(cand.parent)
+    return None
+
+
 def _resolve_pnpm() -> Optional[str]:
     """Find an absolute path to pnpm. systemd --user doesn't load the user's
     shell rc, so corepack/nvm bins aren't on the unit's $PATH. Check common
@@ -167,13 +178,14 @@ def cmd_install_services(args) -> int:
         text = src.read_text() \
             .replace("%h/code/centinel", repo_str) \
             .replace("%%PNPM_PATH%%", pnpm_path)
-        # Build PATH including pnpm dir AND node dir (which may differ when
-        # pnpm comes from corepack vs. node from nvm).
+        # Build PATH including pnpm dir, node dir, AND hermes dir.
         pnpm_dir = str(Path(pnpm_path).parent)
         node_dir = _resolve_node_dir()
+        hermes_dir = _resolve_hermes_dir()
         path_parts = [pnpm_dir]
-        if node_dir and node_dir != pnpm_dir:
-            path_parts.append(node_dir)
+        for d in (node_dir, hermes_dir):
+            if d and d not in path_parts:
+                path_parts.append(d)
         path_parts += ["/usr/local/bin", "/usr/bin", "/bin"]
         unit_path = ":".join(path_parts)
         if "Environment=PATH=" not in text and "[Service]" in text:
