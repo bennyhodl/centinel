@@ -425,6 +425,28 @@ def cmd_restart(args) -> int:
     return 0
 
 
+def cmd_stop(args) -> int:
+    units = _TARGETS.get(args.target, list(ALL_UNITS))
+    for u in units:
+        rc = _systemctl("stop", u, capture=False).returncode
+        if rc != 0:
+            _err(f"stop failed: {u}")
+            return rc
+        _ok(f"stopped {u}")
+    return 0
+
+
+def cmd_start(args) -> int:
+    units = _TARGETS.get(args.target, list(ALL_UNITS))
+    for u in units:
+        rc = _systemctl("start", u, capture=False).returncode
+        if rc != 0:
+            _err(f"start failed: {u}")
+            return rc
+        _ok(f"started {u}")
+    return 0
+
+
 def cmd_logs(args) -> int:
     units = _TARGETS.get(args.target, list(ALL_UNITS))
     cmd = ["journalctl", "--user"]
@@ -475,6 +497,16 @@ def register_subcommands(sub) -> None:
     sp.add_argument("target", nargs="?", default="all",
                     choices=list(_TARGETS), help="which service to restart")
     sp.set_defaults(func=cmd_restart)
+
+    sp = sub.add_parser("stop", help="Stop a service")
+    sp.add_argument("target", nargs="?", default="all",
+                    choices=list(_TARGETS), help="which service to stop")
+    sp.set_defaults(func=cmd_stop)
+
+    sp = sub.add_parser("start", help="Start a service")
+    sp.add_argument("target", nargs="?", default="all",
+                    choices=list(_TARGETS), help="which service to start")
+    sp.set_defaults(func=cmd_start)
 
     sp = sub.add_parser("logs", help="Tail service logs")
     sp.add_argument("target", nargs="?", default="all",
