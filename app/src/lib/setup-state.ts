@@ -110,7 +110,32 @@ export async function writeSetupState(state: SetupState): Promise<void> {
 
 export async function isSetupComplete(): Promise<boolean> {
   const s = await readSetupState();
-  return s.status === "complete";
+  if (s.status === "complete") return true;
+
+  // Self-heal: if the wizard never marked complete but real artifacts exist
+  // on disk (sitemap was bootstrapped via dispatcher CLI, or an earlier
+  // wizard run got cut off after activation), promote to complete and write
+  // it back. This prevents the "/ → /setup" redirect loop on instances that
+  // were bootstrapped outside the wizard flow.
+  try {
+    const { wikiPath } = await import("./config");
+    const sitemapJson = path.join(wikiPath(), "Sitemap", "sitemap.json");
+    const stat = await fs.stat(sitemapJson);
+    if (stat.isFile() && stat.size > 0) {
+      const healed: SetupState = {
+        ...s,
+        status: "complete",
+        step: 7,
+        completedAt: s.completedAt ?? new Date().toISOString(),
+      };
+      // Best-effort write — never block the read path on disk failure.
+      writeSetupState(healed).catch(() => {});
+      return true;
+    }
+  } catch {
+    // sitemap missing → genuinely not set up.
+  }
+  return false;
 }
 
 /**
