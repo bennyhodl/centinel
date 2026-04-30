@@ -175,6 +175,50 @@ def _hermes_api_key() -> str | None:
     return os.environ.get("HERMES_API_KEY") or None
 
 
+def _render_tool_progress(chunk: dict, log: TextIO) -> None:
+    """Pretty-print a `hermes.tool.progress` SSE payload.
+
+    Hermes emits two payload shapes:
+      - {"type": "function_call", "name": <tool>, "arguments": <json-str>, "call_id": ...}
+      - {"type": "function_call_output", "call_id": ..., "output": <str>}
+
+    We render the call as a one-liner with a short args summary, and the
+    output as a fenced block (truncated to a few hundred chars for log
+    legibility — full output is in the agent's session record).
+    """
+    kind = chunk.get("type")
+    if kind == "function_call":
+        name = chunk.get("name") or "tool"
+        raw_args = chunk.get("arguments") or ""
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            # Show first 1–2 string-ish args inline so the log is readable.
+            preview_parts = []
+            for k, v in list(args.items())[:3]:
+                vs = str(v)
+                if len(vs) > 80:
+                    vs = vs[:77] + "..."
+                preview_parts.append(f"{k}={vs}")
+            preview = ", ".join(preview_parts)
+        except (json.JSONDecodeError, AttributeError):
+            preview = (raw_args or "")[:120]
+        log.write(f"\n→ tool: {name}({preview})\n")
+        log.flush()
+    elif kind == "function_call_output":
+        out = chunk.get("output") or ""
+        if not isinstance(out, str):
+            out = json.dumps(out)
+        # Trim runaway outputs but keep enough to be useful.
+        if len(out) > 600:
+            out = out[:600] + f"\n... [{len(out) - 600} more chars]"
+        log.write(f"   ↳ {out}\n")
+        log.flush()
+    else:
+        # Unknown progress shape — dump compactly so we can iterate later.
+        log.write(f"   ⋯ {json.dumps(chunk)[:200]}\n")
+        log.flush()
+
+
 def _hermes_chat_stream(
     *,
     prompt: str,
@@ -217,8 +261,20 @@ def _hermes_chat_stream(
 
     try:
         with urllib.request.urlopen(req, timeout=None) as resp:
+            # SSE parser: events arrive as `event: <name>\ndata: <json>\n\n`.
+            # Hermes emits both standard `chat.completion.chunk` (no event line,
+            # just `data:`) AND a custom `event: hermes.tool.progress` carrying
+            # function_call / function_call_output payloads. We render both so
+            # the operator sees tool activity live in the wizard log.
+            current_event: str | None = None
             for raw in resp:
-                line = raw.decode("utf-8", errors="replace")
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if not line:
+                    current_event = None  # blank line ends an SSE event block
+                    continue
+                if line.startswith("event:"):
+                    current_event = line[len("event:"):].strip()
+                    continue
                 if not line.startswith("data:"):
                     continue
                 payload = line[len("data:"):].strip()
@@ -230,7 +286,12 @@ def _hermes_chat_stream(
                     log.write(payload + "\n")
                     log.flush()
                     continue
-                # OpenAI delta shape: choices[0].delta.content
+
+                if current_event == "hermes.tool.progress":
+                    _render_tool_progress(chunk, log)
+                    continue
+
+                # Default: OpenAI delta shape choices[0].delta.content
                 for choice in chunk.get("choices", []) or []:
                     delta = choice.get("delta") or {}
                     content = delta.get("content")

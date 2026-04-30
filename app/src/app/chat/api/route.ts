@@ -140,6 +140,17 @@ export async function POST(req: NextRequest) {
             const frame = buffer.slice(0, sep);
             buffer = buffer.slice(sep + 2);
 
+            // Pick out the frame's event name (default = "message" per SSE
+            // spec). Hermes uses "hermes.tool.progress" for tool calls and
+            // tool outputs — we surface those inline as italicized markers
+            // so the UI shows live progress, not a long silent gap.
+            const eventLine = frame
+              .split(/\r?\n/)
+              .find((l) => l.startsWith("event:"));
+            const eventName = eventLine
+              ? eventLine.slice("event:".length).trim()
+              : "message";
+
             // Each frame may have multiple `data: ...` lines. We
             // concatenate the data payloads per the SSE spec.
             const dataLines = frame
@@ -155,10 +166,63 @@ export async function POST(req: NextRequest) {
             }
 
             try {
-              const parsed = JSON.parse(dataPayload) as {
-                choices?: { delta?: { content?: string | null } }[];
-              };
-              const delta = parsed.choices?.[0]?.delta?.content;
+              const parsed = JSON.parse(dataPayload) as
+                | { choices?: { delta?: { content?: string | null } }[] }
+                | {
+                    type?: "function_call" | "function_call_output";
+                    name?: string;
+                    arguments?: string;
+                    output?: string | unknown;
+                  };
+
+              if (eventName === "hermes.tool.progress") {
+                const tp = parsed as {
+                  type?: "function_call" | "function_call_output";
+                  name?: string;
+                  arguments?: string;
+                  output?: string | unknown;
+                };
+                if (tp.type === "function_call") {
+                  let preview = "";
+                  try {
+                    const args = tp.arguments
+                      ? (JSON.parse(tp.arguments) as Record<string, unknown>)
+                      : {};
+                    preview = Object.entries(args)
+                      .slice(0, 3)
+                      .map(([k, v]) => {
+                        const vs = String(v);
+                        return `${k}=${vs.length > 60 ? vs.slice(0, 57) + "..." : vs}`;
+                      })
+                      .join(", ");
+                  } catch {
+                    preview = (tp.arguments ?? "").slice(0, 80);
+                  }
+                  const name = tp.name ?? "tool";
+                  controller.enqueue(
+                    encoder.encode(`\n\n_→ ${name}(${preview})_\n\n`),
+                  );
+                } else if (tp.type === "function_call_output") {
+                  const raw =
+                    typeof tp.output === "string"
+                      ? tp.output
+                      : JSON.stringify(tp.output ?? "");
+                  const trimmed =
+                    raw.length > 400
+                      ? raw.slice(0, 400) + ` … [+${raw.length - 400} chars]`
+                      : raw;
+                  controller.enqueue(
+                    encoder.encode(`_↳ ${trimmed.replace(/\n/g, " ")}_\n\n`),
+                  );
+                }
+                continue;
+              }
+
+              const delta = (
+                parsed as {
+                  choices?: { delta?: { content?: string | null } }[];
+                }
+              ).choices?.[0]?.delta?.content;
               if (delta) {
                 controller.enqueue(encoder.encode(delta));
               }
