@@ -19,13 +19,14 @@ ExecStart=/bin/bash -lc 'DATASETTE_BIN="/opt/centinel/datasette-venv/bin/dataset
     DB="$WIKI/_data/$SLUG.db"; \
     if [ ! -f "$DB" ]; then \
         echo "centinel: $DB not present — serving empty in-memory DB"; \
-        exec "$DATASETTE_BIN" serve --host 127.0.0.1 --port 8001 --memory --cors; \
+        exec "$DATASETTE_BIN" serve --host 127.0.0.1 --port 8001 --memory --cors --setting base_url /datasette/; \
     fi; \
     EXTRA=""; \
     [ -f "$WIKI/_data/datasette-metadata.json" ] && EXTRA="--metadata $WIKI/_data/datasette-metadata.json"; \
     exec "$DATASETTE_BIN" serve "$DB" \
         --host 127.0.0.1 --port 8001 \
         --immutable "$DB" \
+        --setting base_url /datasette/ \
         --setting default_page_size 50 \
         --setting truncate_cells_html 200 \
         --cors $EXTRA'

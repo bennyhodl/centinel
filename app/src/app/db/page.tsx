@@ -12,15 +12,13 @@ function datasettePublicUrl(): string {
   return process.env.DATASETTE_URL || DEFAULT_PUBLIC_URL;
 }
 
-// URL this Next.js server uses for health probes. Inside docker-compose,
-// "localhost" is the web container itself, so we need the compose service
-// hostname (http://datasette:8001). Falls back to the public URL for
-// non-containerized dev.
+// URL this Next.js server uses for health probes. Defaults to the local
+// systemd-managed datasette on 127.0.0.1:8001.
 function datasetteInternalUrl(): string {
   return (
     process.env.DATASETTE_INTERNAL_URL ||
     process.env.DATASETTE_URL ||
-    "http://datasette:8001"
+    "http://127.0.0.1:8001"
   );
 }
 
@@ -44,20 +42,6 @@ async function probeDatasette(url: string): Promise<boolean> {
     clearTimeout(timer);
   }
 }
-
-const COMPOSE_SNIPPET = `datasette:
-  image: datasetteproject/datasette:latest
-  volumes:
-    - <wiki>/_data:/data:ro
-    - <wiki>/_data/public-views.sql:/views.sql:ro
-  command: >
-    datasette /data/tampa.db
-    --immutable /data/tampa.db
-    --metadata /views.sql
-    --host 0.0.0.0 --port 8001
-  ports:
-    - '8001:8001'
-`;
 
 export default async function DbPage() {
   const url = datasettePublicUrl();
@@ -130,27 +114,34 @@ export default async function DbPage() {
         <Field
           label="DATASETTE_INTERNAL_URL"
           value={probeUrl}
-          hint="server-side probe (compose: http://datasette:8001)"
+          hint="server-side probe (host: http://127.0.0.1:8001)"
         />
         <Field label="DB path" value={dbPath()} hint="config.dbPath()" />
       </div>
 
       <div>
-        <h2 className="mb-2 section-header">
-          docker compose snippet
-        </h2>
+        <h2 className="mb-2 section-header">how to fix</h2>
         <pre className="overflow-x-auto border border-border bg-secondary p-4 font-mono text-xs leading-relaxed">
-          {COMPOSE_SNIPPET}
+{`# Check service
+./bin/centinel status
+./bin/centinel logs datasette -n 50
+
+# Restart it
+./bin/centinel restart datasette
+
+# Reinstall (e.g. if datasette binary moved)
+./bin/centinel install-services
+`}
         </pre>
         <p className="mt-2 text-xs text-muted-foreground">
-          Replace <code className="font-mono">&lt;wiki&gt;</code> with your
-          wiki path. The container mounts{" "}
-          <code className="font-mono">tampa.db</code> read-only and applies{" "}
-          <code className="font-mono">public-views.sql</code> as metadata so
-          only sanitized views are exposed (confidence ≥ 0.7, no in-progress
-          confidential investigations). See{" "}
-          <code className="font-mono">WEB_APP_DESIGN.md</code> §{" "}
-          <em>/db — the database explorer</em> for the full rationale.
+          Datasette runs as a host systemd --user unit
+          (<code className="font-mono">centinel-datasette.service</code>) and
+          serves the read-only city DB with{" "}
+          <code className="font-mono">--immutable</code> and{" "}
+          <code className="font-mono">base_url=/datasette/</code> so this app
+          can proxy it same-origin. See{" "}
+          <code className="font-mono">deploy/systemd/centinel-datasette.service</code>{" "}
+          for the full unit.
         </p>
       </div>
     </section>

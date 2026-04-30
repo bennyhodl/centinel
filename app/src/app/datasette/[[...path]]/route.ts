@@ -16,7 +16,7 @@ function internalBase(): string {
   return (
     process.env.DATASETTE_INTERNAL_URL ||
     process.env.DATASETTE_URL ||
-    "http://datasette:8001"
+    "http://127.0.0.1:8001"
   ).replace(/\/$/, "");
 }
 
