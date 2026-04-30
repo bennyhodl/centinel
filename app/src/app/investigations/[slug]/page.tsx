@@ -1,10 +1,12 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { extractFindingLinks, readInvestigation } from "@/lib/investigations";
+import { readInvestigationCronStatus } from "@/lib/investigation-cron";
 import MarkdownView from "@/components/MarkdownView";
 import { Pill, statusTone } from "@/components/Pill";
 import { resolveWikilink } from "@/lib/wiki";
 import { InvestigationControls } from "./_components/InvestigationControls";
+import { CronStatusCard } from "./_components/CronStatusCard";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +23,9 @@ export default async function InvestigationDetailPage({
   const status = (fm.status as string | undefined) ?? "active";
   const seeds = Array.isArray(fm.seeds) ? (fm.seeds as unknown[]) : [];
   const findingLinks = extractFindingLinks(doc.body);
+  const cronStatus = await readInvestigationCronStatus(slug);
+  // Prefer cron's last_run (authoritative) over frontmatter (which may be stale).
+  const lastRun = cronStatus.last_run ?? (fm.last_run ? String(fm.last_run) : "—");
 
   return (
     <section>
@@ -55,8 +60,12 @@ export default async function InvestigationDetailPage({
         <Stat label="Schedule" value={fm.schedule ? String(fm.schedule) : "—"} />
         <Stat label="Depth" value={fm.depth != null ? String(fm.depth) : "—"} />
         <Stat label="Seeds" value={String(seeds.length)} />
-        <Stat label="Last Run" value={fm.last_run ? String(fm.last_run) : "—"} />
+        <Stat label="Last Run" value={lastRun} />
       </dl>
+
+      <div className="mb-6">
+        <CronStatusCard status={cronStatus} />
+      </div>
 
       <div className="grid gap-6 md:grid-cols-[1fr_240px]">
         <article className="border border-border bg-card p-6">

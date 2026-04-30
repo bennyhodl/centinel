@@ -586,6 +586,10 @@ def cmd_investigate_register(args: argparse.Namespace) -> int:
     Reads `<wiki>/Investigations/<slug>.md` frontmatter for `schedule:` field.
     Schedule words (`daily | weekly | monthly | manual`) translate to cron
     expressions; `manual` skips registration entirely.
+
+    On success, the resulting cron job id is written back to the investigation's
+    frontmatter as `cron_job_id:` so subsequent pause/resume/status calls can
+    target it directly without grepping the cron list.
     """
     config = cfg.load()
     hermes = _hermes_bin()
@@ -600,9 +604,20 @@ def cmd_investigate_register(args: argparse.Namespace) -> int:
     schedule = _resolve_schedule(raw_schedule)
     if schedule is None:
         _ok(f"Schedule is 'manual' for {slug} — no cron registered (operator triggers only)")
+        # Clear any stale cron_job_id (manual schedule should never carry one).
+        _patch_frontmatter_field(inv_path, "cron_job_id", "")
         return 0
 
     name = _job_name("investigation", slug=slug)
+
+    # Idempotency: if a job with this name already exists in the investigator
+    # profile, don't double-register. Capture its id and write it back.
+    existing_id = _find_cron_job_id("investigator", name)
+    if existing_id:
+        _info(f"cron {name} already registered as {existing_id}, updating frontmatter")
+        _patch_frontmatter_field(inv_path, "cron_job_id", existing_id)
+        return 0
+
     prompt = (
         f"Run investigation {slug}. Read {inv_path}, resume from its last "
         f"`## Run log` entry, fan out from seeds, append findings, and update "
@@ -619,8 +634,159 @@ def cmd_investigate_register(args: argparse.Namespace) -> int:
     if preload:
         cmd += ["--script", preload]
     cmd += [schedule, prompt]
-    _run(cmd, check=False)
-    _ok(f"Registered cron {name} ({schedule}) for {slug}")
+
+    _info(" ".join(_shell_quote(c) for c in cmd))
+    result = subprocess.run(cmd, check=False, text=True, capture_output=True)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    if result.returncode != 0:
+        _err(
+            f"hermes cron create failed (exit {result.returncode}) for {slug}. "
+            f"See output above. Investigation file is on disk but no cron is "
+            f"registered — re-run `bin/centinel investigate register {slug}` "
+            f"after fixing the underlying issue."
+        )
+        return result.returncode
+
+    # Parse `Created job: <id>` from stdout.
+    job_id: str | None = None
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Created job:"):
+            job_id = stripped.split(":", 1)[1].strip().split()[0]
+            break
+
+    # Fallback: if we couldn't parse it, look it up by name.
+    if not job_id:
+        job_id = _find_cron_job_id("investigator", name)
+
+    if job_id:
+        _patch_frontmatter_field(inv_path, "cron_job_id", job_id)
+        _ok(f"Registered cron {name} → {job_id} ({schedule}) for {slug}")
+    else:
+        _err(
+            f"cron create returned 0 but job id could not be determined for {slug}. "
+            f"Run `hermes --profile investigator cron list` to verify."
+        )
+        return 1
+    return 0
+
+
+def cmd_investigate_cron_status(args: argparse.Namespace) -> int:
+    """Print JSON describing this investigation's cron job — for the web UI.
+
+    Schema:
+      {
+        "slug": str,
+        "registered": bool,
+        "job_id": str | null,
+        "name": str,
+        "schedule_word": str | null,    # raw frontmatter ("weekly", etc.)
+        "schedule_cron": str | null,    # resolved cron expression
+        "active": bool | null,          # True=active, False=paused, None=unknown
+        "next_run": str | null,         # ISO-ish, as printed by hermes
+        "last_run": str | null,
+        "error": str | null,
+      }
+    """
+    import json as _json
+    config = cfg.load()
+    slug = args.slug
+    inv_path = config.wiki_path / "Investigations" / f"{slug}.md"
+
+    out: dict[str, object | None] = {
+        "slug": slug,
+        "registered": False,
+        "job_id": None,
+        "name": _job_name("investigation", slug=slug),
+        "schedule_word": None,
+        "schedule_cron": None,
+        "active": None,
+        "next_run": None,
+        "last_run": None,
+        "error": None,
+    }
+    if not inv_path.exists():
+        out["error"] = f"investigation file not found: {inv_path}"
+        print(_json.dumps(out))
+        return 0
+
+    raw_schedule = _parse_frontmatter_field(inv_path, "schedule")
+    out["schedule_word"] = raw_schedule
+    out["schedule_cron"] = _resolve_schedule(raw_schedule)
+
+    # Manual = intentionally no cron.
+    if out["schedule_cron"] is None:
+        out["error"] = "manual schedule — no cron expected"
+        print(_json.dumps(out))
+        return 0
+
+    # Prefer the saved job_id from frontmatter; fall back to a list lookup.
+    saved_id = _parse_frontmatter_field(inv_path, "cron_job_id") or None
+    name = out["name"]
+    assert isinstance(name, str)
+
+    hermes = _hermes_bin()
+    listing = subprocess.run(
+        [hermes, "--profile", "investigator", "cron", "list", "--all"],
+        check=False, text=True, capture_output=True,
+    ).stdout
+
+    # Walk the listing once, locate the block by id (if known) or by name.
+    block_id: str | None = None
+    block: dict[str, str] = {}
+    current_id: str | None = None
+    current_status: str | None = None
+    current: dict[str, str] = {}
+    matched = False
+
+    def commit() -> None:
+        nonlocal block_id, block, matched
+        if matched:
+            return
+        nm = current.get("Name", "")
+        if (saved_id and current_id == saved_id) or nm == name:
+            block_id = current_id
+            block = dict(current)
+            block["__status__"] = current_status or ""
+            matched = True
+
+    for raw in listing.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        tokens = stripped.split()
+        if (
+            len(tokens) >= 2
+            and tokens[1].startswith("[")
+            and tokens[1].endswith("]")
+        ):
+            commit()
+            current_id = tokens[0]
+            current_status = tokens[1].strip("[]")
+            current = {}
+            continue
+        if ":" in stripped:
+            key, _, val = stripped.partition(":")
+            current[key.strip()] = val.strip()
+    commit()
+
+    if block_id:
+        out["registered"] = True
+        out["job_id"] = block_id
+        status_str = block.get("__status__", "")
+        out["active"] = (status_str == "active") if status_str else None
+        out["next_run"] = block.get("Next run") or None
+        out["last_run"] = block.get("Last run") or None
+        # Heal frontmatter if the saved id drifted.
+        if saved_id != block_id:
+            _patch_frontmatter_field(inv_path, "cron_job_id", block_id)
+    else:
+        out["error"] = "no cron registered for this investigation"
+
+    print(_json.dumps(out))
     return 0
 
 
@@ -1024,6 +1190,9 @@ def build_parser() -> argparse.ArgumentParser:
     inv_trig = inv_sub.add_parser("trigger", help="Drop an inbox request — runs on next investigator tick")
     inv_trig.add_argument("slug")
     inv_trig.set_defaults(func=cmd_investigate_trigger)
+    inv_status = inv_sub.add_parser("cron-status", help="Print JSON describing this investigation's cron job")
+    inv_status.add_argument("slug")
+    inv_status.set_defaults(func=cmd_investigate_cron_status)
 
     watch = sub.add_parser("watch", help="Watch lifecycle commands")
     watch_sub = watch.add_subparsers(dest="watch_action", required=True)
