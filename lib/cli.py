@@ -429,10 +429,7 @@ def cmd_setup_cron(args: argparse.Namespace) -> int:
             )
 
     s = config.cron
-    # Cron prompts are executed by hermes-on-host — paths embedded here must
-    # be host-resolvable, not container-local. config.host_wiki_path resolves
-    # to whatever the host filesystem sees (same as wiki_path when run on host).
-    hwiki = config.host_wiki_path
+    hwiki = config.wiki_path
     register(_job_name("sitemap-lint"),    s.sitemap_lint,   None,            "sitemap-builder",     f"Lint sitemap at {hwiki}/Sitemap/.")
     register(_job_name("briefings"),       s.briefings,      None,            "humanized-writing",   f"Draft weekly briefing from {hwiki}/Findings + outbox.")
     register(_job_name("huddle-rollup"),   s.huddle_rollup,  None,            "civic-doge-editor",   f"Roll up daily huddle into {hwiki}/_runtime/operator-queue/.")
@@ -613,9 +610,7 @@ def cmd_investigate_register(args: argparse.Namespace) -> int:
         return 0
 
     name = _job_name("investigation", slug=slug)
-    # Path the dispatcher embeds in the cron prompt — must be host-resolvable
-    # because hermes-on-host (not this container) will read it at run time.
-    host_inv_path = config.host_wiki_path / "Investigations" / f"{slug}.md"
+    host_inv_path = config.wiki_path / "Investigations" / f"{slug}.md"
 
     # Idempotency: if a job with this name already exists in the investigator
     # profile, don't double-register. Capture its id and write it back.
@@ -1216,6 +1211,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("doctor", help="Health check")
     sp.set_defaults(func=cmd_doctor)
+
+    # Service management (host systemd units): install-services, status,
+    # restart, logs, deploy. Defined in lib/services.py.
+    from lib.services import register_subcommands as _register_services
+    _register_services(sub)
 
     return p
 

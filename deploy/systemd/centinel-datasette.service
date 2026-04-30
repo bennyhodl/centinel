@@ -1,0 +1,36 @@
+[Unit]
+Description=Centinel Datasette (read-only DB browser)
+Documentation=https://datasette.io
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+EnvironmentFile=-%h/code/centinel/.env
+# CENTINEL_WIKI_PATH and CITY_SLUG come from .env (defaults below in ExecStart).
+# Datasette is installed in a dedicated venv at /opt/centinel/datasette-venv
+# (see `centinel install-services`). Falls back to ~/.local/bin/datasette
+# (pipx) if /opt path is missing.
+ExecStart=/bin/bash -lc 'DATASETTE_BIN="/opt/centinel/datasette-venv/bin/datasette"; \
+    [ -x "$DATASETTE_BIN" ] || DATASETTE_BIN="$HOME/.local/bin/datasette"; \
+    WIKI="${CENTINEL_WIKI_PATH:-$HOME/wiki/Tampa}"; \
+    SLUG="${CITY_SLUG:-tampa}"; \
+    DB="$WIKI/_data/$SLUG.db"; \
+    if [ ! -f "$DB" ]; then \
+        echo "centinel: $DB not present — serving empty in-memory DB"; \
+        exec "$DATASETTE_BIN" serve --host 127.0.0.1 --port 8001 --memory --cors; \
+    fi; \
+    EXTRA=""; \
+    [ -f "$WIKI/_data/datasette-metadata.json" ] && EXTRA="--metadata $WIKI/_data/datasette-metadata.json"; \
+    exec "$DATASETTE_BIN" serve "$DB" \
+        --host 127.0.0.1 --port 8001 \
+        --immutable "$DB" \
+        --setting default_page_size 50 \
+        --setting truncate_cells_html 200 \
+        --cors $EXTRA'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

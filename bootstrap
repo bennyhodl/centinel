@@ -62,7 +62,7 @@ prompt_if_unset() {
 info "Checking dependencies"
 require_command hermes  "Install Hermes Agent first: https://hermes-agent.nousresearch.com/docs/"
 require_command python3 "Install Python 3.11+"
-require_command docker  "Install Docker"
+require_command pnpm  "Install with: corepack enable && corepack prepare pnpm@latest --activate"
 # yq is optional (we fall back to python+pyyaml), but warn if missing.
 if ! command -v yq >/dev/null 2>&1; then
     warn "yq not found — will use python+pyyaml fallback for config reads"
@@ -206,22 +206,23 @@ case ":${PATH}:" in
         ;;
 esac
 
-# ───────────────────────── 10. docker / next steps ─────────────────────────
+# ───────────────────────── 10. build web + install services ─────────────────────────
 
-if [ -f docker-compose.yml ]; then
-    info "Starting docker services (web + datasette)"
-    # Preflight: docker daemon reachable from this user?
-    if ! docker info >/dev/null 2>&1; then
-        warn "Cannot reach Docker daemon as user '$USER'."
-        warn "Most likely your user isn't in the 'docker' group. Fix:"
-        warn "    sudo usermod -aG docker \$USER && newgrp docker"
-        warn "Then re-run: docker compose up -d"
-    elif ! docker compose up -d --build; then
-        warn "docker compose failed to start — see error above."
-        warn "Most common cause: required env vars not set in .env"
-        warn "(CENTINEL_PASSWORD). Fix .env and re-run: docker compose up -d"
-    fi
+info "Installing web app dependencies (pnpm)"
+(cd "$REPO_ROOT/app" && pnpm install --frozen-lockfile)
+
+info "Building Next.js production bundle"
+(cd "$REPO_ROOT/app" && pnpm build)
+
+info "Installing systemd --user services (centinel-web, centinel-datasette)"
+"$REPO_ROOT/bin/centinel" install-services || warn "install-services exited non-zero — re-run after fixing the issue."
+
+# Reminder: services need linger to survive logout on EC2.
+if command -v loginctl >/dev/null 2>&1 && ! loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes'; then
+    warn "User linger is OFF. Enable so services survive logout:"
+    warn "    sudo loginctl enable-linger $USER"
 fi
+
 
 cat <<EOF
 
@@ -230,12 +231,12 @@ $(c_green "🎉 Bootstrap complete.")
 Next:
   1. Edit ${REPO_ROOT}/.env if you haven't (CENTINEL_PASSWORD, HERMES_API_KEY).
   2. Open the web app and run the setup wizard:
-       cd app && pnpm dev
        open http://localhost:3000/setup
   3. Wizard Step 5 will call: ./bin/centinel bootstrap-sitemap <domain>
   4. Wizard Step 7 will call: ./bin/centinel cron resume-all
   5. After that, the browser can close — agents run on schedule.
 
 Health check:
+  ./bin/centinel status
   ./bin/centinel doctor
 EOF

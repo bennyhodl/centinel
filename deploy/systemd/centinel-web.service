@@ -1,0 +1,20 @@
+[Unit]
+Description=Centinel web app (Next.js)
+Documentation=https://github.com/bennyhodl/centinel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/code/centinel/app
+EnvironmentFile=-%h/code/centinel/.env
+Environment=NODE_ENV=production
+Environment=NEXT_TELEMETRY_DISABLED=1
+Environment=PORT=3000
+ExecStart=/usr/bin/env pnpm start
+Restart=on-failure
+RestartSec=5
+# Tail logs with: journalctl --user -u centinel-web -f
+
+[Install]
+WantedBy=default.target
