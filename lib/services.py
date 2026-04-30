@@ -88,6 +88,20 @@ def _http_ok(url: str, timeout: float = 2.0) -> tuple[bool, Optional[int]]:
         return (False, None)
 
 
+def _resolve_node_dir() -> Optional[str]:
+    """Find the directory containing `node` so we can add it to systemd's PATH."""
+    found = shutil.which("node")
+    if found:
+        return str(Path(found).resolve().parent)
+    home = Path.home()
+    nvm_versions = home / ".nvm" / "versions" / "node"
+    if nvm_versions.is_dir():
+        for d in sorted(nvm_versions.iterdir(), reverse=True):
+            if (d / "bin" / "node").exists():
+                return str((d / "bin").resolve())
+    return None
+
+
 def _resolve_pnpm() -> Optional[str]:
     """Find an absolute path to pnpm. systemd --user doesn't load the user's
     shell rc, so corepack/nvm bins aren't on the unit's $PATH. Check common
@@ -153,13 +167,19 @@ def cmd_install_services(args) -> int:
         text = src.read_text() \
             .replace("%h/code/centinel", repo_str) \
             .replace("%%PNPM_PATH%%", pnpm_path)
-        # Prepend pnpm's dir to PATH so node/npm/etc are findable.
-        # systemd allows multiple Environment= lines and merges them.
+        # Build PATH including pnpm dir AND node dir (which may differ when
+        # pnpm comes from corepack vs. node from nvm).
         pnpm_dir = str(Path(pnpm_path).parent)
+        node_dir = _resolve_node_dir()
+        path_parts = [pnpm_dir]
+        if node_dir and node_dir != pnpm_dir:
+            path_parts.append(node_dir)
+        path_parts += ["/usr/local/bin", "/usr/bin", "/bin"]
+        unit_path = ":".join(path_parts)
         if "Environment=PATH=" not in text and "[Service]" in text:
             text = text.replace(
                 "[Service]\n",
-                f"[Service]\nEnvironment=PATH={pnpm_dir}:/usr/local/bin:/usr/bin:/bin\n",
+                f"[Service]\nEnvironment=PATH={unit_path}\n",
                 1,
             )
         dst.write_text(text)
