@@ -337,12 +337,22 @@ def cmd_status(args) -> int:
 
     # Hermes API
     hermes_url = os.environ.get("HERMES_API_URL", "http://localhost:8000/v1").rstrip("/")
-    base = hermes_url[:-3] if hermes_url.endswith("/v1") else hermes_url
-    hermes_ok, hermes_status = _http_ok(f"{base}/health", timeout=2)
+    # Try /v1/models (always available) — works regardless of whether the
+    # configured URL ends in /v1 or not.
+    base = hermes_url[:-3].rstrip("/") if hermes_url.endswith("/v1") else hermes_url
+    probe_urls = [f"{base}/v1/models", f"{base}/health", f"{hermes_url}/models"]
+    hermes_ok = False
+    hermes_status: Optional[int] = None
+    hit_url = ""
+    for u in probe_urls:
+        ok, st = _http_ok(u, timeout=2)
+        if ok:
+            hermes_ok, hermes_status, hit_url = True, st, u
+            break
     if hermes_ok:
-        rows.append(("hermes (api)", _green("● reachable"), f"{base}/health → {hermes_status}"))
+        rows.append(("hermes (api)", _green("● reachable"), f"{hit_url} → {hermes_status}"))
     else:
-        rows.append(("hermes (api)", _red("○ unreachable"), _dim(f"check daemon + API_SERVER_ENABLED=1")))
+        rows.append(("hermes (api)", _red("○ unreachable"), _dim(f"tried {base}; check API_SERVER_ENABLED=1 and HERMES_API_URL")))
 
     # Hermes cron jobs
     cron_count = _hermes_cron_count()

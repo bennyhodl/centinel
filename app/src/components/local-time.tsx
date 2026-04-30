@@ -36,7 +36,16 @@ export function LocalTime({
         ? { dateStyle: "medium" }
         : mode === "time"
           ? { timeStyle: "short" }
-          : { dateStyle: "medium", timeStyle: "short", timeZoneName: "short" };
+          : {
+              // Explicit fields — `dateStyle`/`timeStyle` can't be combined
+              // with `timeZoneName` (throws "Invalid option" in Chrome).
+              year: "numeric",
+              month: "short",
+              day: "numeric",
+              hour: "numeric",
+              minute: "2-digit",
+              timeZoneName: "short",
+            };
 
     setFormatted(new Intl.DateTimeFormat(undefined, opts).format(d));
 
