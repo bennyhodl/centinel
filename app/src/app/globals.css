@@ -167,3 +167,193 @@ html, body {
   font-weight: 700;
   color: var(--primary);
 }
+
+/* ============================================================================
+   Broadsheet prose — typography for rendered markdown bodies (investigations,
+   findings, entities, etc). Custom-tuned to the colonial palette + serifs;
+   replaces @tailwindcss/typography (which we don't install).
+   ============================================================================ */
+
+.prose-broadsheet {
+  font-family: var(--font-serif);
+  font-size: 1rem;
+  line-height: 1.7;
+  color: var(--foreground);
+  max-width: 70ch;
+}
+
+/* When this column needs to fill its parent (e.g. inside a sidebar grid). */
+.prose-broadsheet.prose-wide { max-width: none; }
+
+.prose-broadsheet > :first-child { margin-top: 0; }
+.prose-broadsheet > :last-child  { margin-bottom: 0; }
+
+/* Paragraphs */
+.prose-broadsheet p {
+  margin: 0 0 1.1em;
+}
+
+/* Headings — Playfair Display, broadsheet feel */
+.prose-broadsheet h1,
+.prose-broadsheet h2,
+.prose-broadsheet h3,
+.prose-broadsheet h4,
+.prose-broadsheet h5,
+.prose-broadsheet h6 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  color: var(--foreground);
+  margin: 1.6em 0 0.6em;
+}
+.prose-broadsheet h1 { font-size: 2.1rem; margin-top: 0; border-bottom: 2px solid var(--border); padding-bottom: 0.3em; }
+.prose-broadsheet h2 { font-size: 1.55rem; border-bottom: 1px solid var(--border); padding-bottom: 0.2em; }
+.prose-broadsheet h3 { font-size: 1.25rem; }
+.prose-broadsheet h4 { font-size: 1.05rem; font-family: var(--font-smallcaps); letter-spacing: 0.04em; text-transform: none; }
+.prose-broadsheet h5,
+.prose-broadsheet h6 { font-size: 0.95rem; font-family: var(--font-smallcaps); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted-foreground); }
+
+/* Links — printer's red, restrained underline */
+.prose-broadsheet a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--primary) 35%, transparent);
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1px;
+  transition: text-decoration-color 120ms ease;
+}
+.prose-broadsheet a:hover {
+  text-decoration-color: var(--primary);
+}
+
+/* Emphasis */
+.prose-broadsheet strong { font-weight: 700; color: var(--foreground); }
+.prose-broadsheet em     { font-style: italic; }
+
+/* Lists */
+.prose-broadsheet ul,
+.prose-broadsheet ol {
+  margin: 0 0 1.1em;
+  padding-left: 1.5em;
+}
+.prose-broadsheet ul { list-style: disc; }
+.prose-broadsheet ol { list-style: decimal; }
+.prose-broadsheet li { margin: 0.25em 0; }
+.prose-broadsheet li > p { margin: 0.25em 0; }
+.prose-broadsheet li::marker { color: var(--muted-foreground); }
+.prose-broadsheet ul ul,
+.prose-broadsheet ol ol,
+.prose-broadsheet ul ol,
+.prose-broadsheet ol ul { margin: 0.25em 0; }
+
+/* Task lists (GFM) */
+.prose-broadsheet input[type="checkbox"] {
+  margin-right: 0.4em;
+  accent-color: var(--primary);
+}
+
+/* Blockquote — broadsheet pull-quote */
+.prose-broadsheet blockquote {
+  margin: 1.4em 0;
+  padding: 0.4em 1.1em;
+  border-left: 3px solid var(--primary);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  font-style: italic;
+  color: color-mix(in srgb, var(--foreground) 85%, var(--muted-foreground));
+}
+.prose-broadsheet blockquote p { margin: 0.4em 0; }
+
+/* Code */
+.prose-broadsheet code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--secondary);
+  border: 1px solid var(--border);
+  padding: 0.08em 0.35em;
+  border-radius: 2px;
+}
+.prose-broadsheet pre {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  line-height: 1.55;
+  background: var(--secondary);
+  border: 1px solid var(--border);
+  padding: 0.9em 1em;
+  margin: 1.2em 0;
+  overflow-x: auto;
+}
+.prose-broadsheet pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+}
+
+/* Horizontal rule — printed-page separator */
+.prose-broadsheet hr {
+  border: 0;
+  height: 1px;
+  background: var(--border);
+  margin: 2em 0;
+  position: relative;
+}
+
+/* Tables — broadsheet ledger */
+.prose-broadsheet table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.3em 0;
+  font-size: 0.93em;
+}
+.prose-broadsheet thead { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.prose-broadsheet th,
+.prose-broadsheet td {
+  text-align: left;
+  padding: 0.5em 0.75em;
+  border: 1px solid var(--border);
+  vertical-align: top;
+}
+.prose-broadsheet th {
+  font-family: var(--font-smallcaps);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  font-size: 0.85em;
+  text-transform: uppercase;
+}
+.prose-broadsheet tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--secondary) 50%, transparent);
+}
+
+/* Images */
+.prose-broadsheet img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  margin: 1.2em 0;
+}
+
+/* Footnotes (GFM) */
+.prose-broadsheet .footnotes {
+  margin-top: 2.5em;
+  padding-top: 1em;
+  border-top: 1px solid var(--border);
+  font-size: 0.88em;
+  color: var(--muted-foreground);
+}
+.prose-broadsheet .footnotes ol { padding-left: 1.2em; }
+
+/* Compact variant for chat bubbles. */
+.prose-broadsheet.prose-compact { font-size: 0.92rem; line-height: 1.55; }
+.prose-broadsheet.prose-compact p { margin: 0 0 0.6em; }
+.prose-broadsheet.prose-compact h1,
+.prose-broadsheet.prose-compact h2,
+.prose-broadsheet.prose-compact h3,
+.prose-broadsheet.prose-compact h4 { margin: 0.8em 0 0.3em; border-bottom: 0; padding-bottom: 0; }
+.prose-broadsheet.prose-compact h1 { font-size: 1.25rem; }
+.prose-broadsheet.prose-compact h2 { font-size: 1.1rem; }
+.prose-broadsheet.prose-compact h3 { font-size: 1rem; }
+.prose-broadsheet.prose-compact pre { margin: 0.6em 0; }
+.prose-broadsheet.prose-compact ul,
+.prose-broadsheet.prose-compact ol { margin: 0 0 0.6em; }

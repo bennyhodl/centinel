@@ -30,7 +30,7 @@ export default function Message({
         {message.content ? (
           <ClientMarkdown
             source={message.content}
-            className="prose prose-sm max-w-none prose-p:my-2 prose-headings:mt-3 prose-headings:mb-2 prose-headings:font-display prose-pre:bg-secondary prose-code:text-primary"
+            className="prose-broadsheet prose-wide prose-compact"
           />
         ) : (
           <span className="text-sm text-muted-foreground italic">…</span>
