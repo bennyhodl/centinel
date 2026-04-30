@@ -3,10 +3,25 @@ import { dbPath } from "@/lib/config";
 export const dynamic = "force-dynamic";
 export const revalidate = 10;
 
-const DEFAULT_URL = "http://localhost:8001";
+const DEFAULT_PUBLIC_URL = "http://localhost:8001";
 
-function datasetteUrl(): string {
-  return process.env.DATASETTE_URL || DEFAULT_URL;
+// URL the browser uses (iframe src, "open in new tab" link). Must be reachable
+// from the user's machine — typically http://localhost:8001 when datasette is
+// published on the host.
+function datasettePublicUrl(): string {
+  return process.env.DATASETTE_URL || DEFAULT_PUBLIC_URL;
+}
+
+// URL this Next.js server uses for health probes. Inside docker-compose,
+// "localhost" is the web container itself, so we need the compose service
+// hostname (http://datasette:8001). Falls back to the public URL for
+// non-containerized dev.
+function datasetteInternalUrl(): string {
+  return (
+    process.env.DATASETTE_INTERNAL_URL ||
+    process.env.DATASETTE_URL ||
+    DEFAULT_PUBLIC_URL
+  );
 }
 
 async function probeDatasette(url: string): Promise<boolean> {
@@ -40,8 +55,9 @@ const COMPOSE_SNIPPET = `datasette:
 `;
 
 export default async function DbPage() {
-  const url = datasetteUrl();
-  const up = await probeDatasette(url);
+  const url = datasettePublicUrl();
+  const probeUrl = datasetteInternalUrl();
+  const up = await probeDatasette(probeUrl);
 
   if (up) {
     return (
@@ -94,7 +110,7 @@ export default async function DbPage() {
         <p className="mt-2 text-foreground/80">
           Probed{" "}
           <code className="font-mono text-xs">
-            {url}/-/versions.json
+            {probeUrl}/-/versions.json
           </code>{" "}
           (2s timeout) — no response.
         </p>
@@ -104,7 +120,12 @@ export default async function DbPage() {
         <Field
           label="DATASETTE_URL"
           value={url}
-          hint={`env var · default ${DEFAULT_URL}`}
+          hint={`browser-facing · default ${DEFAULT_PUBLIC_URL}`}
+        />
+        <Field
+          label="DATASETTE_INTERNAL_URL"
+          value={probeUrl}
+          hint="server-side probe (compose: http://datasette:8001)"
         />
         <Field label="DB path" value={dbPath()} hint="config.dbPath()" />
       </div>

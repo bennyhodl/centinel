@@ -85,7 +85,8 @@ No ORM, no Postgres, no custom auth provider.
 | `CENTINEL_EDITOR_PERSONA_PATH` | path to Editor persona markdown | `~/plans/centinel/EDITOR_PERSONA.md` |
 | `HERMES_API_URL` | OpenAI-compatible base URL for `/chat` | _required_ |
 | `HERMES_API_KEY` | API key for Hermes endpoint | _required_ |
-| `DATASETTE_URL` | optional Datasette base URL | `http://localhost:8001` |
+| `DATASETTE_URL` | browser-facing Datasette URL (iframe + links) | `http://localhost:8001` |
+| `DATASETTE_INTERNAL_URL` | server-side probe URL (compose: `http://datasette:8001`) | falls back to `DATASETTE_URL` |
 
 Copy `.env.example` → `.env.local` and fill in.
 

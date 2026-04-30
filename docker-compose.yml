@@ -38,6 +38,11 @@ services:
       HERMES_API_URL: ${HERMES_API_URL:-http://host.docker.internal:8000/v1}
       HERMES_API_KEY: ${HERMES_API_KEY:-}
       HERMES_MODEL: ${HERMES_MODEL:-}
+      # Datasette: browser hits localhost:8001 (published port), but the web
+      # server probes via the compose service hostname since "localhost" inside
+      # this container is the web container itself.
+      DATASETTE_URL: ${DATASETTE_URL:-http://localhost:8001}
+      DATASETTE_INTERNAL_URL: ${DATASETTE_INTERNAL_URL:-http://datasette:8001}
       # Web auth.
       CENTINEL_PASSWORD: ${CENTINEL_PASSWORD:?CENTINEL_PASSWORD required in .env}
       # Tavily for sitemap-builder skill (used by dispatcher → hermes on host).
