@@ -32,6 +32,10 @@ services:
     environment:
       # Wiki path INSIDE the container.
       CENTINEL_WIKI_PATH: /wiki
+      # Wiki path the HOST filesystem sees — embedded in cron prompts that
+      # hermes-on-host (not this container) will execute. Must match the
+      # docker-compose volume mount source for the wiki below.
+      CENTINEL_HOST_WIKI_PATH: ${CENTINEL_WIKI_PATH:-${HOME}/wiki/Tampa}
       # Dispatcher path INSIDE the container.
       CENTINEL_BIN: /repo/bin/centinel
       # Hermes endpoint — host-relative URL works thanks to host-gateway alias.

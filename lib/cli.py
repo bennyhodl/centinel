@@ -429,9 +429,13 @@ def cmd_setup_cron(args: argparse.Namespace) -> int:
             )
 
     s = config.cron
-    register(_job_name("sitemap-lint"),    s.sitemap_lint,   None,            "sitemap-builder",     f"Lint sitemap at {config.wiki_path}/Sitemap/.")
-    register(_job_name("briefings"),       s.briefings,      None,            "humanized-writing",   f"Draft weekly briefing from {config.wiki_path}/Findings + outbox.")
-    register(_job_name("huddle-rollup"),   s.huddle_rollup,  None,            "civic-doge-editor",   f"Roll up daily huddle into {config.wiki_path}/_runtime/operator-queue/.")
+    # Cron prompts are executed by hermes-on-host — paths embedded here must
+    # be host-resolvable, not container-local. config.host_wiki_path resolves
+    # to whatever the host filesystem sees (same as wiki_path when run on host).
+    hwiki = config.host_wiki_path
+    register(_job_name("sitemap-lint"),    s.sitemap_lint,   None,            "sitemap-builder",     f"Lint sitemap at {hwiki}/Sitemap/.")
+    register(_job_name("briefings"),       s.briefings,      None,            "humanized-writing",   f"Draft weekly briefing from {hwiki}/Findings + outbox.")
+    register(_job_name("huddle-rollup"),   s.huddle_rollup,  None,            "civic-doge-editor",   f"Roll up daily huddle into {hwiki}/_runtime/operator-queue/.")
     register(_job_name("watch-runner"),    s.watch_runner,   "watch-runner",  "civic-watch-runner",  "Run watches over latest sitemap diffs and new wiki pages.")
     register(_job_name("data-reporter"),   s.data_reporter,  "data-reporter", "civic-data-reporter", "Refresh entity DB and methodology log.")
     register(_job_name("vault-manifest"),  s.vault_manifest, "archivist",     "civic-archivist",     "Drain archivist inbox; rebuild vault manifest if stale.")
@@ -609,6 +613,9 @@ def cmd_investigate_register(args: argparse.Namespace) -> int:
         return 0
 
     name = _job_name("investigation", slug=slug)
+    # Path the dispatcher embeds in the cron prompt — must be host-resolvable
+    # because hermes-on-host (not this container) will read it at run time.
+    host_inv_path = config.host_wiki_path / "Investigations" / f"{slug}.md"
 
     # Idempotency: if a job with this name already exists in the investigator
     # profile, don't double-register. Capture its id and write it back.
@@ -619,7 +626,7 @@ def cmd_investigate_register(args: argparse.Namespace) -> int:
         return 0
 
     prompt = (
-        f"Run investigation {slug}. Read {inv_path}, resume from its last "
+        f"Run investigation {slug}. Read {host_inv_path}, resume from its last "
         f"`## Run log` entry, fan out from seeds, append findings, and update "
         f"the run log with timestamp + summary."
     )

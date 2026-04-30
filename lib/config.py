@@ -44,7 +44,8 @@ class CronSchedules:
 @dataclass
 class CentinelConfig:
     city: CityConfig
-    wiki_path: Path
+    wiki_path: Path        # path THIS process reads files from (container: /wiki)
+    host_wiki_path: Path   # path that hermes-on-host will see (host: /home/ec2-user/wiki)
     cron: CronSchedules
     watch_presets: list[str]
     confidential_investigations: list[str]
@@ -88,8 +89,30 @@ def load() -> CentinelConfig:
             print(f"ERROR: doge.config.yaml is missing city.{required}", file=sys.stderr)
             raise SystemExit(1)
 
-    wiki_raw = (raw.get("wiki") or {}).get("path") or "~/wiki/Centinel"
+    # CENTINEL_WIKI_PATH overrides the YAML — lets the same doge.config.yaml
+    # serve both host CLI (resolves ~/wiki/Tampa against the user's home) and
+    # container runtime (the host wiki gets mounted at /wiki regardless of
+    # what's in the YAML). Web app already honors this env via lib/config.ts.
+    wiki_env = os.environ.get("CENTINEL_WIKI_PATH")
+    yaml_wiki = (raw.get("wiki") or {}).get("path") or "~/wiki/Centinel"
+    wiki_raw = wiki_env or yaml_wiki
     wiki_path = Path(os.path.expanduser(os.path.expandvars(wiki_raw))).resolve()
+
+    # host_wiki_path is what hermes-on-host will see when it runs cron jobs
+    # spawned by THIS dispatcher. When running directly on host this equals
+    # wiki_path. When running inside the centinel-web container it must be
+    # overridden via CENTINEL_HOST_WIKI_PATH (e.g. /home/ec2-user/wiki) so
+    # cron prompts embed paths the host can resolve.
+    host_wiki_env = os.environ.get("CENTINEL_HOST_WIKI_PATH")
+    host_wiki_path = (
+        Path(os.path.expanduser(os.path.expandvars(host_wiki_env))).resolve()
+        if host_wiki_env
+        else (
+            Path(os.path.expanduser(os.path.expandvars(yaml_wiki))).resolve()
+            if wiki_env
+            else wiki_path
+        )
+    )
 
     cron_overrides = raw.get("cron_schedule_overrides") or {}
     cron = CronSchedules(**{k: v for k, v in cron_overrides.items() if hasattr(CronSchedules, k)})
@@ -102,6 +125,7 @@ def load() -> CentinelConfig:
             timezone=city_raw.get("timezone", "America/New_York"),
         ),
         wiki_path=wiki_path,
+        host_wiki_path=host_wiki_path,
         cron=cron,
         watch_presets=list(raw.get("watch_presets") or []),
         confidential_investigations=list(raw.get("confidential_investigations") or []),
