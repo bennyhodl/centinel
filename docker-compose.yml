@@ -38,10 +38,10 @@ services:
       HERMES_API_URL: ${HERMES_API_URL:-http://host.docker.internal:8000/v1}
       HERMES_API_KEY: ${HERMES_API_KEY:-}
       HERMES_MODEL: ${HERMES_MODEL:-}
-      # Datasette: browser hits localhost:8001 (published port), but the web
-      # server probes via the compose service hostname since "localhost" inside
-      # this container is the web container itself.
-      DATASETTE_URL: ${DATASETTE_URL:-http://localhost:8001}
+      # Datasette: browser hits the same-origin proxy at /datasette/ (handled
+      # by app/src/app/datasette/[[...path]]/route.ts). The web server probes
+      # the upstream container directly via the compose service hostname.
+      DATASETTE_URL: ${DATASETTE_URL:-/datasette/}
       DATASETTE_INTERNAL_URL: ${DATASETTE_INTERNAL_URL:-http://datasette:8001}
       # Web auth.
       CENTINEL_PASSWORD: ${CENTINEL_PASSWORD:?CENTINEL_PASSWORD required in .env}
@@ -71,6 +71,9 @@ services:
 
   datasette:
     image: datasetteproject/datasette:0.65.1
+    # Note: the host port publish below is OPTIONAL — the web app proxies
+    # Datasette at /datasette/ same-origin, so end users never hit 8001
+    # directly. Kept exposed for ops/debugging. Comment out to lock down.
     ports:
       - "8001:8001"
     volumes:
@@ -89,7 +92,7 @@ services:
           echo "centinel: $$DB not present yet — Datasette will idle on /-/health"
           # Serve an empty in-memory DB so health checks pass; restart the
           # container after setup to pick up the real city DB.
-          exec datasette serve --host 0.0.0.0 --port 8001 --memory --cors
+          exec datasette serve --host 0.0.0.0 --port 8001 --memory --cors --setting base_url /datasette/
         fi
         EXTRA=""
         if [ -f "/data/datasette-metadata.json" ]; then
@@ -98,6 +101,7 @@ services:
         exec datasette serve "$$DB" \
           --host 0.0.0.0 --port 8001 \
           --immutable "$$DB" \
+          --setting base_url /datasette/ \
           --setting default_page_size 50 \
           --setting truncate_cells_html 200 \
           --cors $$EXTRA

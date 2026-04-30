@@ -3,11 +3,11 @@ import { dbPath } from "@/lib/config";
 export const dynamic = "force-dynamic";
 export const revalidate = 10;
 
-const DEFAULT_PUBLIC_URL = "http://localhost:8001";
+const DEFAULT_PUBLIC_URL = "/datasette/";
 
-// URL the browser uses (iframe src, "open in new tab" link). Must be reachable
-// from the user's machine — typically http://localhost:8001 when datasette is
-// published on the host.
+// URL the browser uses (iframe src, "open in new tab" link). Defaults to the
+// same-origin proxy at /datasette/ — works behind any reverse proxy and by
+// raw IP without exposing the datasette port directly.
 function datasettePublicUrl(): string {
   return process.env.DATASETTE_URL || DEFAULT_PUBLIC_URL;
 }
@@ -20,7 +20,7 @@ function datasetteInternalUrl(): string {
   return (
     process.env.DATASETTE_INTERNAL_URL ||
     process.env.DATASETTE_URL ||
-    DEFAULT_PUBLIC_URL
+    "http://datasette:8001"
   );
 }
 
@@ -28,7 +28,12 @@ async function probeDatasette(url: string): Promise<boolean> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 2000);
   try {
-    const res = await fetch(`${url.replace(/\/$/, "")}/-/versions.json`, {
+    // Datasette mounts at /datasette/ via base_url, so probe through it.
+    const base = url.replace(/\/$/, "");
+    const probeUrl = base.includes("/datasette")
+      ? `${base}/-/versions.json`
+      : `${base}/datasette/-/versions.json`;
+    const res = await fetch(probeUrl, {
       signal: ctrl.signal,
       cache: "no-store",
     });
