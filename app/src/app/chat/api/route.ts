@@ -12,9 +12,12 @@ const MessageSchema = z.object({
 
 const RequestSchema = z.object({
   messages: z.array(MessageSchema).min(1),
+  // Optional override — when omitted, we use the persistent default session.
+  // Lets the client start a fresh conversation without polluting history.
+  sessionId: z.string().min(1).max(128).optional(),
 });
 
-const SESSION_ID = "centinel-web-chat";
+const DEFAULT_SESSION_ID = "centinel-web-chat";
 
 /**
  * /chat is a streaming proxy to Hermes' OpenAI-compatible API server. We
@@ -69,6 +72,8 @@ export async function POST(req: NextRequest) {
     stream: true,
   };
 
+  const sessionId = parsed.data.sessionId?.trim() || DEFAULT_SESSION_ID;
+
   let upstream: Response;
   try {
     upstream = await fetch(url, {
@@ -76,7 +81,7 @@ export async function POST(req: NextRequest) {
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey || "missing"}`,
-        "X-Hermes-Session-Id": SESSION_ID,
+        "X-Hermes-Session-Id": sessionId,
       },
       body: JSON.stringify(payload),
       signal: req.signal,

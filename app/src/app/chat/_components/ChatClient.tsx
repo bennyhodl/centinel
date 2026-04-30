@@ -10,13 +10,77 @@ import Composer from "./Composer";
  * tool-output frames. The client builds structured `MessagePart[]` per
  * message so tools render as proper styled cards rather than inline italics.
  */
+const DEFAULT_SESSION_ID = "centinel-web-chat";
+const SESSION_STORAGE_KEY = "centinel.chat.sessionId";
+
 export default function ChatClient({ intro }: { intro: string }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  // Session id is persistent across page reloads via localStorage so the
+  // browser keeps talking to the same Hermes session it was last using.
+  const [sessionId, setSessionId] = useState<string>(DEFAULT_SESSION_ID);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // On mount: pick up any persisted session id, then load its history.
+  useEffect(() => {
+    let cancelled = false;
+    let activeSid = DEFAULT_SESSION_ID;
+    try {
+      const saved = localStorage.getItem(SESSION_STORAGE_KEY);
+      if (saved && saved.length > 0 && saved.length <= 128) {
+        activeSid = saved;
+      }
+    } catch {
+      /* SSR / privacy modes — ignore */
+    }
+    setSessionId(activeSid);
+
+    (async () => {
+      try {
+        const res = await fetch(
+          `/chat/api/history?sessionId=${encodeURIComponent(activeSid)}`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) return;
+        const j = (await res.json()) as {
+          messages?: { role: "user" | "assistant"; content: string }[];
+        };
+        if (cancelled) return;
+        const restored = (j.messages ?? []).map(
+          (m) =>
+            ({
+              role: m.role,
+              parts: [{ kind: "text", text: m.content }],
+            }) as ChatMessage,
+        );
+        if (restored.length > 0) setMessages(restored);
+      } catch {
+        // soft-fail
+      } finally {
+        if (!cancelled) setHistoryLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const startNewConversation = useCallback(() => {
+    if (isStreaming) return;
+    const fresh = `${DEFAULT_SESSION_ID}-${Date.now().toString(36)}`;
+    setSessionId(fresh);
+    setMessages([]);
+    setError(null);
+    try {
+      localStorage.setItem(SESSION_STORAGE_KEY, fresh);
+    } catch {
+      /* ignore */
+    }
+  }, [isStreaming]);
 
   // Auto-scroll to bottom whenever content grows. Snap is fine here — the
   // user is following live output.
@@ -138,8 +202,8 @@ export default function ChatClient({ intro }: { intro: string }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          // Send only the latest user message — Hermes owns history.
           messages: [{ role: "user", content: text }],
+          sessionId,
         }),
         signal: controller.signal,
       });
@@ -196,14 +260,39 @@ export default function ChatClient({ intro }: { intro: string }) {
       abortRef.current = null;
       setIsStreaming(false);
     }
-  }, [input, isStreaming, messages, handleEvent]);
+  }, [input, isStreaming, messages, sessionId, handleEvent]);
 
   return (
     // h-full assumes the parent gives us full height. The page sets that up.
     <div className="flex h-full min-h-0 flex-col">
+      {/* Slim header — session indicator + new conversation. */}
+      <div className="flex items-center justify-between gap-3 border-b border-border bg-secondary/40 px-3 py-2 text-xs sm:px-4">
+        <div className="flex items-center gap-2 text-muted-foreground">
+          <span className="font-smallcaps tracking-[0.12em]">session</span>
+          <code
+            className="truncate font-mono text-[0.7rem] text-foreground/80"
+            title={sessionId}
+          >
+            {sessionId}
+          </code>
+        </div>
+        <button
+          type="button"
+          onClick={startNewConversation}
+          disabled={isStreaming}
+          className="border border-border bg-card px-2 py-1 text-[0.7rem] text-foreground transition hover:border-primary/40 hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+          title="Start a fresh conversation (history kept under previous id)"
+        >
+          + New conversation
+        </button>
+      </div>
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-3 py-4 sm:px-4">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
-          {messages.length === 0 ? (
+          {!historyLoaded ? (
+            <div className="flex items-center justify-center py-10 text-sm text-muted-foreground italic">
+              loading conversation…
+            </div>
+          ) : messages.length === 0 ? (
             <Message
               message={{
                 role: "assistant",
