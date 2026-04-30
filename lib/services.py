@@ -102,14 +102,17 @@ def cmd_install_services(args) -> int:
     # 1. Datasette venv (idempotent)
     _ensure_datasette_venv()
 
-    # 2. Copy units
+    # 2. Copy units, substituting the actual repo path so it works regardless
+    #    of where the repo lives (~/centinel, ~/code/centinel, /opt/..., etc).
+    repo_str = str(REPO_ROOT)
     for unit in ALL_UNITS:
         src = SYSTEMD_SRC / unit
         dst = SYSTEMD_DST / unit
         if not src.exists():
             _err(f"unit template missing: {src}")
             return 1
-        dst.write_text(src.read_text())
+        text = src.read_text().replace("%h/code/centinel", repo_str)
+        dst.write_text(text)
         _ok(f"installed {dst}")
 
     # 3. Reload + enable + start
@@ -181,13 +184,22 @@ def _ensure_datasette_pipx() -> None:
     if shutil.which("datasette"):
         _ok("datasette already on PATH")
         return
-    if not shutil.which("pipx"):
-        _err("Neither datasette nor pipx is installed. Install pipx or run:")
-        print(_dim("    python3 -m pip install --user datasette"))
-        return
-    rc = subprocess.run(["pipx", "install", "datasette"], check=False).returncode
+    if shutil.which("pipx"):
+        rc = subprocess.run(["pipx", "install", "datasette"], check=False).returncode
+        if rc == 0:
+            _ok("datasette installed via pipx")
+            return
+    # Last-resort: pip install --user
+    _info("pipx not available — falling back to: pip install --user datasette")
+    rc = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--user", "datasette"],
+        check=False,
+    ).returncode
     if rc == 0:
-        _ok("datasette installed via pipx")
+        _ok("datasette installed to ~/.local/bin/datasette")
+    else:
+        _err("Could not install datasette. Install manually:")
+        print(_dim(f"    {sys.executable} -m pip install --user datasette"))
 
 
 # ─── status ───────────────────────────────────────────────────────────────────
