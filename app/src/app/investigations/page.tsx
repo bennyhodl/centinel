@@ -3,6 +3,7 @@ import { listInvestigations } from "@/lib/investigations";
 import { EmptyState } from "@/components/EmptyState";
 import { Pill, statusTone } from "@/components/Pill";
 import { NewInvestigationForm } from "./_components/NewInvestigationForm";
+import { LocalTime } from "@/components/local-time";
 
 export const dynamic = "force-dynamic";
 
@@ -64,7 +65,7 @@ export default async function InvestigationsPage() {
                     )}
                     {fm.depth != null && <span>depth: {String(fm.depth)}</span>}
                     {fm.last_run != null && (
-                      <span>last run: {String(fm.last_run)}</span>
+                      <span>last run: <LocalTime iso={String(fm.last_run)} /></span>
                     )}
                   </footer>
                 </Link>

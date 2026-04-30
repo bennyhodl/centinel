@@ -1,4 +1,5 @@
 import type { InvestigationCronStatus } from "@/lib/investigation-cron";
+import { LocalTime } from "@/components/local-time";
 
 export function CronStatusCard({ status }: { status: InvestigationCronStatus }) {
   // Manual schedule is intentional, not a problem.
@@ -65,14 +66,24 @@ export function CronStatusCard({ status }: { status: InvestigationCronStatus }) 
         {status.schedule_cron && (
           <Row label="Schedule" value={status.schedule_cron} />
         )}
-        {status.next_run && <Row label="Next run" value={status.next_run} />}
-        {status.last_run && <Row label="Last run" value={status.last_run} />}
+        {status.next_run && (
+          <Row
+            label="Next run"
+            value={<LocalTime iso={status.next_run} showRelative />}
+          />
+        )}
+        {status.last_run && (
+          <Row
+            label="Last run"
+            value={<LocalTime iso={status.last_run} showRelative />}
+          />
+        )}
       </dl>
     </div>
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex justify-between gap-2">
       <dt className="shrink-0">{label}</dt>

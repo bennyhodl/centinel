@@ -7,6 +7,7 @@ import { Pill, statusTone } from "@/components/Pill";
 import { resolveWikilink } from "@/lib/wiki";
 import { InvestigationControls } from "./_components/InvestigationControls";
 import { CronStatusCard } from "./_components/CronStatusCard";
+import { LocalTime } from "@/components/local-time";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +26,7 @@ export default async function InvestigationDetailPage({
   const findingLinks = extractFindingLinks(doc.body);
   const cronStatus = await readInvestigationCronStatus(slug);
   // Prefer cron's last_run (authoritative) over frontmatter (which may be stale).
-  const lastRun = cronStatus.last_run ?? (fm.last_run ? String(fm.last_run) : "—");
+  const lastRunIso = cronStatus.last_run ?? (fm.last_run ? String(fm.last_run) : null);
 
   return (
     <section>
@@ -60,7 +61,7 @@ export default async function InvestigationDetailPage({
         <Stat label="Schedule" value={fm.schedule ? String(fm.schedule) : "—"} />
         <Stat label="Depth" value={fm.depth != null ? String(fm.depth) : "—"} />
         <Stat label="Seeds" value={String(seeds.length)} />
-        <Stat label="Last Run" value={lastRun} />
+        <Stat label="Last Run" value={lastRunIso ? <LocalTime iso={lastRunIso} showRelative /> : "—"} />
       </dl>
 
       <div className="mb-6">
@@ -113,7 +114,7 @@ export default async function InvestigationDetailPage({
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="border border-border bg-card px-3 py-2">
       <div className="font-smallcaps text-[0.55rem] tracking-[0.12em] text-muted-foreground">
