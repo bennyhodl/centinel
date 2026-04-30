@@ -99,8 +99,15 @@ def cmd_install_services(args) -> int:
 
     SYSTEMD_DST.mkdir(parents=True, exist_ok=True)
 
-    # 1. Datasette venv (idempotent)
-    _ensure_datasette_venv()
+    # 1. Datasette venv (idempotent). Datasette is OPTIONAL — if its setup
+    #    fails (no pip, no network, etc), keep going so web still installs.
+    datasette_ok = True
+    try:
+        _ensure_datasette_venv()
+    except Exception as e:
+        datasette_ok = False
+        _warn(f"datasette setup failed: {e}")
+        _warn("continuing without datasette — install it later and re-run install-services")
 
     # 2. Copy units, substituting the actual repo path so it works regardless
     #    of where the repo lives (~/centinel, ~/code/centinel, /opt/..., etc).
@@ -121,12 +128,15 @@ def cmd_install_services(args) -> int:
         _err("systemctl daemon-reload failed")
         return rc
 
-    for unit in ALL_UNITS:
+    units_to_start = list(ALL_UNITS) if datasette_ok else [WEB_UNIT]
+    for unit in units_to_start:
         rc = _systemctl("enable", "--now", unit).returncode
         if rc != 0:
             _err(f"failed to enable+start {unit}")
             return rc
         _ok(f"enabled and started {unit}")
+    if not datasette_ok:
+        _warn(f"skipped {DATASETTE_UNIT} — install datasette and run install-services again")
 
     print()
     _info("To make services survive logout (needed on EC2):")
@@ -164,11 +174,28 @@ def _ensure_datasette_venv() -> None:
         check=False,
     ).returncode
     if rc != 0:
-        _warn("venv creation failed; falling back to pipx")
+        _warn("venv creation failed; falling back to pipx / pip --user")
         _ensure_datasette_pipx()
         return
 
     pip = DATASETTE_VENV / "bin" / "pip"
+    py = DATASETTE_VENV / "bin" / "python"
+    if not pip.exists():
+        # Amazon Linux 2's python3-venv often lacks ensurepip data, so the
+        # venv is created without pip. Bootstrap it manually.
+        _info("venv has no pip — bootstrapping with get-pip.py")
+        try:
+            from urllib.request import urlretrieve
+            tmp = "/tmp/get-pip.py"
+            urlretrieve("https://bootstrap.pypa.io/get-pip.py", tmp)
+            rc = subprocess.run([str(py), tmp], check=False).returncode
+            if rc != 0 or not pip.exists():
+                raise RuntimeError("get-pip.py failed")
+        except Exception as e:
+            _warn(f"could not bootstrap pip in venv ({e}); falling back to pipx / pip --user")
+            _ensure_datasette_pipx()
+            return
+
     _info("installing datasette into venv")
     rc = subprocess.run(
         [str(pip), "install", "--upgrade", "pip", "datasette"],
@@ -176,7 +203,7 @@ def _ensure_datasette_venv() -> None:
     ).returncode
     if rc != 0:
         _err("datasette install failed")
-        return
+        raise RuntimeError("datasette install failed")
     _ok(f"datasette installed at {DATASETTE_VENV}/bin/datasette")
 
 
