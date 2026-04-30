@@ -16,8 +16,12 @@ export function SidebarLayout({ children }: { children: ReactNode }) {
 
   const toggle = useCallback(() => setOpen((v) => !v), []);
 
+  // Routes that need a full-bleed canvas (no padding, no footer, no max-width
+  // wrapper) — typically anything with a fixed-bottom composer or iframe.
+  const isFullBleed = pathname?.startsWith("/chat") || pathname?.startsWith("/db");
+
   return (
-    <div className="flex min-h-svh w-full">
+    <div className="flex h-svh w-full overflow-hidden">
       {/* Desktop sidebar */}
       <AppSidebar className="hidden md:flex" />
 
@@ -45,7 +49,7 @@ export function SidebarLayout({ children }: { children: ReactNode }) {
         </button>
       </div>
 
-      <main className="flex-1 flex flex-col min-w-0">
+      <main className="flex-1 flex flex-col min-w-0 min-h-0">
         {/* Mobile header with menu button */}
         <div className="flex items-center gap-3 border-b-2 border-foreground/15 px-4 py-3 md:hidden">
           <button
@@ -57,20 +61,26 @@ export function SidebarLayout({ children }: { children: ReactNode }) {
           </button>
           <span className="masthead text-lg text-foreground">CENTINEL</span>
         </div>
-        <div className="flex-1 px-4 py-6 md:px-8 md:py-8">
-          <div className="mx-auto max-w-4xl">{children}</div>
-        </div>
-        {/* Footer colophon */}
-        <footer className="border-t border-border px-4 py-4 md:px-8">
-          <div className="mx-auto max-w-4xl flex items-center justify-between text-[0.65rem] text-muted-foreground">
-            <span className="italic">
-              Printed for the publick Benefit
-            </span>
-            <span className="font-smallcaps tracking-[0.12em]">
-              Centinel &middot; Vol. I &middot; Hermes Engine
-            </span>
-          </div>
-        </footer>
+        {isFullBleed ? (
+          // Full bleed: page renders flush; chat owns its own scroll + composer.
+          <div className="flex-1 min-h-0 min-w-0">{children}</div>
+        ) : (
+          <>
+            <div className="flex-1 min-h-0 overflow-y-auto px-4 py-6 md:px-8 md:py-8">
+              <div className="mx-auto max-w-4xl">{children}</div>
+            </div>
+            <footer className="border-t border-border px-4 py-4 md:px-8">
+              <div className="mx-auto max-w-4xl flex items-center justify-between text-[0.65rem] text-muted-foreground">
+                <span className="italic">
+                  Printed for the publick Benefit
+                </span>
+                <span className="font-smallcaps tracking-[0.12em]">
+                  Centinel &middot; Vol. I &middot; Hermes Engine
+                </span>
+              </div>
+            </footer>
+          </>
+        )}
       </main>
     </div>
   );

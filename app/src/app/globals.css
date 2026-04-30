@@ -357,3 +357,12 @@ html, body {
 .prose-broadsheet.prose-compact pre { margin: 0.6em 0; }
 .prose-broadsheet.prose-compact ul,
 .prose-broadsheet.prose-compact ol { margin: 0 0 0.6em; }
+
+/* Animated thinking dots — used in chat while assistant is generating. */
+@keyframes thinking-bounce {
+  0%, 80%, 100% { transform: translateY(0);     opacity: 0.4; }
+  40%           { transform: translateY(-3px);  opacity: 1;   }
+}
+.animate-thinking-1 { animation: thinking-bounce 1.2s ease-in-out infinite; animation-delay: 0s; }
+.animate-thinking-2 { animation: thinking-bounce 1.2s ease-in-out infinite; animation-delay: 0.18s; }
+.animate-thinking-3 { animation: thinking-bounce 1.2s ease-in-out infinite; animation-delay: 0.36s; }

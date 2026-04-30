@@ -14,25 +14,22 @@ const RequestSchema = z.object({
   messages: z.array(MessageSchema).min(1),
 });
 
-// Stable session id passed via X-Hermes-Session-Id so Hermes loads the
-// session's history server-side. The web client sends only the new
-// user message; Hermes owns multi-turn context.
 const SESSION_ID = "centinel-web-chat";
 
 /**
- * /chat is a thin streaming proxy to Hermes' OpenAI-compatible API server
- * (`gateway/platforms/api_server.py` — POST /v1/chat/completions).
+ * /chat is a streaming proxy to Hermes' OpenAI-compatible API server. We
+ * translate Hermes' SSE stream into NDJSON events the client can render
+ * structurally:
  *
- *   1. Take the latest user message.
- *   2. POST to <HERMES_API_URL>/chat/completions with stream=true and
- *      X-Hermes-Session-Id: centinel-web-chat for session continuity.
- *   3. Translate the SSE stream from OpenAI's chat-completions format
- *      to plain text for the browser, extracting `delta.content` chunks.
+ *   { "type": "delta",        "text": "..."         }   // assistant content chunk
+ *   { "type": "tool_call",    "id": "...", "name": "...", "args": { ... } }
+ *   { "type": "tool_output",  "id": "...", "text": "...", "truncated": true }
+ *   { "type": "error",        "message": "..."      }
+ *   { "type": "done" }
  *
- * The Hermes API server is responsible for skill loading (controlled by
- * `platform_toolsets.api_server` in ~/.hermes/config.yaml plus
- * `hermes skills config` enabling the centinel-operator skill), session
- * state (per X-Hermes-Session-Id), and tool execution. We just stream.
+ * Hermes emits two SSE event types:
+ *   - default OpenAI chat-completions chunks  (content deltas)
+ *   - `event: hermes.tool.progress`           (function_call / function_call_output)
  */
 export async function POST(req: NextRequest) {
   let body: unknown;
@@ -66,9 +63,6 @@ export async function POST(req: NextRequest) {
   }
 
   const url = baseURL.replace(/\/$/, "") + "/chat/completions";
-  // We send only the new user message — the Hermes session has the
-  // prior turns. The model field is informational; Hermes routes to
-  // whatever the api_server platform is configured for.
   const payload = {
     model: process.env.HERMES_MODEL ?? "hermes-default",
     messages: [{ role: "user", content: userQuery }],
@@ -81,7 +75,7 @@ export async function POST(req: NextRequest) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey || "missing"}`,
+        Authorization: `Bearer ${apiKey || "missing"}`,
         "X-Hermes-Session-Id": SESSION_ID,
       },
       body: JSON.stringify(payload),
@@ -103,10 +97,7 @@ export async function POST(req: NextRequest) {
     } catch {
       /* ignore */
     }
-    return Response.json(
-      { error: "hermes_error", detail },
-      { status: 502 },
-    );
+    return Response.json({ error: "hermes_error", detail }, { status: 502 });
   }
 
   const encoder = new TextEncoder();
@@ -117,6 +108,20 @@ export async function POST(req: NextRequest) {
       let closed = false;
       const reader = upstream.body!.getReader();
       let buffer = "";
+      // Counter so each tool call gets a stable id even when Hermes doesn't
+      // give us one explicitly — used by the client to pair calls + outputs.
+      let toolSeq = 0;
+      // Stack of pending tool call ids; tool_output frames pop the last one.
+      const toolStack: string[] = [];
+
+      const send = (obj: Record<string, unknown>) => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
+        } catch {
+          /* already closed */
+        }
+      };
 
       const closeOnce = () => {
         if (closed) return;
@@ -140,10 +145,6 @@ export async function POST(req: NextRequest) {
             const frame = buffer.slice(0, sep);
             buffer = buffer.slice(sep + 2);
 
-            // Pick out the frame's event name (default = "message" per SSE
-            // spec). Hermes uses "hermes.tool.progress" for tool calls and
-            // tool outputs — we surface those inline as italicized markers
-            // so the UI shows live progress, not a long silent gap.
             const eventLine = frame
               .split(/\r?\n/)
               .find((l) => l.startsWith("event:"));
@@ -151,8 +152,6 @@ export async function POST(req: NextRequest) {
               ? eventLine.slice("event:".length).trim()
               : "message";
 
-            // Each frame may have multiple `data: ...` lines. We
-            // concatenate the data payloads per the SSE spec.
             const dataLines = frame
               .split(/\r?\n/)
               .filter((l) => l.startsWith("data:"))
@@ -161,86 +160,80 @@ export async function POST(req: NextRequest) {
 
             const dataPayload = dataLines.join("\n");
             if (dataPayload === "[DONE]") {
+              send({ type: "done" });
               closeOnce();
               return;
             }
 
+            let parsed: unknown;
             try {
-              const parsed = JSON.parse(dataPayload) as
-                | { choices?: { delta?: { content?: string | null } }[] }
-                | {
-                    type?: "function_call" | "function_call_output";
-                    name?: string;
-                    arguments?: string;
-                    output?: string | unknown;
-                  };
-
-              if (eventName === "hermes.tool.progress") {
-                const tp = parsed as {
-                  type?: "function_call" | "function_call_output";
-                  name?: string;
-                  arguments?: string;
-                  output?: string | unknown;
-                };
-                if (tp.type === "function_call") {
-                  let preview = "";
-                  try {
-                    const args = tp.arguments
-                      ? (JSON.parse(tp.arguments) as Record<string, unknown>)
-                      : {};
-                    preview = Object.entries(args)
-                      .slice(0, 3)
-                      .map(([k, v]) => {
-                        const vs = String(v);
-                        return `${k}=${vs.length > 60 ? vs.slice(0, 57) + "..." : vs}`;
-                      })
-                      .join(", ");
-                  } catch {
-                    preview = (tp.arguments ?? "").slice(0, 80);
-                  }
-                  const name = tp.name ?? "tool";
-                  controller.enqueue(
-                    encoder.encode(`\n\n_→ ${name}(${preview})_\n\n`),
-                  );
-                } else if (tp.type === "function_call_output") {
-                  const raw =
-                    typeof tp.output === "string"
-                      ? tp.output
-                      : JSON.stringify(tp.output ?? "");
-                  const trimmed =
-                    raw.length > 400
-                      ? raw.slice(0, 400) + ` … [+${raw.length - 400} chars]`
-                      : raw;
-                  controller.enqueue(
-                    encoder.encode(`_↳ ${trimmed.replace(/\n/g, " ")}_\n\n`),
-                  );
-                }
-                continue;
-              }
-
-              const delta = (
-                parsed as {
-                  choices?: { delta?: { content?: string | null } }[];
-                }
-              ).choices?.[0]?.delta?.content;
-              if (delta) {
-                controller.enqueue(encoder.encode(delta));
-              }
+              parsed = JSON.parse(dataPayload);
             } catch {
-              // Malformed frame — skip silently rather than blow up the stream.
+              continue; // malformed frame
+            }
+
+            if (eventName === "hermes.tool.progress") {
+              const tp = parsed as {
+                type?: "function_call" | "function_call_output";
+                id?: string;
+                name?: string;
+                arguments?: string;
+                output?: string | unknown;
+              };
+
+              if (tp.type === "function_call") {
+                let args: Record<string, unknown> | string = {};
+                try {
+                  args = tp.arguments
+                    ? (JSON.parse(tp.arguments) as Record<string, unknown>)
+                    : {};
+                } catch {
+                  args = tp.arguments ?? "";
+                }
+                const id = tp.id || `t${++toolSeq}`;
+                toolStack.push(id);
+                send({
+                  type: "tool_call",
+                  id,
+                  name: tp.name ?? "tool",
+                  args,
+                });
+              } else if (tp.type === "function_call_output") {
+                const raw =
+                  typeof tp.output === "string"
+                    ? tp.output
+                    : JSON.stringify(tp.output ?? "");
+                const LIMIT = 1200;
+                const truncated = raw.length > LIMIT;
+                const text = truncated ? raw.slice(0, LIMIT) : raw;
+                const id = tp.id || toolStack.pop() || `t${toolSeq}`;
+                send({
+                  type: "tool_output",
+                  id,
+                  text,
+                  truncated,
+                  fullLength: raw.length,
+                });
+              }
+              continue;
+            }
+
+            // Default: OpenAI chat-completion chunk.
+            const delta = (
+              parsed as {
+                choices?: { delta?: { content?: string | null } }[];
+              }
+            ).choices?.[0]?.delta?.content;
+            if (delta) {
+              send({ type: "delta", text: delta });
             }
           }
         }
+        send({ type: "done" });
       } catch (e) {
         if (!closed) {
           const msg = e instanceof Error ? e.message : String(e);
-          try {
-            controller.enqueue(
-              encoder.encode(`\n\n_[stream error: ${msg}]_`),
-            );
-          } catch {
-            /* ignore */
-          }
+          send({ type: "error", message: msg });
         }
       } finally {
         closeOnce();
@@ -250,7 +243,7 @@ export async function POST(req: NextRequest) {
 
   return new Response(readable, {
     headers: {
-      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Type": "application/x-ndjson; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       "X-Accel-Buffering": "no",
     },
