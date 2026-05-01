@@ -442,6 +442,15 @@ def cmd_setup_cron(args: argparse.Namespace) -> int:
     _register_dispatcher_cron(name=_job_name("snooze-sweep"), schedule="0 6 * * *",
                               dispatcher_args=["queue", "sweep-snoozed"])
 
+    # Per-profile cron fan-out. Hermes' gateway scheduler only drains the
+    # DEFAULT profile's queue every 60s — jobs in role profiles
+    # (investigator, watch-runner, data-reporter, archivist) never tick on
+    # their own. We fix that by registering a default-profile job that runs
+    # every minute and shells out to `hermes --profile <X> cron tick` for
+    # each role. Cheap (~ms each) and idempotent.
+    _register_dispatcher_cron(name=_job_name("profile-tick"), schedule="* * * * *",
+                              dispatcher_args=["cron", "tick-profiles"])
+
     _ok("Cron jobs registered (paused). Run `centinel cron resume-all` to activate.")
     return 0
 
@@ -530,6 +539,50 @@ def _bulk_cron_state(*, action: str) -> int:
             current_id = None  # consume so we don't double-toggle
     _ok(f"{action}d {touched} Centinel cron jobs")
     return 0
+
+
+def cmd_cron_tick_profiles(args: argparse.Namespace) -> int:
+    """Run `hermes --profile <X> cron tick` for each role profile.
+
+    Why this exists: Hermes' gateway scheduler only drains the DEFAULT
+    profile's queue. Per-profile jobs (investigator, watch-runner,
+    data-reporter, archivist) sit in their own queues and never fire
+    automatically. We register THIS command as a default-profile cron
+    that runs every minute, fanning the tick out to every role profile.
+
+    Each `cron tick` exits immediately with no output if there's nothing
+    due, so this is cheap to run constantly. Errors from individual
+    profiles are surfaced but don't abort the others.
+    """
+    hermes = _hermes_bin()
+    profiles = ["investigator", "watch-runner", "data-reporter", "archivist"]
+    overall_rc = 0
+    for profile in profiles:
+        try:
+            result = subprocess.run(
+                [hermes, "--profile", profile, "cron", "tick"],
+                check=False, text=True, capture_output=True, timeout=600,
+            )
+            if result.returncode != 0:
+                _info(f"{profile}: tick exited {result.returncode}")
+                if result.stderr:
+                    _info(f"  {result.stderr.strip()[:300]}")
+                overall_rc = result.returncode
+            elif result.stdout.strip() or result.stderr.strip():
+                # Only print when something actually happened, to keep the
+                # default-profile cron output dir from filling with empty entries.
+                print(f"=== {profile} ===")
+                if result.stdout:
+                    print(result.stdout, end="")
+                if result.stderr:
+                    print(result.stderr, end="", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            _err(f"{profile}: cron tick timed out after 600s")
+            overall_rc = 1
+        except OSError as e:
+            _err(f"{profile}: failed to spawn hermes cron tick: {e}")
+            overall_rc = 1
+    return overall_rc
 
 
 def cmd_cron_list(args: argparse.Namespace) -> int:
@@ -1370,6 +1423,10 @@ def build_parser() -> argparse.ArgumentParser:
     cron_sub.add_parser("resume-all", help="Wizard Step 7: activate every paused Centinel job").set_defaults(func=cmd_cron_resume_all)
     cron_sub.add_parser("pause-all", help="Emergency stop — pause every Centinel job").set_defaults(func=cmd_cron_pause_all)
     cron_sub.add_parser("list", help="List all Centinel-owned cron jobs").set_defaults(func=cmd_cron_list)
+    cron_sub.add_parser(
+        "tick-profiles",
+        help="Run `hermes --profile <X> cron tick` for each role profile (called by default-profile cron every minute)",
+    ).set_defaults(func=cmd_cron_tick_profiles)
 
     inv = sub.add_parser("investigate", help="Investigation lifecycle commands")
     inv_sub = inv.add_subparsers(dest="inv_action", required=True)
