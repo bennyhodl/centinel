@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { listBriefings } from "@/lib/briefings";
 import { EmptyState } from "@/components/EmptyState";
+import { GenerateBriefingButton } from "./_components/GenerateBriefingButton";
 
 export const dynamic = "force-dynamic";
 
@@ -9,28 +10,49 @@ export default async function BriefingsPage() {
 
   return (
     <section>
-      <header className="mb-6">
-        <h1 className="masthead text-3xl text-foreground">
-          Weekly Briefings
-        </h1>
-        <hr className="rule-double" />
-        <p className="text-sm text-muted-foreground italic">
-          Weekly digests of what changed across the city&apos;s surface.
-        </p>
+      <header className="mb-6 flex flex-wrap items-baseline justify-between gap-4">
+        <div>
+          <h1 className="masthead text-3xl text-foreground">
+            Weekly Briefings
+          </h1>
+          <hr className="rule-double" />
+          <p className="text-sm text-muted-foreground italic">
+            Weekly digests of what changed across the city&apos;s surface.
+          </p>
+        </div>
+        {items.length > 0 && <GenerateBriefingButton compact />}
       </header>
 
       {items.length === 0 ? (
         <EmptyState title="No briefings yet">
-          <p>
+          <p className="mb-2">
             Briefings are produced weekly by the digest agent and land in{" "}
             <code className="font-mono text-primary text-xs">
               &lt;wiki&gt;/Briefings/
             </code>
-            .
+            . You don&apos;t have to wait — generate one now from whatever
+            findings, outbox notes, and run logs already exist.
           </p>
-          <pre className="mx-auto mt-4 overflow-auto border border-border bg-secondary p-3 text-left font-mono text-xs text-foreground/80">
-            hermes -s humanized-writing chat -q "weekly digest"
-          </pre>
+          <p className="mb-4 text-xs text-muted-foreground">
+            Generation takes 1–3 minutes. You can keep using the rest of the
+            app while it runs.
+          </p>
+          <div className="flex justify-center">
+            <GenerateBriefingButton />
+          </div>
+          <details className="mt-4 text-xs text-muted-foreground">
+            <summary className="cursor-pointer">CLI alternative</summary>
+            <pre className="mx-auto mt-2 overflow-auto border border-border bg-secondary p-3 text-left font-mono text-xs text-foreground/80">
+              bin/centinel briefing run-now
+            </pre>
+            <p className="mt-2 italic">
+              You can also see live agent activity on the{" "}
+              <Link href="/status" className="text-primary hover:underline">
+                status page
+              </Link>
+              .
+            </p>
+          </details>
         </EmptyState>
       ) : (
         <ul className="divide-y divide-border">

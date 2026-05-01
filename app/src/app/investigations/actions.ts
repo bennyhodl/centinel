@@ -90,6 +90,17 @@ export async function createInvestigationAction(formData: FormData) {
     );
   }
 
+  // Cold-start fix: kick off the first run immediately, in the background.
+  // The user shouldn't have to wait for the next scheduled tick to see anything
+  // happen. `run-now` is fire-and-forget on the dispatcher side (Popen +
+  // start_new_session), so this returns in milliseconds. Best-effort — if it
+  // fails we still redirect; the cron will run on schedule.
+  try {
+    await run(bin, ["investigate", "run-now", slug], { timeout: 15_000 });
+  } catch {
+    // soft-fail; cron is registered, normal schedule still applies
+  }
+
   revalidatePath("/investigations");
   redirect(`/investigations/${slug}`);
 }

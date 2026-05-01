@@ -797,6 +797,56 @@ def cmd_investigate_cron_status(args: argparse.Namespace) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _run_cron_now(
+    *,
+    profile: str | None,
+    job_name: str,
+    detach: bool = True,
+) -> tuple[bool, str]:
+    """Fire `hermes cron run <id>` for the named job.
+
+    Returns (ok, human_message). When detach=True (default), spawns the
+    process in a new session and returns immediately — caller doesn't block
+    on the agent's full execution. Output goes to ~/.hermes logs as usual.
+
+    Used by the `run-now` family of commands and by createInvestigationAction's
+    auto-first-run hook so the operator never has to wait for cron.
+    """
+    job_id = _find_cron_job_id(profile, job_name)
+    if not job_id:
+        return False, f"no cron job named {job_name}"
+
+    hermes = _hermes_bin()
+    cmd = [hermes]
+    if profile:
+        cmd += ["--profile", profile]
+    cmd += ["cron", "run", job_id]
+
+    if detach:
+        # Fire-and-forget: detach so the web action doesn't block on the
+        # full agent run. stdout/stderr go to the void; Hermes logs the
+        # session normally and the /status feed picks it up.
+        try:
+            subprocess.Popen(  # noqa: S603 — args are program-controlled
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except OSError as e:
+            return False, f"failed to spawn: {e}"
+        return True, f"triggered {job_name} ({job_id}) — running in background"
+
+    # Foreground variant for terminal users / debugging.
+    result = subprocess.run(cmd, check=False, text=True, capture_output=True)
+    if result.returncode != 0:
+        msg = (result.stderr or result.stdout or "no output").strip()
+        return False, f"hermes cron run failed: {msg[:300]}"
+    return True, f"ran {job_name} ({job_id})"
+
+
 def _find_cron_job_id(profile: str | None, name: str) -> str | None:
     """Return the cron job id for the job with `Name: <name>`, or None.
 
@@ -972,6 +1022,97 @@ def cmd_watch_trigger(args: argparse.Namespace) -> int:
         slug_hint=f"watch-{watch_id or 'all'}",
         extra_fm={"watch_id": watch_id} if watch_id else None,
     )
+
+
+def cmd_investigate_run_now(args: argparse.Namespace) -> int:
+    """Run an investigation NOW.
+
+    Tries to fire its registered cron job (the fast path — same execution
+    flow as a scheduled tick). If the schedule is `manual` (no cron) we
+    fall back to dropping an inbox request and triggering the
+    investigator-tick job, so something runs within seconds either way.
+    """
+    config = cfg.load()
+    slug = args.slug
+    inv_path = config.wiki_path / "Investigations" / f"{slug}.md"
+    if not inv_path.exists():
+        _err(f"Investigation file not found: {inv_path}")
+        return 1
+
+    name = _job_name("investigation", slug=slug)
+    ok, msg = _run_cron_now(profile="investigator", job_name=name)
+    if ok:
+        _ok(msg)
+        return 0
+
+    # Fallback: manual schedule or registration failure — drop inbox + kick tick.
+    _info(f"{msg}; falling back to inbox + investigator-tick")
+    rc = _drop_inbox_request(
+        role="investigator",
+        sender="operator",
+        request_body=(
+            f"# Operator run-now: investigation `{slug}`\n\n"
+            f"Operator clicked Run-now from the web UI. Read "
+            f"`Investigations/{slug}.md`, resume from its last `## Run log` "
+            f"entry, fan out from seeds, append findings.\n\n"
+            f"## Reply\nUpdate the investigation's run log and write a "
+            f"completion notice to `_runtime/outbox/investigator/<YYYY-MM>/`."
+        ),
+        slug_hint=f"investigation-{slug}",
+    )
+    if rc != 0:
+        return rc
+    tick_ok, tick_msg = _run_cron_now(
+        profile="investigator", job_name=_job_name("investigator-tick"),
+    )
+    if tick_ok:
+        _ok(tick_msg)
+    else:
+        _info(f"investigator-tick: {tick_msg} (inbox drop succeeded; will run on next scheduled tick)")
+    return 0
+
+
+def cmd_briefing_run_now(args: argparse.Namespace) -> int:
+    """Generate a weekly briefing NOW (out-of-schedule)."""
+    ok, msg = _run_cron_now(profile=None, job_name=_job_name("briefings"))
+    if ok:
+        _ok(msg)
+        return 0
+    _err(msg)
+    return 1
+
+
+def cmd_watch_run_now(args: argparse.Namespace) -> int:
+    """Run watches NOW — fires the watch-runner cron once.
+
+    If `watch_id` is provided, also drops an inbox request scoping the run
+    to that watch (the watch-runner skill respects the `watch_id` field).
+    """
+    watch_id = args.watch_id
+
+    # Optionally narrow the run via inbox before firing the cron tick.
+    if watch_id:
+        rc = _drop_inbox_request(
+            role="watch-runner",
+            sender="operator",
+            request_body=(
+                f"# Operator run-now: watch `{watch_id}`\n\n"
+                f"Operator clicked Run-now. Run only the named watch.\n\n"
+                f"## Reply\nWrite the run summary to "
+                f"`_runtime/outbox/watch-runner/<YYYY-MM>/`."
+            ),
+            slug_hint=f"watch-{watch_id}",
+            extra_fm={"watch_id": watch_id},
+        )
+        if rc != 0:
+            return rc
+
+    ok, msg = _run_cron_now(profile="watch-runner", job_name=_job_name("watch-runner"))
+    if ok:
+        _ok(msg)
+        return 0
+    _err(msg)
+    return 1
 
 
 def _drop_inbox_request(
@@ -1192,6 +1333,9 @@ def build_parser() -> argparse.ArgumentParser:
     inv_trig = inv_sub.add_parser("trigger", help="Drop an inbox request — runs on next investigator tick")
     inv_trig.add_argument("slug")
     inv_trig.set_defaults(func=cmd_investigate_trigger)
+    inv_run = inv_sub.add_parser("run-now", help="Run NOW — fires the registered cron job (or inbox+tick fallback)")
+    inv_run.add_argument("slug")
+    inv_run.set_defaults(func=cmd_investigate_run_now)
     inv_status = inv_sub.add_parser("cron-status", help="Print JSON describing this investigation's cron job")
     inv_status.add_argument("slug")
     inv_status.set_defaults(func=cmd_investigate_cron_status)
@@ -1201,6 +1345,14 @@ def build_parser() -> argparse.ArgumentParser:
     watch_trig = watch_sub.add_parser("trigger", help="Drop an inbox request — runs on next watch-runner tick")
     watch_trig.add_argument("watch_id", nargs="?", default=None, help="Watch id (omit to run all)")
     watch_trig.set_defaults(func=cmd_watch_trigger)
+    watch_run = watch_sub.add_parser("run-now", help="Run watches NOW — fires watch-runner cron")
+    watch_run.add_argument("watch_id", nargs="?", default=None, help="Watch id (omit to run all)")
+    watch_run.set_defaults(func=cmd_watch_run_now)
+
+    briefing = sub.add_parser("briefing", help="Briefing lifecycle commands")
+    briefing_sub = briefing.add_subparsers(dest="briefing_action", required=True)
+    briefing_run = briefing_sub.add_parser("run-now", help="Generate a weekly briefing NOW")
+    briefing_run.set_defaults(func=cmd_briefing_run_now)
 
     queue = sub.add_parser("queue", help="Operator-queue maintenance")
     queue_sub = queue.add_subparsers(dest="queue_action", required=True)

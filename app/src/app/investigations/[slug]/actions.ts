@@ -51,3 +51,9 @@ export async function triggerInvestigationAction(formData: FormData) {
   if (!slug) throw new Error("slug is required");
   return dispatcherCall(["investigate", "trigger", slug], slug);
 }
+
+export async function runInvestigationNowAction(formData: FormData) {
+  const slug = String(formData.get("slug") ?? "").trim();
+  if (!slug) throw new Error("slug is required");
+  return dispatcherCall(["investigate", "run-now", slug], slug);
+}

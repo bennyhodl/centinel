@@ -6,6 +6,7 @@ import {
 import { EmptyState } from "@/components/EmptyState";
 import { Pill, statusTone } from "@/components/Pill";
 import { ResolveButtons } from "./_components/ResolveButtons";
+import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 
@@ -27,9 +28,24 @@ export default async function OperatorQueuePage() {
 
       {total === 0 ? (
         <EmptyState title="Queue is empty">
-          <p>
-            Nothing is waiting on the operator. Items show up here when agents
-            flag entity merges, watch tuning, aging drafts, or broken watches.
+          <p className="mb-3">
+            Nothing is waiting on your decision. Items show up here when
+            agents flag entity merges, watch tuning, aging drafts, or broken
+            watches — i.e. only after they&apos;ve actually run and found
+            something ambiguous.
+          </p>
+          <p className="text-xs text-muted-foreground">
+            If you just installed Centinel and the queue stays empty, it
+            usually means the agents haven&apos;t had enough material to
+            disagree about yet. Create an{" "}
+            <Link href="/investigations" className="text-primary hover:underline">
+              investigation
+            </Link>{" "}
+            or check the{" "}
+            <Link href="/status" className="text-primary hover:underline">
+              status page
+            </Link>{" "}
+            to see what&apos;s currently running.
           </p>
         </EmptyState>
       ) : (

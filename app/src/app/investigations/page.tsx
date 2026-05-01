@@ -25,11 +25,20 @@ export default async function InvestigationsPage() {
 
       {items.length === 0 ? (
         <EmptyState title="No investigations yet">
-          <p>
+          <p className="mb-3">
             Click <strong>+ New Investigation</strong> above to launch your
             first one. Each investigation is a markdown file in{" "}
-            <code>Investigations/</code> plus a registered cron job — the
-            Investigator agent picks it up on its next tick.
+            <code>Investigations/</code> plus a registered cron job.
+          </p>
+          <p className="text-xs text-muted-foreground">
+            <strong>Good news:</strong> the system kicks off the first run
+            immediately when you create one — you don&apos;t have to wait for
+            the next scheduled tick. Watch the{" "}
+            <Link href="/status" className="text-primary hover:underline">
+              status page
+            </Link>{" "}
+            for live progress, and findings will start landing within a few
+            minutes.
           </p>
         </EmptyState>
       ) : (

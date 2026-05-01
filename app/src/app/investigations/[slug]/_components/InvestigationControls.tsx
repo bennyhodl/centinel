@@ -4,10 +4,11 @@ import { useState, useTransition } from "react";
 import {
   pauseInvestigationAction,
   resumeInvestigationAction,
+  runInvestigationNowAction,
   triggerInvestigationAction,
 } from "../actions";
 
-type Action = "pause" | "resume" | "trigger";
+type Action = "pause" | "resume" | "trigger" | "run-now";
 
 export interface InvestigationControlsProps {
   slug: string;
@@ -35,11 +36,17 @@ export function InvestigationControls({
             ? await pauseInvestigationAction(fd)
             : action === "resume"
               ? await resumeInvestigationAction(fd)
-              : await triggerInvestigationAction(fd);
+              : action === "run-now"
+                ? await runInvestigationNowAction(fd)
+                : await triggerInvestigationAction(fd);
 
         if (action === "trigger") {
           setSuccess(
-            "Trigger queued. Investigator will pick this up on its next tick (≤ ~4h). For an immediate run, use centinel-investigator from the terminal.",
+            "Trigger queued. The investigator will pick this up on its next tick (≤ ~4h).",
+          );
+        } else if (action === "run-now") {
+          setSuccess(
+            "Running now in the background. Watch the Status page for live progress — findings and run-log entries will appear in a minute or two.",
           );
         } else {
           setSuccess(result.output.trim().split("\n").slice(-3).join("\n"));
@@ -58,6 +65,17 @@ export function InvestigationControls({
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap gap-2">
+        {!isTerminal && (
+          <button
+            type="button"
+            disabled={isPending}
+            onClick={() => call("run-now")}
+            title="Fire the investigator immediately. Runs in the background."
+            className="border border-emerald-500/50 bg-emerald-50 px-3 py-1.5 text-sm text-emerald-800 transition hover:bg-emerald-100 font-smallcaps tracking-wider disabled:opacity-50"
+          >
+            {isPending ? "Working…" : "▶ Run Now"}
+          </button>
+        )}
         {!isTerminal && isActive && (
           <button
             type="button"
@@ -83,10 +101,10 @@ export function InvestigationControls({
             type="button"
             disabled={isPending}
             onClick={() => call("trigger")}
-            title="Drops a request into the investigator's inbox; runs on next cron tick."
+            title="Drop a request into the investigator's inbox. Queued for the next tick."
             className="border border-primary/40 bg-primary/5 px-3 py-1.5 text-sm text-primary transition hover:bg-primary/10 font-smallcaps tracking-wider disabled:opacity-50"
           >
-            {isPending ? "Working…" : "Trigger Run"}
+            Queue Trigger
           </button>
         )}
       </div>
