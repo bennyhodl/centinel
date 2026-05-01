@@ -26,20 +26,66 @@ export default function ChatClient({ intro }: { intro: string }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // On mount: pick up any persisted session id, then load its history.
+  // URL params override localStorage:
+  //   ?session=<id>       — use this session instead of the persisted one
+  //   ?seedUrl=<url>      — seed the session with a Tavily extract of <url>
+  //   ?refresh=1          — force-refresh the extract before seeding
   useEffect(() => {
     let cancelled = false;
     let activeSid = DEFAULT_SESSION_ID;
-    try {
-      const saved = localStorage.getItem(SESSION_STORAGE_KEY);
-      if (saved && saved.length > 0 && saved.length <= 128) {
-        activeSid = saved;
+
+    const params =
+      typeof window !== "undefined"
+        ? new URLSearchParams(window.location.search)
+        : null;
+    const urlSession = params?.get("session")?.trim();
+    const seedUrl = params?.get("seedUrl");
+    const refresh = params?.get("refresh") === "1";
+
+    if (urlSession && urlSession.length > 0 && urlSession.length <= 200) {
+      activeSid = urlSession;
+      // Also persist so it survives a manual refresh of /chat
+      try {
+        localStorage.setItem(SESSION_STORAGE_KEY, activeSid);
+      } catch {
+        /* ignore */
       }
-    } catch {
-      /* SSR / privacy modes — ignore */
+    } else {
+      try {
+        const saved = localStorage.getItem(SESSION_STORAGE_KEY);
+        if (saved && saved.length > 0 && saved.length <= 200) {
+          activeSid = saved;
+        }
+      } catch {
+        /* SSR / privacy modes — ignore */
+      }
     }
     setSessionId(activeSid);
 
     (async () => {
+      // Seed step (only when ?seedUrl is provided)
+      if (seedUrl) {
+        try {
+          await fetch("/api/sitemap/chat-seed", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              url: seedUrl,
+              sessionId: activeSid,
+              refresh,
+            }),
+          });
+        } catch {
+          /* soft-fail; history will still load if anything was already there */
+        }
+        // Strip query params from URL so reloads don't re-seed
+        try {
+          window.history.replaceState({}, "", "/chat");
+        } catch {
+          /* ignore */
+        }
+      }
+
       try {
         const res = await fetch(
           `/chat/api/history?sessionId=${encodeURIComponent(activeSid)}`,

@@ -46,6 +46,30 @@ export const SitemapEntryContentKind = z.enum([
   "search",
 ]);
 
+/**
+ * A single outbound link harvested from a crawled page.
+ * - kind: classified by destination (internal=same host, sitemap=in our sitemap,
+ *   external=different host, document=PDF/doc/xls, mailto, tel, anchor=in-page).
+ * - llm_summary: optional, populated on demand when operator clicks "explain".
+ */
+export const SitemapLink = z.object({
+  href: z.string(),
+  anchor: z.string().default(""),
+  kind: z
+    .enum([
+      "internal",
+      "sitemap",
+      "external",
+      "document",
+      "mailto",
+      "tel",
+      "anchor",
+    ])
+    .default("external"),
+  llm_summary: z.string().optional(),
+});
+export type SitemapLink = z.infer<typeof SitemapLink>;
+
 export const SitemapEntry = z.object({
   url: z.string().url(),
   type: SitemapEntryType,
@@ -59,6 +83,10 @@ export const SitemapEntry = z.object({
   crawl_freq: z.string().optional(),
   status: SitemapEntryStatus,
   notes: z.array(z.string()).default([]),
+  // --- Tier 3 additions (all optional, backward-compatible) ---
+  links: z.array(SitemapLink).default([]),
+  signal_score: z.number().int().min(0).max(3).optional(),
+  investigation_refs: z.array(z.string()).default([]),
 });
 export type SitemapEntry = z.infer<typeof SitemapEntry>;
 

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { computeStats, loadSitemap, sortEntries } from "@/lib/sitemap";
+import { buildHostTrees, orderHosts } from "@/lib/sitemap-tree";
 import { SitemapEntryCard, StatusPill } from "./_components/SitemapEntryCard";
 import { SitemapEmptyState } from "./_components/EmptyState";
 
@@ -24,13 +25,13 @@ export default async function SitemapPage() {
   }
 
   const stats = computeStats(doc);
+  const trees = buildHostTrees(doc);
+  const pinnedHost = process.env.CENTINEL_HOST_DOMAIN ?? doc.domain ?? undefined;
+  const orderedHosts = orderHosts([...trees.keys()], pinnedHost);
+
   const needsReview = sortEntries(
     doc.entries.filter((e) => e.status === "needs_review"),
-  ).slice(0, 5);
-
-  const sortedTypes = Object.entries(stats.byType).sort(
-    (a, b) => b[1] - a[1],
-  );
+  ).slice(0, 3);
 
   return (
     <section>
@@ -38,9 +39,25 @@ export default async function SitemapPage() {
         <h1 className="masthead text-3xl text-foreground">The Sitemap</h1>
         <hr className="rule-double" />
         <p className="text-sm text-muted-foreground italic">
-          {doc.domain} &middot; generated {doc.generated_at}
+          {doc.domain || "civic atlas"} &middot; generated {doc.generated_at}
         </p>
       </header>
+
+      {/* Awaiting-review explainer */}
+      {stats.needsReview > 0 && (
+        <div className="mb-6 border-l-4 border-amber-700/60 bg-amber-50/60 px-4 py-3 text-sm text-foreground/80">
+          <strong className="font-display text-amber-900">
+            {stats.needsReview} pages awaiting review
+          </strong>{" "}
+          — the Cartographer flags newly-crawled URLs as{" "}
+          <em>needs_review</em> until the operator approves or excludes them.
+          Open a page below to triage; or{" "}
+          <Link href="/sitemap/needs-review" className="text-primary underline">
+            see the full queue
+          </Link>
+          .
+        </div>
+      )}
 
       {/* Stat strip */}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 mb-8">
@@ -55,28 +72,59 @@ export default async function SitemapPage() {
         <Stat label="Broken" value={stats.broken} tone="red" href="/sitemap/broken" />
       </div>
 
-      {/* By type */}
+      {/* Hosts */}
       <div className="mb-8">
-        <div className="section-header">By Type</div>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
-          {sortedTypes.map(([type, count]) => (
-            <Link
-              key={type}
-              href={`/sitemap/type/${type}`}
-              className="border border-border bg-card px-4 py-3 transition hover:bg-accent group"
-            >
-              <div className="font-smallcaps text-[0.6rem] tracking-[0.15em] text-muted-foreground">
-                {type}
-              </div>
-              <div className="font-display text-xl font-bold mt-1 group-hover:text-primary transition-colors">
-                {count}
-              </div>
-            </Link>
-          ))}
+        <div className="section-header">Hosts</div>
+        <div className="space-y-2">
+          {orderedHosts.map((host) => {
+            const tree = trees.get(host)!;
+            const isPinned = host === pinnedHost;
+            const topChildren = [...tree.root.children.values()]
+              .sort((a, b) => b.descendantCount - a.descendantCount)
+              .slice(0, 6);
+            return (
+              <Link
+                key={host}
+                href={`/sitemap/host/${encodeURIComponent(host)}`}
+                className="block border border-border bg-card px-4 py-3 transition hover:bg-accent group"
+              >
+                <div className="flex items-baseline justify-between gap-3">
+                  <div className="flex items-baseline gap-2">
+                    {isPinned && (
+                      <span className="border border-primary/30 bg-primary/5 px-1.5 py-0.5 font-smallcaps text-[0.55rem] tracking-[0.12em] text-primary uppercase">
+                        primary
+                      </span>
+                    )}
+                    <span className="font-mono text-sm text-foreground group-hover:text-primary transition-colors">
+                      {host}
+                    </span>
+                  </div>
+                  <span className="font-display text-lg font-bold">
+                    {tree.total}
+                  </span>
+                </div>
+                {topChildren.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5 text-[0.65rem] text-muted-foreground">
+                    {topChildren.map((c) => (
+                      <span
+                        key={c.segment}
+                        className="border border-border bg-secondary px-1.5 py-0.5"
+                      >
+                        /{c.segment}{" "}
+                        <span className="text-foreground/50">
+                          {c.descendantCount}
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </Link>
+            );
+          })}
         </div>
       </div>
 
-      {/* Operator queue: needs review */}
+      {/* Operator queue: needs review (compact) */}
       {needsReview.length > 0 && (
         <div className="mb-8">
           <div className="flex items-baseline justify-between mb-3">
