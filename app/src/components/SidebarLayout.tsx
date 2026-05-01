@@ -3,6 +3,7 @@
 import { type ReactNode, useState, useCallback, useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { AppSidebar } from "@/components/AppSidebar";
+import { GatewayHealthBanner } from "@/components/GatewayHealthBanner";
 import { Menu, X } from "lucide-react";
 
 export function SidebarLayout({ children }: { children: ReactNode }) {
@@ -61,6 +62,7 @@ export function SidebarLayout({ children }: { children: ReactNode }) {
           </button>
           <span className="masthead text-lg text-foreground">CENTINEL</span>
         </div>
+        <GatewayHealthBanner />
         {isFullBleed ? (
           // Full bleed: page renders flush; chat owns its own scroll + composer.
           <div className="flex-1 min-h-0 min-w-0">{children}</div>

@@ -797,6 +797,33 @@ def cmd_investigate_cron_status(args: argparse.Namespace) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _gateway_status() -> tuple[bool, str]:
+    """Check whether the Hermes gateway/scheduler is running.
+
+    Returns (running, human_message). When False, callers should refuse to
+    claim they triggered anything — `hermes cron run` only sets a flag the
+    scheduler reads on its next tick. No scheduler = nothing ever fires.
+
+    We use `hermes cron status` because it explicitly reports gateway state
+    and is fast (~50ms).
+    """
+    hermes = _hermes_bin()
+    try:
+        result = subprocess.run(
+            [hermes, "cron", "status"],
+            check=False, text=True, capture_output=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, f"failed to check gateway status: {e}"
+    out = (result.stdout or "") + (result.stderr or "")
+    # Look for the success marker. `hermes cron status` prints either
+    #   ✓ Gateway is running — cron jobs will fire automatically
+    # or an error explaining that gateway is down.
+    if "Gateway is running" in out:
+        return True, out.strip()
+    return False, out.strip() or "gateway not running"
+
+
 def _run_cron_now(
     *,
     profile: str | None,
@@ -812,6 +839,20 @@ def _run_cron_now(
     Used by the `run-now` family of commands and by createInvestigationAction's
     auto-first-run hook so the operator never has to wait for cron.
     """
+    # Pre-flight: `hermes cron run` only sets a flag the scheduler reads on
+    # its next tick. If the gateway/scheduler is down, the flag sits there
+    # forever and nothing happens. Refuse with a clear error so the web UI
+    # doesn't promise "running in the background" when it isn't.
+    gw_ok, gw_msg = _gateway_status()
+    if not gw_ok:
+        return False, (
+            "Hermes gateway/scheduler is not running. "
+            "Cron jobs only fire when the gateway is alive. Start it with:\n"
+            "  hermes gateway start         (or)\n"
+            "  systemctl --user start hermes-gateway\n\n"
+            f"Detail: {gw_msg[:300]}"
+        )
+
     job_id = _find_cron_job_id(profile, job_name)
     if not job_id:
         return False, f"no cron job named {job_name}"
@@ -1236,6 +1277,17 @@ def _parse_frontmatter_field(path: Path, field: str) -> str | None:
     return None
 
 
+def cmd_gateway_status(args: argparse.Namespace) -> int:
+    """Print JSON describing whether the Hermes scheduler is alive.
+
+    Used by the web UI to badge the global header so operators know
+    *before* clicking Run-Now whether anything will actually happen.
+    """
+    ok, msg = _gateway_status()
+    print(json.dumps({"running": ok, "detail": msg}))
+    return 0 if ok else 1
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Health check. Exit 0 = green, 1 = yellow, 2 = red."""
     issues: list[str] = []
@@ -1353,6 +1405,11 @@ def build_parser() -> argparse.ArgumentParser:
     briefing_sub = briefing.add_subparsers(dest="briefing_action", required=True)
     briefing_run = briefing_sub.add_parser("run-now", help="Generate a weekly briefing NOW")
     briefing_run.set_defaults(func=cmd_briefing_run_now)
+
+    sub.add_parser(
+        "gateway-status",
+        help="Print JSON: { running: bool, detail: str } describing the Hermes scheduler",
+    ).set_defaults(func=cmd_gateway_status)
 
     queue = sub.add_parser("queue", help="Operator-queue maintenance")
     queue_sub = queue.add_subparsers(dest="queue_action", required=True)
