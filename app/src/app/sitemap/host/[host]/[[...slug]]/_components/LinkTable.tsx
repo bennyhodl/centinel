@@ -15,7 +15,7 @@ const KIND_COLOR: Record<string, string> = {
 
 export function LinkTable({
   links,
-  pageUrl,
+  pageUrl: _pageUrl,
 }: {
   links: SitemapLink[];
   pageUrl: string;
@@ -48,7 +48,7 @@ export function LinkTable({
 
       <div className="border border-border bg-card divide-y divide-border">
         {visible.map((l, i) => (
-          <LinkRow key={i} link={l} pageUrl={pageUrl} />
+          <LinkRow key={i} link={l} />
         ))}
       </div>
     </div>
@@ -79,47 +79,37 @@ function FilterChip({
   );
 }
 
-function LinkRow({ link, pageUrl }: { link: SitemapLink; pageUrl: string }) {
-  const [explainLoading, setExplainLoading] = useState(false);
-  const [explanation, setExplanation] = useState<string | undefined>(
-    link.llm_summary,
-  );
-  const [err, setErr] = useState<string | null>(null);
-
-  async function explain() {
-    setExplainLoading(true);
-    setErr(null);
-    try {
-      const res = await fetch("/api/sitemap/explain-link", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          page_url: pageUrl,
-          link_href: link.href,
-          link_anchor: link.anchor,
-        }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as { summary: string };
-      setExplanation(data.summary);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "explain failed");
-    } finally {
-      setExplainLoading(false);
-    }
+/**
+ * Resolve the in-app sitemap drill-in path for a sitemap-kind link.
+ * Returns null if the URL doesn't parse cleanly.
+ */
+function sitemapDrillHref(link: SitemapLink): string | null {
+  if (link.kind !== "sitemap") return null;
+  try {
+    const u = new URL(link.href);
+    const segs = u.pathname.split("/").filter(Boolean);
+    return `/sitemap/host/${encodeURIComponent(u.host)}${segs.length ? "/" + segs.map(encodeURIComponent).join("/") : ""}`;
+  } catch {
+    return null;
   }
+}
 
-  // Sitemap-link → drill into the in-app sitemap node
-  let sitemapHref: string | null = null;
-  if (link.kind === "sitemap") {
-    try {
-      const u = new URL(link.href);
-      const segs = u.pathname.split("/").filter(Boolean);
-      sitemapHref = `/sitemap/host/${encodeURIComponent(u.host)}${segs.length ? "/" + segs.map(encodeURIComponent).join("/") : ""}`;
-    } catch {}
-  }
-
+function LinkRow({ link }: { link: SitemapLink }) {
   const cls = KIND_COLOR[link.kind] ?? KIND_COLOR.external;
+  const drillHref = sitemapDrillHref(link);
+
+  // Anchor text is now the primary clickable element.
+  // - sitemap-kind → drill into the in-app sitemap (same window)
+  // - mailto/tel/anchor → keep their semantic href
+  // - everything else → external (new tab)
+  const anchorText = link.anchor || "(no anchor)";
+  const titleHrefProps = drillHref
+    ? { href: drillHref }
+    : link.kind === "anchor"
+      ? { href: link.href }
+      : link.kind === "mailto" || link.kind === "tel"
+        ? { href: link.href }
+        : { href: link.href, target: "_blank", rel: "noopener noreferrer" as const };
 
   return (
     <div className="px-3 py-2 hover:bg-accent">
@@ -129,44 +119,43 @@ function LinkRow({ link, pageUrl }: { link: SitemapLink; pageUrl: string }) {
         >
           {link.kind}
         </span>
-        <span className="font-serif text-sm text-foreground flex-1 min-w-0">
-          {link.anchor || <em className="text-muted-foreground">(no anchor)</em>}
-        </span>
+        <a
+          {...titleHrefProps}
+          className={`font-serif text-sm flex-1 min-w-0 ${
+            link.anchor
+              ? "text-foreground hover:text-primary hover:underline"
+              : "text-muted-foreground italic"
+          } ${drillHref ? "cursor-pointer" : ""}`}
+        >
+          {anchorText}
+          {drillHref && (
+            <span className="ml-1 text-primary/70 text-xs not-italic">→</span>
+          )}
+        </a>
       </div>
       <div className="mt-1 flex flex-wrap items-baseline gap-2 text-xs">
-        <a
-          href={link.href}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="font-mono text-muted-foreground hover:text-primary break-all"
-        >
+        {/* URL shown muted as the underlying destination — not the primary action */}
+        <span className="font-mono text-muted-foreground/70 break-all">
           {link.href}
-        </a>
-        {sitemapHref && (
+        </span>
+        {/* Open external in new tab — even when title drills into sitemap, give a way out to the live page */}
+        {link.kind !== "anchor" && link.kind !== "mailto" && link.kind !== "tel" && (
           <a
-            href={sitemapHref}
-            className="text-primary hover:underline italic"
+            href={link.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-smallcaps text-[0.55rem] tracking-[0.12em] text-muted-foreground hover:text-primary uppercase"
+            title="open the live URL in a new tab"
           >
-            open in sitemap →
+            open ↗
           </a>
         )}
-        {!explanation && (
-          <button
-            type="button"
-            onClick={explain}
-            disabled={explainLoading}
-            className="text-primary hover:underline italic disabled:opacity-50"
-          >
-            {explainLoading ? "explaining…" : "explain"}
-          </button>
-        )}
       </div>
-      {explanation && (
+      {link.llm_summary && (
         <p className="mt-1 text-xs text-foreground/70 italic">
-          {explanation}
+          {link.llm_summary}
         </p>
       )}
-      {err && <p className="mt-1 text-xs text-red-800 italic">{err}</p>}
     </div>
   );
 }

@@ -3,6 +3,7 @@ import type { SitemapEntry, SitemapLink } from "@/lib/sitemap";
 import { StatusPill } from "../../../../_components/SitemapEntryCard";
 import { LeafActions } from "./LeafActions";
 import { LinkTable } from "./LinkTable";
+import { PageSummary } from "./PageSummary";
 
 export async function LeafDetail({
   entry,
@@ -79,6 +80,13 @@ export async function LeafDetail({
           {entry.description}
         </p>
       )}
+
+      {/* On-demand page summary */}
+      <PageSummary
+        url={entry.url}
+        initialSummary={entry.page_summary}
+        initialSummaryAt={entry.page_summary_at}
+      />
 
       {/* Contains tags */}
       {entry.contains.length > 0 && (

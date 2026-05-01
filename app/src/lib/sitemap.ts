@@ -87,6 +87,11 @@ export const SitemapEntry = z.object({
   links: z.array(SitemapLink).default([]),
   signal_score: z.number().int().min(0).max(3).optional(),
   investigation_refs: z.array(z.string()).default([]),
+  // On-demand LLM summary of the page's actual content (Tavily extract → LLM).
+  // Distinct from `description`, which is the structural classification written
+  // by the Cartographer when the entry was first crawled.
+  page_summary: z.string().optional(),
+  page_summary_at: z.string().optional(),
 });
 export type SitemapEntry = z.infer<typeof SitemapEntry>;
 
