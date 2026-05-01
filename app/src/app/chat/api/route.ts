@@ -178,46 +178,48 @@ export async function POST(req: NextRequest) {
             }
 
             if (eventName === "hermes.tool.progress") {
+              // Hermes emits lifecycle-only progress frames:
+              //   {"tool":"search_files","toolCallId":"call_...","status":"running"}
+              //   {"tool":"search_files","toolCallId":"call_...","status":"completed"}
+              // No args, no output text — just name + id + status. We surface
+              // these as paired tool_call (running) → tool_output (completed)
+              // frames so the client renders a card with a status indicator.
               const tp = parsed as {
-                type?: "function_call" | "function_call_output";
-                id?: string;
-                name?: string;
-                arguments?: string;
-                output?: string | unknown;
+                tool?: string;
+                toolCallId?: string;
+                status?: "running" | "completed" | "failed" | string;
+                emoji?: string;
+                label?: string;
+                error?: string;
               };
 
-              if (tp.type === "function_call") {
-                let args: Record<string, unknown> | string = {};
-                try {
-                  args = tp.arguments
-                    ? (JSON.parse(tp.arguments) as Record<string, unknown>)
-                    : {};
-                } catch {
-                  args = tp.arguments ?? "";
-                }
-                const id = tp.id || `t${++toolSeq}`;
-                toolStack.push(id);
+              const id = tp.toolCallId || `t${++toolSeq}`;
+              const name = tp.tool ?? "tool";
+
+              if (tp.status === "running") {
+                if (!tp.toolCallId) toolStack.push(id);
                 send({
                   type: "tool_call",
                   id,
-                  name: tp.name ?? "tool",
-                  args,
+                  name,
+                  args: tp.label ? { label: tp.label } : {},
                 });
-              } else if (tp.type === "function_call_output") {
-                const raw =
-                  typeof tp.output === "string"
-                    ? tp.output
-                    : JSON.stringify(tp.output ?? "");
-                const LIMIT = 1200;
-                const truncated = raw.length > LIMIT;
-                const text = truncated ? raw.slice(0, LIMIT) : raw;
-                const id = tp.id || toolStack.pop() || `t${toolSeq}`;
+              } else if (
+                tp.status === "completed" ||
+                tp.status === "failed"
+              ) {
+                const fallbackId = tp.toolCallId || toolStack.pop() || `t${toolSeq}`;
+                const text =
+                  tp.status === "failed"
+                    ? `failed${tp.error ? `: ${tp.error}` : ""}`
+                    : "(completed — no output captured)";
                 send({
                   type: "tool_output",
-                  id,
+                  id: fallbackId,
                   text,
-                  truncated,
-                  fullLength: raw.length,
+                  truncated: false,
+                  fullLength: text.length,
+                  status: tp.status,
                 });
               }
               continue;
