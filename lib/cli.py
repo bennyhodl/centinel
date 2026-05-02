@@ -356,7 +356,14 @@ def cmd_bootstrap_sitemap(args: argparse.Namespace) -> int:
 
 
 def cmd_setup_profiles(args: argparse.Namespace) -> int:
-    """Idempotently create one Hermes profile per non-Editor role."""
+    """Idempotently create one Hermes profile per non-Editor role.
+
+    Also symlinks each role's Centinel skill into the profile's skills/
+    directory. Without this, `hermes --profile <role> ...` runs cron jobs
+    with skill discovery scoped to the profile dir, so the civic-* skills
+    that live at REPO_ROOT/skills/ are never found and the agent runs
+    blind (no instructions to write findings, append run logs, etc.)
+    """
     hermes = _hermes_bin()
     existing = subprocess.run(
         [hermes, "profile", "list"], check=False, text=True, capture_output=True
@@ -365,13 +372,74 @@ def cmd_setup_profiles(args: argparse.Namespace) -> int:
     for role in cfg.PROFILE_ROLES:
         if role in existing.split():
             _info(f"profile {role} already exists, skipping")
-            continue
-        flags = ["--clone"]
-        if args.no_alias:
-            flags.append("--no-alias")
-        _run([hermes, "profile", "create", *flags, role], check=False)
+        else:
+            flags = ["--clone"]
+            if args.no_alias:
+                flags.append("--no-alias")
+            _run([hermes, "profile", "create", *flags, role], check=False)
+
+    # Symlink centinel skills into each profile (idempotent).
+    _link_role_skills()
     _ok("Profiles ready")
     return 0
+
+
+def _link_role_skills() -> None:
+    """Symlink each role's Centinel skill into <profile>/skills/centinel/<skill>.
+
+    Hermes resolves --profile <role>'s skills from ~/.hermes/profiles/<role>/skills/.
+    Our skills live at REPO_ROOT/skills/, which is OUTSIDE that tree, so they're
+    invisible by default. Symlinking is preferred over copy because `git pull`
+    on the centinel repo immediately propagates skill updates without re-running
+    setup-profiles.
+
+    We also symlink the *operator-and-ops-shared* skills (centinel-operator,
+    sitemap-builder) because some role agents reference them via
+    related_skills metadata.
+    """
+    profiles_root = Path.home() / ".hermes" / "profiles"
+    centinel_skills_src = REPO_ROOT / "skills"
+    if not centinel_skills_src.is_dir():
+        _err(f"skills source not found: {centinel_skills_src}")
+        return
+
+    # Skills to expose to ALL role profiles. Per-role primary skill is in
+    # cfg.ROLE_SKILL[role]; we expose the full set so cross-references work.
+    shared_skills = sorted(
+        d.name for d in centinel_skills_src.iterdir()
+        if d.is_dir() and (d / "SKILL.md").exists()
+    )
+
+    for role in cfg.PROFILE_ROLES:
+        profile_skills = profiles_root / role / "skills"
+        if not profile_skills.parent.exists():
+            _err(f"profile dir missing for {role}: {profile_skills.parent}")
+            continue
+        # Group centinel skills under a "centinel" namespace dir so they
+        # don't collide with whatever the user has in skills/ already.
+        dst_dir = profile_skills / "centinel"
+        dst_dir.mkdir(parents=True, exist_ok=True)
+
+        linked: list[str] = []
+        for skill_name in shared_skills:
+            src = (centinel_skills_src / skill_name).resolve()
+            link = dst_dir / skill_name
+            try:
+                # Refresh the link so updates to the src tree take effect even
+                # if the operator manually edited the link target previously.
+                if link.is_symlink() or link.exists():
+                    if link.is_symlink() and link.resolve() == src:
+                        continue  # already correct
+                    link.unlink()
+                link.symlink_to(src)
+                linked.append(skill_name)
+            except OSError as e:
+                _err(f"failed to symlink {skill_name} into {role}: {e}")
+
+        if linked:
+            _ok(f"{role}: linked {len(linked)} skill(s) → {dst_dir}")
+        else:
+            _info(f"{role}: skills already linked")
 
 
 def cmd_setup_cron(args: argparse.Namespace) -> int:
