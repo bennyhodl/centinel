@@ -52,16 +52,35 @@ If none of those — exit. Do not freelance investigations.
 
 ## Setup (every run, in order)
 
-1. **Locate the wiki root.** Read it from `~/.hermes/profiles/investigator/config.yaml` (key: `wiki_root`) or the `WIKI_ROOT` env var. If absent, abort with a clear error.
-2. **Sweep your inbox.** For every file in `<wiki>/_runtime/inbox/investigator/`:
+1. **Locate the wiki root.** Read it from `~/.hermes/profiles/investigator/config.yaml` (key: `wiki_root`) or the `WIKI_ROOT` env var. If neither resolves, fall back to inferring it from the request prompt: when the operator/cron passes a slug, the file is at `<wiki>/Investigations/<slug>.md` — read that path with the absolute form `/home/<user>/wiki/...` (no `~` — `read_file` does NOT expand tilde, you'll get a path like `<cwd>/home/...` which won't exist). Default if all else fails: `/home/$USER/wiki`.
+2. **Sweep your inbox.** Use `terminal: ls -1 <wiki>/_runtime/inbox/investigator/ 2>/dev/null` (NOT `search_files` — it does content search by default, which gives misleading zero counts). For every `.md` file:
+   - `read_file` it, parse frontmatter.
    - If `expires` is in the past → move to `<wiki>/_runtime/outbox/_expired/<YYYY-MM>/` and skip.
-   - Otherwise hold the request and decide which investigation slug it points to.
+   - Otherwise note which investigation slug the request points to.
+   - **Empty inbox is normal — DO NOT halt.** Most cron-driven runs have an empty inbox; the schedule itself is the trigger. After the sweep, always proceed to step 3 regardless of how many files you found.
 3. **Update the status board.** Acquire `flock` on `<wiki>/_runtime/status/.board.lock`, append an `In flight` line to `<wiki>/_runtime/status/board.md`, bump the timestamp, release. If lock contended >5s, fall back to `<wiki>/_runtime/status/_pending/<ts>-investigator.md`.
 4. **Acquire the per-investigation lock.** `<wiki>/Investigations/.locks/<slug>.lock`. If held by another live PID, exit with a friendly note in `<wiki>/_runtime/status/investigator.md`. Don't race.
 5. **Parse the investigation YAML.** Use `scripts/parse_investigation_yaml.py <path>` and validate the required fields: `title`, `goal`, `seeds`, `status`, `depth`, `schedule`. If validation fails, write a problem note to `<wiki>/_runtime/status/investigator.md` and exit.
 6. **Skip if `status != active`.** Append a one-line `### Run <ts>` "skipped (status=<x>)" entry to the investigation's Run log and exit cleanly.
 7. **Load `focus_entities` and `exclude_urls`.** These shape extraction priorities and the crawl frontier.
 8. **Load the sitemap.** Read `<wiki>/Sitemap/sitemap.json`. For each seed: if missing, queue a `register` request to the Cartographer (see *Inbox/outbox*) but proceed with the crawl using a generic strategy.
+
+> **You MUST proceed from setup to *Procedure* unconditionally** unless step 4 (lock contended) or step 5 (YAML invalid) or step 6 (status != active) explicitly says to exit. An empty inbox, an empty sitemap, missing prior runs, or "no entities exist yet" are NOT exit conditions — they're just the cold-start state. Keep going.
+
+---
+
+## Tool-use cheatsheet (read this before searching for files)
+
+| Need | Use | NOT |
+|------|-----|-----|
+| List files in a directory | `terminal: ls -1 <path>` | `search_files(pattern=".")` — defaults to *content* search; misleading zero counts |
+| Find files by name | `search_files(target="files", file_glob="*.md", path="<dir>")` | bare `search_files(pattern="...")` (content mode) |
+| Read a wiki/disk file | `read_file("/absolute/path/file.md")` | `read_file("~/wiki/...")` — tilde is NOT expanded; you'll get a non-existent relative path |
+| Run a shell pipeline | `terminal: <cmd>` | `execute_code` for one-liners (terminal is faster) |
+| Run multi-step Python | `execute_code` (5-min ceiling) | inline `python3 -c "<huge script>"` via terminal |
+| Fetch a public URL | `web_extract(["https://..."])` | `terminal: curl` (won't work in this profile's sandbox) |
+
+If `search_files(target="files", file_glob="*", path=X)` returns `total_count: 0` for a path you *know* exists, fall back to `terminal: ls -la <path>` before concluding the dir is empty. Never let a single search-tool zero-result halt the run.
 
 ---
 
