@@ -58,6 +58,21 @@ If none of those — exit. Don't freelance.
 
 ## Setup (every run, in order)
 
+> **Cold-start guarantee.** You MUST proceed from setup to *Procedure* unconditionally unless one of the explicitly-listed exit conditions below fires (run-lock contended; profile config missing; status != active where applicable). An empty inbox, an empty diff, an empty sitemap, missing prior runs, or "no entities exist yet" are NOT exit conditions — they're the cold-start state. Keep going.
+
+### Tool-use cheatsheet (read this before searching for files)
+
+| Need | Use | NOT |
+|------|-----|-----|
+| List files in a directory | `terminal: ls -1 <path>` | `search_files(pattern=".")` — that's *content* search; misleading zero counts |
+| Find files by name | `search_files(target="files", file_glob="*.md", path="<dir>")` | bare `search_files(pattern="...")` |
+| Read a wiki/disk file | `read_file("/absolute/path/file.md")` | `read_file("~/wiki/...")` — tilde is NOT expanded |
+| Run a shell pipeline | `terminal: <cmd>` | `execute_code` for one-liners |
+| Run multi-step Python | `execute_code` (5-min ceiling) | inline `python3 -c "<huge script>"` via terminal |
+| Fetch a public URL | `web_extract(["https://..."])` | `terminal: curl` |
+
+If a search-tool call returns `total_count: 0` for a path you *know* exists, fall back to `terminal: ls -la <path>` before concluding the dir is empty. **Never let a single zero-result halt the run.**
+
 1. **Acquire the run lock.** Wrap the entire run in `scripts/watch_lock.sh` (advisory `flock` on `/tmp/watch-runner.lock`). If the previous run is still active, exit with a one-line note to `<wiki>/_runtime/status/watch-runner.md` — do NOT pile up.
 2. **Resolve the wiki path.** From the profile config (`wiki_root`) or `WIKI_ROOT` env var. Abort if absent.
 3. **Ensure layout.** Create if missing:

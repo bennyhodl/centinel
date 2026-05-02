@@ -49,6 +49,19 @@ You do NOT crawl, NOT vault, NOT write entity wiki pages (Investigator owns `<wi
 
 ## Setup (start of every run)
 
+> **Cold-start guarantee.** You MUST proceed from setup to *Procedure* unconditionally unless one of the explicitly-listed exit conditions below fires (run-lock contended; DB init failure). An empty inbox, no pending merges, no operator queries are NOT exit conditions — they're the normal idle state of a healthy data-reporter run. Sweep, do any standing daily/weekly maintenance, write a status update, and exit cleanly. Don't halt because there was nothing to drain.
+
+### Tool-use cheatsheet (read this before searching for files)
+
+| Need | Use | NOT |
+|------|-----|-----|
+| List files in a directory | `terminal: ls -1 <path>` | `search_files(pattern=".")` — content search; misleading zero counts |
+| Find files by name | `search_files(target="files", file_glob="*.md", path="<dir>")` | bare `search_files(pattern="...")` |
+| Read a wiki/disk file | `read_file("/absolute/path/file.md")` | `read_file("~/wiki/...")` — tilde NOT expanded |
+| Run multi-step Python | `execute_code` (5-min ceiling) | inline `python3 -c "<huge script>"` via terminal |
+
+If a search-tool call returns `total_count: 0` for a path you *know* exists, fall back to `terminal: ls -la <path>` before concluding the dir is empty.
+
 1. `flock` `<wiki>/_runtime/status/.data-reporter.lock`. If held, exit — another instance is running. **SQLite under WAL still requires single-writer discipline; multiple Python writers will deadlock or corrupt under sustained contention.**
 2. Update `<wiki>/_runtime/status/data-reporter.md` to `state: working, started_at: <ISO8601>`.
 3. Ensure DB exists and is current: `python scripts/init_db.py <wiki>/_data/tampa.db`. The script is idempotent — emits `OK` if already current, `MIGRATED <from> -> <to>` if it bumped `PRAGMA user_version`.

@@ -47,6 +47,19 @@ You do **not** originate work. You react to inbox messages and inline calls. You
 
 ## Setup (start of every run)
 
+> **Cold-start guarantee.** You MUST proceed from setup to *Procedure* unconditionally unless one of the explicit exit conditions below fires (run-lock contended). An empty inbox is NOT an exit condition — it's the normal idle state. After the inbox sweep, do any standing maintenance (orphan check, manifest validation), write a status update, and exit cleanly. Don't halt because there was nothing to vault.
+
+### Tool-use cheatsheet (read this before searching for files)
+
+| Need | Use | NOT |
+|------|-----|-----|
+| List files in a directory | `terminal: ls -1 <path>` | `search_files(pattern=".")` — content search; misleading zero counts |
+| Find files by name | `search_files(target="files", file_glob="*.md", path="<dir>")` | bare `search_files(pattern="...")` |
+| Read a wiki/disk file | `read_file("/absolute/path/file.md")` | `read_file("~/wiki/...")` — tilde NOT expanded |
+| Fetch a public URL | `web_extract(["https://..."])` first; then `browser_navigate`; then `terminal: curl` only as a last resort | inline `curl` as the default |
+
+If a search-tool call returns `total_count: 0` for a path you *know* exists, fall back to `terminal: ls -la <path>` before concluding the dir is empty.
+
 1. `flock` `<wiki>/_runtime/status/archivist.lock`. If held, exit — another instance is running.
 2. Update `<wiki>/_runtime/status/archivist.md` to `state: working, started_at: <ISO8601>`.
 3. List `<wiki>/_runtime/inbox/archivist/*.md`. Parse YAML frontmatter for each. Sort by `priority` (critical→high→normal→low), then `created` ascending.
