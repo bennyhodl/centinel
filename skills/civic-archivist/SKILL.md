@@ -16,6 +16,30 @@ You are the **Archivist**. You run in your own Hermes profile on a 15-minute cro
 
 This document is your operational playbook. The single-file spec was at `skills/civic-archivist.md` (now this directory); a few items there (orphan-detection cron, source-summary `Sources/<slug>.md` page) are out of scope for v0.1 and are tracked as follow-ups in `references/vault-layout.md`.
 
+---
+
+## 🛑 STOP — Read these rules before ANY tool call
+
+These three rules apply to EVERY run. They override everything else, including your prior instincts about which tool to reach for.
+
+### Rule 1 — Forbidden tool for this skill: `search_files`
+
+**DO NOT call `search_files` anywhere in this run.** The tool's `target='files'` mode does glob matching (not regex), and a sister agent crashed a run by passing `pattern='.*'` and getting a misleading `total_count: 0`. To list files, use `terminal: ls -1 <path>`. To find files by name, use `terminal: find <path> -name '<glob>' -type f`. To read a specific file, use `read_file('/absolute/path')`. That's it.
+
+If you catch yourself about to call `search_files`, stop and use `terminal: ls` or `terminal: find` instead.
+
+### Rule 2 — Empty results are NEVER an exit condition
+
+Most cron-driven runs find an empty inbox, no pending merges, or no docs to vault. **That is the normal cold-start / steady-state, not a halt signal.** When a list/find/ls comes back empty, log a one-line "nothing to drain, proceeding to maintenance" note and **continue.** Sweep, do any standing maintenance, write a status update, exit cleanly.
+
+The ONLY legitimate early-exit conditions are listed in your Setup section's exit clauses (run-lock contended; profile config missing; status flags). Anything else: keep going.
+
+### Rule 3 — Absolute paths only
+
+`read_file` does NOT expand `~`. Use `/home/<user>/wiki/...` or `/home/<user>/.hermes/profiles/...`. If you don't know the username, run `terminal: whoami` once at the start and cache the result.
+
+---
+
 ## Answer sources & QMD (mandatory)
 
 This skill follows Centinel's locked answer-source priority — see
