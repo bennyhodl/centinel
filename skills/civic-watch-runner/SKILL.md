@@ -46,6 +46,27 @@ The ONLY legitimate early-exit conditions are listed in your Setup section's exi
 
 `read_file` does NOT expand `~`. Use `/home/<user>/wiki/...` or `/home/<user>/.hermes/profiles/...`. If you don't know the username, run `terminal: whoami` once at the start and cache the result.
 
+### Rule 4 — Call tools DIRECTLY. Do NOT wrap them in `execute_code`.
+
+You have native tools: `web_search`, `web_extract`, `read_file`, `write_file`, `patch`, `terminal`. **Use them directly.** Wrapping them in `execute_code` bloats every tool call with 200-500 chars of boilerplate; over a multi-watch run that boilerplate exhausts context before findings get written.
+
+`execute_code` is ONLY for: pure-Python data processing between tool calls (regex over diff entries, dedup hashing, JSON parsing). It is NOT for fetching URLs, reading files, writing files, or shell commands.
+
+### Rule 5 — Persist findings as you go. Never batch writes for the end.
+
+After each watch evaluates and produces a hit, **write the finding immediately** to `Findings/raw/` or `Findings/draft/` per the lane rule. Don't accumulate hits in memory and try to flush them all at the end of the run — context exhaustion will eat your work. Atomic write = `write_file(path.tmp, body)` immediately followed by `terminal: mv <path>.tmp <path>` in the next tool call. Never orphan a `.tmp`.
+
+### Rule 6 — Budget your turns
+
+You get roughly 60 turns before context gets uncomfortable. Allocate:
+- ~5 turns for setup (lock, board, load watches, load diff)
+- ~5 turns per watch (filter → evaluate → write finding if hit)
+- ~5 turns for cleanup (status update, release lock, board "Last 24h" line)
+
+If you hit turn 50 and have unprocessed watches, **persist what you've already evaluated and exit cleanly with a "deferred" note** in your status file. The remaining watches will re-evaluate next tick. Don't drop everything to chase the last few.
+
+---
+
 ---
 
 ## Answer sources & QMD (mandatory)

@@ -43,6 +43,41 @@ Anything else: keep going.
 
 `read_file` does NOT expand `~`. Use `/home/<user>/wiki/...` or `/home/<user>/.hermes/profiles/...`. If you don't know the username, run `terminal: whoami` once at the start and cache the result.
 
+### Rule 4 — Call tools DIRECTLY. Do NOT wrap them in `execute_code`.
+
+You have native tools: `web_search`, `web_extract`, `read_file`, `write_file`, `patch`, `terminal`. **Use them directly.** Wrapping them in `execute_code` (e.g. writing a Python script that imports `hermes_tools` and calls `web_extract` from inside) bloats every single tool call with 200-500 chars of boilerplate, and over a 9-minute run that boilerplate alone exhausts the context window before you reach the write phase.
+
+`execute_code` is ONLY for: pure-Python data processing between tool calls (parsing 11MB JSON, computing hashes, building entity dicts). It is NOT for fetching URLs, reading files, writing files, or running shell commands.
+
+| Task | Right tool | Wrong (context-bloat) |
+|------|-----------|----------------------|
+| Fetch a URL | `web_extract(["https://..."])` | `execute_code` with `from hermes_tools import web_extract` |
+| Read a file | `read_file("/abs/path")` | `execute_code` with `Path(...).read_text()` |
+| Write a file | `write_file(path, content)` | `execute_code` with file ops |
+| List a dir | `terminal: ls -1 <path>` | `execute_code` |
+| Append to a markdown file | `patch(path, old_string, new_string)` | re-read + rewrite via `execute_code` |
+
+### Rule 5 — Persist as you go. Never batch writes for the end.
+
+The pattern that kills runs: "I'll research everything, build a complete picture, then write all the entity pages and findings at the end." You will run out of context before "the end."
+
+The right pattern is **persist incrementally:**
+
+1. After fetching ONE seed and extracting entities → immediately `write_file` (or `patch`) the entity pages for that seed. Then move to the next seed.
+2. Atomic-write means `write_file('<path>.tmp', body)` IMMEDIATELY followed by `terminal: mv <path>.tmp <path>` in the very next tool call. **Never leave a `.tmp` orphan** — your last successful run wrote `jane-castor.md.tmp` and died before the rename, so the file is invisible.
+3. Update `## Run log` in the investigation file `patch(...)` after each major chunk of work, not at the end. If you die mid-run, the partial run log tells the operator what got done.
+4. Drop draft findings in `Findings/draft/` as soon as you have one solid candidate connection. Don't wait for the full synthesis pass.
+
+### Rule 6 — Budget your turns
+
+You get roughly 60 turns before context gets uncomfortable. Allocate:
+- ~5 turns for setup (lock, status board, parse YAML, sweep inbox)
+- ~25 turns for crawl + extraction (fetch seed → extract → write entity → next seed)
+- ~10 turns for synthesis + draft findings
+- ~5 turns for run log update + cleanup (release lock, update board)
+
+If you hit turn 40 and haven't started writing entity pages, **stop researching and start persisting** what you have. A partial-but-saved run is infinitely better than a thorough-but-lost one.
+
 ---
 
 ## Answer sources & QMD (mandatory)
