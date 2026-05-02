@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState, useTransition } from "react";
 import {
   pauseInvestigationAction,
@@ -13,21 +14,28 @@ type Action = "pause" | "resume" | "trigger" | "run-now";
 export interface InvestigationControlsProps {
   slug: string;
   status: string; // "active" | "paused" | "complete" | "archived" | ...
+  cronJobId?: string | null;
 }
 
 export function InvestigationControls({
   slug,
   status,
+  cronJobId,
 }: InvestigationControlsProps) {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [runsHref, setRunsHref] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
   function call(action: Action) {
     setError(null);
     setSuccess(null);
+    setRunsHref(null);
     const fd = new FormData();
     fd.set("slug", slug);
+
+    // Capture click time so the runs page can filter to "new since this click."
+    const clickedAtMs = Date.now();
 
     startTransition(async () => {
       try {
@@ -46,8 +54,15 @@ export function InvestigationControls({
           );
         } else if (action === "run-now") {
           setSuccess(
-            "Running now in the background. Watch the Status page for live progress — findings and run-log entries will appear in a minute or two.",
+            "Running now in the background. Open the run viewer to watch reasoning + tool calls live.",
           );
+          // Build a /runs filter that surfaces sessions started after this click.
+          const params = new URLSearchParams({
+            profile: "investigator",
+            since: String(clickedAtMs - 5_000), // small back-buffer for clock skew
+          });
+          if (cronJobId) params.set("cronJobId", cronJobId);
+          setRunsHref(`/runs?${params.toString()}`);
         } else {
           setSuccess(result.output.trim().split("\n").slice(-3).join("\n"));
         }
@@ -61,6 +76,12 @@ export function InvestigationControls({
   const isActive = status === "active";
   const isPaused = status === "paused";
   const isTerminal = status === "complete" || status === "archived";
+
+  // Static "view runs" link — always available, filtered to this investigation
+  // when we know the cron_job_id.
+  const allRunsHref = cronJobId
+    ? `/runs?profile=investigator&cronJobId=${encodeURIComponent(cronJobId)}`
+    : `/runs?profile=investigator`;
 
   return (
     <div className="space-y-2">
@@ -107,10 +128,27 @@ export function InvestigationControls({
             Queue Trigger
           </button>
         )}
+        <Link
+          href={allRunsHref}
+          className="border border-border bg-card px-3 py-1.5 text-sm text-foreground transition hover:border-primary/40 hover:text-primary font-smallcaps tracking-wider"
+        >
+          📜 Run history
+        </Link>
       </div>
       {success && (
         <div className="border border-emerald-300 bg-emerald-50 p-2 text-xs text-emerald-700 whitespace-pre-wrap">
           {success}
+          {runsHref && (
+            <>
+              {" "}
+              <Link
+                href={runsHref}
+                className="font-semibold underline hover:text-emerald-900"
+              >
+                Open the new run →
+              </Link>
+            </>
+          )}
         </div>
       )}
       {error && (

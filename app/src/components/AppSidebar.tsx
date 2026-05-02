@@ -18,14 +18,15 @@ const SECTIONS = [
     items: [
       { href: "/operator-queue", label: "Operator Queue", roman: "V" },
       { href: "/status", label: "Status Board", roman: "VI" },
-      { href: "/briefings", label: "Weekly Briefings", roman: "VII" },
+      { href: "/runs", label: "Agent Runs", roman: "VII" },
+      { href: "/briefings", label: "Weekly Briefings", roman: "VIII" },
     ],
   },
   {
     heading: "Tools",
     items: [
-      { href: "/db", label: "The Database", roman: "VIII" },
-      { href: "/chat", label: "Editor's Desk", roman: "IX" },
+      { href: "/db", label: "The Database", roman: "IX" },
+      { href: "/chat", label: "Editor's Desk", roman: "X" },
     ],
   },
 ];

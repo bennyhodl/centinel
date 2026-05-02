@@ -45,7 +45,13 @@ export default async function InvestigationDetailPage({
           <span className="font-mono text-[0.65rem] text-primary">{slug}</span>
         </div>
         <div className="mt-3">
-          <InvestigationControls slug={slug} status={status} />
+          <InvestigationControls
+            slug={slug}
+            status={status}
+            cronJobId={
+              typeof fm.cron_job_id === "string" ? fm.cron_job_id : null
+            }
+          />
         </div>
       </header>
 
