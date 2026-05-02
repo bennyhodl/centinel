@@ -380,8 +380,77 @@ def cmd_setup_profiles(args: argparse.Namespace) -> int:
 
     # Symlink centinel skills into each profile (idempotent).
     _link_role_skills()
+    # Ensure cron-mode approvals are set so unattended runs don't deadlock
+    # on terminal approval prompts.
+    _ensure_cron_approvals()
     _ok("Profiles ready")
     return 0
+
+
+def _ensure_cron_approvals() -> None:
+    """Set `approvals.cron_mode: allow` in each role profile.
+
+    Without this, the investigator/watch-runner/data-reporter/archivist agents
+    hit an approval wall the first time they call `terminal` with `python3 -c`
+    or any other "script execution" pattern. cron_mode defaults to `deny` (or
+    `ask`) which silently stalls the run — the tool returns
+    `status: approval_required` and the agent has no human to ask.
+
+    The civic-* skills depend on terminal+python3 to parse the 11MB
+    sitemap.json, run the per-investigation parser, etc. We could rewrite
+    them to use execute_code instead, but flipping cron_mode is the smaller
+    fix and keeps the skills unmodified.
+
+    Idempotent: only writes if the value is missing or different.
+    """
+    profiles_root = Path.home() / ".hermes" / "profiles"
+    for role in cfg.PROFILE_ROLES:
+        config_path = profiles_root / role / "config.yaml"
+        if not config_path.exists():
+            _err(f"profile config missing for {role}: {config_path}")
+            continue
+        try:
+            text = config_path.read_text()
+        except OSError as e:
+            _err(f"{role}: failed to read config: {e}")
+            continue
+
+        # Quick heuristic regex update — we don't want to take a YAML library
+        # dependency just for this. The config files are author-controlled and
+        # use predictable indentation.
+        import re
+        new_text = text
+        if re.search(r"^approvals:\s*$", new_text, re.MULTILINE):
+            # approvals: block exists. Update or insert cron_mode.
+            if re.search(r"^\s+cron_mode:\s*\w+\s*$", new_text, re.MULTILINE):
+                new_text = re.sub(
+                    r"^(\s+cron_mode:)\s*\w+\s*$",
+                    r"\1 allow",
+                    new_text,
+                    flags=re.MULTILINE,
+                )
+            else:
+                # Insert cron_mode under the existing approvals: block.
+                new_text = re.sub(
+                    r"^(approvals:\s*\n)",
+                    r"\1  cron_mode: allow\n",
+                    new_text,
+                    count=1,
+                    flags=re.MULTILINE,
+                )
+        else:
+            # No approvals block — append one.
+            if not new_text.endswith("\n"):
+                new_text += "\n"
+            new_text += "\napprovals:\n  cron_mode: allow\n"
+
+        if new_text != text:
+            tmp = config_path.with_suffix(config_path.suffix + ".tmp")
+            tmp.write_text(new_text)
+            tmp.replace(config_path)
+            _ok(f"{role}: set approvals.cron_mode: allow")
+        else:
+            _info(f"{role}: cron_mode already allow")
 
 
 def _link_role_skills() -> None:
