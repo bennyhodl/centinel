@@ -26,7 +26,7 @@ This is the rule that keeps maintenance burden near zero forever:
 | "Publish finding" | `mv draft/foo.md published/foo.md` | Web app re-renders feed |
 | "Pause watch" | Edits frontmatter `status: paused` in watch YAML | Watch Runner skips it next run |
 | "Tune watch" | Edits watch YAML | Watch Runner uses new config next run |
-| Chat with Editor | OpenAI request to Hermes endpoint | Editor reads wiki/DB, optionally delegates to specialists |
+| Chat with Editor | Request to centinel-server's `/chat` endpoint (runs the `editor` role) | Editor reads wiki/DB, optionally delegates to specialists via the `delegate` tool |
 
 ## Auth
 
@@ -36,13 +36,14 @@ No public/operator distinction. Everyone with the password gets the full app: vi
 
 ## Distribution shape
 
-**Hermes plugin in v0.1.** Operators self-host Hermes; `centinel` lives as a plugin folder at `~/code/centinel/`. Standalone bundled-everything fork is a stretch goal once there's evidence non-technical operators want it.
+**Single-machine self-host in v0.1.** Operators clone the repo; centinel-server runs locally and owns the cron loop. Standalone bundled-everything distribution is a stretch goal once there's evidence non-technical operators want it.
 
 ```
 git clone github.com/lygos/centinel-template my-city-doge
 cd my-city-doge
-./setup                        # registers Hermes skills + cron jobs (paused)
-docker compose up              # web app + Datasette
+./bootstrap                    # builds centinel-server, seeds paused cron jobs
+./bin/centinel-server &        # run the role runtime
+pnpm --filter centinel dev     # web app
 # open localhost:3000 → setup wizard → enter city.gov → kick off
 ```
 
@@ -57,8 +58,8 @@ Step 3: Watch presets                   → checkboxes: errant-spending, corrupt
 Step 4: Notification channel (optional) → Discord/Telegram for briefings only
 Step 5: Confirm → "Start Bootstrap"
         ↓
-        Server action shells out to (see docs/AGENT_INVOCATION.md):
-        hermes -s sitemap-builder chat -q "bootstrap mode: build sitemap for tampa.gov, write to $WIKI/Sitemap/"
+        Server action shells out to centinel-server:
+        ./bin/centinel role editor -q "bootstrap mode: build sitemap for tampa.gov, write to $WIKI/Sitemap/"
         Tails the log to the browser via Server-Sent Events
         Live progress: pages crawled, classified, descriptions written
         ETA 30–90 minutes for a city like Tampa
@@ -67,7 +68,7 @@ Step 6: Sitemap review
         Operator skims /sitemap, marks bulk-categories needs_review → active
         ↓
 Step 7: Activate cron
-        Web app calls Hermes API: flip cron jobs from paused → active
+        Web app calls centinel-server: flip cron jobs from paused → active
         ↓
 Done. /sitemap is the home. Operator launches first investigation from /investigations.
 ```
@@ -108,8 +109,8 @@ All routes behind basic auth in v0.1. No anonymous access.
 - **Search**: `qmd` BM25 over the wiki via HTTP endpoint
 - **Status page rendering**: `chokidar` watches `status/board.md`; web app pushes to client via Server-Sent Events
 - **Wizard state**: `<wiki>/_runtime/setup-state.json`. Middleware redirects to `/setup` until `complete`.
-- **Hermes integration**: server actions shell out to `centinel-cli` which writes files / toggles cron / starts sessions.
-- **Chat**: Vercel AI SDK or `openai` npm package, pointed at Hermes' OpenAI-compatible endpoint, system prompt loads from the `centinel-editor` skill.
+- **centinel-server integration**: server actions shell out to `./bin/centinel` (the dispatcher) which writes files / toggles cron / triggers roles.
+- **Chat**: Vercel AI SDK / `@ai-sdk/anthropic` pointed at centinel-server's `/chat` endpoint, which loads the editor role's system prompt + `sitemap-builder` skill.
 
 No ORM, no GraphQL, no custom auth provider, no CMS. ~5 npm dependencies that matter.
 
@@ -174,20 +175,20 @@ The vault is the evidence base. The wiki, DB, findings, and Editor's chat answer
 
 ## Setup wizard implementation detail
 
-The shell-out approach: the `/setup` server action invokes `bin/centinel bootstrap-sitemap <domain>` (which under the hood runs `hermes -s sitemap-builder chat -q "<bootstrap prompt>"`) and streams the log file to the browser via the SSE endpoint at `/api/setup/bootstrap-log`. See `docs/AGENT_INVOCATION.md` for the full invocation paradigm — there is no `hermes session run X` primitive.
+The shell-out approach: the `/setup` server action invokes `bin/centinel bootstrap-sitemap <domain>` (which under the hood runs `./bin/centinel role editor -q "<bootstrap prompt>"`) and streams the log file to the browser via the SSE endpoint at `/api/setup/bootstrap-log`. See `docs/PI_MIGRATION_PLAN.md` for the full invocation paradigm.
 
-If the web process crashes mid-bootstrap, the bootstrap continues (it's a Hermes session, not a web request). On reconnect, web app reads the latest sitemap state and resumes its progress display from there.
+If the web process crashes mid-bootstrap, the bootstrap continues (it's a centinel-server role run, not a web request). On reconnect, web app reads the latest sitemap state and resumes its progress display from there.
 
 If we hit reliability problems with shell-out, fall back to trigger-file pattern: web app writes `<wiki>/_runtime/triggers/bootstrap.json`, a tiny watcher daemon picks it up. Don't pre-build this — only switch if shell-out bites us.
 
 ## Cron registration
 
-Per RUNTIME_PROTOCOL.md, cron is dynamic — each investigation's `schedule:` field becomes its own Hermes cron entry.
+Per RUNTIME_PROTOCOL.md, cron is dynamic — each investigation's `schedule:` field becomes its own centinel-server cron entry.
 
 When operator launches an investigation via web app or chat:
 1. Server action writes `<wiki>/Investigations/<slug>.md` with frontmatter
-2. Server action calls `hermes --profile investigator cron create "<sched>" --name "centinel-investigation-<slug>" --skill civic-investigator "run investigation <slug>: read $WIKI/Investigations/<slug>.md and append results"` — in practice via `bin/centinel investigate register <slug>`, which parses the investigation YAML's `schedule:` field and constructs the call. The flag is `--skill` (singular, repeatable), and `--profile` is the global flag placed BEFORE the subcommand — there is no `--profile` argument on `cron create` and no `hermes cron register`.
-3. Cron entry runs at next scheduled tick. To temporarily disable: `hermes --profile investigator cron pause <id>` (or `centinel cron pause-all` for emergency stop).
+2. Server action calls `./bin/centinel investigate register <slug> --cron "<sched>"`, which parses the investigation YAML's `schedule:` field and adds an entry to `.runtime/cron.json` targeting the `investigator` role.
+3. Cron entry runs at next scheduled tick. To temporarily disable: `./bin/centinel cron pause investigator-tick` (or `./bin/centinel cron pause-all` for emergency stop).
 
 When operator pauses an investigation: edits frontmatter `status: paused`. Cron entry remains registered but next run sees `status: paused` and skips. (Lighter weight than unregistering cron.)
 
@@ -208,6 +209,6 @@ When operator pauses an investigation: edits frontmatter `status: paused`. Cron 
 ## Open questions (for later, non-blocking)
 
 1. Mobile UX for the chat? Most steering will probably happen mobile (operator on the go). Plan for mobile-first chat UI. Other routes can be desktop-prioritized.
-2. Multi-investigation chat context — when operator chats with Editor, should Editor remember context across sessions? Default: stateless per chat session (Hermes handles this), but offer "pin investigation" mode that scopes Editor to one investigation's context.
-3. Real-time collaboration — two operators chatting with Editor simultaneously. Hermes sessions are per-user; both will get independent Editor sessions. Acceptable for v0.1.
+2. Multi-investigation chat context — when operator chats with Editor, should Editor remember context across sessions? Default: stateless per chat session (centinel-server hands the editor role a fresh thread each time), but offer "pin investigation" mode that scopes Editor to one investigation's context.
+3. Real-time collaboration — two operators chatting with Editor simultaneously. centinel-server role runs are per-request; both will get independent Editor runs. Acceptable for v0.1.
 4. Auth upgrade path — when v0.1 basic auth is no longer enough, prefer better-auth (already in scaffold skill) over rolling our own.

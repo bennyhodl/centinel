@@ -29,7 +29,7 @@ export default async function BriefingsPage() {
             .
           </p>
           <pre className="mx-auto mt-4 overflow-auto border border-border bg-secondary p-3 text-left font-mono text-xs text-foreground/80">
-            hermes -s humanized-writing chat -q "weekly digest"
+            centinel role data-reporter -p "weekly digest"
           </pre>
         </EmptyState>
       ) : (

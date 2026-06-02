@@ -7,19 +7,15 @@ parent: ../README.md
 
 # Skill Specs
 
-Design specs for the five new skills required by Centinel. **These are NOT in `~/.hermes/skills/`** — they live here in the plan directory as authored specs. When the project graduates from 🧠 Thinking → 🔬 Investigating → 🛠️ Building, each spec gets translated into a real Hermes skill via `skill_manage(action='create')`.
+Skill specs for the five Centinel roles. Each one ships as a `SKILL.md` in its own directory under `skills/`; centinel-server's role loader picks the right one for the active role at runtime via pi-agent's `DefaultResourceLoader` skills override. See [`docs/PI_MIGRATION_PLAN.md`](../docs/PI_MIGRATION_PLAN.md).
 
-| Skill | Owner agent | Spec |
+| Skill | Loaded into role | Spec |
 |---|---|---|
-| `sitemap-builder` | Cartographer | [sitemap-builder.md](./sitemap-builder.md) |
-| `civic-investigator` | Investigator | [civic-investigator.md](./civic-investigator.md) |
-| `civic-archivist` | Archivist | [civic-archivist.md](./civic-archivist.md) |
-| `civic-data-reporter` | Data Reporter | [civic-data-reporter.md](./civic-data-reporter.md) |
-| `civic-watch-runner` | Watch Runner | [civic-watch-runner.md](./civic-watch-runner.md) |
-
-Reused (not specced here, already exist):
-- `humanized-writing` — Briefings Writer
-- `llm-wiki` — Librarian (lint mode)
+| `sitemap-builder` | `editor` | [sitemap-builder/SKILL.md](./sitemap-builder/SKILL.md) |
+| `civic-investigator` | `investigator` | [civic-investigator/SKILL.md](./civic-investigator/SKILL.md) |
+| `civic-archivist` | `archivist` | [civic-archivist/SKILL.md](./civic-archivist/SKILL.md) |
+| `civic-data-reporter` | `data-reporter` | [civic-data-reporter/SKILL.md](./civic-data-reporter/SKILL.md) |
+| `civic-watch-runner` | `watch-runner` | [civic-watch-runner/SKILL.md](./civic-watch-runner/SKILL.md) |
 
 ## Conventions across all five specs
 

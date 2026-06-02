@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# Centinel one-time installer.
+# Centinel installer.
 #
 # Idempotent. Safe to re-run after `git pull` to pick up new skills, presets,
 # and migrations. Honors operator config in `doge.config.yaml` and `.env`.
 #
-# What this does (per docs/REPO_AND_DISTRIBUTION.md):
-#   1. Sanity-checks dependencies (hermes, python3, yq).
+# What this does:
+#   1. Sanity-checks dependencies (node >= 20, pnpm).
 #   2. Creates `doge.config.yaml` from example if missing.
-#   3. Creates `.env` from example if missing (then prompts for required vars).
+#   3. Creates `.env` from example if missing.
 #   4. Creates the wiki directory tree at the configured path.
 #   5. Initializes the SQLite DB (no-op if already there).
-#   6. Symlinks bundled skills into ~/.hermes/skills/centinel/.
-#   7. Runs `centinel setup-profiles` (idempotent — creates investigator, archivist, etc.).
-#   8. Runs `centinel setup-cron` (idempotent — registers paused recurring jobs).
-#   9. Brings up Docker services (web + Datasette).
-#  10. Prints the next-step URL.
+#   6. Runs `pnpm install` at the workspace root.
+#   7. Builds @centinel/server.
+#   8. Seeds the cron table (all jobs paused).
+#   9. Runs `centinel doctor` for sanity.
+#  10. Prints next-step URL.
 #
 # Operator activates cron via the web wizard's Step 7 (which calls
 # `centinel cron resume-all`). Until then, all cron jobs stay paused.
@@ -29,12 +29,11 @@ cd "$REPO_ROOT"
 c_red()    { printf "\033[31m%s\033[0m\n" "$*"; }
 c_green()  { printf "\033[32m%s\033[0m\n" "$*"; }
 c_yellow() { printf "\033[33m%s\033[0m\n" "$*"; }
-c_dim()    { printf "\033[2m%s\033[0m\n" "$*"; }
 
-err()  { c_red "❌ $*" >&2; exit 1; }
-ok()   { c_green "✅ $*"; }
+err()  { c_red "FAIL $*" >&2; exit 1; }
+ok()   { c_green "OK   $*"; }
 info() { printf "→ %s\n" "$*"; }
-warn() { c_yellow "⚠️  $*"; }
+warn() { c_yellow "WARN $*"; }
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -42,47 +41,25 @@ require_command() {
     fi
 }
 
-prompt_if_unset() {
-    # prompt_if_unset VARNAME PROMPT_TEXT [DEFAULT]
-    local var="$1" prompt="$2" default="${3:-}"
-    if [ -z "${!var:-}" ]; then
-        local input
-        if [ -n "$default" ]; then
-            read -r -p "$prompt [$default]: " input
-            input="${input:-$default}"
-        else
-            read -r -p "$prompt: " input
-        fi
-        export "$var=$input"
-    fi
-}
-
 # ───────────────────────── 1. dependencies ─────────────────────────
 
 info "Checking dependencies"
-require_command hermes  "Install Hermes Agent first: https://hermes-agent.nousresearch.com/docs/"
-require_command python3 "Install Python 3.11+"
-require_command docker  "Install Docker"
-# yq is optional (we fall back to python+pyyaml), but warn if missing.
-if ! command -v yq >/dev/null 2>&1; then
-    warn "yq not found — will use python+pyyaml fallback for config reads"
+require_command node "Install Node.js 20+ (https://nodejs.org)."
+require_command pnpm "Install pnpm: npm i -g pnpm"
+
+node_major=$(node -p "process.versions.node.split('.')[0]")
+if [ "$node_major" -lt 20 ]; then
+    err "Node.js >= 20 required (found $(node --version))"
 fi
-# pyyaml is required for lib/config.py
-if ! python3 -c "import yaml" 2>/dev/null; then
-    info "Installing PyYAML…"
-    python3 -m pip install --user pyyaml >/dev/null
-fi
-ok "dependencies"
+ok "dependencies (node $(node --version), pnpm $(pnpm --version))"
 
 # ───────────────────────── 2. doge.config.yaml ─────────────────────────
 
 if [ ! -f doge.config.yaml ]; then
-    if [ ! -f doge.config.yaml.example ]; then
-        err "Neither doge.config.yaml nor doge.config.yaml.example found"
-    fi
+    [ -f doge.config.yaml.example ] || err "doge.config.yaml.example missing"
     info "Creating doge.config.yaml from example"
     cp doge.config.yaml.example doge.config.yaml
-    warn "Edit doge.config.yaml to set city.name, city.slug, city.domain before continuing."
+    warn "Edit doge.config.yaml to set city.{name,slug,domain} and wiki.path"
     warn "Press ENTER to open in \$EDITOR, or Ctrl-C to exit and edit later."
     read -r _
     "${EDITOR:-vi}" doge.config.yaml
@@ -98,125 +75,140 @@ if [ ! -f .env ]; then
         cat > .env <<'EOF'
 # Centinel runtime secrets — never commit this file.
 CENTINEL_PASSWORD=
-HERMES_API_URL=http://localhost:8000/v1
-HERMES_API_KEY=
+# One of these is required by the agent runtime:
+ANTHROPIC_API_KEY=
+# OPENAI_API_KEY=
 EOF
     fi
-    warn ".env created — fill in CENTINEL_PASSWORD and HERMES_API_KEY before starting the web app."
+    warn ".env created — fill in CENTINEL_PASSWORD and an agent API key before starting the server."
 fi
 ok ".env present"
 
 # ───────────────────────── 4. wiki dirs ─────────────────────────
 
-# Resolve wiki path from doge.config.yaml using lib/config.py (single source of truth).
-WIKI_PATH="$(python3 -c "from lib import config; print(config.load().wiki_path)")"
-CITY_SLUG="$(python3 -c "from lib import config; print(config.load().city.slug)")"
-info "Wiki: $WIKI_PATH"
+# Resolve wiki.path from doge.config.yaml using node (no python required).
+WIKI_PATH="$(node -e "
+const fs=require('node:fs'), os=require('node:os'), path=require('node:path');
+const yaml=require('${REPO_ROOT}/server/node_modules/yaml');
+const cfg=yaml.parse(fs.readFileSync('doge.config.yaml','utf8'));
+let p=cfg?.wiki?.path||'~/wiki/Tampa';
+if(p.startsWith('~/'))p=path.join(os.homedir(),p.slice(2));
+process.stdout.write(p);
+" 2>/dev/null || echo "")"
+
+CITY_SLUG="$(node -e "
+const fs=require('node:fs');
+const yaml=require('${REPO_ROOT}/server/node_modules/yaml');
+const cfg=yaml.parse(fs.readFileSync('doge.config.yaml','utf8'));
+process.stdout.write(cfg?.city?.slug||'tampa');
+" 2>/dev/null || echo "tampa")"
+
+if [ -z "$WIKI_PATH" ]; then
+    warn "Could not resolve wiki path yet — install dependencies first, then re-run bootstrap"
+fi
+
+info "Wiki: ${WIKI_PATH:-(unresolved)}"
 info "City slug: $CITY_SLUG"
 
-mkdir -p \
-    "$WIKI_PATH/Sitemap" \
-    "$WIKI_PATH/Investigations" \
-    "$WIKI_PATH/Findings/raw" \
-    "$WIKI_PATH/Findings/draft" \
-    "$WIKI_PATH/Findings/published" \
-    "$WIKI_PATH/Vault/pdfs" \
-    "$WIKI_PATH/Vault/html" \
-    "$WIKI_PATH/Vault/transcripts" \
-    "$WIKI_PATH/Vault/images" \
-    "$WIKI_PATH/Watches/_presets" \
-    "$WIKI_PATH/Entities" \
-    "$WIKI_PATH/Briefings" \
-    "$WIKI_PATH/_runtime/inbox/investigator" \
-    "$WIKI_PATH/_runtime/inbox/archivist" \
-    "$WIKI_PATH/_runtime/inbox/data-reporter" \
-    "$WIKI_PATH/_runtime/inbox/watch-runner" \
-    "$WIKI_PATH/_runtime/outbox/investigator" \
-    "$WIKI_PATH/_runtime/outbox/archivist" \
-    "$WIKI_PATH/_runtime/outbox/data-reporter" \
-    "$WIKI_PATH/_runtime/outbox/watch-runner" \
-    "$WIKI_PATH/_runtime/status" \
-    "$WIKI_PATH/_runtime/operator-queue" \
-    "$WIKI_PATH/_runtime/huddle" \
-    "$WIKI_PATH/_runtime/logs" \
-    "$WIKI_PATH/_data"
+if [ -n "$WIKI_PATH" ]; then
+    mkdir -p \
+        "$WIKI_PATH/Sitemap" \
+        "$WIKI_PATH/Investigations" \
+        "$WIKI_PATH/Findings/raw" \
+        "$WIKI_PATH/Findings/draft" \
+        "$WIKI_PATH/Findings/published" \
+        "$WIKI_PATH/Vault/pdfs" \
+        "$WIKI_PATH/Vault/html" \
+        "$WIKI_PATH/Vault/transcripts" \
+        "$WIKI_PATH/Vault/images" \
+        "$WIKI_PATH/Watches/_presets" \
+        "$WIKI_PATH/Entities" \
+        "$WIKI_PATH/Briefings" \
+        "$WIKI_PATH/_runtime/inbox/investigator" \
+        "$WIKI_PATH/_runtime/inbox/archivist" \
+        "$WIKI_PATH/_runtime/inbox/data-reporter" \
+        "$WIKI_PATH/_runtime/inbox/watch-runner" \
+        "$WIKI_PATH/_runtime/outbox/investigator" \
+        "$WIKI_PATH/_runtime/outbox/archivist" \
+        "$WIKI_PATH/_runtime/outbox/data-reporter" \
+        "$WIKI_PATH/_runtime/outbox/watch-runner" \
+        "$WIKI_PATH/_runtime/status" \
+        "$WIKI_PATH/_runtime/operator-queue" \
+        "$WIKI_PATH/_runtime/huddle" \
+        "$WIKI_PATH/_runtime/logs" \
+        "$WIKI_PATH/_data"
 
-# Idempotent runtime state files.
-[ -f "$WIKI_PATH/_runtime/setup-state.json" ] || echo '{"status":"pending","step":1,"watchPresets":[]}' > "$WIKI_PATH/_runtime/setup-state.json"
-[ -f "$WIKI_PATH/log.md" ] || cat > "$WIKI_PATH/log.md" <<'EOF'
+    [ -f "$WIKI_PATH/_runtime/setup-state.json" ] || echo '{"status":"pending","step":1,"watchPresets":[]}' > "$WIKI_PATH/_runtime/setup-state.json"
+    [ -f "$WIKI_PATH/log.md" ] || cat > "$WIKI_PATH/log.md" <<'EOF'
 # Centinel log
 
 Append-only log of state-changing actions. Initialized by ./bootstrap.
 EOF
+    ok "wiki tree at $WIKI_PATH"
 
-ok "wiki tree created"
-
-# ───────────────────────── 5. DB init ─────────────────────────
-
-DB_PATH="$WIKI_PATH/_data/$CITY_SLUG.db"
-if [ ! -f "$DB_PATH" ]; then
-    info "Initializing SQLite DB at $DB_PATH"
-    # Schema TBD — for now, create an empty DB so the doctor + Datasette can find it.
-    # When lib/db/init.py lands, swap this for: python3 -m lib.db.init "$DB_PATH"
-    sqlite3 "$DB_PATH" "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT);" 2>/dev/null \
-        || warn "sqlite3 CLI not found — DB will be created on first agent run"
+    # ── DB init ──
+    DB_PATH="$WIKI_PATH/_data/$CITY_SLUG.db"
+    if [ ! -f "$DB_PATH" ]; then
+        info "Initializing SQLite DB at $DB_PATH"
+        if command -v sqlite3 >/dev/null 2>&1; then
+            sqlite3 "$DB_PATH" "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT);"
+        else
+            warn "sqlite3 CLI not found — DB will be created on first agent run"
+        fi
+    fi
+    [ -f "$DB_PATH" ] && ok "db: $DB_PATH"
 fi
-[ -f "$DB_PATH" ] && ok "db: $DB_PATH"
 
-# ───────────────────────── 6. skill symlinks ─────────────────────────
+# ───────────────────────── 5. pnpm install + build ─────────────────────────
 
-HERMES_SKILLS_DIR="$HOME/.hermes/skills/centinel"
-mkdir -p "$HERMES_SKILLS_DIR"
-for skill_dir in skills/*/; do
-    name=$(basename "$skill_dir")
-    [ -f "$skill_dir/SKILL.md" ] || continue
-    target="$HERMES_SKILLS_DIR/$name"
-    ln -sfn "$(realpath "$skill_dir")" "$target"
-done
-ok "skills symlinked into $HERMES_SKILLS_DIR/"
+info "Installing workspace dependencies (pnpm install)"
+pnpm install --prefer-offline >/dev/null
+ok "dependencies installed"
 
-# ───────────────────────── 7. profiles ─────────────────────────
+info "Building @centinel/server"
+pnpm --filter @centinel/server build >/dev/null
+ok "server built"
 
-info "Creating Hermes profiles (investigator, archivist, data-reporter, watch-runner)"
-"$REPO_ROOT/bin/centinel" setup-profiles
-ok "profiles ready"
+# ───────────────────────── 6. cron seed ─────────────────────────
 
-# ───────────────────────── 8. cron jobs ─────────────────────────
+info "Seeding cron table (paused)"
+"$REPO_ROOT/bin/centinel" cron seed-paused >/dev/null
+ok "cron jobs seeded (paused — wizard Step 7 activates them)"
 
-info "Registering paused cron jobs"
-"$REPO_ROOT/bin/centinel" setup-cron
-ok "cron jobs registered (paused — wizard Step 7 activates them)"
+# ───────────────────────── 7. doctor ─────────────────────────
 
-# ───────────────────────── 9. PATH hint ─────────────────────────
+info "Running centinel doctor"
+# Doctor returns non-zero if anything fails; we surface that but don't abort —
+# operator can fix and re-run.
+if "$REPO_ROOT/bin/centinel" doctor; then
+    ok "doctor passed"
+else
+    warn "doctor found problems above — fix and re-run ./bootstrap (or ./bin/centinel doctor)"
+fi
 
-# We don't auto-modify the operator's shell rc. But we can hint.
+# ───────────────────────── 8. PATH hint ─────────────────────────
+
 case ":${PATH}:" in
     *":$REPO_ROOT/bin:"*) ok "$REPO_ROOT/bin already on PATH" ;;
     *)
-        warn "Add this to your shell rc to use centinel-* wrappers globally:"
+        warn "Add this to your shell rc to use the centinel CLI globally:"
         echo "      export PATH=\"$REPO_ROOT/bin:\$PATH\""
         ;;
 esac
 
-# ───────────────────────── 10. docker / next steps ─────────────────────────
-
-if [ -f docker-compose.yml ]; then
-    info "Starting docker services (web + datasette)"
-    docker compose up -d 2>/dev/null || warn "docker compose not yet wired — skipping"
-fi
-
 cat <<EOF
 
-$(c_green "🎉 Bootstrap complete.")
+$(c_green "Bootstrap complete.")
 
 Next:
-  1. Edit ${REPO_ROOT}/.env if you haven't (CENTINEL_PASSWORD, HERMES_API_KEY).
-  2. Open the web app and run the setup wizard:
-       cd app && pnpm dev
+  1. Edit ${REPO_ROOT}/.env if you haven't (CENTINEL_PASSWORD, ANTHROPIC_API_KEY).
+  2. Start the runtime server (in one terminal):
+       ./bin/centinel-server
+  3. Start the web app (in another terminal):
+       pnpm --filter centinel dev
        open http://localhost:3000/setup
-  3. Wizard Step 5 will call: ./bin/centinel bootstrap-sitemap <domain>
-  4. Wizard Step 7 will call: ./bin/centinel cron resume-all
-  5. After that, the browser can close — agents run on schedule.
+  4. Activate cron when ready:
+       ./bin/centinel cron resume-all
 
 Health check:
   ./bin/centinel doctor

@@ -115,7 +115,7 @@ export async function isSetupComplete(): Promise<boolean> {
 
 /**
  * Path where bootstrap stub writes its progress log.
- * Real implementation would point at the live Hermes session log.
+ * Real implementation would point at the live pi-agent run log via centinel-server.
  */
 export function bootstrapLogPath(): string {
   return path.join(runtimePath(), "bootstrap.log");

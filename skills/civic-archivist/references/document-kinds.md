@@ -1,6 +1,6 @@
 # Document Kinds — Per-Type Extraction Playbook
 
-The Archivist's golden rule: **try Hermes `web_extract` first**, then fall back to terminal tools when web_extract returns empty, errors, or doesn't support the mime type. Every fallback below assumes the corresponding system package is installed; SKILL.md lists them.
+The Archivist's golden rule: **try the `web_fetch` tool (TODO: stub) first**, then fall back to terminal tools when web_extract returns empty, errors, or doesn't support the mime type. Every fallback below assumes the corresponding system package is installed; SKILL.md lists them.
 
 Detect kind by magic bytes (`file --mime-type <path>`), NOT by URL extension or server `Content-Type`. Servers lie.
 
@@ -9,7 +9,7 @@ Detect kind by magic bytes (`file --mime-type <path>`), NOT by URL extension or 
 ## PDF — `application/pdf`
 
 ### Primary: `web_extract`
-Hermes `web_extract` will fetch a PDF URL and return markdown. For text-bearing PDFs (most council agendas, budget summaries, contracts) this is everything you need. Cache the markdown for the sidecar's "Extracted text" section.
+the `web_fetch` tool (TODO: stub) will fetch a PDF URL and return markdown. For text-bearing PDFs (most council agendas, budget summaries, contracts) this is everything you need. Cache the markdown for the sidecar's "Extracted text" section.
 
 ### Fallback: `pdftotext`
 ```bash

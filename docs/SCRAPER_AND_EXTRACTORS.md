@@ -9,11 +9,11 @@ parent: README.md
 
 ## Decision (revised 2026-04-26)
 
-**Use Hermes' built-in web tools first** (`web_extract`, `web_search`, browser tools). They already cover HTML→markdown, PDF→markdown, JS rendering, and screenshots — there is no need for a custom Scraper layer in v0.1.
+**Use the role's `web_fetch` tool first** (pi-agent's web tool surface — currently a stub, see `docs/PI_MIGRATION_PLAN.md`). The intent is to cover HTML→markdown, PDF→markdown, JS rendering, and screenshots — there is no need for a custom Scraper layer in v0.1 once the stubs land.
 
-Add thin third-party adapters under `lib/adapters/` only if the spike surfaces concrete gaps Hermes can't fill (most likely: bulk domain-mapping, where Firecrawl `/map` may beat naive crawl). Adapter API keys live in operator's `.env`; absent keys disable the adapter, never break the system.
+Add thin third-party adapters under `lib/adapters/` only if real-world use surfaces concrete gaps `web_fetch` can't fill (most likely: bulk domain-mapping, where Firecrawl `/map` may beat naive crawl). Adapter API keys live in operator's `.env`; absent keys disable the adapter, never break the system.
 
-The earlier "Scraper interface" abstraction below is preserved as reference design in case Hermes' tools fall short on a specific document type, but is NOT shipped in v0.1.
+The earlier "Scraper interface" abstraction below is preserved as reference design in case pi-agent's tools fall short on a specific document type, but is NOT shipped in v0.1.
 
 ---
 

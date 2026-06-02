@@ -2,6 +2,7 @@
 title: Centinel — Installation & First Investigation
 status: 📝 living doc (current state)
 created: 2026-04-28
+updated: 2026-05-21
 parent: README.md
 ---
 
@@ -19,17 +20,16 @@ debugging something that was never built.
 
 | Tool | Version | Why |
 |---|---|---|
-| [Hermes Agent](https://hermes-agent.nousresearch.com/) | latest | The runtime every agent runs in |
-| Python | ≥ 3.11 | Dispatcher (`bin/centinel`), config loader |
-| `pyyaml` | latest | Auto-installed by `./bootstrap` if missing |
-| Node.js | ≥ 20 | Web app |
-| `pnpm` | ≥ 9 | Web app package manager |
+| Node.js | ≥ 20 | centinel-server (TS) + web app |
+| `pnpm` | ≥ 9 | Workspace package manager |
+| Python | ≥ 3.11 | Skill helper scripts under `skills/*/scripts/` |
+| Anthropic API key | — | centinel-server drives roles via pi-agent → Anthropic |
 | Docker (optional) | latest | For Datasette + production deploy |
 | `sqlite3` CLI (optional) | any | Bootstrap DB init falls back gracefully if missing |
 
-Configure Hermes with a working model first (`hermes setup` or `hermes model`).
-Centinel doesn't pin a provider — anything Hermes supports works. The Editor
-uses whatever the default profile is configured for.
+Centinel runs roles inside `centinel-server` (a TypeScript service built on
+`@mariozechner/pi-coding-agent`). There is no separate agent runtime to
+install — `./bootstrap` builds and wires everything from this repo.
 
 ## Step 1 — Clone
 
@@ -49,8 +49,8 @@ The repo path is still `tampa-doge` on GitHub for now; the project itself is
 
 What it does (idempotent — safe to re-run after `git pull`):
 
-1. Checks `hermes`, `python3`, `docker` are installed.
-2. Auto-installs `pyyaml` if missing.
+1. Checks `node`, `pnpm`, `python3`, `docker` are installed.
+2. Auto-installs `pyyaml` if missing (used by skill helper scripts).
 3. Copies `doge.config.yaml.example` → `doge.config.yaml` and opens it in
    `$EDITOR` so you can fill in:
    - `city.name` (e.g. `Tampa`)
@@ -59,14 +59,12 @@ What it does (idempotent — safe to re-run after `git pull`):
    - `wiki.path` (defaults `~/wiki/Tampa`)
 4. Copies `.env.example` → `.env` (or creates a stub). You fill:
    - `CENTINEL_PASSWORD` — basic-auth password for the web app
-   - `HERMES_API_KEY` — for the `/chat` Editor endpoint
-5. Creates the entire wiki tree at `wiki.path`.
-6. Initializes an empty SQLite DB at `<wiki>/_data/<slug>.db`.
-7. Symlinks `skills/*` into `~/.hermes/skills/centinel/`.
-8. Creates Hermes profiles: `investigator`, `archivist`, `data-reporter`,
-   `watch-runner`.
-9. Registers paused cron jobs across all profiles.
-10. Prints a PATH hint and `docker compose` next-step.
+   - `ANTHROPIC_API_KEY` — used by centinel-server's role runtime
+5. `pnpm install` + `pnpm --filter centinel-server build`.
+6. Creates the entire wiki tree at `wiki.path`.
+7. Initializes an empty SQLite DB at `<wiki>/_data/<slug>.db`.
+8. Seeds the canonical cron jobs into `.runtime/cron.json` in the
+   **paused** state (so nothing fires until the wizard's Step 7).
 
 **Verify:**
 
@@ -74,16 +72,21 @@ What it does (idempotent — safe to re-run after `git pull`):
 ./bin/centinel doctor
 ```
 
-Should show ✅ for hermes / city / wiki / db / each profile. Yellow warnings
+Should show ✅ for node / city / wiki / db / server build. Yellow warnings
 are OK at this stage.
 
-## Step 3 — Start the web app ✅
+## Step 3 — Start the runtime ✅
+
+Open two terminals.
 
 ```bash
-cd app
-pnpm install
-pnpm approve-builds   # one-time, allows better-sqlite3 to compile
-pnpm dev
+# Terminal A — centinel-server (cron + HTTP for roles)
+./bin/centinel-server
+```
+
+```bash
+# Terminal B — web app
+pnpm --filter centinel dev
 ```
 
 Open `http://localhost:3000`. Browser prompts for basic auth — leave username
@@ -101,20 +104,21 @@ The wizard at `/setup` has 7 steps:
 | 2 — Project name | ✅ | Defaults to "Centinel" |
 | 3 — Watch presets | ✅ | Persists checked IDs |
 | 4 — Briefing channel | ✅ | Optional Discord/Telegram |
-| 5 — Start bootstrap | 🟡 | Spawns `bin/centinel bootstrap-sitemap <domain>` detached |
+| 5 — Start bootstrap | 🟡 | Asks centinel-server to run the `editor` role with `bootstrap-sitemap <domain>` |
 | 6 — Review sitemap | ✅ | SSE log tail at `/api/setup/bootstrap-log` |
-| 7 — Activate cron | ✅ | Calls `bin/centinel cron resume-all`, surfaces errors |
+| 7 — Activate cron | ✅ | Calls `./bin/centinel cron resume-all` |
 
 **🟡 Step 5 caveat:** The dispatcher *will* successfully spawn the
-`sitemap-builder` skill in a Hermes session. But the skill body itself is still
-spec-shaped — it describes the procedure but doesn't yet have all the tool
-calls wired. Expect a partial sitemap on first run; it improves as the skill
-implementation lands. The wizard advances either way.
+`sitemap-builder` skill inside the `editor` role. But the skill body itself is
+still spec-shaped — it describes the procedure but several pi-agent tools
+(`web_fetch`, `qmd_search`, `db_query`, `vault_put`) are still **stubs**.
+Expect a partial sitemap on first run; it improves as the tool implementations
+land. The wizard advances either way.
 
 **🟡 Step 7 caveat:** `cron resume-all` flips paused → active. The cron
-**scheduler** runs whatever prompt was registered, in the right profile, with
-the right skill loaded. Whether that prompt does useful work depends on the
-skill's implementation status (see the skill matrix below).
+**scheduler** (inside centinel-server) runs whatever prompt was registered, in
+the right role. Whether that prompt does useful work depends on the underlying
+tool implementations (see the skill matrix below).
 
 ## Step 5 — Beginning an investigation
 
@@ -126,72 +130,47 @@ You open `/chat` and tell the Editor:
 
 > "Start an investigation tracking parks contractors since 2021."
 
-The Editor:
-1. Calls its `register_investigation` tool.
-2. Tool writes `<wiki>/Investigations/parks-contractors.md` with frontmatter.
-3. Tool calls `bin/centinel investigate register parks-contractors`.
-4. Dispatcher reads `schedule:` from the YAML, runs
-   `hermes --profile investigator cron create ...`.
-5. Investigator picks it up at the next scheduled tick.
+The Editor uses the `delegate` tool with `target: 'investigator'` and a
+brief, which the role runtime turns into a registered investigation + cron
+entry.
 
 ### What works today (manual path)
 
 ```bash
-# 1. Write the YAML by hand
-cat > "$CENTINEL_WIKI_PATH/Investigations/parks-contractors.md" <<'EOF'
----
-slug: parks-contractors
-title: Parks Department contractors since 2021
-goal: Track every contractor awarded work by Parks dept FY2021–present
-status: active
-schedule: "0 2 * * *"
-seeds:
-  - https://www.tampa.gov/parks/contracts
-depth: 2
-focus_entities: []
-created: 2026-04-28
----
+# 1. Register the investigation (writes YAML + seeds a cron entry, paused)
+./bin/centinel investigate register parks-contractors \
+  --cron "0 2 * * *"
 
-## Run log
-
-(empty — first run pending)
-EOF
-
-# 2. Register the cron entry
-./bin/centinel investigate register parks-contractors
-
-# 3. (optional) Trigger first run immediately rather than waiting for cron
-hermes --profile investigator cron list      # find the job ID
-hermes --profile investigator cron run <id>  # next tick fires it
+# 2. Resume the investigator tick so cron actually fires
+./bin/centinel cron resume investigator-tick
 ```
 
-The Investigator profile picks it up, reads its skill, and runs.
+The `investigator` role inside centinel-server picks it up on the next tick,
+reads its `civic-investigator` skill, and runs.
 
 **🚧 What's not built that the spec promises:**
 
 | Piece | Status | Workaround |
 |---|---|---|
-| Editor's `register_investigation` tool | 🚧 | Hand-write the YAML + run dispatcher |
+| Editor's `delegate`-driven `register_investigation` flow | 🚧 | Hand-write the YAML + run dispatcher |
 | `/investigations/new` web form | ❌ | Same |
-| Editor system-prompt loading | 🟡 | Editor is currently the default Hermes profile with no `EDITOR_PERSONA.md` baked into the system prompt — load it manually with `/skill` if you want the persona, or wait for the `civic-doge-editor` skill |
-| `civic-doge-editor` skill | ❌ | Doesn't exist yet — referenced in cron registrations as a forward declaration |
 | `docker-compose.yml` | ❌ | Run web app via `pnpm dev` instead |
 
 ## Skill implementation matrix
 
-What you can expect each skill to actually do today:
+What you can expect each role + skill to actually do today:
 
-| Skill | Spec | Implementation | What runs |
+| Role / Skill | Spec | Implementation | What runs |
 |---|---|---|---|
-| `sitemap-builder` | ✅ | 🟡 | Crawls and writes partial sitemap; classification works, descriptions partial |
-| `civic-investigator` | ✅ | 🚧 | Will load and start; produces partial output until tools land |
-| `civic-archivist` | ✅ | 🚧 | Same — needs `vault_*` tools to fully function |
-| `civic-data-reporter` | ✅ | 🚧 | Needs `db_query` tool to land |
-| `civic-watch-runner` | ✅ | 🚧 | Needs Match DSL evaluator + sitemap diff source |
+| `editor` / `sitemap-builder` | ✅ | 🟡 | Crawls and writes partial sitemap; classification works, descriptions partial |
+| `investigator` / `civic-investigator` | ✅ | 🚧 | Loads and starts; produces partial output until `web_fetch`/`qmd_search` land |
+| `archivist` / `civic-archivist` | ✅ | 🚧 | Same — needs `vault_*` tools to fully function |
+| `data-reporter` / `civic-data-reporter` | ✅ | 🚧 | Needs `db_query` tool to land |
+| `watch-runner` / `civic-watch-runner` | ✅ | 🚧 | Needs Match DSL evaluator + sitemap diff source |
 
 Each `SKILL.md` opens with the locked spec and the QMD-mandatory rule. The
 **procedure** sections are the working parts; the **tools** sections describe
-what the agent expects to be available, which depends on tool implementation.
+what the role expects to be available, which depends on tool implementation.
 
 ## Common operations
 
@@ -201,15 +180,14 @@ what the agent expects to be available, which depends on tool implementation.
 ./bin/centinel doctor
 ```
 
-### Open a per-role terminal session
+### Run a role interactively
 
 ```bash
-./bin/centinel-investigator                    # interactive
-./bin/centinel-investigator -q "look into X"   # one-shot
-./bin/centinel-archivist --continue            # resume last session
+./bin/centinel role investigator --interactive
+./bin/centinel role archivist -q "drain inbox now"
 ```
 
-### See all Centinel cron jobs across profiles
+### See all Centinel cron jobs
 
 ```bash
 ./bin/centinel cron list
@@ -230,8 +208,8 @@ what the agent expects to be available, which depends on tool implementation.
 ### Trigger a single job now (debugging)
 
 ```bash
-hermes --profile investigator cron list           # find ID
-hermes --profile investigator cron run <id>       # fires next tick
+./bin/centinel cron list                     # find job name
+./bin/centinel cron run <job-name>           # fires immediately
 ```
 
 ### Re-run bootstrap after a `git pull`
@@ -243,40 +221,37 @@ hermes --profile investigator cron run <id>       # fires next tick
 
 ## Troubleshooting
 
-**`./bootstrap` fails on `hermes profile create`** — your Hermes install is
-older than `profile` support. Update Hermes: `hermes update`.
-
-**`./bin/centinel doctor` says profile not created** — re-run
-`./bin/centinel setup-profiles`. It's idempotent.
+**`./bin/centinel doctor` says server build missing** — re-run
+`pnpm --filter centinel-server build`. The bootstrap step is idempotent.
 
 **Step 5 spawns but log shows nothing** — open
 `<wiki>/_runtime/logs/bootstrap-sitemap.log` directly. The SSE endpoint
-streams that file; if the dispatcher crashed at startup, the log will show
+streams that file; if centinel-server crashed at startup, the log will show
 why.
 
 **Step 7 errors with "cron job not found"** — the paused jobs were never
-created. Run `./bin/centinel setup-cron` from a terminal and try Step 7 again.
+seeded. Run `./bin/centinel cron seed-paused` from a terminal and try
+Step 7 again.
 
-**The web app loads but `/chat` returns 500** — `HERMES_API_URL` /
-`HERMES_API_KEY` in `.env` aren't pointing at a reachable Hermes endpoint.
-Test with `curl`. If you're running Hermes locally, default is
-`http://localhost:8000/v1`.
+**The web app loads but `/chat` returns 500** — centinel-server isn't
+running (Terminal A above) or `ANTHROPIC_API_KEY` is missing/invalid. Check
+the terminal output where you launched `./bin/centinel-server`.
 
 **`PromiseWithResolvers` TypeScript errors** — pre-existing tsconfig issue,
 unrelated to functionality. Build still works via Next's bundler.
 
 ## What to read next
 
-- **`docs/AGENT_INVOCATION.md`** — how agents are launched, the three runtime
-  lanes (sync `delegate_task`, async inbox, autonomous cron), and why
-  `bin/centinel-*` exists.
+- **`docs/PI_MIGRATION_PLAN.md`** — the current architecture: how roles run
+  inside centinel-server, how the `delegate` tool dispatches, and which
+  tools are still stubs.
 - **`docs/EDITOR_ANSWER_SOURCES.md`** — the locked priority order
   (DB → Vault → Findings → Investigations → Entities → QMD-always) and the
   rule that QMD runs on every freeform question.
-- **`docs/AGENT_ROSTER.md`** — Spotlight model mapping. Which profile owns
+- **`docs/AGENT_ROSTER.md`** — Spotlight model mapping. Which role owns
   which skill, who writes where.
 - **`docs/RUNTIME_PROTOCOL.md`** — the inbox/outbox/status filesystem
-  protocol agents use to coordinate.
+  protocol roles use to coordinate.
 - **`docs/WEB_APP_DESIGN.md`** — the viewer + control panel spec.
 - **`docs/REPO_AND_DISTRIBUTION.md`** — fork/distribute model for other cities.
 
@@ -284,13 +259,12 @@ unrelated to functionality. Build still works via Next's bundler.
 
 - `./bootstrap` is end-to-end working.
 - The web wizard is end-to-end working with live shell-outs.
-- Profile creation, cron registration, dispatcher subcommands all work.
-- **Skill implementations are spec → partial.** First investigations will run
+- Role registration, cron registration, dispatcher subcommands all work.
+- **Tool implementations are spec → partial.** First investigations will run
   the Investigator's procedure but may produce thin output until the
-  underlying tools (`db_query`, `vault_read`, Match DSL evaluator) land.
-- The Editor's chat-driven `register_investigation` is not yet wired —
+  underlying tools (`web_fetch`, `qmd_search`, `db_query`, `vault_put`) land.
+- The Editor's chat-driven `delegate`-to-investigator flow is not yet wired —
   hand-write the YAML + call the dispatcher.
 
-When `civic-doge-editor` skill, the editor tools, and the per-skill tool
-backings land, the gap from "fresh clone" to "running investigation via chat"
-will close.
+When the stub tools land, the gap from "fresh clone" to "running investigation
+via chat" will close.

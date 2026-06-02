@@ -1,6 +1,6 @@
 # civic-archivist
 
-Centinel Hermes skill. The Archivist — document intake, vault, OCR, sidecar generation, manifest maintenance.
+Centinel skill. The Archivist — document intake, vault, OCR, sidecar generation, manifest maintenance.
 
 ## Layout
 

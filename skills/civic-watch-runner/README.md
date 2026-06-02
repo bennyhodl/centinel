@@ -1,6 +1,6 @@
 # civic-watch-runner
 
-Hermes skill for the **Watch Runner** role in the Centinel civic-data system.
+Centinel skill for the **Watch Runner** role in the Centinel civic-data system.
 
 Continuous matchers over sitemap diffs and new wiki content. Hits classified into two lanes:
 

@@ -32,4 +32,5 @@
 **/next-env.d.ts
 wiki
 .pnpm-store
-lib/__pycache__/
+.runtime/
+doge.config.yaml

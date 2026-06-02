@@ -11,7 +11,7 @@ How the agents communicate at runtime. Locked 2026-04-26 (plan checkpoint v7).
 
 ## Principles
 
-1. **Filesystem is truth.** Single machine, Hermes cron runtime. No message queue, no Redis, no broker. Folders of markdown + a SQLite DB + a git-tracked wiki are sufficient and inspectable.
+1. **Filesystem is truth.** Single machine, centinel-server cron runtime. No message queue, no Redis, no broker. Folders of markdown + a SQLite DB + a git-tracked wiki are sufficient and inspectable.
 2. **State changes ride on shared substrate, not messages.** New entity → wiki page + DB row. Other agents read from there next run. Don't double-write a "hey I made this page" memo.
 3. **Messages are for requests and escalations.** "Please do X" or "you need to see Y" — anything that doesn't fit on a wiki/source/finding page.
 4. **Synchronous within a run, async across runs.** When Investigator calls Archivist mid-crawl, it's a function call. When Investigator wants Archivist to OCR a 400-page budget book, it drops an inbox message and moves on.

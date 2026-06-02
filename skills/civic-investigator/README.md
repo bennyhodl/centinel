@@ -1,8 +1,8 @@
-# civic-investigator (Hermes skill)
+# civic-investigator (skill)
 
 The **Investigator** profile's only skill. Runs operator-defined civic investigations end-to-end against public `.gov` sources, emits cited evidence into the wiki, and proposes candidate connection findings for human review.
 
-- **Profile:** `~/.hermes/profiles/investigator/`
+- **Profile:** the `investigator` role inside centinel-server
 - **Spotlight role:** Lead Reporter
 - **Authority:** drafts only — never publishes, never contacts named subjects.
 
@@ -27,7 +27,7 @@ civic-investigator/
 
 - `SKILL.md` — full procedural instructions for the LLM agent.
 - `../../docs/RUNTIME_PROTOCOL.md` — inbox/outbox conventions across all agents.
-- `../../docs/SCRAPER_AND_EXTRACTORS.md` — **use Hermes' built-in `web_extract` / `browser` tools first**; no custom Playwright wrapper in v0.1.
+- `../../docs/SCRAPER_AND_EXTRACTORS.md` — **use the role's `web_fetch` tool first (TODO: stub)**; no custom Playwright wrapper in v0.1.
 - `../../docs/AGENT_ROSTER.md` — where this profile sits in the org chart.
 - `../../docs/EDITOR_PERSONA.md` — what the Editor delegates to the Investigator.
 

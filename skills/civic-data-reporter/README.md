@@ -1,6 +1,6 @@
 # civic-data-reporter
 
-Hermes skill for Centinel's Data Reporter agent. Sole writer to `<wiki>/_data/tampa.db`.
+Centinel skill for Centinel's Data Reporter agent. Sole writer to `<wiki>/_data/tampa.db`.
 
 See [SKILL.md](./SKILL.md) for the operational playbook.
 

@@ -99,7 +99,7 @@ export function AppSidebar({ className }: { className?: string }) {
           <span className="italic">Published by the</span>
           <br />
           <span className="font-smallcaps tracking-[0.15em] text-[0.6rem]">
-            Hermes Intelligence Engine
+            Centinel Runtime
           </span>
           <br />
           <span className="italic">Est. MMXXV &middot; Vol. I</span>

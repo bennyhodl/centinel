@@ -1,15 +1,15 @@
 ---
 title: Centinel — Civic Intelligence Agent
-status: 🧠 Thinking
+status: 🛠️ v0.1 in progress
 created: 2026-04-25
-updated: 2026-04-25
-checkpoint: v10 (repo + distribution locked; web tooling defaults to Hermes built-ins) — next: Tampa sitemap-builder spike
+updated: 2026-05-21
+checkpoint: v0.1 — Phases 0–4 of pi-agent migration complete. Next: real tool implementations (qmd_search, db_query, vault_put, web_fetch are still stubs).
 owner: Ben
 ---
 
 # Centinel — Civic Intelligence Agent
 
-> A self-hosted Hermes template that crawls a city's `.gov` to build a **described, navigable sitemap** of the entire civic data surface. The sitemap is the entrypoint. From there, the human launches investigations — "track contractors in parks," "find funding flows to NGOs," "follow a single councilor" — and agents fan out, populate a wiki, and surface findings against user-defined and preset watch criteria. Distributed as **fork-your-own**. Centinel is the reference deployment.
+> A self-hosted template (centinel-server, built on pi-coding-agent) that crawls a city's `.gov` to build a **described, navigable sitemap** of the entire civic data surface. The sitemap is the entrypoint. From there, the human launches investigations — "track contractors in parks," "find funding flows to NGOs," "follow a single councilor" — and agents fan out, populate a wiki, and surface findings against user-defined and preset watch criteria. Distributed as **fork-your-own**. Centinel is the reference deployment.
 
 ## Status
 
@@ -28,7 +28,7 @@ The sitemap is **the dashboard**. Investigations are **the tasks**. Findings are
 - **Agent does the work; human reviews and uses.** The agent ingests, structures, and presents. The human reads, picks threads, and writes their own stories with the raw material the agent surfaces. Centinel is a tool, not a journalist.
 - **Document vault** — every source document (PDF, HTML page, transcript) is saved to disk. The city's website may take pages down; the vault is the durable record.
 - **Wiki + Obsidian for storage.** Markdown, graph view, version-controllable, human-editable. `llm-wiki` skill produces it.
-- **Hermes template, fork-your-own.** Each operator runs their own. No central infra, no SaaS, no auth.
+- **Fork-your-own template.** Each operator runs their own centinel-server. No central infra, no SaaS, no auth.
 - **Existing Tampa meeting parser folds in** as one connector among many.
 - **Findings are the deliverable.** Raw data publishes freely; synthesized stories ("this contractor connects to that donor") gate behind editorial review.
 
@@ -207,7 +207,7 @@ The agent reads the investigation file, depth-crawls from the seeds, extracts en
 - **Project timeline** — "the WOW project from first mention to today"
 - **Contractor profile** — "everything about Vendor Y across departments and time"
 
-These are templates the operator can clone and customize. Hermes cron jobs run them on the configured schedule.
+These are templates the operator can clone and customize. centinel-server cron jobs run them on the configured schedule.
 
 ## Watch Jobs (the findings engine)
 
@@ -286,7 +286,7 @@ No Discord/Telegram alerts in v0.1. The whole product is "go look when you want 
 
 ## Agent stack
 
-All work is agent-run on Hermes cron. Three new skills + reuse of existing.
+All work is agent-run on centinel-server cron. Three new skills + reuse of existing.
 
 | Component | Type | Skill | Trigger |
 |---|---|---|---|
@@ -356,7 +356,7 @@ Each new skill is documented in `~/plans/centinel/research/skills/<name>.md` (TB
 ## Technical considerations
 
 ### Stack
-- Hermes core (skills + cron + qmd)
+- centinel-server (TypeScript, built on `@mariozechner/pi-coding-agent`) — owns roles, cron, qmd, and the `delegate` tool
 - Markdown wiki, git-versioned
 - Parser registry (extensible modules)
 - Next.js web app
@@ -384,7 +384,7 @@ Each new skill is documented in `~/plans/centinel/research/skills/<name>.md` (TB
 
 ## Resolved
 
-- ~~Hosting~~ → fork-your-own Hermes template, public good
+- ~~Hosting~~ → fork-your-own centinel-server template, public good
 - ~~Brand~~ → `centinel` template, operators fork to `<city>-doge`
 - ~~Funding~~ → public good, no billing
 - ~~People rule~~ → tag power, not citizens; 3+ mentions or official/leadership role

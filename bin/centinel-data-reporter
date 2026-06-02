@@ -1,2 +1,0 @@
-#!/usr/bin/env bash
-exec hermes --profile data-reporter "$@"

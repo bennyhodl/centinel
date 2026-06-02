@@ -67,7 +67,7 @@ export function SidebarLayout({ children }: { children: ReactNode }) {
               Printed for the publick Benefit
             </span>
             <span className="font-smallcaps tracking-[0.12em]">
-              Centinel &middot; Vol. I &middot; Hermes Engine
+              Centinel &middot; Vol. I &middot; Runtime
             </span>
           </div>
         </footer>

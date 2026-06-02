@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
-# Centinel dispatcher entrypoint.
-# Defers to lib/cli.py — keep this file dumb so we can rewrite the impl freely.
+# Centinel CLI — entry point for operator commands.
+#
+# Phase 0: forwards to the TypeScript CLI under server/dist/cli.js.
+# Build first if dist is missing.
+#
+# See docs/PI_MIGRATION_PLAN.md.
+
 set -euo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$HERE")"
-exec python3 -m lib.cli "$@"
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CLI_JS="$REPO_ROOT/server/dist/cli.js"
+
+if [ ! -f "$CLI_JS" ]; then
+    echo "[centinel] server/dist/cli.js not found — building…" >&2
+    (cd "$REPO_ROOT" && pnpm --filter @centinel/server build >&2)
+fi
+
+exec node "$CLI_JS" "$@"

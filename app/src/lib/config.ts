@@ -38,7 +38,9 @@ export const config = {
   runtimePath,
   setupStatePath,
   vaultPath,
-  hermesApiUrl: () => process.env.HERMES_API_URL ?? "",
-  hermesApiKey: () => process.env.HERMES_API_KEY ?? "",
   authPassword: () => process.env.CENTINEL_PASSWORD ?? "",
+  /** Centinel runtime server base URL (used by /chat proxy). */
+  centinelServerUrl: () =>
+    process.env.CENTINEL_SERVER_URL ??
+    `http://${process.env.CENTINEL_HOST ?? "127.0.0.1"}:${process.env.CENTINEL_PORT ?? "8787"}`,
 };

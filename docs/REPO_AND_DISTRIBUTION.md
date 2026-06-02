@@ -19,7 +19,7 @@ cd cleveland-doge
 ./bootstrap
 ```
 
-Three commands → working `<city>-doge` instance. NPX-style installer (`npx civic-doge init`) deferred to v0.2 if the template-repo flow proves clunky. Hermes-native plugin install is a stretch goal pending Hermes plugin loader support.
+Three commands → working `<city>-doge` instance. NPX-style installer (`npx civic-doge init`) deferred to v0.2 if the template-repo flow proves clunky.
 
 ## Repo layout
 
@@ -32,7 +32,7 @@ centinel-template/                  # the public repo people fork
 ├── .env.example                      # secrets template
 ├── doge.config.yaml.example          # city-specific config template
 │
-├── skills/                           # Hermes skills, packaged
+├── skills/                           # Centinel skills (pi-agent), packaged
 │   ├── centinel-cartographer/SKILL.md
 │   ├── centinel-investigator/SKILL.md
 │   ├── centinel-archivist/SKILL.md
@@ -44,7 +44,7 @@ centinel-template/                  # the public repo people fork
 │   ├── db/                           # schema, migrations, common queries
 │   ├── extractors/                   # extractor catalog (post-spike)
 │   ├── runtime/                      # inbox/outbox/status board helpers
-│   ├── adapters/                     # ONLY if Hermes built-ins don't suffice (see below)
+│   ├── adapters/                     # ONLY if the role's web_fetch / pi-agent tools don't suffice (see below)
 │   ├── doge.py                       # CLI used by web app server actions
 │   └── __version__.py
 │
@@ -119,8 +119,8 @@ confidential_investigations: []        # slugs to suppress from public /status
 
 ```bash
 WEB_BASIC_AUTH_PASSWORD=xxxxxx
-HERMES_OPENAI_API_BASE=http://localhost:8000/v1
-HERMES_OPENAI_API_KEY=sk-local
+ANTHROPIC_API_KEY=sk-ant-...
+# (centinel-server reads Anthropic creds via pi-agent's standard env)
 NOTIFICATION_DISCORD_WEBHOOK=         # optional
 # Adapter API keys (only if used — see Web tooling section below)
 FIRECRAWL_API_KEY=
@@ -139,23 +139,22 @@ Skills load `presets/<thing>` first, then merge `city-overlay/<thing>` on top. O
 
 ## Web tooling (revised)
 
-Hermes already provides production-quality web tools. Skills use them directly:
+The pi-agent toolset gives each role a `web_fetch` tool — currently a stub (see `PI_MIGRATION_PLAN.md`). Skills call it directly:
 
-| Need | Hermes built-in | Adapter required? |
+| Need | pi-agent tool | Adapter required? |
 |---|---|---|
-| Fetch HTML page → markdown | `web_extract` | No |
-| Fetch PDF → markdown | `web_extract` (handles PDFs) | No |
-| Search the web | `web_search` | No |
-| Render JS-heavy SPA | `browser_navigate` + `browser_snapshot` | No |
-| Take screenshot | `browser_vision` | No |
-| Extract images from page | `browser_get_images` | No |
+| Fetch HTML page → markdown | `web_fetch` (TODO: stub) | No |
+| Fetch PDF → markdown | `web_fetch` (TODO: stub) | No |
+| Search the web | (TODO: stub) | No |
+| Render JS-heavy SPA | rendered fetch path (TODO: stub) | No |
+| Take screenshot | (TODO: stub) | No |
 | Crawl a domain (sitemap.xml + recursive) | Not built-in | **Maybe** — `lib/adapters/site_mapper.py` |
 
-The only place we may need a third-party adapter is **bulk site-mapping** — Firecrawl `/map` produces a more complete URL list than walking sitemap.xml + recursive crawl with built-in tools. Verdict from the spike will tell us whether built-ins suffice or we need a thin Firecrawl/Tavily adapter for that one case.
+The only place we may need a third-party adapter is **bulk site-mapping** — Firecrawl `/map` produces a more complete URL list than walking sitemap.xml + recursive crawl with built-in tools.
 
-**Default assumption: Hermes built-ins suffice for v0.1.** Adapters get added under `lib/adapters/` only if the spike surfaces concrete gaps, with operator-supplied API keys in `.env`.
+**Default assumption: pi-agent tools will suffice for v0.1 once the stubs land.** Adapters get added under `lib/adapters/` only if real-world use surfaces concrete gaps, with operator-supplied API keys in `.env`.
 
-This is a meaningful simplification: no `Scraper` interface, no Firecrawl/Tavily/Playwright juggling. Skills just call `web_extract(url)` and trust Hermes' runtime.
+This is a meaningful simplification: no `Scraper` interface, no Firecrawl/Tavily/Playwright juggling. Skills just call `web_fetch(url)` and trust the role's runtime.
 
 ## How `bootstrap` works
 
@@ -164,9 +163,9 @@ This is a meaningful simplification: no `Scraper` interface, no Firecrawl/Tavily
 set -euo pipefail
 
 # 1. Sanity checks
-require_command hermes      # min version check via lib/__version__.py
-require_command docker
-require_command python3.11
+require_command node        # centinel-server needs a recent Node + pnpm
+require_command pnpm
+require_command python3.11  # skill helper scripts
 
 # 2. Read or generate config
 [ -f doge.config.yaml ] || cp doge.config.yaml.example doge.config.yaml
@@ -193,50 +192,22 @@ write_if_missing "$WIKI/_runtime/setup-state.json"  '{"status":"pending"}'
 python3 -m lib.db.init    "$WIKI/_data/$CITY_SLUG.db"
 python3 -m lib.db.migrate "$WIKI/_data/$CITY_SLUG.db"
 
-# 5. Install skills into Hermes
-#    Hermes handles "shipped vs customized" semantics natively — we just place
-#    the skill files where Hermes looks. Hermes' upgrade flow leaves customized
-#    skills alone and updates pristine ones in place.
-mkdir -p ~/.hermes/skills/civic-doge
-for skill_dir in skills/*/; do
-  name=$(basename "$skill_dir")
-  ln -sfn "$(realpath "$skill_dir")" ~/.hermes/skills/civic-doge/"$name"
-done
+# 5. Build centinel-server (and the web app)
+#    Skill specs are checked into `skills/<name>/SKILL.md` and resolved at
+#    runtime by centinel-server's role loader — no symlinking required.
+pnpm install
+pnpm --filter centinel-server build
 
 # 6. Copy presets idempotently (cp -n: never overwrite operator edits)
 for preset in presets/watches/*.yaml; do
   cp -n "$preset" "$WIKI/Watches/_presets/"
 done
 
-# 7. Register Hermes cron jobs (real CLI is `hermes [--profile X] cron create`; `--profile`
-#    is the global flag placed BEFORE the subcommand, NOT a flag on `cron create` itself.
-#    The flag for skills is `--skill` (singular, repeatable), not `--skills`.)
-#    Pause immediately so they're inert until the wizard's Step 7 activates them.
-#    In practice `./bootstrap` defers all of this to `centinel setup-cron` (lib/cli.py),
-#    which is idempotent and centralizes the invocation logic. The block below
-#    documents the underlying call shape.
-register_cron() {
-  local name="$1" sched="$2" profile="$3" skill="$4" prompt="$5"
-  local profile_args=()
-  [ -n "$profile" ] && profile_args=(--profile "$profile")
-  hermes "${profile_args[@]}" cron create \
-    --name "$name" \
-    --skill "$skill" \
-    --deliver local \
-    "$sched" \
-    "$prompt"
-  # New jobs default to active; pause so wizard Step 7 controls activation.
-  local id
-  id=$(hermes "${profile_args[@]}" cron list --all | awk -v n="$name" '$0 ~ n {print $1; exit}')
-  [ -n "$id" ] && hermes "${profile_args[@]}" cron pause "$id"
-}
-register_cron "centinel-sitemap-lint"      "$SCHED_LINT"   ""              sitemap-builder      "lint sitemap at \$WIKI/Sitemap/"
-register_cron "centinel-watch-runner"      "$SCHED_WATCH"  watch-runner    civic-watch-runner   "run watches over latest diffs"
-register_cron "centinel-data-reporter"     "$SCHED_DATA"   data-reporter   civic-data-reporter  "refresh entity DB and methodology"
-register_cron "centinel-vault-manifest"    "$SCHED_VAULT"  archivist       civic-archivist      "rebuild vault manifest and OCR backlog"
-register_cron "centinel-investigator-tick" "$SCHED_INV"    investigator    civic-investigator   "drain investigator inbox; run pending tasks"
-register_cron "centinel-huddle-rollup"     "$SCHED_HUDDLE" ""              civic-doge-editor    "roll up daily huddle into operator queue"
-register_cron "centinel-briefings"         "$SCHED_BRIEF"  ""              humanized-writing    "draft weekly briefing"
+# 7. Seed centinel-server cron jobs in the paused state.
+#    centinel-server owns the cron loop; `centinel cron seed-paused` writes the
+#    canonical jobs into .runtime/cron.json so the wizard's Step 7 can resume
+#    them once the operator confirms.
+./bin/centinel cron seed-paused
 # Per-investigation crons get registered dynamically as operator creates investigations.
 
 # 8. Bring up runtime services
@@ -261,20 +232,18 @@ echo "📖 Open the web app to run the setup wizard."
 | DB init | `CREATE TABLE IF NOT EXISTS`, then run migrations forward-only |
 | Skill symlinks | `ln -sfn` — refresh, idempotent |
 | Presets | `cp -n` — never overwrite (operator may have tuned them) |
-| Cron entries | wrap `hermes cron create` in a `register_cron` helper that's upsert-safe by name (skip if a job with that name already exists) |
+| Cron entries | `centinel cron seed-paused` is upsert-safe by job name (skip if already in `.runtime/cron.json`) |
 | `doge.config.yaml`, `.env` | `cp` only if missing |
 
 Result: `git pull && ./bootstrap` brings in upstream skill/lib/preset updates without touching operator config or wiki content.
 
-## Skill update model (Hermes-native)
+## Skill update model
 
-Hermes already handles the "pristine vs customized" question for skills. We piggyback on that:
+Skill specs live in-tree at `skills/<name>/SKILL.md`. centinel-server's role loader reads them at runtime via pi-agent's `DefaultResourceLoader` skills override; no system-wide install step is needed.
 
-- Skills shipped in `skills/<name>/SKILL.md` are pristine.
-- If operator edits the symlinked skill in `~/.hermes/skills/civic-doge/<name>/SKILL.md`, Hermes treats it as customized and won't auto-overwrite.
-- Operator who wants a custom variant copies it to `~/.hermes/skills/personal/<name>-customized/` and edits there; the symlinked civic-doge version stays pristine.
-- `git pull` updates the canonical files in `skills/`; the symlink resolves to the new content automatically.
-- If a customization is in the symlinked target itself, the operator's edits stay — but they should expect upstream conflicts, same as any source-controlled file.
+- Skills shipped in `skills/<name>/SKILL.md` are pristine and version-controlled.
+- Operators who want a custom variant copy the file to `city-overlay/skills/<name>/SKILL.md` and edit there. The role loader prefers overlay paths over presets when both exist.
+- `git pull` updates the canonical files in `skills/`. Operator edits to overlay copies are untouched.
 
 CHANGELOG.md documents breaking changes (DB schema migrations, skill API breaks, runtime protocol changes). The `tools/doctor` script runs on every bootstrap and reports any version mismatches between `lib/__version__.py` and what the wiki expects.
 
@@ -300,7 +269,8 @@ git pull lygos main
 Idempotent health check. Run after bootstrap, after pulls, when something's off.
 
 Checks:
-- Hermes installed, version >= minimum
+- Node + pnpm installed, versions >= minimum
+- centinel-server build present (server/dist) and runnable
 - Docker running
 - All cron entries registered and in expected paused/active state
 - Wiki path exists, all expected subdirectories present
@@ -348,7 +318,7 @@ The template ships **only the apparatus**. Every operator's content is theirs.
 - ✅ Wizard at localhost:3000 walks operator through bootstrap → first sitemap → cron activation
 - ✅ Re-running `./bootstrap` after upstream pull is safe (idempotent, never destroys operator data)
 - ✅ Operator edits to `doge.config.yaml`, `city-overlay/`, `.env` survive `git pull`
-- ✅ Operator edits to a symlinked skill are preserved by Hermes (no auto-overwrite)
+- ✅ Operator skill overrides in `city-overlay/skills/` win over `skills/` presets at load time
 - ✅ A new city forker (e.g., cleveland-doge) needs to edit only `doge.config.yaml`, `.env`, and optionally `city-overlay/`
 - ✅ `tools/doctor` reports green on a healthy install
 - ✅ DB migration on upgrade is forward-only and non-destructive
@@ -356,7 +326,7 @@ The template ships **only the apparatus**. Every operator's content is theirs.
 
 ## Open questions (non-blocking)
 
-1. Multi-city in one Hermes install — should the cron names always be city-prefixed (yes, current design)? What if same operator runs `centinel` and `cleveland-doge` side by side? Multiple wikis, multiple DBs, distinct skill dirs (`~/.hermes/skills/civic-doge-tampa/` vs `~/.hermes/skills/civic-doge-cleveland/`)? Defer until someone actually wants two cities.
-2. Web app + Hermes on different machines? Default assumes co-located. Distributed setup is plausible (web app on a small VPS, Hermes + wiki on a beefier home server) — defer until needed.
+1. Multi-city in one centinel-server install — should the cron names always be city-prefixed (yes, current design)? What if the same operator runs `centinel` and `cleveland-doge` side by side? Multiple wikis, multiple DBs, distinct `.runtime/` dirs per checkout? Defer until someone actually wants two cities.
+2. Web app + centinel-server on different machines? Default assumes co-located. Distributed setup is plausible (web app on a small VPS, centinel-server + wiki on a beefier home server) — defer until needed.
 3. `tools/snapshot-backup` design — encrypted snapshot of wiki + DB + vault to S3-compatible storage. Lean on the systemd-weekly-backup skill conventions; specify post-v0.1.
 4. Auth upgrade path — when basic auth is no longer enough, prefer better-auth (already in scaffold skill) over rolling our own.

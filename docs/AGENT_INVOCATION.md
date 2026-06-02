@@ -1,10 +1,12 @@
 ---
 title: Centinel — Agent Invocation Model
-status: 🔒 Locked v2
+status: 🔒 Locked v2 (SUPERSEDED)
 created: 2026-04-28
 updated: 2026-04-28
 parent: README.md
 ---
+
+> **SUPERSEDED** by [`docs/PI_MIGRATION_PLAN.md`](./PI_MIGRATION_PLAN.md). The lane model below describes the old Hermes architecture and is retained for historical context. Roles now run inside `centinel-server`; see the migration plan.
 
 # Agent Invocation Model
 

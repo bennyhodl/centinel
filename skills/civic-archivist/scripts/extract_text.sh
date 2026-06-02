@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # extract_text.sh — Type-dispatch text extractor for the Archivist.
 #
-# This is the *terminal fallback path*. The Archivist tries Hermes web_extract
+# This is the *terminal fallback path*. The Archivist tries the role's web_fetch tool (TODO: stub)
 # FIRST for any URL fetch; this script only runs when web_extract failed,
 # returned empty, or the input is a local file (operator inbox drop).
 #

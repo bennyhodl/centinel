@@ -7,7 +7,7 @@ parent: README.md
 
 # Centinel Agent Roster
 
-Mapping the Spotlight investigative model (`ORG_STRUCTURE_AND_WORKFLOW.md`) onto Centinel's runtime agents. Locked 2026-04-26. See `AGENT_INVOCATION.md` for how each profile is actually launched.
+Mapping the Spotlight investigative model (`ORG_STRUCTURE_AND_WORKFLOW.md`) onto Centinel's runtime agents. Locked 2026-04-26. See `PI_MIGRATION_PLAN.md` for how roles are actually launched (the old `AGENT_INVOCATION.md` is superseded).
 
 ## Principles
 
@@ -18,25 +18,25 @@ Mapping the Spotlight investigative model (`ORG_STRUCTURE_AND_WORKFLOW.md`) onto
 
 ---
 
-## Hermes profile mapping
+## Role mapping
 
-Each agent is a **Hermes profile** under `~/.hermes/profiles/<name>/` with its own `config.yaml`, `skills/`, `memories/`, `sessions/`, and `cron/`. They communicate **only** through the wiki filesystem (`<wiki>/_runtime/inbox/<agent>/`, `outbox/<agent>/`, `status/<agent>.md`) per RUNTIME_PROTOCOL.md.
+Each agent is a **role** inside `centinel-server` (TS). The role loader selects the right skill (`SKILL.md`) and system prompt at runtime via pi-agent's `DefaultResourceLoader` override. Roles communicate **only** through the wiki filesystem (`<wiki>/_runtime/inbox/<agent>/`, `outbox/<agent>/`, `status/<agent>.md`) per RUNTIME_PROTOCOL.md.
 
-Invocation is via thin `bin/centinel-<role>` wrappers that exec `hermes --profile <role>`; cron jobs use `hermes --profile <role> cron create '<sched>' --skill <skill> --name <n> "<prompt>"` (note: `--profile` is the global flag, BEFORE the subcommand; `--skill` is singular, repeatable). See `AGENT_INVOCATION.md`.
+Invocation funnels through one TypeScript entry point — `runRole()` inside `centinel-server` — driven by cron, HTTP, the `centinel role` CLI, or the editor's `delegate` tool. See `PI_MIGRATION_PLAN.md`.
 
-| Profile | Skills loaded | Identity | Cron | Notes |
+| Role | Skills loaded | Identity | Cron | Notes |
 |---|---|---|---|---|
-| **(default Hermes agent)** | `sitemap-builder` + Editor system prompt | **Editor + Cartographer** | weekly sitemap lint | Fronts the `/chat` API via OpenAI-compatible endpoint. Knows the city's website inside-out because it owns the sitemap directly. |
+| **`editor`** | `sitemap-builder` + Editor system prompt | **Editor + Cartographer** | weekly sitemap lint | Fronts the `/chat` API. Knows the city's website inside-out because it owns the sitemap directly. |
 | `investigator` | `civic-investigator` | Investigator | per-investigation (registered by Editor when operator launches one) | |
 | `archivist` | `civic-archivist` | Archivist | every 15min + inline calls | |
 | `data-reporter` | `civic-data-reporter` | Data Reporter | every 6h + inline DB queries | |
 | `watch-runner` | `civic-watch-runner` | Watch Runner | every 4h after sitemap diffs | |
 
-**5 entities total** (1 main + 4 profiles). Memory is per-profile — agents have no shared brain; coordination happens via filesystem messages.
+**5 roles total.** Memory is per-role — roles have no shared brain; coordination happens via filesystem messages.
 
-**Why Editor + Cartographer collapse:** the Editor's job is to *know* the city. The sitemap is its mental map. Splitting them would force inbox round-trips for every "what's at /procurement?" — which the Editor should answer instantly. The sitemap-builder skill loads into the main agent so the Editor can both query AND maintain the sitemap.
+**Why Editor + Cartographer collapse:** the Editor's job is to *know* the city. The sitemap is its mental map. Splitting them would force inbox round-trips for every "what's at /procurement?" — which the Editor should answer instantly. The sitemap-builder skill loads into the editor role so the Editor can both query AND maintain the sitemap.
 
-**Briefings Writer + Librarian** stay as separate cron jobs but reuse existing skills (`humanized-writing`, `llm-wiki`) and run inside the main Hermes agent — they don't need their own profiles.
+**Briefings Writer + Librarian** stay as separate cron jobs but reuse existing skills (`humanized-writing`, `llm-wiki`) and run inside the editor role — they don't need their own roles.
 
 ---
 
@@ -47,27 +47,27 @@ Invocation is via thin `bin/centinel-<role>` wrappers that exec `hermes --profil
 | 1 | Executive Editor | **Operator-in-Chief** | 🧑 Human | — |
 | 2 | Deputy Managing Editor | *(collapsed into Operator)* | 🧑 Human | — |
 | 3 | Investigations Editor | **Operator** (you) | 🧑 Human | — directs all agents |
-| 4 | Investigations Editor (LLM) + recon | **Editor + Cartographer** | 🤖 Agent | default Hermes profile + `sitemap-builder` |
-| 5 | Lead Reporter | **Investigator** | 🤖 Agent | `investigator` profile, `civic-investigator` |
-| 6 | Reporter (2nd seat) | **Archivist** | 🤖 Agent | `archivist` profile, `civic-archivist` |
-| 7 | Data Reporter | **Data Reporter** | 🤖 Agent | `data-reporter` profile, `civic-data-reporter` |
-| 8 | News Researcher | **Watch Runner** | 🤖 Agent | `watch-runner` profile, `civic-watch-runner` |
+| 4 | Investigations Editor (LLM) + recon | **Editor + Cartographer** | 🤖 Agent | `editor` role + `sitemap-builder` |
+| 5 | Lead Reporter | **Investigator** | 🤖 Agent | `investigator` role, `civic-investigator` |
+| 6 | Reporter (2nd seat) | **Archivist** | 🤖 Agent | `archivist` role, `civic-archivist` |
+| 7 | Data Reporter | **Data Reporter** | 🤖 Agent | `data-reporter` role, `civic-data-reporter` |
+| 8 | News Researcher | **Watch Runner** | 🤖 Agent | `watch-runner` role, `civic-watch-runner` |
 | 9 | Copy/Standards Editor | **Reviewer** | 🧑 Human | findings draft → published |
 | 10 | In-House Counsel | **Counsel** | 🧑 Human | legal review pre-publish |
 | 11 | Visual Journalist | *(folded into web app)* | 🤖 Agent | web app renderers |
 | 12 | Web Producer | **Web Producer** | 🤖 Agent (build) + 🧑 Human (ops) | Next.js app |
-| 13 | — | **Briefings Writer** | 🤖 Agent | runs in default profile, reuses `humanized-writing` |
-| 14 | — | **Librarian** | 🤖 Agent | runs in default profile, reuses `llm-wiki` (lint mode) |
+| 13 | — | **Briefings Writer** | 🤖 Agent | runs in `editor` role, reuses `humanized-writing` |
+| 14 | — | **Librarian** | 🤖 Agent | runs in `editor` role, reuses `llm-wiki` (lint mode) |
 | 15 | SecureDrop maintainer | *(out of scope — human territory)* | 🧑 Human | — |
 
-**Five new skills:** `sitemap-builder` (loads into default profile), `civic-investigator`, `civic-archivist`, `civic-data-reporter`, `civic-watch-runner` (each loads into its own profile). Two reused: `humanized-writing`, `llm-wiki` (run in default profile).
+**Five new skills:** `sitemap-builder` (loads into `editor` role), `civic-investigator`, `civic-archivist`, `civic-data-reporter`, `civic-watch-runner` (each loads into its own role). Two reused: `humanized-writing`, `llm-wiki` (run in `editor` role).
 
 ---
 
 ## Agent responsibilities (one paragraph each)
 
-### 🤖 Editor + Cartographer — main Hermes agent (default profile)
-Owns the sitemap **and** the chat surface. Crawls `.gov` (sitemap-builder skill), classifies every URL by type and content kind, generates LLM descriptions, suggests parsers, emits `<wiki>/Sitemap/index.md` + `sitemap.json`. Lint mode runs weekly. The same agent fronts `/chat` via Hermes' OpenAI-compatible endpoint — the operator chats with the entity that *built* the sitemap, so it can answer "what's at /procurement?" instantly without an inbox round-trip. As Editor, it synthesizes findings, drafts narratives, registers investigations, and tunes watches per `EDITOR_PERSONA.md`. The Editor never publishes without operator approval.
+### 🤖 Editor + Cartographer — `editor` role inside centinel-server
+Owns the sitemap **and** the chat surface. Crawls `.gov` (sitemap-builder skill), classifies every URL by type and content kind, generates LLM descriptions, suggests parsers, emits `<wiki>/Sitemap/index.md` + `sitemap.json`. Lint mode runs weekly. The same role fronts `/chat` via centinel-server — the operator chats with the entity that *built* the sitemap, so it can answer "what's at /procurement?" instantly without an inbox round-trip. As Editor, it synthesizes findings, drafts narratives, registers investigations, and tunes watches per `EDITOR_PERSONA.md`. The Editor never publishes without operator approval.
 
 ### 🤖 Investigator — `civic-investigator`
 Runs investigations end-to-end. Reads a YAML investigation file, depth-crawls from seeds, extracts entities into wiki pages, populates contractors / projects / funding ledgers, writes a results section into the investigation page. Re-runs on schedule and appends. Drops candidate connection findings into `Findings/draft/` for human review. Files everything to the vault before claiming it.

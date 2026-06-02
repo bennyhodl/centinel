@@ -2,7 +2,7 @@
 
 Centinel Cartographer skill — builds and maintains a labeled sitemap of a city's `.gov` web surface.
 
-This is a Hermes skill, loaded into the **default Hermes profile** alongside the Editor persona (see `docs/AGENT_ROSTER.md` in the parent repo). Same agent, two hats: Editor for chat / synthesis, Cartographer for sitemap upkeep.
+This is a Centinel skill, loaded into the **editor role inside centinel-server** alongside the Editor persona (see `docs/AGENT_ROSTER.md` in the parent repo). Same agent, two hats: Editor for chat / synthesis, Cartographer for sitemap upkeep.
 
 ## Start here
 
@@ -27,6 +27,6 @@ sitemap-builder/
 
 ## v0.1 scope
 
-- Lean on Hermes' built-in web tools (`web_extract`, `browser_navigate`, `web_search`). No custom Playwright wrapper.
+- Lean on the role's web_fetch tool (TODO: stub) (`web_extract`, `browser_navigate`, `web_search`). No custom Playwright wrapper.
 - Iterate against tampa.gov first. Patterns and exclude lists will sharpen after the first real bootstrap.
 - See `docs/SCRAPER_AND_EXTRACTORS.md` and `docs/RUNTIME_PROTOCOL.md` in the parent repo for the surrounding contracts.
