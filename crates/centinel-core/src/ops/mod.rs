@@ -15,7 +15,10 @@ mod doctor;
 mod extract;
 mod ingest;
 mod list;
+mod open;
 mod search;
+
+pub use open::{OpenArgs, OpenReport, open};
 
 pub use build_index::{IndexArgs, IndexReport, index};
 pub use collect::{CollectArgs, CollectFailure, CollectReport, collect};

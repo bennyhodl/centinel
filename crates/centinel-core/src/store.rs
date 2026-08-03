@@ -146,6 +146,13 @@ impl Store {
         Ok(sha)
     }
 
+    /// The pool path for a blob, whether or not it exists.
+    ///
+    /// Exposed so `current/` can hardlink into the pool rather than copying.
+    pub fn blob_path_of(&self, sha: &BlobSha) -> PathBuf {
+        self.blob_path(sha)
+    }
+
     pub async fn has_blob(&self, sha: &BlobSha) -> Result<bool> {
         let p = self.blob_path(sha);
         tokio::fs::try_exists(&p).await.map_err(io_at(&p))

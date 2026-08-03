@@ -1,0 +1,9 @@
+# Centinel configuration.
+#
+# Only [open] is currently read. The rest of the schema is not yet specified.
+
+[open]
+pdf      = "Preview"
+markdown = "TextEdit"
+html     = "Safari"
+default  = "system"

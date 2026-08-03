@@ -21,3 +21,6 @@
 *.swp
 *~
 .obsidian/
+
+# Local config (app preferences are per-machine)
+centinel.toml

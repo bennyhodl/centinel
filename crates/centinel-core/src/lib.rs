@@ -22,11 +22,13 @@
 extern crate self as centinel_core;
 
 pub mod chunk;
+pub mod config;
 pub mod discovery;
 pub mod domain;
 pub mod extract;
 pub mod fetch;
 pub mod index;
+pub mod materialize;
 pub mod op;
 pub mod ops;
 pub mod policy;
