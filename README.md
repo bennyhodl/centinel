@@ -1,102 +1,66 @@
 # Centinel
 
-Data collection for `.gov` web surfaces and YouTube channels — website maps, documents, transcripts, and the changes to all of them over time.
+<p align="center">
+  <img src="assets/centinel-watchman.jpg" alt="Centinel — a 1787-era ink etching of a lone watchman on the rampart with candle, scroll, and quill, gazing over a sleeping colonial town" width="600">
+</p>
 
-A **library** first. The CLI, the HTTP server and the MCP server are thin consumers of it. Agents are clients, not the engine.
+*A civic transparency toolkit — built on the warnings of a Pennsylvania watchman.*
 
-> **Status: spine.** The domain model, the store, and the CLI/MCP/HTTP derivation are built and tested. Search and retrieval is specified but **not implemented**. Seven design decisions remain open — see [`docs/SPEC.md`](docs/SPEC.md) §8.
+---
 
-## The idea
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — How it is built. The store, the domain model, and how one function definition becomes a CLI command, an MCP tool, and an HTTP route. Includes the quickstart.
 
-Files on disk are the only source of truth. Every index is derived and rebuildable:
+**[docs/SPEC.md](docs/SPEC.md)** — The settled specification. Every locked decision with its reasoning and its accepted costs, plus the seven that are still open.
 
-```
-<root>/
-  blobs/ab/cd/abcd1234…          TRUTH    immutable, content-addressed, pooled across sources
-  log/<source>/YYYY-MM.jsonl     TRUTH    append-only observations, discovery runs, status, derivations
-  current/<source>/…             DERIVED  URL-mirroring tree
-  cache/embeddings/              DURABLE  survives an index rebuild
-  centinel.db                    DERIVED  SQLite metadata + FTS5
-  index/                         DERIVED  LanceDB vectors
-```
+**[docs/research/](docs/research/)** — The evidence underneath it. ~3,850 lines, ~450 primary-source citations.
 
-Delete everything derived and you lose minutes, not evidence. The corpus is `rsync`-able and complete on its own.
+---
 
-Two properties this buys, both load-bearing:
+> *"The federal government will... necessarily absorb the state legislatures."*
+> — Centinel, 1787
 
-- **Two hashes.** `blob_sha` covers raw bytes and proves what the server actually served. `fingerprint` covers normalized content and answers whether anything *meaningfully* changed. A rotated CSRF token produces a new blob and no change event.
-- **A blocked page is not a deleted page.** A CloudFront/Akamai 403 is recorded as `Blocked`, never as `Gone`. Conflating them would silently record a live page as removed — measured against real `.gov` hosts, not hypothetical.
+On October 5, 1787 — eighteen days after the Constitutional Convention adjourned in Philadelphia — a Pennsylvania clerk named Samuel Bryan published the first of twenty-four essays under a pseudonym he chose with care.
 
-## One definition, three surfaces
+He called himself **Centinel**. The watchman on the wall. The lone soldier who stays awake while the camp sleeps, whose only job is to warn before the enemy arrives. He addressed his essays *"To the Freemen of Pennsylvania."* Not the gentlemen. Not the delegates. The freemen.
 
-An op is an ordinary async function. Annotating it puts it on the CLI, in the MCP tool list, and at an HTTP route — with **no central registration list to update**:
+What Bryan warned, you have inherited.
 
-```rust
-/// List sources in the store with resource counts and liveness.
-#[op]
-pub async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<ListReport> { … }
-```
+He warned that a federal government with unchecked taxing power would **absorb the state legislatures**. He warned that a republic stretching across an entire continent could only be governed despotically — that distance from the people is itself a form of tyranny. He warned that the states would wither, that a standing army would enforce taxes the citizens had no voice in setting, that local accountability would be the first casualty of consolidated power.
 
-```console
-$ centinel list --max-problems 5              # CLI: flags and help from the same struct
-$ curl -X POST localhost:8787/ops/list        # HTTP: JSON in, JSON out
-{"jsonrpc":"2.0","method":"tools/list"}       # MCP: JSON Schema from the same struct
-```
+He was right. He just had the wrong scale.
 
-Long-running ops emit progress once and each surface renders it in its own idiom — a stderr counter on the CLI, an SSE stream over HTTP, a single return value over MCP. The op never learns who called it.
+The federal government Bryan feared has come, and grown, and the warnings he wrote echo louder at the level he never wrote about: **the city**. The municipal government across the street from you spends in a year what would have stunned a 1787 freeman. It contracts with names you have never heard. It holds meetings whose minutes you will never read. It awards procurement to relatives of officials whose connections you will never trace.
 
-## Try it
+It answers to no one because no one is watching.
 
-```bash
-cargo build
+**You are the freeman now.** The watchman's seat is empty.
 
-# What is this machine missing?
-centinel doctor
+This is what fills it.
 
-# Collect. Legistar is keyless and OData-queryable — for this kind of content,
-# querying beats crawling.
-centinel --root ./.centinel ingest --source hillsboroughcounty \
-  --url "https://webapi.legistar.com/v1/hillsboroughcounty/bodies"
+---
 
-# What is in the store, and what state is it in?
-centinel --root ./.centinel list
+Centinel collects the public record of a city — website maps, documents, transcripts, and the changes to all of them over time — and keeps it in a form nobody can quietly edit.
 
-# Serve it
-centinel --root ./.centinel serve          # HTTP + MCP over HTTP
-centinel --root ./.centinel mcp            # MCP over stdio
-```
+It is built on three principles drawn directly from Bryan's playbook.
 
-Re-run `ingest` on an unchanged URL: it stores the observation, dedupes the blob, and reports `changed: false`.
+**Documents over promises.** Every byte is content-addressed. The hash covers the raw bytes as served — not a summary, not a re-render, not a cleaned-up copy. Reading a document back verifies that hash, so an edit in place is an error rather than a silent success. The watchman demands the original record, not the official summary.
 
-## Layout
+**Never trust memory.** Files on disk are the only truth. Every index, every database, every embedding is derived and rebuildable — delete them all and you lose minutes, not evidence. Nothing in this system can answer from recall, because there is nothing to recall from. There is only the record, read again.
 
-```
-crates/
-  centinel-core/    domain model, store, op registry, ops
-  centinel-macros/  the #[op] attribute
-  centinel/         the binary: CLI, HTTP, MCP
-docs/
-  SPEC.md           the settled specification — read this first
-  research/         ~3,850 lines, ~450 primary-source citations
-```
+**Notice what disappears.** Every version is retained, and every collection run is a full snapshot — so a page that vanishes is a fact the archive holds, not a gap it forgets. A page that *starts refusing you* is a different fact, recorded differently. Conflating "this was deleted" with "this is now blocked" is how a record quietly corrupts, and the model refuses to do it. Bryan did not warn that *something* would go wrong. He named the way it would go wrong, and he was right.
 
-## Requirements
+---
 
-Rust 1.85+. Centinel shells out to standalone binaries rather than running a second language runtime:
+Centinel is a library, a CLI, a server, and an MCP endpoint. The agents come later and sit **on top** — they are clients of the record, never its author. What is collected does not depend on what any model happened to think that day.
 
-| Binary | Needed for | Required |
-|---|---|---|
-| `pdftoppm` (poppler) | rasterising PDF pages for OCR — Rust cannot do this natively | yes |
-| `tesseract` | OCR | yes |
-| `yt-dlp` | YouTube acquisition | yes |
-| `ffmpeg` | audio extraction | no |
+Everything runs locally. No document, no transcript, no page ever leaves the machine for a third-party API.
 
-`centinel doctor` reports what is missing. Everything runs locally — no OCR, transcription, embedding or reranking leaves the machine.
+Bryan lost the immediate fight. Pennsylvania ratified the Constitution in December 1787. But the pressure he and his fellow dissenters generated forced the **Bill of Rights** into existence — protections the powerful had not wanted to grant.
 
-## Not built yet
+The watchman loses individual fights. He wins the ones that matter.
 
-Search and retrieval, crawling, YouTube, document extraction, scheduling. [`docs/SPEC.md`](docs/SPEC.md) §8 lists the seven open decisions and what each one owns; §3–§6 are settled and should not be relitigated without reopening the ticket they came from.
+Light the candle.
 
-## License
+---
 
-MIT (forks-encouraged). See `LICENSE`.
+*MIT licensed. Fork this for your city.*
