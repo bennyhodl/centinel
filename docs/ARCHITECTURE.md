@@ -159,6 +159,11 @@ centinel discover --source tampa --site https://www.tampa.gov --rps 3
 # Fetch it. --limit lets you try a site before committing an hour.
 centinel collect --source tampa --limit 50 --rps 5
 
+# Bytes -> text -> searchable passages
+centinel extract
+centinel index
+centinel search "lobbyist meeting log"
+
 # What is in the store, and what state is it in?
 centinel list
 

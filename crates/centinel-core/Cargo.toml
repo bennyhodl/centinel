@@ -33,6 +33,7 @@ htmd = "0.5.5"
 dom_smoothie = "0.18.0"
 pdf-inspector = "0.1.7"
 calamine = "0.35.0"
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"

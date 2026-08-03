@@ -21,10 +21,12 @@
 // exactly as they do for downstream users.
 extern crate self as centinel_core;
 
+pub mod chunk;
 pub mod discovery;
 pub mod domain;
 pub mod extract;
 pub mod fetch;
+pub mod index;
 pub mod op;
 pub mod ops;
 pub mod policy;
