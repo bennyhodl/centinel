@@ -82,7 +82,7 @@ fn router(ctx: Arc<Ctx>) -> Router {
 /// The registry as JSON — the same information the CLI turns into help text and MCP
 /// turns into a tool list.
 async fn list_ops() -> Json<Value> {
-    let ops: Vec<Value> = op::all()
+    let ops: Vec<Value> = op::remote_ops()
         .into_iter()
         .map(|def| {
             json!({
@@ -102,7 +102,7 @@ async fn invoke(
     Path(name): Path<String>,
     body: Option<Json<Value>>,
 ) -> Response {
-    let Some(def) = op::find(&name) else {
+    let Some(def) = remote_op(&name) else {
         return not_found(&name);
     };
     // An absent body is an empty argument set, so zero-arg ops work with `curl -X POST`.
@@ -120,7 +120,7 @@ async fn invoke_streaming(
     Path(name): Path<String>,
     body: Option<Json<Value>>,
 ) -> Response {
-    let Some(def) = op::find(&name) else {
+    let Some(def) = remote_op(&name) else {
         return not_found(&name);
     };
     let args = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
@@ -163,6 +163,15 @@ async fn mcp_over_http(State(ctx): State<Arc<Ctx>>, Json(req): Json<Value>) -> R
         // A notification: accepted, nothing to say.
         None => StatusCode::ACCEPTED.into_response(),
     }
+}
+
+/// Resolves an op, refusing host-local ones.
+///
+/// A `local_only` op acts on the machine it runs on — launching a GUI, running a
+/// configured command. Reachable remotely it would be command execution against a
+/// server with no authentication, so it is invisible here rather than merely refused.
+fn remote_op(name: &str) -> Option<&'static op::OpDef> {
+    op::find(name).filter(|d| !d.local_only)
 }
 
 fn not_found(name: &str) -> Response {
@@ -208,7 +217,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ops_endpoint_exposes_the_whole_registry() {
+    async fn ops_endpoint_exposes_every_remote_op() {
         let (_d, app) = app().await;
         let resp = app
             .oneshot(Request::get("/ops").body(Body::empty()).unwrap())
@@ -218,8 +227,43 @@ mod tests {
 
         let json = body_json(resp).await;
         let ops = json["ops"].as_array().unwrap();
-        assert_eq!(ops.len(), op::all().len());
+        assert_eq!(ops.len(), op::remote_ops().len());
         assert!(ops.iter().any(|o| o["name"] == "doctor"));
+    }
+
+    /// `open` launches a configured command on the host. Over HTTP — which has no
+    /// authentication — that would be remote command execution.
+    #[tokio::test]
+    async fn host_local_ops_are_neither_listed_nor_invokable() {
+        let (_d, app) = app().await;
+
+        let listed = body_json(
+            app.clone()
+                .oneshot(Request::get("/ops").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            !listed["ops"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o["name"] == "open"),
+            "`open` must not appear in the remote registry"
+        );
+
+        // Not merely hidden — calling it directly must fail too.
+        let resp = app
+            .oneshot(
+                Request::post("/ops/open")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"target":"x","with":"sh -c whoami"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

@@ -138,6 +138,13 @@ pub struct OpDef {
     /// Not every library function should be one — ticket #9's "a model does not need
     /// forty tools". Exposure is **opt-out**: uniform by default, curated deliberately.
     pub mcp: bool,
+    /// This op acts on the machine it runs on, so remote invocation is meaningless or
+    /// dangerous. Excluded from **both** MCP and HTTP; reachable only from the CLI.
+    ///
+    /// `open` is the motivating case: it launches a GUI application on the host and
+    /// accepts a command template. Exposed remotely that is arbitrary command execution
+    /// against a server that (SPEC §8) has no authentication.
+    pub local_only: bool,
     /// Adds this op's arguments to a `clap::Command`.
     pub augment_clap: fn(clap::Command) -> clap::Command,
     /// Extracts parsed CLI arguments as the same JSON the other surfaces send.
@@ -158,7 +165,15 @@ pub fn all() -> Vec<&'static OpDef> {
 
 /// Ops exposed as MCP tools.
 pub fn mcp_tools() -> Vec<&'static OpDef> {
-    all().into_iter().filter(|o| o.mcp).collect()
+    all()
+        .into_iter()
+        .filter(|o| o.mcp && !o.local_only)
+        .collect()
+}
+
+/// Ops reachable over HTTP.
+pub fn remote_ops() -> Vec<&'static OpDef> {
+    all().into_iter().filter(|o| !o.local_only).collect()
 }
 
 /// Looks up an op by name.

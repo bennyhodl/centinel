@@ -121,7 +121,9 @@ async fn call_tool(ctx: &Arc<Ctx>, id: Value, params: Value) -> Value {
     let Some(def) = op::find(name) else {
         return error_response(id, -32602, &format!("unknown tool: {name}"));
     };
-    if !def.mcp {
+    // Checked on call, not merely omitted from `tools/list` — a client may hold a stale
+    // list, or simply guess a name.
+    if !def.mcp || def.local_only {
         return error_response(
             id,
             -32602,

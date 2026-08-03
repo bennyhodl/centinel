@@ -68,7 +68,12 @@ pub struct OpenReport {
 }
 
 /// Open a collected document in an application.
-#[op]
+///
+/// **CLI only.** This launches a GUI application on the host and accepts a command
+/// template, so exposing it over MCP or HTTP would be arbitrary command execution
+/// against a server that has no authentication. Agents wanting the *content* of a
+/// document should call `read`, which returns text and touches nothing.
+#[op(local_only)]
 pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
     let sources = match &args.source {
         Some(s) => vec![SourceId::new(s.clone())?],

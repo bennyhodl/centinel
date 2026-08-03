@@ -34,6 +34,7 @@ struct OpAttr {
     about: Option<String>,
     long_running: bool,
     mcp: Option<bool>,
+    local_only: bool,
 }
 
 /// Registers an async function as a Centinel op.
@@ -54,6 +55,7 @@ struct OpAttr {
 /// - `about = "…"` — override the description (defaults to the first doc-comment line)
 /// - `long_running` — hint that surfaces should stream progress
 /// - `mcp = false` — exclude from the MCP tool list while keeping CLI and HTTP
+/// - `local_only` — act on the host; exclude from **both** MCP and HTTP
 #[proc_macro_attribute]
 pub fn op(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut parsed = OpAttr::default();
@@ -68,15 +70,20 @@ pub fn op(attr: TokenStream, item: TokenStream) -> TokenStream {
                 Ok(v) => v.parse::<LitBool>()?.value(),
                 Err(_) => true,
             };
+        } else if meta.path.is_ident("local_only") {
+            parsed.local_only = match meta.value() {
+                Ok(v) => v.parse::<LitBool>()?.value(),
+                Err(_) => true,
+            };
         } else if meta.path.is_ident("mcp") {
             parsed.mcp = Some(match meta.value() {
                 Ok(v) => v.parse::<LitBool>()?.value(),
                 Err(_) => true,
             });
         } else {
-            return Err(
-                meta.error("unknown `op` option; expected one of: name, about, long_running, mcp")
-            );
+            return Err(meta.error(
+                "unknown `op` option; expected one of: name, about, long_running, mcp, local_only",
+            ));
         }
         Ok(())
     });
@@ -129,6 +136,7 @@ fn expand(attr: OpAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
         .unwrap_or_else(|| name.clone());
     let long_running = attr.long_running;
     let mcp = attr.mcp.unwrap_or(true);
+    let local_only = attr.local_only;
 
     // A private module per op keeps four generated helpers out of the parent namespace
     // while still letting `use super::*` see the function and its argument type.
@@ -197,6 +205,7 @@ fn expand(attr: OpAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                     about: #about,
                     long_running: #long_running,
                     mcp: #mcp,
+                    local_only: #local_only,
                     augment_clap: __augment,
                     args_from_matches: __from_matches,
                     schema: __schema,

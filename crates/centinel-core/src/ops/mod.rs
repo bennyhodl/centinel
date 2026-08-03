@@ -16,9 +16,11 @@ mod extract;
 mod ingest;
 mod list;
 mod open;
+mod read;
 mod search;
 
 pub use open::{OpenArgs, OpenReport, open};
+pub use read::{ReadArgs, ReadReport, read};
 
 pub use build_index::{IndexArgs, IndexReport, index};
 pub use collect::{CollectArgs, CollectFailure, CollectReport, collect};
