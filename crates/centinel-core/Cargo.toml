@@ -24,6 +24,15 @@ hex.workspace = true
 jiff.workspace = true
 tracing.workspace = true
 reqwest.workspace = true
+texting_robots = "0.2.2"
+roxmltree = "0.21.1"
+flate2 = "1.1.9"
+url = "2.5.8"
+governor = "0.10.4"
+htmd = "0.5.5"
+dom_smoothie = "0.18.0"
+pdf-inspector = "0.1.7"
+calamine = "0.35.0"
 
 [dev-dependencies]
 tempfile = "3"

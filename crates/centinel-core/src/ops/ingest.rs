@@ -9,24 +9,16 @@
 //! - **Two hashes** (§5.3). `blob_sha` proves what the server served; `fingerprint`
 //!   answers whether it meaningfully changed.
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::fetch::{FetchFailure, Fetcher};
+use crate::policy::{DEFAULT_USER_AGENT, HostPolicy};
 use crate::prelude::*;
 use crate::store::LogRecord;
-
-/// A descriptive User-Agent with a contact address.
-///
-/// Not cosmetic. The crawling research measured `sec.gov` returning 403 to a default
-/// agent and 200 to a descriptive one — the single highest-yield politeness lever found.
-/// The real per-host policy table (UA, rate cap, contact) is owned by ticket #4; this is
-/// the default until that exists.
-pub const DEFAULT_USER_AGENT: &str =
-    "Centinel/0.1 (civic transparency archiver; +https://github.com/bennyhodl/centinel)";
 
 #[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct IngestArgs {
@@ -101,10 +93,11 @@ pub async fn ingest(
 ) -> anyhow::Result<IngestReport> {
     let source = SourceId::new(args.source.clone())?;
 
-    let client = reqwest::Client::builder()
-        .user_agent(&args.user_agent)
-        .timeout(Duration::from_secs(args.timeout_secs))
-        .build()?;
+    let fetcher = Fetcher::new(&HostPolicy {
+        user_agent: args.user_agent.clone(),
+        timeout: Duration::from_secs(args.timeout_secs),
+        ..Default::default()
+    })?;
 
     // Liveness is replayed once up front so `since` and `consecutive_failures` carry
     // across runs rather than resetting on every invocation.
@@ -120,8 +113,8 @@ pub async fn ingest(
         let resource = Resource::new(source.clone(), url.clone());
         let at = Timestamp::now();
 
-        match fetch(&client, url).await {
-            Ok(FetchOk { bytes, meta }) => {
+        match fetcher.get(url).await {
+            Ok(Fetched { bytes, meta }) => {
                 let n = bytes.len();
                 let (obs, previous) = ctx.store.observe(&resource, &bytes, at, meta).await?;
 
@@ -147,7 +140,7 @@ pub async fn ingest(
                     first_seen,
                 });
             }
-            Err(FetchErr { state, detail }) => {
+            Err(FetchFailure { state, detail }) => {
                 let entry = statuses
                     .entry(resource.clone())
                     .or_insert_with(|| ResourceStatus::new_live(resource.clone(), at));
@@ -180,92 +173,4 @@ pub async fn ingest(
         failed,
         outcomes,
     })
-}
-
-struct FetchOk {
-    bytes: Vec<u8>,
-    meta: BTreeMap<String, String>,
-}
-
-struct FetchErr {
-    state: Liveness,
-    detail: String,
-}
-
-async fn fetch(client: &reqwest::Client, url: &str) -> Result<FetchOk, FetchErr> {
-    let resp = client.get(url).send().await.map_err(|e| FetchErr {
-        state: Liveness::Error,
-        detail: e.to_string(),
-    })?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(FetchErr {
-            state: classify(status.as_u16()),
-            detail: format!("HTTP {status}"),
-        });
-    }
-
-    // Kept on the Observation because they are the cheap change signals a later
-    // conditional-request implementation (#7) will want, and they cannot be recovered
-    // after the fact.
-    let mut meta = BTreeMap::new();
-    for header in ["content-type", "etag", "last-modified"] {
-        if let Some(v) = resp.headers().get(header)
-            && let Ok(s) = v.to_str()
-        {
-            meta.insert(header.to_string(), s.to_string());
-        }
-    }
-    meta.insert("http_status".into(), status.as_u16().to_string());
-    // The post-redirect URL, which is what the bytes actually came from.
-    meta.insert("final_url".into(), resp.url().to_string());
-
-    let bytes = resp.bytes().await.map_err(|e| FetchErr {
-        state: Liveness::Error,
-        detail: format!("body read failed: {e}"),
-    })?;
-
-    Ok(FetchOk {
-        bytes: bytes.to_vec(),
-        meta,
-    })
-}
-
-/// Maps an HTTP status onto liveness.
-///
-/// The 403 → [`Liveness::Blocked`] mapping is the load-bearing one. Both `phila.gov`
-/// and `sec.gov` were measured returning WAF 403s with no `Retry-After`; classifying
-/// those as `Gone` would record a live page as deleted.
-fn classify(status: u16) -> Liveness {
-    match status {
-        404 | 410 => Liveness::Gone,
-        401 | 403 | 429 => Liveness::Blocked,
-        _ => Liveness::Error,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn waf_403_is_blocked_not_gone() {
-        // The distinction the whole discovery-delta story rests on.
-        assert_eq!(classify(403), Liveness::Blocked);
-        assert_eq!(classify(429), Liveness::Blocked);
-        assert_eq!(classify(404), Liveness::Gone);
-        assert_eq!(classify(410), Liveness::Gone);
-        assert_eq!(classify(500), Liveness::Error);
-        assert_eq!(classify(503), Liveness::Error);
-    }
-
-    #[test]
-    fn default_user_agent_is_descriptive_and_contactable() {
-        assert!(DEFAULT_USER_AGENT.contains("Centinel"));
-        assert!(
-            DEFAULT_USER_AGENT.contains('+'),
-            "a contact URL is what flips sec.gov from 403 to 200"
-        );
-    }
 }

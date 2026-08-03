@@ -21,9 +21,13 @@
 // exactly as they do for downstream users.
 extern crate self as centinel_core;
 
+pub mod discovery;
 pub mod domain;
+pub mod extract;
+pub mod fetch;
 pub mod op;
 pub mod ops;
+pub mod policy;
 pub mod store;
 
 /// The `#[op]` attribute. Lives in the macro namespace, so it does not collide with
@@ -32,11 +36,13 @@ pub use centinel_macros::op;
 
 /// The imports an op definition needs.
 pub mod prelude {
+    pub use crate::discovery::{Discoverer, DiscoveryLimits, SiteDiscovery};
     pub use crate::domain::{
         Anchor, BlobSha, ChangeEvent, ChangeKind, ChangeSignal, Derivation, DiscoveryRun, Fetched,
         Fingerprint, Liveness, ModelTier, Observation, Resource, ResourceStatus, Source, SourceId,
     };
     pub use crate::op::{Ctx, Progress, ProgressEvent};
+    pub use crate::policy::{HostPolicy, PolicyTable};
     pub use crate::store::{LogRecord, Store};
     pub use centinel_macros::op;
 }

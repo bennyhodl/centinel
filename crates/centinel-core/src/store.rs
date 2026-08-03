@@ -343,8 +343,10 @@ impl Store {
 
     /// Records an Observation: blob into the pool, line into the log.
     ///
-    /// Returns the previous fingerprint, if any — the caller needs it to decide whether
-    /// this constitutes a [`crate::domain::ChangeEvent`].
+    /// Convenience wrapper that looks up the previous fingerprint first. **Scans the
+    /// whole log**, so it is fine for a handful of URLs and quadratic for a corpus —
+    /// bulk callers should preload with [`Self::latest_observations`] and use
+    /// [`Self::record_observation`] instead.
     pub async fn observe(
         &self,
         resource: &Resource,
@@ -357,7 +359,23 @@ impl Store {
             .await?
             .last()
             .map(|o| o.fingerprint.clone());
+        let obs = self.record_observation(resource, bytes, at, meta).await?;
+        Ok((obs, previous))
+    }
 
+    /// Records an Observation without consulting history.
+    ///
+    /// The bulk path. Collecting 11,476 URLs through [`Self::observe`] would read the
+    /// log 11,476 times; preloading with [`Self::latest_observations`] and calling this
+    /// reads it once. Comparing fingerprints is then the caller's job — which it can do
+    /// from the preloaded map.
+    pub async fn record_observation(
+        &self,
+        resource: &Resource,
+        bytes: &[u8],
+        at: Timestamp,
+        meta: BTreeMap<String, String>,
+    ) -> Result<Observation> {
         let blob_sha = self.put_blob(bytes).await?;
         let fingerprint =
             Fingerprint::from_normalized(&crate::domain::normalize_placeholder(bytes));
@@ -371,7 +389,7 @@ impl Store {
         };
         self.append(&resource.source, &LogRecord::Observation(obs.clone()))
             .await?;
-        Ok((obs, previous))
+        Ok(obs)
     }
 }
 

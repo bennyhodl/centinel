@@ -8,10 +8,16 @@
 //! [`crate::domain::Source`], and a serializable result. Behaviour that deserves tests
 //! belongs in the library, not in an op body.
 
+mod collect;
+mod discover;
 mod doctor;
+mod extract;
 mod ingest;
 mod list;
 
+pub use collect::{CollectArgs, CollectFailure, CollectReport, collect};
+pub use discover::{DiscoverArgs, DiscoverReport, discover};
 pub use doctor::{Binary, DoctorArgs, DoctorReport, doctor};
-pub use ingest::{DEFAULT_USER_AGENT, IngestArgs, IngestOutcome, IngestReport, ingest};
+pub use extract::{ExtractArgs, ExtractReport, ExtractSample, Unreadable, extract};
+pub use ingest::{IngestArgs, IngestOutcome, IngestReport, ingest};
 pub use list::{ListArgs, ListReport, Problem, SourceSummary, list};

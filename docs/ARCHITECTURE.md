@@ -153,20 +153,29 @@ cargo build
 # What is this machine missing?
 centinel doctor
 
-# Collect. Legistar is keyless and OData-queryable — for this kind of content,
-# querying beats crawling.
-centinel --root ./.centinel ingest --source hillsboroughcounty \
-  --url "https://webapi.legistar.com/v1/hillsboroughcounty/bodies"
+# What does a city say it has? ~3 seconds for Tampa's 11,476 URLs.
+centinel discover --source tampa --site https://www.tampa.gov --rps 3
+
+# Fetch it. --limit lets you try a site before committing an hour.
+centinel collect --source tampa --limit 50 --rps 5
 
 # What is in the store, and what state is it in?
-centinel --root ./.centinel list
+centinel list
 
 # Serve it
-centinel --root ./.centinel serve          # HTTP + MCP over HTTP
-centinel --root ./.centinel mcp            # MCP over stdio
+centinel serve          # HTTP + MCP over HTTP
+centinel mcp            # MCP over stdio
 ```
 
-Re-run `ingest` on an unchanged URL: it stores the observation, dedupes the blob, and reports `changed: false`.
+`collect` is **resumable with no checkpoint file**: the work list is the latest
+`DiscoveryRun` minus everything already observed, so interrupting and re-running picks
+up where it stopped. `remaining` in the report is how much is left.
+
+`--match` is a coarse substring filter for exploration — `--match /assets/` pulls just
+the documents. For ad-hoc URLs outside a discovery run, `ingest` takes them directly.
+
+Re-collect an unchanged page and it stores the observation, dedupes the blob, and does
+not count as changed.
 
 ## Requirements
 
