@@ -35,7 +35,9 @@ pub mod op;
 pub mod ops;
 pub mod policy;
 pub mod store;
+pub mod transcribe;
 pub mod vectors;
+pub mod youtube;
 
 /// The `#[op]` attribute. Lives in the macro namespace, so it does not collide with
 /// the [`op`] module in the type namespace.

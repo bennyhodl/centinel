@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/centinel-core", "crates/centinel-macros", "crates/centinel"]
+members = [
+    "crates/centinel-core",
+    "crates/centinel-macros",
+    "crates/centinel",
+    # Links whisper.cpp, and must never link llama.cpp — see the crate's Cargo.toml.
+    "crates/centinel-whisper",
+]
 
 [workspace.package]
 version = "0.1.0"

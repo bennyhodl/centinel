@@ -125,6 +125,10 @@ pub fn content_kind(meta: &BTreeMap<String, String>, bytes: &[u8]) -> &'static s
         _ => {}
     }
 
+    if declared.starts_with("audio/") {
+        return "audio";
+    }
+
     // Hosts mislabel constantly — .gov servers routinely serve PDFs as
     // application/octet-stream. Magic bytes are the tiebreak.
     if bytes.starts_with(b"%PDF-") {
@@ -134,6 +138,9 @@ pub fn content_kind(meta: &BTreeMap<String, String>, bytes: &[u8]) -> &'static s
     if bytes.starts_with(b"PK\x03\x04") {
         return "zip-container";
     }
+    if is_audio(bytes) {
+        return "audio";
+    }
     let head = &bytes[..bytes.len().min(256)];
     let head = String::from_utf8_lossy(head)
         .trim_start()
@@ -142,6 +149,40 @@ pub fn content_kind(meta: &BTreeMap<String, String>, bytes: &[u8]) -> &'static s
         return "html";
     }
     "other"
+}
+
+/// Container sniffing for the audio YouTube actually serves.
+///
+/// Magic bytes rather than the declared type, because blobs are content-addressed and a
+/// blob path has no extension — this is how `transcribe` finds its work list, and how
+/// ffmpeg's job is confirmed before it is asked to do it.
+fn is_audio(bytes: &[u8]) -> bool {
+    // ISO base media (m4a): `....ftyp` — the size field comes first.
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        // `ftypmp42`/`ftypM4A ` are audio; `ftypisom` is usually video, but a
+        // video-carrying blob is still something ffmpeg can pull an audio track from.
+        return true;
+    }
+    // Matroska / WebM.
+    if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        return true;
+    }
+    // RIFF....WAVE
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE" {
+        return true;
+    }
+    // Ogg (Opus/Vorbis).
+    if bytes.starts_with(b"OggS") {
+        return true;
+    }
+    // MP3: an ID3 tag, or a bare frame sync.
+    if bytes.starts_with(b"ID3") {
+        return true;
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0 {
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]

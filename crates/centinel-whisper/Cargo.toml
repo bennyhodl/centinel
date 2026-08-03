@@ -1,0 +1,40 @@
+[package]
+name = "centinel-whisper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Centinel's transcription worker: whisper.cpp in a process of its own."
+
+# This crate exists to be a SEPARATE PROCESS, and that is its entire reason for being.
+#
+# whisper.cpp and llama.cpp each vendor their own copy of ggml, exporting the same ~534
+# `ggml_*` symbols. Linked into one binary they resolve to whichever archive the linker
+# reached first, and the two vendored versions differ (`ggml.h` is 2,724 lines in
+# whisper.cpp 1.8.3 against 2,845 in llama.cpp). Measured, on identical audio and model:
+#
+#   whisper-rs alone            -> "The council meeting will come to order." (2 segments)
+#   whisper-rs + llama-cpp-2    -> 0 segments, every logit p=0.000
+#
+# It links, it runs, it crashes nowhere, and it transcribes nothing. So `centinel` links
+# llama.cpp and this binary links whisper.cpp, and they meet over a pipe.
+#
+# Deliberately NOT a workspace dependency: nothing may add llama-cpp-2 here by accident.
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+whisper-rs = { version = "0.16.0", default-features = false, features = ["openmp"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16.0", default-features = false, features = ["openmp", "metal"] }
+
+[features]
+# Mirrors centinel-core's accelerator features so `--features cuda` reaches both runtimes.
+cuda = ["whisper-rs/cuda"]
+vulkan = ["whisper-rs/vulkan"]
+rocm = ["whisper-rs/hipblas"]

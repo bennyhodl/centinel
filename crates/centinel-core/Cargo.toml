@@ -35,6 +35,9 @@ pdf-inspector = "0.1.7"
 calamine = "0.35.0"
 rusqlite = { version = "0.37", features = ["bundled"] }
 toml = "1.1.4"
+# yt-dlp writes files and the store wants bytes; each video gets a scratch directory
+# that is removed with it, so nothing outlives the conversion.
+tempfile = "3"
 
 # Local inference. Compiles llama.cpp from source, which is what puts a C++ build in
 # `cargo build` — the distribution question ticket #11 already tracks for whisper-rs.
