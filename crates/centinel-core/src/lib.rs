@@ -29,6 +29,7 @@ pub mod extract;
 pub mod fetch;
 pub mod index;
 pub mod materialize;
+pub mod models;
 pub mod op;
 pub mod ops;
 pub mod policy;

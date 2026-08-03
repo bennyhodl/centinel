@@ -38,3 +38,7 @@ toml = "1.1.4"
 
 [dev-dependencies]
 tempfile = "3"
+# The download tests speak HTTP/1.1 over a raw socket. Resume correctness is a property
+# of the conversation — Range headers, 206 vs 200, a connection dropped mid-body — and a
+# server framework will not let a test write a deliberately truncated response.
+tokio = { workspace = true, features = ["net"] }

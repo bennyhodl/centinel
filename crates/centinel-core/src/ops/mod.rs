@@ -15,10 +15,15 @@ mod doctor;
 mod extract;
 mod ingest;
 mod list;
+mod models;
 mod open;
 mod read;
 mod search;
 
+pub use models::{
+    FetchedFile, FileCheck, ModelsAction, ModelsArgs, ModelsReport, Orphan, PruneArgs, PullArgs,
+    RemoveArgs, VerifyArgs, models,
+};
 pub use open::{OpenArgs, OpenReport, open};
 pub use read::{ReadArgs, ReadReport, read};
 
