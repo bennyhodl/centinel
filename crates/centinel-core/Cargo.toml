@@ -36,6 +36,23 @@ calamine = "0.35.0"
 rusqlite = { version = "0.37", features = ["bundled"] }
 toml = "1.1.4"
 
+# Local inference. Compiles llama.cpp from source, which is what puts a C++ build in
+# `cargo build` — the distribution question ticket #11 already tracks for whisper-rs.
+llama-cpp-2 = { version = "0.1.153", default-features = false, features = ["openmp"] }
+
+[features]
+default = []
+# GPU backends. Metal is enabled automatically on macOS below; the rest are opt-in
+# because they need a toolchain (nvcc, ROCm) that a plain `cargo build` cannot assume.
+cuda = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]
+rocm = ["llama-cpp-2/rocm"]
+
+# Metal needs no external toolchain on macOS and is the difference between a corpus that
+# embeds overnight and one that embeds over a lunch break, so it is not opt-in there.
+[target.'cfg(target_os = "macos")'.dependencies]
+llama-cpp-2 = { version = "0.1.153", default-features = false, features = ["openmp", "metal"] }
+
 [dev-dependencies]
 tempfile = "3"
 # The download tests speak HTTP/1.1 over a raw socket. Resume correctness is a property

@@ -68,7 +68,10 @@ pub struct Chunk {
 }
 
 impl Chunk {
-    fn new(text: String, ordinal: usize, heading: String, char_start: usize) -> Self {
+    /// `pub(crate)` so other modules' tests can build a chunk with a real `chunk_hash`
+    /// rather than fabricating one — a fabricated hash would make a cache-hit test pass
+    /// for the wrong reason.
+    pub(crate) fn new(text: String, ordinal: usize, heading: String, char_start: usize) -> Self {
         use sha2::{Digest, Sha256};
         let char_end = char_start + text.chars().count();
         Self {

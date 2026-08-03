@@ -228,6 +228,36 @@ impl Index {
         Ok(hits)
     }
 
+    /// Every chunk hash in the index.
+    ///
+    /// Hashes only, not text: this answers "what exists?" so that `embed` can subtract
+    /// what is already cached. Pulling the text too would load hundreds of megabytes to
+    /// compute a set difference.
+    pub fn chunk_hashes(&self) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT chunk_hash FROM chunk ORDER BY id")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The text of specific chunks, in the order requested.
+    ///
+    /// Batched deliberately — `embed` walks the corpus a batch at a time so that only a
+    /// batch's worth of text is resident, however large the corpus.
+    pub fn chunk_texts(&self, hashes: &[String]) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT text FROM chunk WHERE chunk_hash = ?1")?;
+        hashes
+            .iter()
+            .map(|h| {
+                stmt.query_row([h], |r| r.get::<_, String>(0))
+                    .map_err(|e| anyhow::anyhow!("chunk {h} is not in the index: {e}"))
+            })
+            .collect()
+    }
+
     pub fn placements_of(&self, chunk_hash: &str) -> anyhow::Result<Vec<Placement>> {
         let mut stmt = self.conn.prepare(
             "SELECT source, resource, blob_sha, derived_sha, ordinal, heading,

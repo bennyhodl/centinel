@@ -25,6 +25,7 @@ pub mod chunk;
 pub mod config;
 pub mod discovery;
 pub mod domain;
+pub mod embed;
 pub mod extract;
 pub mod fetch;
 pub mod index;
@@ -34,6 +35,7 @@ pub mod op;
 pub mod ops;
 pub mod policy;
 pub mod store;
+pub mod vectors;
 
 /// The `#[op]` attribute. Lives in the macro namespace, so it does not collide with
 /// the [`op`] module in the type namespace.
