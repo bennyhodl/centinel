@@ -45,17 +45,57 @@ impl Ctx {
     }
 }
 
+/// How to read [`ProgressEvent::done`] and `total`.
+///
+/// Presentation, not semantics — the op says what it is counting, and each surface
+/// decides how to render it. `Bytes` is what turns `312000000/613527539` into
+/// `297 MiB / 585 MiB at 18.4 MiB/s`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unit {
+    /// Bare items: URLs fetched, documents extracted.
+    #[default]
+    Count,
+    Bytes,
+}
+
+impl Unit {
+    /// So the default stays off the wire and old consumers see the old shape.
+    fn is_count(&self) -> bool {
+        matches!(self, Self::Count)
+    }
+}
+
+/// The reserved `id` for an aggregate track — "this whole operation", as opposed to the
+/// individual unit of work in flight.
+///
+/// Reserved rather than conventional: a surface has to be able to tell the summary line
+/// from the item lines to lay them out, and an op that produced a track called `total`
+/// for its own reasons would otherwise silently overwrite the summary. The leading
+/// underscores keep it out of any namespace a real work item would use.
+pub const TOTAL_TRACK: &str = "__total__";
+
 /// A progress report from a long-running op.
 ///
 /// This is the shape all three surfaces render: a progress bar on the CLI, an SSE frame
 /// over HTTP, a notification over MCP.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `id` is what makes **concurrent or sequential multi-part work** legible: events
+/// sharing an id are the same unit of work, so a renderer can keep one bar per file and
+/// an aggregate bar beside it, rather than one bar whose meaning changes underneath the
+/// operator. An event with no `id` is a log line, not a bar.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProgressEvent {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
+    /// Which unit of work this reports on. `None` means "a message, not a bar".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Unit::is_count")]
+    pub unit: Unit,
 }
 
 /// The sink an op reports progress into.
@@ -95,17 +135,38 @@ impl Progress {
     pub fn say(&self, message: impl Into<String>) {
         self.send(ProgressEvent {
             message: message.into(),
-            done: None,
-            total: None,
+            ..Default::default()
         });
     }
 
-    /// Convenience for counted work.
+    /// Convenience for counted work with a single implicit track.
     pub fn step(&self, message: impl Into<String>, done: u64, total: u64) {
         self.send(ProgressEvent {
             message: message.into(),
             done: Some(done),
             total: Some(total),
+            ..Default::default()
+        });
+    }
+
+    /// Reports on a *named* unit of work — one bar per `id`.
+    ///
+    /// Reaching `done == total` is how a surface knows a track finished, so an op that
+    /// completes one should say so explicitly rather than simply stopping.
+    pub fn track(
+        &self,
+        id: impl Into<String>,
+        message: impl Into<String>,
+        done: u64,
+        total: u64,
+        unit: Unit,
+    ) {
+        self.send(ProgressEvent {
+            message: message.into(),
+            done: Some(done),
+            total: Some(total),
+            id: Some(id.into()),
+            unit,
         });
     }
 }
@@ -244,5 +305,66 @@ mod tests {
         let (p, rx) = Progress::channel();
         drop(rx);
         p.say("into the void");
+    }
+
+    #[tokio::test]
+    async fn tracks_are_distinguished_by_id() {
+        let (p, mut rx) = Progress::channel();
+        p.track("a", "file a", 1, 10, Unit::Bytes);
+        p.track("b", "file b", 5, 10, Unit::Bytes);
+        drop(p);
+
+        let a = rx.recv().await.unwrap();
+        let b = rx.recv().await.unwrap();
+        assert_eq!(a.id.as_deref(), Some("a"));
+        assert_eq!(b.id.as_deref(), Some("b"));
+        assert_eq!(a.unit, Unit::Bytes);
+    }
+
+    /// The added fields must not change what an existing counted op puts on the wire —
+    /// SSE consumers of `/ops/{name}/stream` predate them.
+    #[test]
+    fn counted_events_serialize_exactly_as_before() {
+        let ev = ProgressEvent {
+            message: "collected".into(),
+            done: Some(3),
+            total: Some(9),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"message": "collected", "done": 3, "total": 9})
+        );
+    }
+
+    #[test]
+    fn byte_tracks_carry_their_unit_and_id() {
+        let ev = ProgressEvent {
+            message: "model.onnx".into(),
+            done: Some(1),
+            total: Some(2),
+            id: Some("m/model.onnx".into()),
+            unit: Unit::Bytes,
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["unit"], "bytes");
+        assert_eq!(json["id"], "m/model.onnx");
+    }
+
+    /// It must not collide with anything an op would name a work item, or that item
+    /// would silently overwrite the aggregate.
+    #[test]
+    fn the_aggregate_track_id_is_reserved() {
+        assert!(TOTAL_TRACK.starts_with("__"));
+        assert!(!TOTAL_TRACK.contains('/'));
+    }
+
+    #[test]
+    fn an_event_without_the_new_fields_still_deserializes() {
+        let ev: ProgressEvent =
+            serde_json::from_str(r#"{"message":"old","done":1,"total":2}"#).unwrap();
+        assert!(ev.id.is_none());
+        assert_eq!(ev.unit, Unit::Count);
     }
 }

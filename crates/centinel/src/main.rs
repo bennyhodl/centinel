@@ -7,6 +7,7 @@
 
 mod http;
 mod mcp;
+mod progress;
 
 use std::sync::Arc;
 
@@ -120,7 +121,8 @@ async fn run_op(ctx: Arc<Ctx>, name: &str, matches: &clap::ArgMatches) -> Result
     let def = op::find(name).with_context(|| format!("unknown op `{name}`"))?;
     let args = (def.args_from_matches)(matches)?;
 
-    // Progress goes to stderr so stdout stays a clean JSON stream for piping.
+    // Progress goes to stderr so stdout stays a clean JSON stream for piping. Which
+    // renderer draws it — bars or lines — is [`progress`]'s decision, not this one's.
     let (progress, rx) = if def.long_running {
         let (p, rx) = Progress::channel();
         (p, Some(rx))
@@ -128,16 +130,7 @@ async fn run_op(ctx: Arc<Ctx>, name: &str, matches: &clap::ArgMatches) -> Result
         (Progress::none(), None)
     };
 
-    let printer = rx.map(|mut rx| {
-        tokio::spawn(async move {
-            while let Some(ev) = rx.recv().await {
-                match (ev.done, ev.total) {
-                    (Some(d), Some(t)) => eprintln!("[{d}/{t}] {}", ev.message),
-                    _ => eprintln!("… {}", ev.message),
-                }
-            }
-        })
-    });
+    let printer = rx.map(progress::spawn);
 
     let result = (def.invoke)(ctx, args, progress).await;
 

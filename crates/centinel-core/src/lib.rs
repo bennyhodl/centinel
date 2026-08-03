@@ -45,7 +45,7 @@ pub mod prelude {
         Anchor, BlobSha, ChangeEvent, ChangeKind, ChangeSignal, Derivation, DiscoveryRun, Fetched,
         Fingerprint, Liveness, ModelTier, Observation, Resource, ResourceStatus, Source, SourceId,
     };
-    pub use crate::op::{Ctx, Progress, ProgressEvent};
+    pub use crate::op::{Ctx, Progress, ProgressEvent, Unit};
     pub use crate::policy::{HostPolicy, PolicyTable};
     pub use crate::store::{LogRecord, Store};
     pub use centinel_macros::op;
