@@ -238,10 +238,10 @@ Raw-only would produce a new version every recrawl forever. Normalized-only woul
 
 ```
 query
-  ├─ BM25 (Tantivy, via LanceDB)     → top 100    [instant, no model]
-  └─ vector (Qwen3-Embedding-0.6B)   → top 100    [fast]
+  ├─ BM25 (SQLite FTS5)              → top 100    [instant, no model]
+  └─ vector (Qwen3-Embedding-4B)     → top 100    [fast]
         └─ RRF fuse (k=60)           → top 30–40
-              └─ Qwen3-Reranker-0.6B → top 10     [always on, ~0.5–2 s CPU]
+              └─ Qwen3-Reranker      → top 10     [always on]
 ```
 
 ### 6.1 Chunk identity is `hash(chunk_text)`
@@ -250,13 +250,67 @@ The versioned-corpus problem **dissolves** rather than being solved. A monthly r
 
 **Two-tier retrieval:** default `is_current = true`; `--as-of <date>` and `--all-versions` reach history. **The tier is a filter, not a copy** — vectors are shared across versions.
 
-### 6.2 Models — fixed for every install
+### 6.2 Models — the Qwen3 family, sized by where the cost lands
 
-**`Qwen3-Embedding-0.6B` + `Qwen3-Reranker-0.6B`.** Apache-2.0 on both halves, 32K context on both.
+**`Qwen3-Embedding-4B` + `Qwen3-Reranker`.** Apache-2.0 on both halves, 32K context on both.
 
-Licence was the deciding factor: Centinel auto-downloads models and forks redistribute them. EmbeddingGemma carries the Gemma licence; Jina's reranker is CC-BY-NC. The 32K context also matters concretely — it is the only pair that can embed a long transcript span whole (EmbeddingGemma's 2,048 cannot).
+Licence was the deciding factor for the family: Centinel auto-downloads models and forks redistribute them. EmbeddingGemma carries the Gemma licence; Jina's reranker is CC-BY-NC. The 32K context also matters concretely — it is the only pair that can embed a long transcript span whole (EmbeddingGemma's 2,048 cannot).
 
-**Fixing the model means every Centinel corpus shares one embedding space.** Had hardware tiering selected embedding models, two installs would produce **incompatible vector spaces** — corpora that could not be compared or merged, fatal when forks are the point.
+**Revised 2026-08-03.** This section previously fixed *both* halves at 0.6B, on the reasoning that hardware-tiered embedding models would give two installs incompatible vector spaces — "fatal when forks are the point." That argument assumed a many-install deployment. The actual one is **a single machine that collects, embeds and indexes, with everyone else querying over HTTP or MCP**. There is no second install to be incompatible with, so the constraint that fixed the size is gone. What replaces it is a cost argument.
+
+**Where the cost lands decides the size:**
+
+| | paid | cost of going bigger |
+|---|---|---|
+| **embedder** | once per corpus | **hours** of wall clock |
+| **reranker** | once per query | **milliseconds** |
+
+Measured on MTEB English Retrieval: 0.6B **61.83** → 4B **68.46** → 8B **69.44**. Nearly the whole gain is 0.6B→4B; 8B buys **+1.0 point for roughly double the embedding time**, which on a corpus that takes hours is hours spent on a rounding error.
+
+The 4B is not free either. Measured on an M1 Max under Metal, batch 32:
+
+| | chunks/sec | 200k chunks |
+|---|---|---|
+| 0.6B Q8_0 | 18.5 | 3.0 h |
+| **4B Q8_0** | **3.8** | **14.8 h** |
+
+So the real trade is **+6.6 retrieval points for ~12 extra hours, once**. Taken: retrieval quality is the product, the cost is paid a single time per corpus, and §6.1's `chunk_hash` cache means a monthly recrawl re-embeds only what genuinely changed. But it is an overnight run, not a lunch break, and a first crawl should be planned as one.
+
+Batching helps the 4B far less than the 0.6B (1.4× against 3.0×) because at 4B the matrix arithmetic dominates rather than the per-call setup — there is less overhead left to amortise.
+
+So: **4B for the embedder, and the reranker scales freely with the host.** A reranker emits a score at query time and never writes a stored artifact, so its size is invisible to everything downstream — it is the one place extra hardware converts directly into better answers.
+
+**Model identity is still recorded, and still binding across time.** §5.2's cache key is `(chunk_hash, model_id, dims)`, so several models can coexist on disk — but a query vector and the index it searches must come from the same model. Changing the embedder is therefore a **full re-embed of the corpus**, not a config edit. The cross-install argument is gone; the across-time one is not.
+
+*If the deployment ever becomes many-install* — corpora published and merged between operators, which §5.2 explicitly contemplates for the embedding cache — this decision must be reopened, because the incompatibility it used to prevent returns.
+
+### 6.2.1 Runtime — GGUF via `llama.cpp`, not ONNX
+
+Model **weights** are GGUF; inference is `llama-cpp-2` in-process. No server, no sidecar.
+
+**ONNX was measured and rejected.** The `onnx-community` exports are decoder graphs carrying a KV cache (28 layers × key/value, plus `position_ids`), and CoreML refuses them:
+
+```
+Input (past_key_values.0.key) has a dynamic shape ({-1,8,-1,128}) but the
+runtime shape ({1,8,0,128}) has zero elements. Not supported by the CoreML EP.
+```
+
+That makes ONNX **permanently CPU-only on Apple Silicon**. `llama.cpp` has first-class Metal, CUDA, Vulkan and ROCm backends, and GGUF is the format quantization ladders are actually published in.
+
+Measured on an M1 Max, 1,200-character chunks, **same model on both sides** so the runtime is the only variable:
+
+| runtime | backend | chunks/sec |
+|---|---|---|
+| ONNX `ort`, 0.6B int8 | CPU, 10 threads | 5.5 |
+| `llama.cpp`, 0.6B Q8_0 | Metal, batch 32 | **18.5** |
+
+**3.4×, and only with batching.** Unbatched the same path gives 6.1 chunks/sec — barely better than CPU — because a context and its KV cache are built per *call*, not per text. Embedding one chunk at a time measures allocation, not inference. Any consumer of [`crate::embed`] that loops one text at a time is leaving two thirds of the throughput on the floor.
+
+*Known headroom:* the batched path still decodes sequences one at a time inside a shared context. True multi-sequence batching — several `seq_id`s in one `LlamaBatch` — is not implemented.
+
+*Accepted cost:* a C++ build enters `cargo build`. This is the same question ticket [#11](https://github.com/bennyhodl/centinel/issues/11) already tracks for `whisper-rs`; it now has two occupants and should be decided once.
+
+*Accepted cost:* the reranker has **no first-party GGUF** — Qwen publishes GGUF for the embedder only. Reranker weights come from a community conversion (`ggml-org`, the llama.cpp organisation). This is not a change in provenance: the ONNX weights were community conversions too. Digests pin exactly what is fetched either way; what is weaker is the chain of custody, and it should be recorded in the registry rather than glossed.
 
 ### 6.3 Reranking is always on
 
@@ -264,13 +318,15 @@ One command, one answer, **no fast path that silently returns worse results.**
 
 This **departs from the research recommendation** to copy qmd's `search`/`query` split. Deliberate: the measured gap is large (BM25Q **14.8 → 33.4** nDCG@10 — reranked BM25 beats an expensively-trained reasoning-tuned dense retriever used alone at 29.1), and a default returning the 14.8 is a footgun.
 
-*Accepted cost:* 0.5–2 s CPU per query. Invisible over MCP; noticeable when iterating on the CLI.
+*Accepted cost:* around a second per query. Invisible over MCP; noticeable when iterating on the CLI.
 
-The architectural consequence: **a cheap first stage that over-fetches plus a good reranker beats an expensive retriever alone**, which is why aggressive quantization and MRL truncation are affordable.
+The architectural consequence: **a cheap first stage that over-fetches plus a good reranker beats an expensive retriever alone**, which is why aggressive quantization and MRL truncation are affordable — and why §6.2 spends its hardware budget on the reranker rather than the embedder. The first stage only has to get the right document into the top 100; it does not have to rank it.
 
 ### 6.4 Hybrid is the default, not an option
 
-Names, motions, addresses, ordinance numbers, dollar figures — what people actually search meeting records for — are **exact tokens**. Vector-only search would fail hardest on precisely those. *(Inferred; LanceDB provides Tantivy BM25 natively.)*
+Names, motions, addresses, ordinance numbers, dollar figures — what people actually search meeting records for — are **exact tokens**. Vector-only search would fail hardest on precisely those.
+
+The BM25 arm is **SQLite FTS5**, not LanceDB's Tantivy. §5.1 listed both; FTS5 is built, tested, and already demonstrated on the real corpus, and RRF fusion in our own code is a few dozen lines. That keeps the two arms independent — either can be rebuilt without touching the other.
 
 ### 6.5 Chunking — three shapes, three pipelines
 

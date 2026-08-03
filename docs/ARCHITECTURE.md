@@ -125,9 +125,15 @@ The hardest case. Ops emit progress one way and never learn who called them:
 
 | Surface | Rendering |
 |---|---|
-| CLI | counter on stderr, so stdout stays a clean JSON stream |
+| CLI | progress bars on stderr when stderr is a terminal, plain lines when it is a pipe — stdout stays a clean JSON stream either way |
 | HTTP | `POST /ops/{name}/stream` → SSE progress frames, then a terminal `result` or `error` |
 | MCP | waits and returns once — base MCP has no streaming channel for tool results |
+
+A `ProgressEvent` carries an optional **`id`** and a **`unit`**. Events sharing an `id`
+are one unit of work, so a renderer can keep a bar per file plus an aggregate beside it
+rather than one bar whose meaning shifts underneath the operator; `unit: bytes` is what
+turns `312000000/613527539` into `297 MiB / 585 MiB at 18.4 MiB/s`. Both are presentation
+hints. The op emits them and never learns whether anything drew a bar.
 
 `/stream` holds the connection open rather than returning a job id. Honest for the spine, wrong for a multi-hour crawl; a durable job store belongs with scheduling ([#7](https://github.com/bennyhodl/centinel/issues/7)).
 
@@ -195,8 +201,177 @@ Rust 1.85+. Centinel shells out to standalone binaries rather than running a sec
 
 `centinel doctor` reports what is missing. Everything runs locally — no OCR, transcription, embedding or reranking leaves the machine. A consequence the whole design carries: **output quality varies by machine**, so the model tier that produced an artifact is part of its provenance.
 
+## Model weights
+
+```bash
+centinel models list                    # registry + what is on disk
+centinel models pull                    # ~5.2 GB: embedder + reranker
+centinel models pull qwen3-embedding-4b --variant q4_k_m
+centinel models verify                  # re-hash against the pinned digests
+centinel models prune                   # preview weights the registry dropped
+centinel models prune --delete
+```
+
+Weights are fetched by an **explicit** `models pull` and never as a side effect
+([`SPEC.md`](SPEC.md) §3.2), so a scheduled 3am crawl can fail on a missing model but can
+never decide to download a gigabyte on its own.
+
+| | model | default | why this size |
+|---|---|---|---|
+| Embedding | `qwen3-embedding-4b` | `q8_0` (3.99 GiB) | cost paid **once per corpus**, in hours |
+| Reranker | `qwen3-reranker-0.6b` | `q8_0` (0.60 GiB) | cost paid **once per query**, in milliseconds |
+
+**Where the cost lands decides the size** (§6.2). MTEB English Retrieval runs 0.6B
+**61.83** → 4B **68.46** → 8B **69.44**: nearly the whole gain is 0.6B→4B, and 8B buys
++1.0 point for roughly double the embedding time. So the embedder stops at 4B and the
+reranker is where extra hardware should go, because it never writes a stored artifact.
+
+`qwen3-embedding-0.6b` stays in the registry as a fast smoke-test path, **not** as a
+hardware tier — its vectors are 1024-wide against 4B's 2560, a different space entirely,
+so switching costs a full re-embed.
+
+**Everything is pinned** — repository, commit revision, and a SHA-256 per file. Pinning
+the revision is what makes the digests meaningful: `main` moves, and a digest checked
+against a moving target is theatre. GGUF files are self-contained, so a variant is one
+file: no sidecar tokenizer, no ONNX external-data pairing.
+
+**Interruption is expected, not exceptional.** Bytes land in `<name>.part` and an
+interrupted transfer resumes with `Range: bytes=<n>-` rather than restarting — the same
+argument that makes `collect` resumable, for the same reason. Three rules follow:
+
+- a **network error keeps** the `.part`; that retention *is* the resume point
+- a **digest mismatch deletes** it, because resuming from known-bad bytes would fail
+  identically forever
+- a server that **ignores the `Range`** (answers 200 instead of 206) restarts cleanly,
+  rather than appending a duplicate prefix that a size check would not catch
+
+The digest is computed from the completed file **on disk**, not from the byte stream —
+a stream hash cannot span a resume, because the prefix was written by an earlier process.
+
+Bumping a pin downloads alongside the old revision rather than clobbering it, so an
+interrupted upgrade never leaves a half-new model. `models prune` collects what that
+leaves behind, and previews by default.
+
+`models` is **host-local**: excluded from MCP and HTTP entirely. It writes outside the
+store and can be made to pull gigabytes, which over an unauthenticated server is disk and
+bandwidth exhaustion. Weight *status* is reported by `doctor` instead, beside the binary
+probes — §3.2 says missing weights are fatal "exactly like a missing binary", and `doctor`
+is remotely reachable, so an agent can learn that search is about to fail for want of a
+model without being able to trigger a download.
+
+Readiness is split — `binaries_ready`, `models_ready`, `ready` as the conjunction —
+because a machine can crawl and extract with no weights at all; it simply cannot search.
+`doctor` judges presence **by file size**, so it stays instant; re-hashing 5 GB is
+`models verify`'s job.
+
+Weights live in the OS cache directory (`$CENTINEL_MODELS`, else
+`~/Library/Caches/centinel/models`), **not** in the store: they are neither corpus nor
+provenance, and an `rsync`-able store (§5.4) should not carry gigabytes of GGUF.
+
+## Inference
+
+`llama.cpp` in-process via `llama-cpp-2`. No server, no sidecar. Metal is on by default
+on macOS; `--features cuda` / `vulkan` / `rocm` elsewhere, opt-in because they need a
+toolchain a plain `cargo build` cannot assume.
+
+**ONNX was measured and rejected** (§6.2.1). The `onnx-community` exports are decoder
+graphs carrying a KV cache, and CoreML refuses them:
+
+```
+Input (past_key_values.0.key) has a dynamic shape ({-1,8,-1,128}) but the
+runtime shape ({1,8,0,128}) has zero elements. Not supported by the CoreML EP.
+```
+
+That made ONNX permanently CPU-only on Apple Silicon. Measured on an M1 Max with
+1,200-character chunks, same model on both sides:
+
+| runtime | backend | chunks/sec |
+|---|---|---|
+| ONNX `ort`, 0.6B int8 | CPU, 10 threads | 5.5 |
+| `llama.cpp`, 0.6B Q8_0 | Metal, batch 32 | **18.5** |
+
+**Batching is where the win lives.** Unbatched, the same path gives 6.1 chunks/sec —
+a context and its KV cache are built per *call*, not per text, so embedding one chunk at
+a time measures allocation rather than inference. `cargo run --release --example
+embed_bench` reproduces this on any host, which is how a CUDA or DGX Spark box gets
+compared without re-deriving a benchmark.
+
+*Accepted cost:* a C++ build enters `cargo build`. Same question ticket
+[#11](https://github.com/bennyhodl/centinel/issues/11) already tracks for `whisper-rs`.
+
+**The Qwen3 recipe is not obvious and gets no error when wrong.** Three things a generic
+embedding wrapper would not do:
+
+1. **Last-token pooling**, not mean pooling
+2. **An instruction prefix on queries only** — documents are embedded bare; the asymmetry
+   is the model's
+3. **L2 normalization**, so cosine similarity is a dot product
+
+Each produces plausible unit vectors when wrong — slightly worse retrieval, nothing to
+catch in a test that checks shapes. So `embed`'s test asserts on *meaning*: a query about
+lobbying spend must land measurably closer to a lobbying document than to one about bin
+collection.
+
+## Embedding
+
+```bash
+centinel embed --dry-run          # what would be embedded, without loading a model
+centinel embed --limit 100        # sample before committing hours
+centinel embed                    # the rest; re-run to resume
+```
+
+```
+cache/embeddings/<model_id>-<dims>.vec
+  [64-byte header][record][record]…
+  header:  magic(12) version(4) dims(4) model_id(40, NUL-padded) reserved(4)
+  record:  chunk_hash(32 raw bytes)  vector(dims × f32 little-endian)
+```
+
+**Tier A** ([`SPEC.md`](SPEC.md) §5.2) — expensive to rebuild, portable across search
+backends, and the natural unit to publish. Fixed-width and append-only, so a record sits
+at a computable offset and an interrupted run keeps everything it wrote. A crash mid-append
+leaves a partial trailing record; reopening detects the length mismatch and truncates it,
+which is safe because the dropped chunk is simply re-embedded.
+
+**Resumability is a consequence, not a feature.** No checkpoint file — the work list is
+`index chunk hashes − cached chunk hashes`. Kill it at chunk 40,000 and re-run; it starts
+at 40,001. Same shape as `collect`, for the same reason. It is also why a monthly recrawl
+is cheap: identical text has an identical `chunk_hash`, so only genuinely new chunks reach
+the model (§6.1).
+
+**Batching is not optional.** A `llama.cpp` context and its KV cache are built per *call*,
+not per text: one chunk per call gives 6.1 chunks/sec on an M1 Max, batches of 32 give
+18.5. The batch is the unit of work here, not the chunk. A batch that fails as a unit —
+usually one over-long chunk — is retried individually, so one bad chunk cannot cost the
+other 31.
+
+The whole run goes into a single `spawn_blocking`. Inference would otherwise stall the
+async runtime, which matters more than usual here because an HTTP caller's connection has
+to survive a multi-hour run.
+
+## Why the vector arm exists
+
+Measured on the real corpus. `search "drinking water sampling results"` returns **0 hits**
+from FTS5 — the water report says `PWSName`, `Analyte`, `UCMR 5`, and the only chunk
+containing "drinking" is a tax table about *Drinking Places (Alcoholic Beverages)*. BM25 is
+behaving correctly and is still useless.
+
+```console
+$ cargo run --release --example vector_search
+  0.4726  |PWSName|Sample Collection Date|EPA Method|Analyte|Result|…
+          …/2023_Q2_Pebble_Creek_System_UCMR_5_Results.pdf
+```
+
+Top three hits, all the right document. That is the case hybrid retrieval is for, and the
+reason §6.4 makes it the default rather than an option.
+
+`examples/vector_search.rs` also demonstrates that a linear scan over the Tier A cache
+answers queries on its own — which is what makes LanceDB a deferrable optimisation rather
+than a prerequisite.
+
 ## Not built yet
 
-Search and retrieval, crawling, YouTube, document extraction, scheduling.
+Hybrid RRF fusion, reranking, crawling, YouTube, scheduling. The pieces exist —
+FTS5 BM25, the vector cache, and a working embedder — but nothing fuses them yet.
 
 [`SPEC.md`](SPEC.md) §3–§6 are settled and should not be relitigated without reopening the ticket they came from. §8 lists the seven open decisions.
