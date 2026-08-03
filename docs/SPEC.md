@@ -74,8 +74,11 @@ A search result must be citable back to a specific page of a specific document f
 | `poppler` (`pdftoppm`) | rasterising scanned pages | pinned minimum version |
 | `tesseract` | OCR | pinned minimum version |
 | `yt-dlp` | YouTube acquisition | pinned minimum version |
+| `ffmpeg` | decoding audio to 16 kHz mono PCM | pinned minimum version |
 
 These are **one-shot subprocesses, not services**. All are **required**.
+
+A fifth subprocess, `centinel-whisper`, is **ours** — built from this workspace, not installed. See §3.6.
 
 `centinel doctor` verifies presence **and pinned minimum version**, and runs before any command. A too-old `tesseract` fails at boot naming the required version — not on page 200 of a crawl. This matters most for `yt-dlp`, which warns at 90 days stale and shipped 26 releases in 2025 in emergency clusters.
 
@@ -110,7 +113,34 @@ Fetched by explicit `centinel models pull` into a cache directory. **Missing wei
 | Jina reranker | CC-BY-NC-4.0 | Not redistributable |
 | `html2md` (Rust), `html2text` (Py), `ultimate-sitemap-parser` | GPL-3.0+ | Permissive substitutes exist |
 
-**Safe:** Qwen3 embed + rerank (Apache-2.0), `pdf-inspector` (MIT), LanceDB (Apache-2.0), `sqlite-vec` (Apache-2.0/MIT). Shelling out to GPL poppler is **licence-safe across the process boundary**.
+**Safe:** Qwen3 embed + rerank (Apache-2.0), `pdf-inspector` (MIT), LanceDB (Apache-2.0), `sqlite-vec` (Apache-2.0/MIT), whisper.cpp GGML weights (MIT), Silero VAD (MIT). Shelling out to GPL poppler is **licence-safe across the process boundary**.
+
+### 3.6 Transcription runs in a separate process, and it is not optional
+
+`whisper.cpp` and `llama.cpp` each vendor their own copy of **`ggml`**, and both static archives export the same ~534 `ggml_*` symbols. Linked into one binary the linker keeps one copy and silently resolves the other library's calls to it. The two vendored versions are not the same (`ggml.h` is 2,724 lines in whisper.cpp 1.8.3 against 2,845 in llama.cpp via `llama-cpp-2` 0.1.153).
+
+**Measured, identical model and audio, the linked crates the only variable:**
+
+| binary | result |
+|---|---|
+| `whisper-rs` alone | 2 segments — *"The council meeting will come to order."* |
+| `whisper-rs` + `llama-cpp-2` | **0 segments**, every decoded token id 0 at `p=0.000` |
+
+It links without a warning, runs without a crash, and transcribes nothing. There is no error to catch.
+
+**Therefore `centinel` links `llama.cpp` and `centinel-whisper` links `whisper.cpp`, and they meet over a pipe:**
+
+```
+blob (m4a/webm) --ffmpeg--> f32le 16 kHz mono --pipe--> centinel-whisper --> JSON segments
+```
+
+Both hops stream; a 3-hour meeting is ~691 MB of PCM and is never materialised.
+
+*Rejected:* aligning the two `ggml` versions. It might work today, and the failure mode when it stops working is a silently empty transcript — the one class of bug a transparency tool cannot ship.
+
+*Consistent with §2.3:* a one-shot subprocess, not a long-lived second-language service. The worker is built from this workspace, so it adds no install step beyond what already exists — but it does add a **second C++ build**, which is now the confirmed shape of ticket [#11](https://github.com/bennyhodl/centinel/issues/11) rather than a risk it was tracking.
+
+**VAD is mandatory by default, and this is a §2 decision, not a tuning knob.** Koenecke et al. measured hallucination tracking *non-vocal duration*; a gavel-to-gavel recording is mostly non-vocal. `transcribe` therefore refuses to run without Silero VAD unless `--allow-no-vad` is passed, and records `vad` on every transcript. whisper.cpp **accepts a corrupt or empty VAD model silently**, transcribes without it and exits 0 — verified with `/dev/null` and with 885 KB of `/dev/urandom` — so the worker loads the VAD itself first and refuses rather than let provenance claim a mitigation that never ran.
 
 ---
 
@@ -308,7 +338,7 @@ Measured on an M1 Max, 1,200-character chunks, **same model on both sides** so t
 
 *Known headroom:* the batched path still decodes sequences one at a time inside a shared context. True multi-sequence batching — several `seq_id`s in one `LlamaBatch` — is not implemented.
 
-*Accepted cost:* a C++ build enters `cargo build`. This is the same question ticket [#11](https://github.com/bennyhodl/centinel/issues/11) already tracks for `whisper-rs`; it now has two occupants and should be decided once.
+*Accepted cost:* a C++ build enters `cargo build`. Ticket [#11](https://github.com/bennyhodl/centinel/issues/11) already tracked this for `whisper-rs`; both are now present, and §3.6 explains why they cannot share a binary — so #11 decides packaging for **two** C++ builds producing **two** executables.
 
 *Accepted cost:* the reranker has **no first-party GGUF** — Qwen publishes GGUF for the embedder only. Reranker weights come from a community conversion (`ggml-org`, the llama.cpp organisation). This is not a change in provenance: the ONNX weights were community conversions too. Digests pin exactly what is fetched either way; what is weaker is the chain of custody, and it should be recorded in the registry rather than glossed.
 
@@ -395,7 +425,7 @@ Multiple hits from one document appear separately. Every hit is **independently 
 |---|---|---|
 | [#4](https://github.com/bennyhodl/centinel/issues/4) | Crawl scope, boundary & politeness | Build-vs-buy on Firecrawl · site boundary · the per-host UA/rate/contact policy table · robots stance · what is captured vs merely mapped |
 | [#7](https://github.com/bennyhodl/centinel/issues/7) | Change detection & scheduling | **The `fingerprint` normalization rules** · trusting vendor `LastModifiedUtc` · when `Live` becomes `Gone` · cadence · idempotency and resumability · the phantom-diff *policy* |
-| [#8](https://github.com/bennyhodl/centinel/issues/8) | YouTube as a Source | Whisper tier · audio retention · VAD · metadata change semantics · whether Granicus/Swagit demotes YouTube to a fallback |
+| [#8](https://github.com/bennyhodl/centinel/issues/8) | YouTube as a Source | ~~Whisper tier~~ (§3.6, registry) · ~~VAD~~ (§3.6, mandatory) · audio retention · metadata change semantics · whether Granicus/Swagit demotes YouTube to a fallback · **the bot wall**: whether cookies/PO-token providers are in scope, or a blocked day is simply a blocked day |
 | [#9](https://github.com/bennyhodl/centinel/issues/9) | Single-definition → CLI/MCP/HTTP | The generation mechanism · how long operations express themselves across three consumers · what is deliberately not exposed |
 | [#11](https://github.com/bennyhodl/centinel/issues/11) | Distribution & packaging | Install channel · whether `cargo install` survives `whisper-rs`'s C++ build · platform matrix · where the version-pin table lives |
 | [#12](https://github.com/bennyhodl/centinel/issues/12) | Document extraction pipeline | Routing thresholds · per-page OCR · broken-encoding fallback · table representation · non-PDF formats · failure semantics |
