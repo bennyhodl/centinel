@@ -231,11 +231,22 @@ mod tests {
         assert!(ops.iter().any(|o| o["name"] == "doctor"));
     }
 
-    /// `open` launches a configured command on the host. Over HTTP — which has no
-    /// authentication — that would be remote command execution.
+    /// Host-local ops act on the machine they run on: `open` launches a configured
+    /// command, `models` pulls gigabytes into a local cache. Over HTTP — which has no
+    /// authentication — those are remote command execution and remote disk exhaustion.
+    ///
+    /// Written over the whole registry rather than named ops, so a future `local_only`
+    /// op is covered the day it is added rather than the day someone remembers to.
     #[tokio::test]
     async fn host_local_ops_are_neither_listed_nor_invokable() {
         let (_d, app) = app().await;
+
+        let local: Vec<&str> = op::all()
+            .into_iter()
+            .filter(|d| d.local_only)
+            .map(|d| d.name)
+            .collect();
+        assert!(!local.is_empty(), "the guard would pass vacuously");
 
         let listed = body_json(
             app.clone()
@@ -244,26 +255,35 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert!(
-            !listed["ops"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|o| o["name"] == "open"),
-            "`open` must not appear in the remote registry"
-        );
+        for name in &local {
+            assert!(
+                !listed["ops"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|o| o["name"] == *name),
+                "`{name}` must not appear in the remote registry"
+            );
+        }
 
-        // Not merely hidden — calling it directly must fail too.
-        let resp = app
-            .oneshot(
-                Request::post("/ops/open")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"target":"x","with":"sh -c whoami"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        // Not merely hidden — calling one directly must fail too.
+        for name in &local {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::post(format!("/ops/{name}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"target":"x","with":"sh -c whoami"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "`{name}` is reachable over HTTP"
+            );
+        }
     }
 
     #[tokio::test]

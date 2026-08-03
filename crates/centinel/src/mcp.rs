@@ -261,6 +261,35 @@ mod tests {
         assert_eq!(resp["result"]["isError"], true);
     }
 
+    /// `tools/list` omitting them is not enough — a client may hold a stale list or
+    /// simply guess a name, so `tools/call` refuses them independently.
+    #[tokio::test]
+    async fn host_local_ops_are_refused_by_name() {
+        let (_d, ctx) = ctx().await;
+        let local: Vec<&str> = op::all()
+            .into_iter()
+            .filter(|d| d.local_only)
+            .map(|d| d.name)
+            .collect();
+        assert!(!local.is_empty(), "the guard would pass vacuously");
+
+        for name in local {
+            let resp = handle(
+                &ctx,
+                json!({
+                    "jsonrpc":"2.0","id":9,"method":"tools/call",
+                    "params": {"name": name, "arguments": {}}
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                resp["error"]["code"], -32602,
+                "`{name}` must be refused over MCP"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn unknown_method_is_a_protocol_error() {
         let (_d, ctx) = ctx().await;
