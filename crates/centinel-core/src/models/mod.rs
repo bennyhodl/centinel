@@ -20,13 +20,19 @@
 //! byte-identical everywhere. So they live in the OS cache directory, like [`crate::config`]
 //! lives outside the store, and a copied corpus does not drag 1.7 GB of ONNX with it.
 //!
-//! ## Fixing the models is deliberate
+//! ## Fixing the models is deliberate — for search
 //!
 //! SPEC §6.2: hardware tiering selects *quantization*, never the model. Two installs
 //! that picked different embedding models would produce incompatible vector spaces —
 //! corpora that could not be compared or merged, which is fatal when forks are the point.
-//! So [`REGISTRY`] has one embedder and one reranker, and [`Variant`] is the only axis
-//! that varies by machine.
+//! So search has one embedder and one reranker, and [`Variant`] is the only axis that
+//! varies by machine.
+//!
+//! **Transcription is the exception, and the domain model already knew it.** A transcript
+//! is text, not a vector: a smaller Whisper yields a worse transcript, never an
+//! incomparable one. So model size is a legitimate tier here, and
+//! [`crate::domain::ModelTier`] is recorded on every derivation precisely so §4.6's
+//! *"this ran on a weaker machine with a smaller whisper tier"* stays answerable.
 
 pub mod download;
 
@@ -38,7 +44,7 @@ use serde::{Deserialize, Serialize};
 /// Overrides the cache directory.
 pub const ENV_MODELS_DIR: &str = "CENTINEL_MODELS";
 
-/// What a model is for. Search needs exactly one of each (SPEC §6.1).
+/// What a model is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelRole {
@@ -46,6 +52,45 @@ pub enum ModelRole {
     Embedding,
     /// Second-stage reranking, always on (SPEC §6.3).
     Reranker,
+    /// Speech to text.
+    Transcription,
+    /// Voice activity detection — finds the speech in a recording so the transcriber
+    /// never sees the silence between it.
+    VoiceActivity,
+}
+
+impl ModelRole {
+    /// Which pipeline stage stops working without this model.
+    ///
+    /// Weights are fatal like a missing binary (SPEC §3.2), but they are not fatal to
+    /// the *same things*: a machine that only crawls `.gov` sites needs no Whisper
+    /// weights, and reporting it unready would be crying wolf — which is exactly what
+    /// §3.2's "loud" requirement cannot afford. So readiness is reported per gate.
+    pub fn gates(&self) -> Gate {
+        match self {
+            Self::Embedding | Self::Reranker => Gate::Search,
+            Self::Transcription | Self::VoiceActivity => Gate::Transcription,
+        }
+    }
+}
+
+/// A pipeline stage that a set of weights gates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Gate {
+    /// Hybrid search: the embedder and the reranker.
+    Search,
+    /// Turning audio into a transcript: Whisper and its VAD.
+    Transcription,
+}
+
+impl std::fmt::Display for Gate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Search => "search",
+            Self::Transcription => "transcription",
+        })
+    }
 }
 
 impl std::fmt::Display for ModelRole {
@@ -53,6 +98,8 @@ impl std::fmt::Display for ModelRole {
         f.write_str(match self {
             Self::Embedding => "embedding",
             Self::Reranker => "reranker",
+            Self::Transcription => "transcription",
+            Self::VoiceActivity => "voice-activity",
         })
     }
 }
@@ -159,10 +206,11 @@ impl ModelSpec {
 
 /// Every model Centinel knows how to fetch.
 ///
-/// GGUF, so each variant is a single self-contained file — weights, tokenizer and config
-/// in one blob. Digests are Hugging Face's LFS `oid`, which is the SHA-256 of the file
-/// content; that equivalence was checked against a real download, including one
-/// reassembled from two separate range requests.
+/// Each variant is a single self-contained file — weights, tokenizer and config in one
+/// blob. The container differs by runtime: llama.cpp reads **GGUF**, whisper.cpp still
+/// reads the older **GGML** `.bin` and never migrated. Digests are Hugging Face's LFS
+/// `oid`, which is the SHA-256 of the file content; that equivalence was checked against
+/// a real download, including one reassembled from two separate range requests.
 ///
 /// **Sizes are asymmetric on purpose** (SPEC §6.2). The embedder is fixed at 4B because
 /// its cost is paid once per corpus, in hours; the reranker scales with the host because
@@ -286,6 +334,114 @@ pub static REGISTRY: &[ModelSpec] = &[
                 path: "qwen3-reranker-0.6b-q8_0.gguf",
                 size: 639_153_184,
                 sha256: "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48",
+            }],
+        }],
+    },
+    ModelSpec {
+        id: "whisper-large-v3-turbo",
+        role: ModelRole::Transcription,
+        about: "Speech to text. Near-large accuracy at ~8x the speed. The default.",
+        repo: "ggerganov/whisper.cpp",
+        revision: "5359861c739e955e79d9a303bcbc70fb988958b1",
+        converted_from: Some("openai/whisper"),
+        license: "MIT",
+        dims: None,
+        // Q8_0 over the f16: near-lossless at half the download, and unlike the embedder
+        // there is no vector space to protect — a transcript is text, and a weaker tier
+        // yields a worse transcript rather than an incomparable one.
+        default_variant: "q8_0",
+        variants: &[
+            Variant {
+                name: "q8_0",
+                about: "8-bit. Near-lossless; the default.",
+                files: &[ModelFile {
+                    path: "ggml-large-v3-turbo-q8_0.bin",
+                    size: 874_188_075,
+                    sha256: "317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1",
+                }],
+            },
+            Variant {
+                name: "q5_0",
+                about: "5-bit. For a machine that cannot hold Q8_0.",
+                files: &[ModelFile {
+                    path: "ggml-large-v3-turbo-q5_0.bin",
+                    size: 574_041_195,
+                    sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+                }],
+            },
+            Variant {
+                name: "f16",
+                about: "Half precision. Unquantized reference.",
+                files: &[ModelFile {
+                    path: "ggml-large-v3-turbo.bin",
+                    size: 1_624_555_275,
+                    sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+                }],
+            },
+        ],
+    },
+    ModelSpec {
+        id: "whisper-tiny",
+        role: ModelRole::Transcription,
+        // Retained for the same reason as `qwen3-embedding-0.6b`: a 32 MB download and
+        // seconds of inference make the pipeline testable end to end. Its transcripts
+        // are not fit for an archive, which is why [`crate::domain::ModelTier`] records
+        // which tier ran — §4.6's "this ran on a weaker machine".
+        about: "Speech to text, 39M params. A smoke test for the pipeline, not an archive.",
+        repo: "ggerganov/whisper.cpp",
+        revision: "5359861c739e955e79d9a303bcbc70fb988958b1",
+        converted_from: Some("openai/whisper"),
+        license: "MIT",
+        dims: None,
+        default_variant: "q5_1",
+        variants: &[
+            Variant {
+                name: "q5_1",
+                about: "5-bit. 32 MB.",
+                files: &[ModelFile {
+                    path: "ggml-tiny-q5_1.bin",
+                    size: 32_152_673,
+                    sha256: "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7",
+                }],
+            },
+            Variant {
+                name: "f16",
+                about: "Half precision.",
+                files: &[ModelFile {
+                    path: "ggml-tiny.bin",
+                    size: 77_691_713,
+                    sha256: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+                }],
+            },
+        ],
+    },
+    ModelSpec {
+        id: "silero-vad",
+        role: ModelRole::VoiceActivity,
+        // The single most on-mission model in this registry. Koenecke et al. (FAccT 2024)
+        // measured Whisper fabricating whole sentences in ~1% of transcriptions, 38% of
+        // those containing explicit harms, and found the effect tracks **non-vocal
+        // duration**. A gavel-to-gavel council recording is close to a worst case for
+        // that variable: roll call, recesses, waiting for a speaker to reach the podium.
+        // An invented sentence, timestamped and archived as a public record, is worse
+        // than no transcript. VAD is how the silence never reaches the decoder.
+        about: "Voice activity detection. Keeps Whisper from hallucinating over dead air.",
+        repo: "ggml-org/whisper-vad",
+        revision: "9ffd54a1e1ee413ddf265af9913beaf518d1639b",
+        converted_from: Some("snakers4/silero-vad"),
+        license: "MIT",
+        dims: None,
+        // A model version rather than a quantization — the one place `Variant` carries a
+        // different axis. Pinned to the release whisper.cpp's own README documents;
+        // `ggml-silero-v6.2.0.bin` exists upstream and is unbenchmarked here.
+        default_variant: "v5.1.2",
+        variants: &[Variant {
+            name: "v5.1.2",
+            about: "885 KB. The version whisper.cpp documents.",
+            files: &[ModelFile {
+                path: "ggml-silero-v5.1.2.bin",
+                size: 885_098,
+                sha256: "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf",
             }],
         }],
     },
@@ -460,6 +616,10 @@ pub fn status(spec: &'static ModelSpec, root: &Path) -> ModelStatus {
 mod tests {
     use super::*;
 
+    /// Hugging Face orgs that publish their own weights. Anything outside this list is a
+    /// conversion and must name its base — see [`ModelSpec::converted_from`].
+    const FIRST_PARTY_ORGS: &[&str] = &["Qwen"];
+
     fn by_role(role: ModelRole) -> Vec<&'static ModelSpec> {
         REGISTRY.iter().filter(|m| m.role == role).collect()
     }
@@ -470,9 +630,29 @@ mod tests {
         assert!(!by_role(ModelRole::Reranker).is_empty());
     }
 
-    /// §5.2 keys the embedding cache `(chunk_hash, model_id, dims)`. A reranker emits a
-    /// score rather than a vector, so it has no place in that key — and an embedder
-    /// missing its dimensions could not be cached correctly.
+    /// Transcription needs a Whisper *and* a VAD. Without the VAD the transcriber runs,
+    /// but it runs over dead air — the documented hallucination case (see `silero-vad`).
+    #[test]
+    fn transcription_has_both_halves_available() {
+        assert!(!by_role(ModelRole::Transcription).is_empty());
+        assert!(!by_role(ModelRole::VoiceActivity).is_empty());
+    }
+
+    /// Every gate must be reachable, or `doctor` would report readiness for a stage no
+    /// model in the registry can actually serve.
+    #[test]
+    fn every_gate_has_weights_behind_it() {
+        for gate in [Gate::Search, Gate::Transcription] {
+            assert!(
+                REGISTRY.iter().any(|m| m.role.gates() == gate),
+                "nothing in the registry serves `{gate}`"
+            );
+        }
+    }
+
+    /// §5.2 keys the embedding cache `(chunk_hash, model_id, dims)`. Everything else
+    /// emits a score, a transcript or a segment boundary, so it has no place in that key
+    /// — and an embedder missing its dimensions could not be cached correctly.
     #[test]
     fn only_embedders_declare_dimensions() {
         for spec in REGISTRY {
@@ -480,9 +660,11 @@ mod tests {
                 ModelRole::Embedding => {
                     assert!(spec.dims.is_some(), "{} must declare dims", spec.id)
                 }
-                ModelRole::Reranker => {
-                    assert!(spec.dims.is_none(), "{} scores, it does not embed", spec.id)
-                }
+                _ => assert!(
+                    spec.dims.is_none(),
+                    "{} does not embed, so it has no dimensions",
+                    spec.id
+                ),
             }
         }
     }
@@ -502,17 +684,37 @@ mod tests {
     }
 
     /// A conversion must name what it was converted from. SPEC §6.2.1 accepts community
-    /// reranker weights precisely *because* the chain of custody stays visible.
+    /// weights precisely *because* the chain of custody stays visible — a transparency
+    /// tool should not be vague about its own provenance.
+    ///
+    /// Most of the registry is a conversion: Qwen publish no reranker GGUF, whisper.cpp's
+    /// GGML files are converted from `openai/whisper`, and the VAD from `snakers4/silero-vad`.
     #[test]
-    fn community_conversions_name_their_base_model() {
+    fn conversions_name_a_distinct_base_model() {
         for spec in REGISTRY {
-            let first_party = spec.repo.starts_with("Qwen/");
-            assert_eq!(
-                spec.converted_from.is_none(),
-                first_party,
-                "{} must record its base model unless it is first-party",
-                spec.id
-            );
+            let org = spec.repo.split('/').next().expect("repo is `org/name`");
+            let first_party = FIRST_PARTY_ORGS.contains(&org);
+
+            match spec.converted_from {
+                None => assert!(
+                    first_party,
+                    "{} comes from `{org}`, which does not publish it — name the base model",
+                    spec.id
+                ),
+                Some(base) => {
+                    assert!(
+                        !first_party,
+                        "{} is first-party; it converts nothing",
+                        spec.id
+                    );
+                    assert!(
+                        base.contains('/'),
+                        "{} names `{base}`, which is not an `org/name` reference",
+                        spec.id
+                    );
+                    assert_ne!(base, spec.repo, "{} cannot be its own base", spec.id);
+                }
+            }
         }
     }
 
@@ -585,13 +787,19 @@ mod tests {
     }
 
     /// SPEC §3.5 rejects non-redistributable weights outright; a fork ships these.
+    ///
+    /// An allow-list rather than a deny-list: a new entry carrying `CC-BY-NC-4.0` or an
+    /// OpenRAIL threshold should fail here by default, not pass because nobody thought to
+    /// ban it. §3.5 rejected Jina's reranker on exactly that licence.
     #[test]
     fn every_model_is_permissively_licensed() {
+        const PERMISSIVE: &[&str] = &["Apache-2.0", "MIT", "BSD-3-Clause"];
         for spec in REGISTRY {
-            assert_eq!(
-                spec.license, "Apache-2.0",
-                "{} is not redistributable",
-                spec.id
+            assert!(
+                PERMISSIVE.contains(&spec.license),
+                "{} is `{}`, which is not on the redistributable list {PERMISSIVE:?}",
+                spec.id,
+                spec.license
             );
         }
     }
@@ -609,11 +817,19 @@ mod tests {
         }
     }
 
-    /// GGUF is self-contained — weights, tokenizer and config in one blob — so a variant
-    /// is normally a single file and there are no sidecars to keep beside it.
+    /// Both containers are self-contained — weights, tokenizer and config in one blob —
+    /// so a variant is a single file and there are no sidecars to keep beside it.
+    ///
+    /// The extension is checked because it is what tells the two runtimes apart: a `.gguf`
+    /// handed to whisper.cpp, or a `.bin` handed to llama.cpp, fails at load time with a
+    /// magic-number error rather than anywhere useful.
     #[test]
-    fn a_variant_is_one_self_contained_file() {
+    fn a_variant_is_one_self_contained_file_in_its_runtime_s_container() {
         for spec in REGISTRY {
+            let expected = match spec.role {
+                ModelRole::Embedding | ModelRole::Reranker => ".gguf",
+                ModelRole::Transcription | ModelRole::VoiceActivity => ".bin",
+            };
             for variant in spec.variants {
                 assert_eq!(
                     variant.files.len(),
@@ -623,10 +839,12 @@ mod tests {
                     variant.name
                 );
                 assert!(
-                    variant.files[0].path.ends_with(".gguf"),
-                    "{}/{} is not GGUF",
+                    variant.files[0].path.ends_with(expected),
+                    "{}/{} is `{}`, but a {} model must be {expected}",
                     spec.id,
-                    variant.name
+                    variant.name,
+                    variant.files[0].path,
+                    spec.role
                 );
             }
         }

@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::models::{self, ModelRole};
+use crate::models::{self, Gate, ModelRole};
 use crate::prelude::*;
 
 /// A subprocess dependency Centinel shells out to.
@@ -46,9 +46,15 @@ impl Binary {
 pub struct Weights {
     pub id: String,
     pub role: ModelRole,
+    /// Which pipeline stage stops without it. Weights are fatal like a missing binary
+    /// (§3.2), but not to the same things — a crawl-only machine needs no Whisper.
+    pub gates: Gate,
     /// What this model is needed for — so a missing one is actionable, not just red.
     pub purpose: String,
-    /// Weights gate search, exactly as a missing binary gates its pipeline stage (§3.2).
+    /// True when the gate needs this model's **role** filled (§3.2) — which every role in
+    /// the registry is. It does not mean *this* model: the registry carries alternates
+    /// (`whisper-tiny`, `qwen3-embedding-0.6b`), and any one installed model satisfies
+    /// its role. [`GateStatus`] is where that rollup happens.
     pub required: bool,
     pub installed: bool,
     /// The variant that would be loaded. `None` when nothing is installed.
@@ -60,6 +66,26 @@ pub struct Weights {
     /// An interrupted download is waiting to resume — re-running `pull` continues it.
     pub resumable: bool,
     /// The command that fixes this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
+}
+
+/// Whether one pipeline stage's weights are all present.
+///
+/// Reported per gate rather than as a single flag because the two stages fail
+/// independently and for different people: a machine crawling `.gov` sitemaps never
+/// touches Whisper, and one transcribing a backlog offline may not have embedded yet.
+/// Collapsing them would make `doctor` say "not ready" to someone whose pipeline works.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GateStatus {
+    pub gate: Gate,
+    pub ready: bool,
+    /// What is unavailable while this gate is shut.
+    pub blocks: String,
+    /// Model ids still to pull.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
+    /// The command that opens it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<String>,
 }
@@ -76,12 +102,15 @@ pub struct DoctorReport {
     /// provenance and an `rsync`-able store should not carry 1.7 GB of ONNX.
     pub models_dir: PathBuf,
     pub models: Vec<Weights>,
+    /// Per-stage readiness. The field to look at when `ready` is false — it says which
+    /// half of the pipeline still works.
+    pub gates: Vec<GateStatus>,
     /// True when every *required* binary is present.
     pub binaries_ready: bool,
     /// True when every *required* model is installed.
     pub models_ready: bool,
     /// True when both are. Reported separately as well, because a machine can crawl and
-    /// extract with no weights at all — it simply cannot search.
+    /// extract with no weights at all — it simply cannot search or transcribe.
     pub ready: bool,
 }
 
@@ -105,7 +134,13 @@ pub async fn doctor(ctx: &Ctx, args: DoctorArgs) -> anyhow::Result<DoctorReport>
         .await,
         probe("tesseract", true, "OCR for scanned documents").await,
         probe("yt-dlp", true, "YouTube acquisition").await,
-        probe("ffmpeg", false, "audio extraction for transcription").await,
+        probe(
+            "ffmpeg",
+            true,
+            "decodes audio to 16kHz mono PCM for transcription",
+        )
+        .await,
+        worker_probe(),
     ];
     binaries.sort_by(|a, b| b.required.cmp(&a.required).then(a.name.cmp(&b.name)));
 
@@ -114,9 +149,10 @@ pub async fn doctor(ctx: &Ctx, args: DoctorArgs) -> anyhow::Result<DoctorReport>
         .iter()
         .map(|spec| weights(spec, &models_dir))
         .collect();
+    let gates = gate_statuses(&models);
 
     let binaries_ready = binaries.iter().all(|b| !b.required || b.found());
-    let models_ready = models.iter().all(|m| !m.required || m.installed);
+    let models_ready = gates.iter().all(|g| g.ready);
 
     let sources = ctx
         .store
@@ -139,10 +175,69 @@ pub async fn doctor(ctx: &Ctx, args: DoctorArgs) -> anyhow::Result<DoctorReport>
         binaries,
         models_dir,
         models,
+        gates,
         binaries_ready,
         models_ready,
         ready: binaries_ready && models_ready,
     })
+}
+
+/// Rolls the per-model view up into per-stage readiness.
+///
+/// A gate opens when every **role** behind it has *some* installed model — not when
+/// every model is installed. The registry deliberately carries alternates (`whisper-tiny`
+/// beside `whisper-large-v3-turbo`, `qwen3-embedding-0.6b` beside the 4B), and demanding
+/// all of them would report a working machine as broken.
+fn gate_statuses(models: &[Weights]) -> Vec<GateStatus> {
+    [Gate::Search, Gate::Transcription]
+        .into_iter()
+        .map(|gate| {
+            let roles = [
+                ModelRole::Embedding,
+                ModelRole::Reranker,
+                ModelRole::Transcription,
+                ModelRole::VoiceActivity,
+            ];
+
+            // For each unfilled role, name the model a user should actually pull: the
+            // first the registry lists, which is the preferred one.
+            let missing: Vec<String> = roles
+                .into_iter()
+                .filter(|role| role.gates() == gate)
+                .filter(|role| {
+                    !models
+                        .iter()
+                        .any(|m| m.role == *role && m.required && m.installed)
+                })
+                .filter_map(|role| {
+                    models
+                        .iter()
+                        .find(|m| m.role == role && m.required)
+                        .map(|m| m.id.clone())
+                })
+                .collect();
+
+            GateStatus {
+                gate,
+                ready: missing.is_empty(),
+                blocks: match gate {
+                    Gate::Search => "`centinel embed` and the vector half of `centinel search`",
+                    Gate::Transcription => "`centinel transcribe`",
+                }
+                .to_string(),
+                // `models pull` takes one model, so a two-model gap is two commands.
+                // Chained rather than listed, because the point is to be pasted.
+                fix: (!missing.is_empty()).then(|| {
+                    missing
+                        .iter()
+                        .map(|id| format!("centinel models pull {id}"))
+                        .collect::<Vec<_>>()
+                        .join(" && ")
+                }),
+                missing,
+            }
+        })
+        .collect()
 }
 
 /// Reports one model's weights as a host dependency.
@@ -155,12 +250,18 @@ fn weights(spec: &'static models::ModelSpec, root: &std::path::Path) -> Weights 
     Weights {
         id: status.id.clone(),
         role: status.role,
+        gates: status.role.gates(),
         purpose: match status.role {
-            ModelRole::Embedding => "the vector half of hybrid search".to_string(),
-            ModelRole::Reranker => "reranks retrieved passages; always on".to_string(),
-        },
-        // Missing weights are fatal exactly like a missing binary (§3.2). They gate
-        // search, not collection — which is why `models_ready` is reported on its own.
+            ModelRole::Embedding => "the vector half of hybrid search",
+            ModelRole::Reranker => "reranks retrieved passages; always on",
+            ModelRole::Transcription => "turns meeting audio into a timestamped transcript",
+            ModelRole::VoiceActivity => {
+                "finds the speech, so the transcriber never decodes dead air"
+            }
+        }
+        .to_string(),
+        // Missing weights are fatal exactly like a missing binary (§3.2) — but only to
+        // their own gate, which is why readiness is reported per stage rather than once.
         required: true,
         installed: status.installed,
         variant: status.active().map(|v| v.variant.clone()),
@@ -174,6 +275,26 @@ fn weights(spec: &'static models::ModelSpec, root: &std::path::Path) -> Weights 
                 format!("centinel models pull {}", status.id)
             }
         }),
+    }
+}
+
+/// Locates the transcription worker.
+///
+/// Unlike the others this one is *ours* — `cargo build` produces it beside `centinel`.
+/// It is reported here anyway because it can genuinely be absent: it links whisper.cpp
+/// and so needs a C++ toolchain, which means `cargo build -p centinel` alone leaves it
+/// out. Probed by path rather than by `command -v`, since it is normally a sibling of
+/// the running executable and not on `PATH` at all.
+fn worker_probe() -> Binary {
+    let path = crate::transcribe::worker_path().ok();
+    Binary {
+        name: crate::transcribe::WORKER.to_string(),
+        required: true,
+        purpose: "runs whisper.cpp in its own process, out of llama.cpp's ggml".to_string(),
+        // Not run for a version: it loads no model to answer, but it is still a process
+        // spawn on an op that must stay instant.
+        version: None,
+        path: path.map(|p| p.display().to_string()),
     }
 }
 
@@ -276,6 +397,18 @@ mod tests {
         models::require("qwen3-embedding-4b").unwrap()
     }
 
+    /// The whole registry as `doctor` would see it against `root`.
+    fn survey(root: &std::path::Path) -> Vec<Weights> {
+        models::REGISTRY.iter().map(|s| weights(s, root)).collect()
+    }
+
+    fn gate(root: &std::path::Path, want: Gate) -> GateStatus {
+        gate_statuses(&survey(root))
+            .into_iter()
+            .find(|g| g.gate == want)
+            .expect("every gate is reported")
+    }
+
     /// Fakes an installed variant: every file at its pinned length.
     ///
     /// `set_len` rather than writing bytes — these are 600 MB files, and the filesystem
@@ -368,6 +501,70 @@ mod tests {
             w.fix.as_deref().unwrap().contains("resumes"),
             "the hint should say re-running continues rather than restarts: {:?}",
             w.fix
+        );
+    }
+
+    /// The two stages fail for different people and must fail independently: a machine
+    /// crawling `.gov` sitemaps never loads Whisper, and one transcribing a backlog
+    /// offline may not have embedded anything yet. One flag would tell both of them
+    /// they are broken.
+    #[test]
+    fn the_gates_open_independently() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(!gate(dir.path(), Gate::Search).ready);
+        assert!(!gate(dir.path(), Gate::Transcription).ready);
+
+        install(
+            models::require("qwen3-embedding-4b").unwrap(),
+            "q8_0",
+            dir.path(),
+        );
+        install(
+            models::require("qwen3-reranker-0.6b").unwrap(),
+            "q8_0",
+            dir.path(),
+        );
+
+        let search = gate(dir.path(), Gate::Search);
+        assert!(search.ready, "still missing: {:?}", search.missing);
+        assert_eq!(search.fix, None);
+
+        let transcription = gate(dir.path(), Gate::Transcription);
+        assert!(!transcription.ready, "no whisper weights were installed");
+        assert!(transcription.blocks.contains("transcribe"));
+    }
+
+    /// The registry carries alternates on purpose — `whisper-tiny` for a smoke test,
+    /// `qwen3-embedding-0.6b` as an escape hatch. A gate that demanded every model would
+    /// call a working machine broken.
+    #[test]
+    fn any_one_model_of_a_role_opens_its_gate() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // The 39M smoke-test model, not the 874 MB default.
+        install(models::require("whisper-tiny").unwrap(), "q5_1", dir.path());
+        install(models::require("silero-vad").unwrap(), "v5.1.2", dir.path());
+
+        let g = gate(dir.path(), Gate::Transcription);
+        assert!(
+            g.ready,
+            "an alternate must satisfy its role: {:?}",
+            g.missing
+        );
+    }
+
+    /// A gap has to be fixable by pasting, not by reading a list and reassembling it.
+    /// `models pull` takes one model, so two missing roles are two commands.
+    #[test]
+    fn a_shut_gate_names_the_preferred_model_and_a_runnable_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = gate(dir.path(), Gate::Transcription);
+
+        assert_eq!(g.missing, vec!["whisper-large-v3-turbo", "silero-vad"]);
+        assert_eq!(
+            g.fix.as_deref(),
+            Some("centinel models pull whisper-large-v3-turbo && centinel models pull silero-vad")
         );
     }
 

@@ -355,31 +355,34 @@ async fn run_remove(args: RemoveArgs, dir: PathBuf) -> anyhow::Result<ModelsRepo
     let mut removed = Vec::new();
     let mut bytes_freed = 0u64;
 
-    match args.variant.as_deref() {
-        // A named variant deletes only its own file, leaving other quantizations of the
-        // same model — which live in the same directory — untouched.
-        Some(name) => {
-            let variant = spec.variant(Some(name))?;
-            for file in variant.files {
-                for path in [
-                    model_dir.join(file.path),
-                    part_path(&model_dir.join(file.path)),
-                ] {
-                    if let Ok(meta) = tokio::fs::metadata(&path).await {
-                        bytes_freed += meta.len();
-                        tokio::fs::remove_file(&path).await?;
-                        removed.push(path);
-                    }
+    // Deletes named files, never the directory — because a directory is keyed by
+    // `<repo>/<revision>` and **two models can share one**: `whisper-tiny` and
+    // `whisper-large-v3-turbo` are both files in `ggerganov/whisper.cpp`. A
+    // `remove_dir_all` here would take the sibling model with it.
+    let targets: Vec<&'static models::Variant> = match args.variant.as_deref() {
+        Some(name) => vec![spec.variant(Some(name))?],
+        None => spec.variants.iter().collect(),
+    };
+
+    for variant in targets {
+        for file in variant.files {
+            let target = model_dir.join(file.path);
+            for path in [part_path(&target), target] {
+                if let Ok(meta) = tokio::fs::metadata(&path).await {
+                    bytes_freed += meta.len();
+                    tokio::fs::remove_file(&path).await?;
+                    removed.push(path);
                 }
             }
         }
-        None => {
-            if tokio::fs::metadata(&model_dir).await.is_ok() {
-                bytes_freed = dir_size(&model_dir).await?;
-                tokio::fs::remove_dir_all(&model_dir).await?;
-                removed.push(model_dir);
-            }
-        }
+    }
+
+    // Tidy up only if nothing else is left — which is exactly the shared-directory test.
+    if let Ok(mut entries) = tokio::fs::read_dir(&model_dir).await
+        && entries.next_entry().await?.is_none()
+    {
+        tokio::fs::remove_dir(&model_dir).await?;
+        removed.push(model_dir);
     }
 
     Ok(ModelsReport::Remove {
