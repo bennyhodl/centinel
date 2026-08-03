@@ -1,0 +1,29 @@
+[package]
+name = "centinel-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Centinel's library core: domain model, content-addressed store, and the op registry."
+
+[dependencies]
+centinel-macros.workspace = true
+
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+clap.workspace = true
+inventory.workspace = true
+tokio.workspace = true
+futures.workspace = true
+sha2.workspace = true
+hex.workspace = true
+jiff.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

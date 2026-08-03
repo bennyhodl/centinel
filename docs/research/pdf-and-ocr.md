@@ -1148,3 +1148,58 @@ All fetched 2026-08-02.
   [bench code](https://github.com/allenai/olmocr/tree/main/olmocr/bench) ·
   [olmOCR 2 paper, arXiv:2510.19817](https://arxiv.org/abs/2510.19817)
 - [OmniDocBench](https://github.com/opendatalab/OmniDocBench)
+## Correction: `pdf-inspector` (added on review, 2026-08-02)
+
+**The research missed `firecrawl/pdf-inspector`, and it materially changes §1, §7, and §9.** It appears in `crawling-and-sitemaps.md` only as a name in Firecrawl's `Cargo.toml` dependency list; it was never evaluated on its own. Verified directly during review.
+
+| Field | Value |
+|---|---|
+| Repo | <https://github.com/firecrawl/pdf-inspector> — 6,038 stars, MIT, **pure Rust** |
+| Created / last push | 2026-02-06 / 2026-08-02 |
+| Dependencies | `lopdf`, `ttf-parser`, `regex`, `unicode-normalization`, `thiserror`. **No FFI, no pdfium, no poppler, no ML models.** Compiles to WASM. |
+| Published | crates.io `0.1.7` · npm `@firecrawl/pdf-inspector` `1.11.2` · PyPI `0.2.6` |
+
+### Claims in this document that it falsifies
+
+- ~~"Rust has zero table-structure extraction"~~ — `src/tables/` is ~580 KB across four independent strategies: ruled lines, rectangles, PDF structure tree, and text-alignment heuristics. Handles financial tables, footnotes, and **continuation tables across pages**.
+- ~~"Rust has zero markdown generation"~~ — `src/markdown/` is ~295 KB. Headings via font-size ratios, lists, code blocks (monospace detection), tables, bold/italic, URL linking, page breaks.
+- ~~"`pdf-extract`/`lopdf`/`pdf-rs` are text-layer-only and layout-naive"~~ — true of those crates, but `src/extractor/` includes `reading_order.rs`, `layout.rs`, and multi-column plus RTL detection.
+
+### Published benchmark
+
+opendataloader-bench (200 PDFs, Apple M4 Pro, refreshed 2026-07-31, reproducible results branch published):
+
+| Engine | Overall | Reading order | **Tables** | **Speed** |
+|---|---|---|---|---|
+| **pdf-inspector** | **0.875** | **0.915** | **0.814** | **0.470s** |
+| liteparse | 0.873 | 0.913 | 0.693 | 0.750s |
+| pymupdf4llm | 0.735 | 0.886 | 0.401 | 17.117s |
+| markitdown | 0.589 | 0.844 | 0.273 | 16.165s |
+
+**It beats `pymupdf4llm` — the AGPL tool §2 disqualifies — on every axis, at 36× the speed, under MIT.**
+
+### It independently implements two constraints this document derived
+
+§4 argued that OCR routing must detect **garbage** text layers, not merely missing ones, and that **mixed documents** need per-page decisions. `pdf-inspector` does both:
+
+- *"Encoding issue detection — automatically flags broken font encodings so callers can fall back to OCR"*, backed by a 110 KB `tounicode.rs` and a dedicated `text_quality.rs`.
+- Returns **`pages_needing_ocr`** — specific page numbers, enabling **per-page OCR routing instead of all-or-nothing**. Classification runs in 10–50 ms by sampling content streams.
+
+§5's provenance requirement is also served: extraction is position-aware, carrying font info and X/Y coordinates.
+
+### What it does NOT change
+
+**It does not do OCR and does not rasterise.** Explicitly: *"all without OCR."* It is a **classifier and router** — Firecrawl built it to skip OCR for *"the ~54% of PDFs that don't need them,"* which concedes ~46% still do.
+
+So §1's hardest finding survives: **pure Rust still cannot rasterise a page, so Rust still cannot OCR without PDFium or a `pdftoppm` subprocess.**
+
+### Revised conclusion for §9
+
+Rust's PDF gap narrows from *"extraction, tables, markdown, layout, and OCR"* to **OCR alone** — and OCR is a subprocess or service call in **every** language, since §3 established that tesseract bindings carry the same deployment burden as shelling out. This is a materially stronger case for Rust than this document concluded.
+
+### Caveats
+
+- **Young and pre-1.0.** Repo ~6 months old; the crate was first published 2026-06-05, ~2 months ago.
+- **Version fragmentation reveals the priority order:** npm is at **1.11.2 across 50 releases**; crates.io is at **0.1.7 across 8**. Firecrawl is a TypeScript shop, and the Rust crate is the least-released surface of their own Rust library — the same batch-port pattern seen in their SDKs. Mitigation: depend on the git repo rather than crates.io.
+- The benchmark is **vendor-run**, though on a third-party corpus with published reproducible results.
+- **The corpus is not `.gov` agenda packets.** §8's recommendation of a 30–50 document internal benchmark still stands — it now has a specific first candidate to test.

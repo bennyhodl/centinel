@@ -1,36 +1,23 @@
-# Root-level ignores for the monorepo.
-# App-specific ignores live in app/.gitignore — these are extra defense-in-depth.
+# Rust
+/target/
+**/*.rs.bk
 
-# dependencies — anywhere in the tree
-**/node_modules/
-**/.pnp/
-**/.pnp.*
+# Centinel store — the corpus is data, not source. Rebuildable indexes and
+# multi-gigabyte blob pools do not belong in git.
+/.centinel/
 
-# build artifacts
-**/.next/
-**/.turbo/
-**/out/
-**/build/
-**/coverage/
+# Local model weights, pulled by `centinel models pull`.
+/models/
 
-# os / editor
-.DS_Store
-*.pem
-*.log
-.idea/
-.vscode/
-*.swp
-*~
-
-# env (covered per-package, but defense-in-depth)
+# env / secrets
 .env
 .env.local
 .env.*.local
 
-# typescript
-**/*.tsbuildinfo
-**/next-env.d.ts
-wiki
-.pnpm-store
-.runtime/
-doge.config.yaml
+# os / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+.obsidian/

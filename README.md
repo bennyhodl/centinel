@@ -1,129 +1,101 @@
 # Centinel
 
-Civic transparency platform for tracking city government — sitemaps, investigations, vaulted documents, watches, and findings. Built on [`@mariozechner/pi-coding-agent`](https://www.npmjs.com/package/@mariozechner/pi-coding-agent) so any city's accountability operation can fork it.
+Data collection for `.gov` web surfaces and YouTube channels — website maps, documents, transcripts, and the changes to all of them over time.
 
-> The web app NEVER originates state. It reads files + DB. Every "action" is a small, well-formed file write that an agent already knows how to react to.
+A **library** first. The CLI, the HTTP server and the MCP server are thin consumers of it. Agents are clients, not the engine.
 
-**Status:** v0.1 — pi-agent migration phases 0–4 complete. Web app shell complete; agent skills specced; tool implementations are mostly stubs. See [`docs/PI_MIGRATION_PLAN.md`](docs/PI_MIGRATION_PLAN.md) and [`docs/PLAN.md`](docs/PLAN.md).
+> **Status: spine.** The domain model, the store, and the CLI/MCP/HTTP derivation are built and tested. Search and retrieval is specified but **not implemented**. Seven design decisions remain open — see [`docs/SPEC.md`](docs/SPEC.md) §8.
 
-## Repo layout
+## The idea
+
+Files on disk are the only source of truth. Every index is derived and rebuildable:
 
 ```
-centinel/
-├── app/                  # Next.js 16 viewer + control panel
-├── server/               # @centinel/server — pi-agent runtime (cron, /run, /chat)
-├── bin/                  # `centinel` + `centinel-server` shims
-├── bootstrap             # one-time installer (idempotent)
-├── docs/                 # locked design specs (the source of truth)
-│   ├── PLAN.md
-│   ├── PI_MIGRATION_PLAN.md     # current architecture
-│   ├── PHASE_4_PLAN.md
-│   ├── WEB_APP_DESIGN.md
-│   ├── RUNTIME_PROTOCOL.md
-│   ├── EDITOR_PERSONA.md
-│   ├── AGENT_ROSTER.md
-│   ├── ORG_STRUCTURE_AND_WORKFLOW.md
-│   ├── REPO_AND_DISTRIBUTION.md
-│   ├── SCRAPER_AND_EXTRACTORS.md
-│   ├── INSTALLATION.md
-│   ├── AGENT_INVOCATION.md      # SUPERSEDED — kept for historical context
-│   └── EDITOR_ANSWER_SOURCES.md
-└── skills/               # pi-agent skill specs loaded into roles
-    ├── sitemap-builder/
-    ├── civic-investigator/
-    ├── civic-archivist/
-    ├── civic-data-reporter/
-    └── civic-watch-runner/
+<root>/
+  blobs/ab/cd/abcd1234…          TRUTH    immutable, content-addressed, pooled across sources
+  log/<source>/YYYY-MM.jsonl     TRUTH    append-only observations, discovery runs, status, derivations
+  current/<source>/…             DERIVED  URL-mirroring tree
+  cache/embeddings/              DURABLE  survives an index rebuild
+  centinel.db                    DERIVED  SQLite metadata + FTS5
+  index/                         DERIVED  LanceDB vectors
 ```
 
-## The agent stack
+Delete everything derived and you lose minutes, not evidence. The corpus is `rsync`-able and complete on its own.
 
-Every agent runs as a **role** inside centinel-server — a single Node process built on pi-coding-agent. Roles are scoped: each one loads only its own skill and tools. Coordination across roles is via the wiki filesystem and the editor's `delegate` tool — no shared memory, no message broker.
+Two properties this buys, both load-bearing:
 
-| Role | Skill | Purpose |
-|---|---|---|
-| **editor** | `sitemap-builder` + Editor persona | fronts `/chat`, owns the sitemap, dispatches via `delegate` |
-| **investigator** | `civic-investigator` | depth-crawl from seeds |
-| **archivist** | `civic-archivist` | document intake, OCR, vault |
-| **data-reporter** | `civic-data-reporter` | entity DB, queries |
-| **watch-runner** | `civic-watch-runner` | continuous matchers over diffs |
+- **Two hashes.** `blob_sha` covers raw bytes and proves what the server actually served. `fingerprint` covers normalized content and answers whether anything *meaningfully* changed. A rotated CSRF token produces a new blob and no change event.
+- **A blocked page is not a deleted page.** A CloudFront/Akamai 403 is recorded as `Blocked`, never as `Gone`. Conflating them would silently record a live page as removed — measured against real `.gov` hosts, not hypothetical.
 
-Humans wear all editorial/legal/source-protection hats — agents only do ingest/structure/present. See [`docs/AGENT_ROSTER.md`](docs/AGENT_ROSTER.md).
+## One definition, three surfaces
 
-Roles are reachable three ways:
+An op is an ordinary async function. Annotating it puts it on the CLI, in the MCP tool list, and at an HTTP route — with **no central registration list to update**:
 
-- `centinel role <name> -p "..."` — one-shot from the operator's shell (streams events via the local server)
-- `centinel role <name> --interactive` — pi's full TUI scoped to that role's skill + tools
-- `delegate(target: "<name>", prompt: "...")` — the editor calls specialists in-process; each delegation appears live on `/status`
+```rust
+/// List sources in the store with resource counts and liveness.
+#[op]
+pub async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<ListReport> { … }
+```
 
-Cron-driven runs use the same code path as `delegate` and CLI. See [`docs/PI_MIGRATION_PLAN.md`](docs/PI_MIGRATION_PLAN.md) and [`docs/EDITOR_ANSWER_SOURCES.md`](docs/EDITOR_ANSWER_SOURCES.md).
+```console
+$ centinel list --max-problems 5              # CLI: flags and help from the same struct
+$ curl -X POST localhost:8787/ops/list        # HTTP: JSON in, JSON out
+{"jsonrpc":"2.0","method":"tools/list"}       # MCP: JSON Schema from the same struct
+```
 
-## The web app
+Long-running ops emit progress once and each surface renders it in its own idiom — a stderr counter on the CLI, an SSE stream over HTTP, a single return value over MCP. The op never learns who called it.
 
-Next.js 16 App Router. ~18 routes. All gated by basic auth in v0.1.
-
-- `/sitemap` — labeled map of the city's `.gov` surface (the home view)
-- `/setup` — 7-step wizard, gates everything until complete
-- `/chat` — Editor persona, streaming, mobile-first (proxies to centinel-server `/chat`)
-- `/investigations`, `/findings`, `/entities`, `/briefings`
-- `/operator-queue` — drainable items
-- `/status` — live SSE board + 7-day activity feed
-- `/db` — embedded Datasette
-- `/vault/*` — stable URLs for verification anchors
-
-See [`docs/WEB_APP_DESIGN.md`](docs/WEB_APP_DESIGN.md) for the full spec.
-
-## Stack
-
-- **Next.js 16** (App Router, standalone output)
-- **Tailwind v4** (CSS-first via `@theme` in `src/app/globals.css`)
-- **TypeScript**, **pnpm** (workspace; `app/`, `server/`)
-- `@mariozechner/pi-coding-agent` — the agent runtime
-- `react-markdown` + `remark-gfm` + `gray-matter` — wiki rendering
-- `better-sqlite3` — read-only access to `<wiki>/_data/<city>.db`
-- `zod` — schema validation
-- `croner` — cron scheduling inside centinel-server
-
-No ORM, no Postgres, no custom auth provider.
-
-## Environment variables
-
-| Var | Purpose | Default |
-|---|---|---|
-| `CENTINEL_PASSWORD` | shared password for basic-auth gate | _required_ |
-| `CENTINEL_WIKI_PATH` | path to the operator's wiki root | from `doge.config.yaml` |
-| `CENTINEL_EDITOR_PERSONA_PATH` | path to Editor persona markdown | `<repo>/docs/EDITOR_PERSONA.md` |
-| `CENTINEL_HOST` | centinel-server bind/connect host | `127.0.0.1` |
-| `CENTINEL_PORT` | centinel-server bind/connect port | `8787` |
-| `CENTINEL_SERVER_URL` | full base URL for the Next app's `/chat` proxy | derived from host/port |
-| `CENTINEL_RUNTIME_DIR` | where `.runtime/{runs,sessions}/cron.json` live | `<repo>/.runtime` |
-| `ANTHROPIC_API_KEY` | model provider key (pi-agent default) | one of these required |
-| `OPENAI_API_KEY` | alternative provider | |
-| `DATASETTE_URL` | optional Datasette base URL | `http://localhost:8001` |
-
-Copy `.env.example` → `.env` and fill in.
-
-## Develop
-
-**New here?** See [`docs/INSTALLATION.md`](docs/INSTALLATION.md) for the full fresh-clone walkthrough. Quick version:
+## Try it
 
 ```bash
-./bootstrap                            # idempotent installer (deps, wiki tree, cron seed, doctor)
-./bin/centinel-server                  # start the runtime server (in one terminal)
-pnpm --filter centinel dev             # start the web app (in another terminal)
+cargo build
+
+# What is this machine missing?
+centinel doctor
+
+# Collect. Legistar is keyless and OData-queryable — for this kind of content,
+# querying beats crawling.
+centinel --root ./.centinel ingest --source hillsboroughcounty \
+  --url "https://webapi.legistar.com/v1/hillsboroughcounty/bodies"
+
+# What is in the store, and what state is it in?
+centinel --root ./.centinel list
+
+# Serve it
+centinel --root ./.centinel serve          # HTTP + MCP over HTTP
+centinel --root ./.centinel mcp            # MCP over stdio
 ```
 
-Open http://localhost:3000. The browser prompts for basic auth — user can be blank, password = `CENTINEL_PASSWORD`.
+Re-run `ingest` on an unchanged URL: it stores the observation, dedupes the blob, and reports `changed: false`.
 
-Health check at any time: `./bin/centinel doctor`.
+## Layout
 
-## Build
-
-```bash
-pnpm build           # builds both centinel app and @centinel/server
+```
+crates/
+  centinel-core/    domain model, store, op registry, ops
+  centinel-macros/  the #[op] attribute
+  centinel/         the binary: CLI, HTTP, MCP
+docs/
+  SPEC.md           the settled specification — read this first
+  research/         ~3,850 lines, ~450 primary-source citations
 ```
 
-The app's Next build is standalone (`output: 'standalone'`), ready for Coolify or any Docker host.
+## Requirements
+
+Rust 1.85+. Centinel shells out to standalone binaries rather than running a second language runtime:
+
+| Binary | Needed for | Required |
+|---|---|---|
+| `pdftoppm` (poppler) | rasterising PDF pages for OCR — Rust cannot do this natively | yes |
+| `tesseract` | OCR | yes |
+| `yt-dlp` | YouTube acquisition | yes |
+| `ffmpeg` | audio extraction | no |
+
+`centinel doctor` reports what is missing. Everything runs locally — no OCR, transcription, embedding or reranking leaves the machine.
+
+## Not built yet
+
+Search and retrieval, crawling, YouTube, document extraction, scheduling. [`docs/SPEC.md`](docs/SPEC.md) §8 lists the seven open decisions and what each one owns; §3–§6 are settled and should not be relitigated without reopening the ticket they came from.
 
 ## License
 

@@ -1,8 +1,0 @@
-packages:
-  - "app"
-  - "server"
-
-# Keep the install fast and predictable.
-ignoredBuiltDependencies:
-  - sharp
-  - unrs-resolver
