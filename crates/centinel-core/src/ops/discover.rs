@@ -75,13 +75,13 @@ pub struct DiscoverReport {
     pub sitemaps_fetched: Vec<String>,
     /// False when `robots.txt` was unreachable and rules were assumed rather than read.
     pub robots_declared: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crawl_delay_secs: Option<f64>,
     /// URLs the site's own `robots.txt` told us not to fetch.
     pub disallowed: usize,
     /// Counted against the previous run. A large negative swing usually means a
     /// truncated crawl, not a shrinking website.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_run_urls: Option<usize>,
     pub warnings: Vec<String>,
     pub sample: Vec<String>,
@@ -166,4 +166,99 @@ pub async fn discover(
         sample,
         written_to_log,
     })
+}
+
+// -----------------------------------------------------------------------------------------
+// Rendering
+// -----------------------------------------------------------------------------------------
+
+/// The URL count, and everything that would explain a wrong one.
+///
+/// A discovery run is trusted or it is not, and the fields that decide that are all
+/// negative space: whether `robots.txt` was actually read or merely assumed, how the count
+/// moved against the previous run, what the site told us not to fetch. A large negative
+/// swing usually means a truncated crawl rather than a shrinking website, so the delta is
+/// rendered as a warning rather than as a number.
+impl Render for DiscoverReport {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        p.title(&self.source, &self.site)?;
+        p.nest(|p| {
+            let count = p.paint(&render::count(self.urls_found as u64), Ink::Bold);
+            let label = p.paint("URLs discovered", Ink::Dim);
+            p.line(format!("{count} {label}"))?;
+
+            if let Some(previous) = self.previous_run_urls {
+                let delta = self.urls_found as i64 - previous as i64;
+                let text = format!(
+                    "{}{} against the previous run's {}",
+                    if delta >= 0 { "+" } else { "" },
+                    delta,
+                    render::count(previous as u64),
+                );
+                // A shrinking crawl is the signature of a truncated one, so it is amber
+                // rather than a neutral figure.
+                if delta < 0 {
+                    p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+                } else {
+                    p.line(p.paint(&text, Ink::Dim))?;
+                }
+            }
+
+            p.blank()?;
+            p.marked(
+                Mark::from_ok(self.robots_declared),
+                p.paint(
+                    if self.robots_declared {
+                        "robots.txt read"
+                    } else {
+                        "robots.txt unreachable — rules assumed, not read"
+                    },
+                    Ink::Dim,
+                ),
+            )?;
+            if self.disallowed > 0 {
+                let text = format!(
+                    "{} excluded by the site's own rules",
+                    render::count(self.disallowed as u64)
+                );
+                p.line(format!("  {}", p.paint(&text, Ink::Dim)))?;
+            }
+            if let Some(delay) = self.crawl_delay_secs {
+                let text = format!("crawl-delay {delay}s");
+                p.line(format!("  {}", p.paint(&text, Ink::Dim)))?;
+            }
+            p.marked(
+                Mark::from_ok(self.written_to_log),
+                p.paint(
+                    if self.written_to_log {
+                        "written to the log"
+                    } else {
+                        "not written — preview only"
+                    },
+                    Ink::Dim,
+                ),
+            )?;
+
+            if !self.sitemaps_fetched.is_empty() {
+                p.section("sitemaps")?;
+                for sitemap in &self.sitemaps_fetched {
+                    let text = render::truncate_start(sitemap, p.width());
+                    p.line(p.paint(&text, Ink::Dim))?;
+                }
+            }
+
+            for warning in &self.warnings {
+                p.marked(Mark::Warn, p.paint(&render::one_line(warning), Ink::Dim))?;
+            }
+
+            if !self.sample.is_empty() {
+                p.section("sample")?;
+                for url in &self.sample {
+                    let text = render::truncate_start(url, p.width());
+                    p.line(p.paint(&text, Ink::Dim))?;
+                }
+            }
+            Ok(())
+        })
+    }
 }

@@ -37,7 +37,7 @@ pub struct Placement {
     pub observed_at: String,
     /// Which extraction pipeline produced the text.
     pub tool: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 }
 

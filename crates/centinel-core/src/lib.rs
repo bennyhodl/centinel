@@ -9,6 +9,7 @@
 //!   store   — files are truth (§5). CAS blob pool + append-only JSONL log.
 //!   op      — the registry (#9).    One definition → CLI + MCP + HTTP.
 //!   ops     — the verbs.            Individual operations, registered by #[op].
+//!   render  — how a report reads.   The terminal's idiom for the same report.
 //! ```
 //!
 //! ## What is not here yet
@@ -35,6 +36,7 @@ pub mod models;
 pub mod op;
 pub mod ops;
 pub mod policy;
+pub mod render;
 pub mod store;
 pub mod transcribe;
 pub mod vectors;
@@ -53,6 +55,7 @@ pub mod prelude {
     };
     pub use crate::op::{Ctx, Progress, ProgressEvent, Unit};
     pub use crate::policy::{HostPolicy, PolicyTable};
+    pub use crate::render::{self, Align, Cell, Ink, Mark, Painter, Render, Table};
     pub use crate::store::{LogRecord, Store};
     pub use centinel_macros::op;
 }

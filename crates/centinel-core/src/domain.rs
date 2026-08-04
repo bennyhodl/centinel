@@ -198,7 +198,24 @@ impl fmt::Display for Liveness {
             Self::Blocked => "blocked",
             Self::Error => "error",
         };
-        f.write_str(s)
+        f.pad(s)
+    }
+}
+
+impl Liveness {
+    /// The glyph this state reads as.
+    ///
+    /// `Blocked` is amber rather than red on purpose, and it is the whole reason this
+    /// mapping lives beside the enum instead of in a renderer. Painting a refusal the
+    /// same colour as a 404 would undo, at the last possible moment, the distinction the
+    /// model spends §4.4 protecting: a page that refuses you is not a page that is gone.
+    pub fn mark(&self) -> crate::render::Mark {
+        use crate::render::Mark;
+        match self {
+            Self::Live => Mark::Ok,
+            Self::Blocked => Mark::Warn,
+            Self::Gone | Self::Error => Mark::Bad,
+        }
     }
 }
 

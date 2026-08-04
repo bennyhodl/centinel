@@ -44,7 +44,7 @@ const MIN_READABLE_CHARS: usize = 200;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Extraction {
     pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// Which pipeline produced this. Distinguishes `dom_smoothie+htmd` from bare `htmd`,
     /// because the two produce very different text from the same bytes.

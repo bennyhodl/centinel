@@ -9,10 +9,12 @@ mod http;
 mod mcp;
 mod progress;
 
+use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use centinel_core::op::{self, Ctx, Progress};
+use centinel_core::render::{DEFAULT_WIDTH, Painter};
 use centinel_core::store::Store;
 use clap::{Arg, ArgAction, Command};
 
@@ -45,6 +47,42 @@ fn build_cli() -> Command {
                 .global(true)
                 .action(ArgAction::SetTrue)
                 .help("Log to stderr"),
+        )
+        .arg(
+            Arg::new("json")
+                .long("json")
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .conflicts_with("pretty")
+                .help("Emit the raw report as JSON (the default when stdout is not a terminal)"),
+        )
+        .arg(
+            Arg::new("pretty")
+                .long("pretty")
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .help("Render the report for a human (the default when stdout is a terminal)"),
+        )
+        .arg(
+            Arg::new("color")
+                .long("color")
+                .global(true)
+                .value_name("WHEN")
+                .value_parser(["auto", "always", "never"])
+                .default_value("auto")
+                .help("When to colourise: auto, always, never"),
+        )
+        .arg(
+            // Honoured for its presence, per the no-color.org convention: any non-empty
+            // value means no colour. Kept as a separate hidden arg rather than as `--color`'s
+            // env source, because an env var must not beat an explicit `--color always`.
+            Arg::new("no-color-env")
+                .long("no-color")
+                .global(true)
+                .env("NO_COLOR")
+                .action(ArgAction::SetTrue)
+                .hide(true)
+                .help("Render without colour"),
         )
         .subcommand_required(true)
         .arg_required_else_help(true);
@@ -108,8 +146,60 @@ async fn main() -> Result<()> {
             http::serve(ctx, &bind).await
         }
         "mcp" => mcp::serve(ctx).await,
-        op_name => run_op(ctx, op_name, sub).await,
+        op_name => run_op(ctx, op_name, sub, Output::detect(sub)).await,
     }
+}
+
+/// What stdout should receive.
+///
+/// The default is decided by the destination, not by a flag: a person gets prose, a pipe
+/// gets JSON. That keeps `centinel list | jq` working exactly as it did — the guarantee
+/// this binary has always made — while ending the practice of printing a serialization
+/// format at a human who asked a question.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Output {
+    json: bool,
+    color: bool,
+    width: usize,
+}
+
+impl Output {
+    fn detect(matches: &clap::ArgMatches) -> Self {
+        let tty = std::io::stdout().is_terminal();
+
+        // Format and colour are decided separately, because `--pretty | less -R` is a
+        // real thing to want and bundling them would make it unreachable.
+        let json = match (matches.get_flag("json"), matches.get_flag("pretty")) {
+            (true, _) => true,
+            (_, true) => false,
+            _ => !tty,
+        };
+
+        let color = match matches
+            .get_one::<String>("color")
+            .map(String::as_str)
+            .unwrap_or("auto")
+        {
+            "always" => true,
+            "never" => false,
+            // `NO_COLOR` loses to an explicit `--color always` and wins over everything else.
+            _ => tty && !matches.get_flag("no-color-env"),
+        };
+
+        Self {
+            json,
+            color,
+            width: terminal_width(),
+        }
+    }
+}
+
+/// The usable width, or [`DEFAULT_WIDTH`] when there is no terminal to ask.
+fn terminal_width() -> usize {
+    console::Term::stdout()
+        .size_checked()
+        .map(|(_, cols)| cols as usize)
+        .unwrap_or(DEFAULT_WIDTH as u16 as usize)
 }
 
 /// Runs one op from the CLI.
@@ -117,7 +207,15 @@ async fn main() -> Result<()> {
 /// CLI arguments are converted to the same JSON the HTTP and MCP surfaces send, rather
 /// than being passed as a struct. That keeps the three paths genuinely identical — a
 /// divergence surfaces as a deserialize failure instead of as quietly different behaviour.
-async fn run_op(ctx: Arc<Ctx>, name: &str, matches: &clap::ArgMatches) -> Result<()> {
+///
+/// The *result* takes the same route: rendering reads the erased JSON value the other two
+/// surfaces receive, so a terminal can never be shown a field HTTP would not return.
+async fn run_op(
+    ctx: Arc<Ctx>,
+    name: &str,
+    matches: &clap::ArgMatches,
+    output: Output,
+) -> Result<()> {
     let def = op::find(name).with_context(|| format!("unknown op `{name}`"))?;
     let args = (def.args_from_matches)(matches)?;
 
@@ -140,7 +238,23 @@ async fn run_op(ctx: Arc<Ctx>, name: &str, matches: &clap::ArgMatches) -> Result
     }
 
     let value = result?;
-    println!("{}", serde_json::to_string_pretty(&value)?);
+
+    if output.json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+
+    // Rendered through a lock and flushed once: a report is one screen of output and
+    // should not interleave with anything the progress renderer is still finishing.
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    writeln!(handle)?;
+    {
+        let mut painter = Painter::new(&mut handle, output.color, output.width);
+        (def.render)(&value, &mut painter)?;
+    }
+    writeln!(handle)?;
+    handle.flush()?;
     Ok(())
 }
 

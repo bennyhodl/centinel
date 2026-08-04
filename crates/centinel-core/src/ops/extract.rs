@@ -56,7 +56,7 @@ pub struct ExtractSample {
     pub kind: String,
     pub tool: String,
     pub chars: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// First line or so of the derived text — enough to eyeball quality.
     pub preview: String,
@@ -244,4 +244,97 @@ pub async fn extract(
 
     progress.say(format!("{} documents extracted", report.extracted));
     Ok(report)
+}
+
+// -----------------------------------------------------------------------------------------
+// Rendering
+// -----------------------------------------------------------------------------------------
+
+/// The counters, which pipeline handled what, and a look at the text.
+///
+/// The sample is the point. Extraction is the stage that fails *quietly* — a PDF that
+/// yields three characters of ligature soup counts as extracted and passes every counter
+/// in this report. Printing the first line of a few documents is the cheapest way for a
+/// person to catch that, so it is rendered rather than filed under `--json`.
+impl Render for ExtractReport {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        p.title(
+            &self.sources.join(", "),
+            &format!("{} of text", render::count(self.chars_of_text as u64)),
+        )?;
+        p.nest(|p| {
+            p.figures(&[
+                (self.observations as u64, "observations"),
+                (self.already_derived as u64, "already derived"),
+                (self.attempted as u64, "attempted"),
+                (self.extracted as u64, "extracted"),
+                (self.needs_ocr as u64, "need OCR"),
+                (self.unextractable as u64, "unextractable"),
+            ])?;
+
+            if self.ocr_pages_pending > 0 {
+                p.blank()?;
+                let text = format!(
+                    "{} scanned pages need pdftoppm + tesseract",
+                    render::count(self.ocr_pages_pending as u64)
+                );
+                p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+            }
+
+            if !self.by_tool.is_empty() {
+                p.section("by tool")?;
+                let mut table = Table::bare(&[Align::Right, Align::Left]);
+                for (tool, n) in &self.by_tool {
+                    table.push(vec![
+                        Cell::new(render::count(*n as u64), Ink::Bold),
+                        Cell::dim(tool),
+                    ]);
+                }
+                p.table(&table)?;
+            }
+
+            if !self.unreadable.is_empty() {
+                p.section("unreadable")?;
+                for item in &self.unreadable {
+                    item.render(p)?;
+                }
+            }
+
+            if !self.sample.is_empty() {
+                p.section("sample")?;
+                for (i, item) in self.sample.iter().enumerate() {
+                    if i > 0 {
+                        p.blank()?;
+                    }
+                    item.render(p)?;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+impl Render for Unreadable {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        let head = format!(
+            "{:<6}{}",
+            self.kind,
+            render::truncate(&self.url, p.width().saturating_sub(10)),
+        );
+        p.marked(Mark::Bad, head)?;
+        p.nest(|p| p.wrapped(&render::one_line(&self.reason), Ink::Dim))
+    }
+}
+
+impl Render for ExtractSample {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        let label = self.title.as_deref().unwrap_or(&self.url);
+        let head = p.paint(&render::truncate(label, p.width().saturating_sub(22)), Ink::Bold);
+        let aside = p.paint(
+            &format!("{} · {}", self.tool, render::count(self.chars as u64)),
+            Ink::Dim,
+        );
+        p.line(format!("{head}  {aside}"))?;
+        p.nest(|p| p.wrapped(&render::one_line(&self.preview), Ink::Dim))
+    }
 }

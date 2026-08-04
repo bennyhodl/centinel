@@ -103,7 +103,7 @@ pub struct CollectReport {
     /// What was actually gathered — the input to planning extraction.
     pub by_kind: BTreeMap<String, usize>,
     pub failures: Vec<CollectFailure>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failures_truncated: Option<usize>,
 }
 
@@ -309,5 +309,79 @@ fn push_failure(report: &mut CollectReport, max: usize, failure: CollectFailure)
         report.failures.push(failure);
     } else {
         *report.failures_truncated.get_or_insert(0) += 1;
+    }
+}
+
+// -----------------------------------------------------------------------------------------
+// Rendering
+// -----------------------------------------------------------------------------------------
+
+/// What the run did, what it left, and what refused it.
+///
+/// `remaining` is promoted out of the counter column into a line of its own, because it is
+/// the only figure here that is an *instruction*: non-zero means running the same command
+/// again continues from where this stopped, and a person who misses that re-crawls from
+/// the beginning.
+impl Render for CollectReport {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        p.title(&self.source, &render::bytes(self.bytes))?;
+        p.nest(|p| {
+            p.figures(&[
+                (self.discovered as u64, "discovered"),
+                (self.already_had as u64, "already had"),
+                (self.filtered_out as u64, "filtered out"),
+                (self.attempted as u64, "attempted"),
+                (self.stored as u64, "stored"),
+                (self.changed as u64, "changed"),
+                (self.failed as u64, "failed"),
+            ])?;
+
+            if !self.by_kind.is_empty() {
+                p.section("by kind")?;
+                let mut table = Table::bare(&[Align::Right, Align::Left]);
+                for (kind, n) in &self.by_kind {
+                    table.push(vec![
+                        Cell::new(render::count(*n as u64), Ink::Bold),
+                        Cell::dim(kind),
+                    ]);
+                }
+                p.table(&table)?;
+            }
+
+            if !self.failures.is_empty() {
+                p.section("failures")?;
+                for failure in &self.failures {
+                    failure.render(p)?;
+                }
+                if let Some(more) = self.failures_truncated {
+                    let text = format!("… and {} more", render::count(more as u64));
+                    p.line(p.paint(&text, Ink::Dim))?;
+                }
+            }
+
+            if self.remaining > 0 {
+                p.blank()?;
+                let text = format!(
+                    "{} still uncollected — re-run to continue",
+                    render::count(self.remaining as u64)
+                );
+                p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl Render for CollectFailure {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        let mark = self.state.mark();
+        let state = format!("{:<8}", self.state);
+        let head = format!(
+            "{}{}",
+            p.paint(&state, mark.ink()),
+            render::truncate(&self.url, p.width().saturating_sub(12)),
+        );
+        p.marked(mark, head)?;
+        p.nest(|p| p.wrapped(&render::one_line(&self.detail), Ink::Dim))
     }
 }

@@ -86,7 +86,7 @@ pub enum Gate {
 
 impl std::fmt::Display for Gate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+        f.pad(match self {
             Self::Search => "search",
             Self::Transcription => "transcription",
         })
@@ -95,7 +95,7 @@ impl std::fmt::Display for Gate {
 
 impl std::fmt::Display for ModelRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+        f.pad(match self {
             Self::Embedding => "embedding",
             Self::Reranker => "reranker",
             Self::Transcription => "transcription",
@@ -508,9 +508,9 @@ pub struct VariantStatus {
     /// legible before it starts.
     pub bytes_present: u64,
     /// Files with an interrupted download waiting to resume.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resumable: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<String>,
 }
 

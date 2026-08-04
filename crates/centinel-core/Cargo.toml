@@ -23,6 +23,9 @@ sha2.workspace = true
 hex.workspace = true
 jiff.workspace = true
 tracing.workspace = true
+# Column alignment measured in display cells rather than bytes or chars — a CJK title in
+# a table would otherwise shift every column to its right.
+unicode-width = "0.2"
 reqwest.workspace = true
 texting_robots = "0.2.2"
 roxmltree = "0.21.1"

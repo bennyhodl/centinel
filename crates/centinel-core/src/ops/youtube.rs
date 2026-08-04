@@ -143,9 +143,9 @@ pub struct VideoOutcome {
     /// Which parts were stored: `metadata`, `captions.json3`, `audio`.
     pub stored: Vec<String>,
     pub bytes: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<Liveness>,
 }
 
@@ -154,9 +154,9 @@ pub struct VideoOutcome {
 pub enum YoutubeReport {
     Discover {
         source: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         channel: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         channel_id: Option<String>,
         yt_dlp_version: String,
         /// Every video in this snapshot. The DiscoveryRun records **all** of them —
@@ -506,6 +506,155 @@ fn title_of(metadata_json: &[u8]) -> Option<String> {
         .get("title")?
         .as_str()
         .map(str::to_string)
+}
+
+// -----------------------------------------------------------------------------------------
+// Rendering
+// -----------------------------------------------------------------------------------------
+
+/// Two different reports under one command, rendered as two different things.
+///
+/// The `action` discriminant is not printed. It is load-bearing on the wire, where a
+/// consumer must tell the variants apart, and redundant under a command the operator just
+/// typed the subcommand for.
+impl Render for YoutubeReport {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        match self {
+            YoutubeReport::Discover {
+                source,
+                channel,
+                videos,
+                new_videos,
+                tabs,
+                rejected,
+                total_duration_hours,
+                yt_dlp_version,
+                ..
+            } => {
+                p.title(
+                    channel.as_deref().unwrap_or(source),
+                    &format!("yt-dlp {yt_dlp_version}"),
+                )?;
+                p.nest(|p| {
+                    p.figures(&[
+                        (*videos as u64, "videos in this snapshot"),
+                        (*new_videos as u64, "not seen before"),
+                        (*rejected as u64, "entries that were not videos"),
+                    ])?;
+                    p.blank()?;
+                    let hours = format!("{total_duration_hours:.1} hours of recording");
+                    p.line(p.paint(&hours, Ink::Dim))?;
+
+                    // A council channel keeps its meetings in /streams, disjointly from
+                    // /videos. A tab that silently returned nothing is the difference
+                    // between a complete archive and a convincing partial one, and this
+                    // table is the only place it shows.
+                    if !tabs.is_empty() {
+                        p.section("tabs")?;
+                        let mut table = Table::bare(&[Align::Left, Align::Right, Align::Left]);
+                        for tab in tabs {
+                            let mark = Mark::from_ok(tab.videos > 0);
+                            table.push(vec![
+                                Cell::mark(mark),
+                                Cell::new(render::count(tab.videos as u64), Ink::Bold),
+                                Cell::dim(format!(
+                                    "{}{}",
+                                    render::truncate_start(&tab.url, 48),
+                                    if tab.duplicates > 0 {
+                                        format!("  ({} already seen)", tab.duplicates)
+                                    } else {
+                                        String::new()
+                                    }
+                                )),
+                            ]);
+                        }
+                        p.table(&table)?;
+                    }
+                    Ok(())
+                })
+            }
+
+            YoutubeReport::Fetch {
+                source,
+                discovered,
+                already_had,
+                attempted,
+                stored,
+                failed,
+                blocked,
+                no_captions,
+                bytes,
+                videos,
+                yt_dlp_version,
+            } => {
+                p.title(source, &format!("{} · yt-dlp {yt_dlp_version}", render::bytes(*bytes)))?;
+                p.nest(|p| {
+                    p.figures(&[
+                        (*discovered as u64, "discovered"),
+                        (*already_had as u64, "already had"),
+                        (*attempted as u64, "attempted"),
+                        (*stored as u64, "stored"),
+                        (*failed as u64, "failed"),
+                    ])?;
+
+                    // A wall of refusals with nothing stored is the bot wall, and it looks
+                    // exactly like an empty channel unless something says so out loud.
+                    if *blocked > 0 {
+                        p.blank()?;
+                        let text = if *stored == 0 {
+                            format!(
+                                "{} refused and nothing stored — this is a block, not an empty channel",
+                                render::count(*blocked as u64)
+                            )
+                        } else {
+                            format!("{} refused", render::count(*blocked as u64))
+                        };
+                        p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+                    }
+
+                    if *no_captions > 0 {
+                        let text = format!(
+                            "{} without captions — the transcription work-list",
+                            render::count(*no_captions as u64)
+                        );
+                        p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+                        p.nest(|p| {
+                            let cmd = "centinel youtube fetch --audio-if-no-captions";
+                            p.line(p.paint(cmd, Ink::Cyan))
+                        })?;
+                    }
+
+                    if !videos.is_empty() {
+                        p.section("videos")?;
+                        for video in videos {
+                            video.render(p)?;
+                        }
+                    }
+                    Ok(())
+                })
+            }
+        }
+    }
+}
+
+impl Render for VideoOutcome {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        let mark = match (&self.failed, self.state) {
+            (None, _) => Mark::Ok,
+            (Some(_), Some(state)) => state.mark(),
+            (Some(_), None) => Mark::Bad,
+        };
+        let head = render::truncate(&self.title, p.width().saturating_sub(4));
+        p.marked(mark, head)?;
+
+        p.nest(|p| {
+            let note = match &self.failed {
+                Some(reason) => render::one_line(reason),
+                None => format!("{}  {}", self.stored.join(", "), render::bytes(self.bytes)),
+            };
+            p.wrapped(&note, Ink::Dim)
+        })
+    }
 }
 
 #[cfg(test)]

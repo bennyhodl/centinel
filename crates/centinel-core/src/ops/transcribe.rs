@@ -111,7 +111,7 @@ pub struct TranscribeFailure {
 pub struct TranscribeReport {
     pub sources: Vec<String>,
     pub model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
     /// False when no VAD was installed and `--allow-no-vad` permitted the run anyway.
     pub vad: bool,
@@ -125,7 +125,7 @@ pub struct TranscribeReport {
     pub audio_ms: u64,
     pub transcribed_chars: usize,
     pub items: Vec<TranscribedItem>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<TranscribeFailure>,
 }
 
@@ -322,6 +322,90 @@ fn short(url: &str) -> String {
 /// Present so a reader grepping for the worker binary finds it named here too.
 #[allow(dead_code)]
 const _WORKER: &str = WORKER;
+
+// -----------------------------------------------------------------------------------------
+// Rendering
+// -----------------------------------------------------------------------------------------
+
+/// The counters, the realtime factor, and whether VAD was actually in the loop.
+///
+/// `vad: false` is rendered as a warning rather than a field. A run that skipped voice
+/// activity detection under `--allow-no-vad` produces transcripts that are real but worse
+/// — Whisper hallucinates into silence — and six months later the only record of *why* a
+/// transcript is poor is this flag. It should be impossible to miss on the run that made it.
+impl Render for TranscribeReport {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        let model = match &self.variant {
+            Some(v) => format!("{} · {v}", self.model),
+            None => self.model.clone(),
+        };
+        p.title(&self.sources.join(", "), &model)?;
+        p.nest(|p| {
+            p.figures(&[
+                (self.audio_found as u64, "audio blobs found"),
+                (self.already_transcribed as u64, "already transcribed"),
+                (self.attempted as u64, "attempted"),
+                (self.transcribed as u64, "transcribed"),
+                (self.failed as u64, "failed"),
+            ])?;
+
+            p.blank()?;
+            let totals = format!(
+                "{} of audio · {} of text",
+                render::duration(self.audio_ms as f64 / 1000.0),
+                render::count(self.transcribed_chars as u64),
+            );
+            p.line(p.paint(&totals, Ink::Dim))?;
+
+            if !self.vad {
+                p.marked(
+                    Mark::Warn,
+                    p.paint("no VAD — Whisper saw the silence too", Ink::Dim),
+                )?;
+            }
+
+            if !self.items.is_empty() {
+                p.section("transcribed")?;
+                for item in &self.items {
+                    item.render(p)?;
+                }
+            }
+
+            if !self.failures.is_empty() {
+                p.section("failures")?;
+                for failure in &self.failures {
+                    failure.render(p)?;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+impl Render for TranscribedItem {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        let head = render::truncate(&self.url, p.width().saturating_sub(4));
+        p.marked(Mark::Ok, head)?;
+        let note = format!(
+            "{} · {} · {} segments · {:.1}× realtime",
+            render::duration(self.duration_ms as f64 / 1000.0),
+            self.language,
+            render::count(self.segments as u64),
+            self.realtime_factor,
+        );
+        p.nest(|p| p.line(p.paint(&note, Ink::Dim)))
+    }
+}
+
+impl Render for TranscribeFailure {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        p.marked(
+            Mark::Bad,
+            render::truncate(&self.url, p.width().saturating_sub(4)),
+        )?;
+        p.nest(|p| p.wrapped(&render::one_line(&self.reason), Ink::Dim))
+    }
+}
 
 #[cfg(test)]
 mod tests {

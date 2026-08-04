@@ -100,7 +100,7 @@ pub struct EmbedReport {
     pub elapsed_secs: f64,
     /// Sustained rate, for planning the rest of a corpus.
     pub chunks_per_sec: f64,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<Skipped>,
 }
 
@@ -260,6 +260,61 @@ async fn load_embedder(args: &EmbedArgs, model_id: &'static str) -> anyhow::Resu
         Embedder::load(&root, model_id, variant.as_deref())
     })
     .await?
+}
+
+// -----------------------------------------------------------------------------------------
+// Rendering
+// -----------------------------------------------------------------------------------------
+
+/// The counters, plus the rate — which is the only figure anyone plans with.
+///
+/// `remaining` and `chunks_per_sec` together answer the question actually being asked,
+/// which is never "how many did you do" but "how long until the rest is done". So the
+/// estimate is computed and printed rather than left as two numbers to divide.
+impl Render for EmbedReport {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        p.title(
+            &self.model,
+            &format!("{} · {} dims", self.variant, self.dims),
+        )?;
+        p.nest(|p| {
+            p.figures(&[
+                (self.indexed as u64, "chunks indexed"),
+                (self.already_cached as u64, "already cached"),
+                (self.embedded as u64, "embedded"),
+                (self.remaining as u64, "remaining"),
+            ])?;
+
+            p.blank()?;
+            let rate = format!(
+                "{} at {:.1} chunks/sec",
+                render::duration(self.elapsed_secs),
+                self.chunks_per_sec,
+            );
+            p.line(p.paint(&rate, Ink::Dim))?;
+
+            // Only when there is something to estimate, and only when a rate exists to
+            // estimate from — dividing by a zero rate would print `inf`.
+            if self.remaining > 0 && self.chunks_per_sec > 0.0 {
+                let eta = self.remaining as f64 / self.chunks_per_sec;
+                let text = format!("about {} left — re-run to continue", render::duration(eta));
+                p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+            }
+
+            if !self.skipped.is_empty() {
+                p.section("skipped")?;
+                for item in &self.skipped {
+                    let text = format!(
+                        "{}  {}",
+                        render::short_sha(&item.chunk_hash),
+                        render::one_line(&item.reason)
+                    );
+                    p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+                }
+            }
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]
