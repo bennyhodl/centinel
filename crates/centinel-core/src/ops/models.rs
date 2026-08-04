@@ -116,7 +116,7 @@ pub struct FileCheck {
     pub model: String,
     pub path: String,
     pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
 }
 
@@ -512,6 +512,229 @@ fn human_bytes(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
+// -----------------------------------------------------------------------------------------
+// Rendering
+// -----------------------------------------------------------------------------------------
+
+/// Six subcommands, six shapes.
+///
+/// The `action` discriminant is dropped everywhere — it tells a JSON consumer which
+/// variant it holds, and tells a person who typed `models list` that they typed
+/// `models list`. So is `dir` on most variants: the weights cache is a fixed location,
+/// and `models dir` exists for the one time anybody needs it.
+impl Render for ModelsReport {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        match self {
+            ModelsReport::Dir { dir } => p.line(dir.display().to_string()),
+
+            ModelsReport::List { models, dir } => {
+                let installed = models.iter().filter(|m| m.installed).count();
+                let on_disk: u64 = models
+                    .iter()
+                    .filter_map(|m| m.active())
+                    .map(|v| v.bytes_present)
+                    .sum();
+                p.title(
+                    &format!("{installed} of {} installed", models.len()),
+                    &render::bytes(on_disk),
+                )?;
+                p.line(p.paint(&dir.display().to_string(), Ink::Dim))?;
+
+                for model in models {
+                    p.blank()?;
+                    model.render(p)?;
+                }
+                Ok(())
+            }
+
+            ModelsReport::Pull {
+                fetched,
+                skipped,
+                bytes_fetched,
+                elapsed_secs,
+                ..
+            } => {
+                let rate = if *elapsed_secs > 0.0 {
+                    format!(
+                        " at {}/s",
+                        render::bytes((*bytes_fetched as f64 / elapsed_secs) as u64)
+                    )
+                } else {
+                    String::new()
+                };
+                p.title(
+                    &format!("{} fetched", render::bytes(*bytes_fetched)),
+                    &format!("{}{rate}", render::duration(*elapsed_secs)),
+                )?;
+
+                p.nest(|p| {
+                    for file in fetched {
+                        let name = std::path::Path::new(&file.path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| file.path.clone());
+                        let mut note = render::bytes(file.bytes);
+                        // A resumed transfer is the feature that makes a 4 GB pull over a
+                        // bad connection survivable, and the only proof it worked is here.
+                        if file.resumed_from > 0 {
+                            note.push_str(&format!(
+                                ", resumed from {}",
+                                render::bytes(file.resumed_from)
+                            ));
+                        }
+                        p.marked(
+                            Mark::Ok,
+                            format!("{name}  {}", p.paint(&note, Ink::Dim)),
+                        )?;
+                    }
+                    for name in skipped {
+                        let text = format!("{name}  already present");
+                        p.line(format!("{}  {}", p.paint("·", Ink::Dim), p.paint(&text, Ink::Dim)))?;
+                    }
+                    Ok(())
+                })
+            }
+
+            ModelsReport::Verify { checked, ok, .. } => {
+                let failed = checked.iter().filter(|c| !c.ok).count();
+                let verdict = if *ok {
+                    p.paint("every digest matches", Ink::Green)
+                } else {
+                    p.paint(
+                        &format!("{} of {} failed", failed, checked.len()),
+                        Ink::Red,
+                    )
+                };
+                p.line(verdict)?;
+
+                p.nest(|p| {
+                    for check in checked {
+                        // A passing digest is a line nobody reads; a failing one is the
+                        // whole reason the command exists. Only the failures get detail.
+                        let name = std::path::Path::new(&check.path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| check.path.clone());
+                        p.marked(
+                            Mark::from_ok(check.ok),
+                            format!("{}  {}", check.model, p.paint(&name, Ink::Dim)),
+                        )?;
+                        if let Some(problem) = &check.problem {
+                            p.nest(|p| p.wrapped(&render::one_line(problem), Ink::Red))?;
+                        }
+                    }
+                    Ok(())
+                })
+            }
+
+            ModelsReport::Remove {
+                removed,
+                bytes_freed,
+            } => {
+                p.title(&format!("{} freed", render::bytes(*bytes_freed)), "")?;
+                p.nest(|p| {
+                    for path in removed {
+                        let text = render::truncate_start(&path.display().to_string(), p.width());
+                        p.line(p.paint(&text, Ink::Dim))?;
+                    }
+                    Ok(())
+                })
+            }
+
+            ModelsReport::Prune {
+                orphaned,
+                bytes,
+                deleted,
+            } => {
+                if orphaned.is_empty() {
+                    return p.marked(Mark::Ok, p.paint("nothing orphaned", Ink::Dim));
+                }
+                let verb = if *deleted { "freed" } else { "would free" };
+                p.title(
+                    &format!("{verb} {}", render::bytes(*bytes)),
+                    &render::plural(orphaned.len(), "directory", "directories"),
+                )?;
+                p.nest(|p| {
+                    for orphan in orphaned {
+                        let text = render::truncate_start(
+                            &orphan.path.display().to_string(),
+                            p.width(),
+                        );
+                        p.line(p.paint(&text, Ink::Dim))?;
+                        p.nest(|p| {
+                            let note = format!(
+                                "{}  {}",
+                                render::bytes(orphan.bytes),
+                                render::one_line(&orphan.reason)
+                            );
+                            p.line(p.paint(&note, Ink::Dim))
+                        })?;
+                    }
+                    if !*deleted {
+                        p.blank()?;
+                        p.line(p.paint("centinel models prune --delete", Ink::Cyan))?;
+                    }
+                    Ok(())
+                })
+            }
+        }
+    }
+}
+
+impl Render for ModelStatus {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        let mark = Mark::from_ok(self.installed);
+        let name = p.paint(&self.id, Ink::Bold);
+        let role = p.paint(&format!("{} · {}", self.role, self.license), Ink::Dim);
+        p.marked(mark, format!("{name}  {role}"))?;
+
+        p.nest(|p| {
+            p.nest(|p| {
+                p.wrapped(&self.about, Ink::Dim)?;
+
+                let mut table = Table::bare(&[
+                    Align::Left,
+                    Align::Left,
+                    Align::Right,
+                    Align::Left,
+                ]);
+                for variant in &self.variants {
+                    // Three states, not two: a variant with bytes on disk but not all of
+                    // them is a resumable pull, and calling it "missing" would tell
+                    // someone to start a 3 GB download that is already half done.
+                    let mark = if variant.installed {
+                        Mark::Ok
+                    } else if variant.bytes_present > 0 {
+                        Mark::Warn
+                    } else {
+                        Mark::None
+                    };
+                    let size = if variant.installed || variant.bytes_present == 0 {
+                        render::bytes(variant.bytes_total)
+                    } else {
+                        format!(
+                            "{} / {}",
+                            render::bytes(variant.bytes_present),
+                            render::bytes(variant.bytes_total)
+                        )
+                    };
+                    let ink = if variant.installed { Ink::Plain } else { Ink::Dim };
+                    table.push(vec![
+                        Cell::mark(mark),
+                        Cell::new(
+                            &variant.variant,
+                            if variant.installed { Ink::Plain } else { Ink::Dim },
+                        ),
+                        Cell::new(size, ink),
+                        Cell::dim(if variant.is_default { "default" } else { "" }),
+                    ]);
+                }
+                p.table(&table)
+            })
+        })
     }
 }
 

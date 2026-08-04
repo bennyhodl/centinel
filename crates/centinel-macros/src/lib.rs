@@ -26,7 +26,7 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{FnArg, ItemFn, LitBool, LitStr, spanned::Spanned};
+use syn::{FnArg, ItemFn, LitBool, LitStr, ReturnType, Type, spanned::Spanned};
 
 #[derive(Default)]
 struct OpAttr {
@@ -47,7 +47,11 @@ struct OpAttr {
 /// ```
 ///
 /// `A` must derive `clap::Args`, `serde::Serialize`, `serde::Deserialize` and
-/// `schemars::JsonSchema`. `O` must be `serde::Serialize`.
+/// `schemars::JsonSchema`. `O` must derive `serde::Serialize` and `serde::Deserialize`,
+/// and must implement [`centinel_core::render::Render`] — the CLI renders reports rather
+/// than printing their JSON at a person, and there is no structural fallback to hide
+/// behind. Writing `-> anyhow::Result<O>` with a named `O` is therefore required; a
+/// `impl Trait` or aliased return type cannot be given a renderer.
 ///
 /// # Options
 ///
@@ -126,6 +130,10 @@ fn expand(attr: OpAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
         }
     };
 
+    // The report type, dug out of `-> anyhow::Result<O>`. The CLI needs to name `O` to
+    // put the concrete type back on before rendering; the other two surfaces never do.
+    let out_ty = report_type(&sig.output)?;
+
     let fn_ident = sig.ident.clone();
     let name = attr
         .name
@@ -180,6 +188,13 @@ fn expand(attr: OpAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                 __p::schema_of::<#args_ty>()
             }
 
+            fn __render(
+                __value: &__p::serde_json::Value,
+                __p_out: &mut __p::Painter<'_>,
+            ) -> __p::anyhow::Result<()> {
+                __p::render_as::<#out_ty>(__value, __p_out)
+            }
+
             fn __invoke(
                 __ctx: ::std::sync::Arc<__p::Ctx>,
                 __args_json: __p::serde_json::Value,
@@ -210,10 +225,49 @@ fn expand(attr: OpAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                     args_from_matches: __from_matches,
                     schema: __schema,
                     invoke: __invoke,
+                    render: __render,
                 }
             }
         }
     })
+}
+
+/// Extracts `O` from `-> anyhow::Result<O>`.
+///
+/// Matched structurally on the last path segment's first type argument rather than on the
+/// literal text `anyhow::Result`, so `Result<O>`, `anyhow::Result<O>` and a crate-local
+/// alias all work. The error message names the constraint rather than the parse failure,
+/// because "your return type is unusual" is not what an author needs to hear.
+fn report_type(output: &ReturnType) -> syn::Result<Type> {
+    let unsupported = |span| {
+        syn::Error::new(
+            span,
+            "#[op] needs a named report type: write `-> anyhow::Result<MyReport>`. \
+             The CLI renders `MyReport` for a person, so the type has to be nameable.",
+        )
+    };
+
+    let ReturnType::Type(_, ty) = output else {
+        return Err(unsupported(output.span()));
+    };
+    let Type::Path(path) = &**ty else {
+        return Err(unsupported(ty.span()));
+    };
+    let last = path
+        .path
+        .segments
+        .last()
+        .ok_or_else(|| unsupported(ty.span()))?;
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return Err(unsupported(ty.span()));
+    };
+    args.args
+        .iter()
+        .find_map(|a| match a {
+            syn::GenericArgument::Type(t) => Some(t.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| unsupported(ty.span()))
 }
 
 /// Uses the first non-empty doc-comment line as the description.

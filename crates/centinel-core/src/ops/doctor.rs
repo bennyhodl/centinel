@@ -29,9 +29,9 @@ pub struct Binary {
     pub required: bool,
     /// What this binary is needed for — so a missing one is actionable, not just red.
     pub purpose: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
 
@@ -58,7 +58,7 @@ pub struct Weights {
     pub required: bool,
     pub installed: bool,
     /// The variant that would be loaded. `None` when nothing is installed.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
     pub bytes_present: u64,
     /// Size of the installed variant, or of the one a plain `pull` would fetch.
@@ -66,7 +66,7 @@ pub struct Weights {
     /// An interrupted download is waiting to resume — re-running `pull` continues it.
     pub resumable: bool,
     /// The command that fixes this.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fix: Option<String>,
 }
 
@@ -83,10 +83,10 @@ pub struct GateStatus {
     /// What is unavailable while this gate is shut.
     pub blocks: String,
     /// Model ids still to pull.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<String>,
     /// The command that opens it.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fix: Option<String>,
 }
 
@@ -386,6 +386,148 @@ async fn count_blobs(root: &std::path::Path) -> anyhow::Result<u64> {
         }
     }
     Ok(count)
+}
+
+// -----------------------------------------------------------------------------------------
+// Rendering
+// -----------------------------------------------------------------------------------------
+
+/// The install bar, made loud.
+///
+/// SPEC §3 accepts that this project shells out to four binaries and downloads gigabytes
+/// of weights, on the condition that the missing-dependency case is *loud*. A wall of
+/// JSON is not loud — it is a wall, and a person scanning it for `"path": null` is doing
+/// the work the report was supposed to do for them. So the verdict comes first, every row
+/// carries a glyph, and the fix command sits directly under the thing it fixes.
+impl Render for DoctorReport {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        let verdict = if self.ready {
+            p.paint("ready", Ink::Green)
+        } else if self.binaries_ready || self.models_ready {
+            p.paint("partly ready", Ink::Yellow)
+        } else {
+            p.paint("not ready", Ink::Red)
+        };
+        let corpus = format!(
+            "{} · {} · {}",
+            self.store_root.display(),
+            render::plural(self.blob_count as usize, "blob", "blobs"),
+            render::plural(self.sources.len(), "source", "sources"),
+        );
+        p.line(format!("{verdict}  {}", p.paint(&corpus, Ink::Dim)))?;
+
+        p.section("binaries")?;
+        p.nest(|p| {
+            let mut table = Table::bare(&[
+                Align::Left,
+                Align::Left,
+                Align::Left,
+                Align::Left,
+            ]);
+            for bin in &self.binaries {
+                let found = bin.found();
+                // An absent *optional* binary degrades rather than breaks, so it is amber.
+                let mark = match (found, bin.required) {
+                    (true, _) => Mark::Ok,
+                    (false, true) => Mark::Bad,
+                    (false, false) => Mark::Warn,
+                };
+                // A binary that answered but reports no version is *present*. Saying
+                // "missing" next to a green tick is the one thing this column must never
+                // do — `centinel-whisper` has no `--version` and is found by path alone.
+                let version = match (&bin.version, found) {
+                    (Some(raw), _) => short_version(raw),
+                    (None, true) => String::new(),
+                    (None, false) => "missing".to_string(),
+                };
+                table.push(vec![
+                    Cell::mark(mark),
+                    Cell::plain(&bin.name),
+                    Cell::new(version, if found { Ink::Cyan } else { Ink::Red }),
+                    Cell::dim(render::truncate(&bin.purpose, 52)),
+                ]);
+            }
+            p.table(&table)
+        })?;
+
+        p.section("models")?;
+        p.nest(|p| {
+            let mut table = Table::bare(&[
+                Align::Left,
+                Align::Left,
+                Align::Left,
+                Align::Right,
+                Align::Left,
+            ]);
+            for m in &self.models {
+                // A partially-downloaded model is neither present nor absent, and saying
+                // "missing" would hide the fact that re-running `pull` resumes it.
+                let mark = if m.installed {
+                    Mark::Ok
+                } else if m.resumable {
+                    Mark::Warn
+                } else {
+                    Mark::Bad
+                };
+                let size = if m.installed || !m.resumable {
+                    render::bytes(m.bytes_total)
+                } else {
+                    format!(
+                        "{} / {}",
+                        render::bytes(m.bytes_present),
+                        render::bytes(m.bytes_total)
+                    )
+                };
+                table.push(vec![
+                    Cell::mark(mark),
+                    Cell::plain(&m.id),
+                    Cell::dim(m.variant.clone().unwrap_or_default()),
+                    Cell::new(size, if m.installed { Ink::Plain } else { Ink::Dim }),
+                    Cell::dim(m.gates.to_string()),
+                ]);
+            }
+            p.table(&table)
+        })?;
+
+        p.section("gates")?;
+        p.nest(|p| {
+            for gate in &self.gates {
+                let mark = Mark::from_ok(gate.ready);
+                let head = if gate.ready {
+                    gate.gate.to_string()
+                } else {
+                    format!(
+                        "{:<16}{}",
+                        gate.gate,
+                        p.paint(&format!("blocks {}", gate.blocks), Ink::Dim)
+                    )
+                };
+                p.marked(mark, head)?;
+                if let Some(fix) = &gate.fix {
+                    p.nest(|p| {
+                        let painted = p.paint(fix, Ink::Cyan);
+                        p.line(format!("  {painted}"))
+                    })?;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// `ffmpeg version 7.1.1 Copyright (c) 2000-2025 …` is a banner, not a version.
+///
+/// Probes capture whatever the tool prints, because a banner is the honest record of what
+/// answered. Displaying it whole would give one column of a five-column table eighty
+/// characters, so the first token that looks like a version wins, and the raw string stays
+/// one `--json` away.
+fn short_version(raw: &str) -> String {
+    let first_line = raw.lines().next().unwrap_or(raw);
+    first_line
+        .split_whitespace()
+        .find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()) && w.contains('.'))
+        .map(|w| w.trim_end_matches(',').to_string())
+        .unwrap_or_else(|| render::truncate(first_line, 24))
 }
 
 #[cfg(test)]

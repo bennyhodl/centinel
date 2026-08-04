@@ -60,10 +60,10 @@ pub struct OpenReport {
     /// Whether this is the original bytes or the extracted text.
     pub derived: bool,
     /// The command run, or `null` with `--print-path`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opened_with: Option<String>,
     /// Other matches, when `target` was ambiguous. The first was used.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub other_matches: Vec<String>,
 }
 
@@ -221,5 +221,45 @@ fn system_opener() -> &'static str {
         "explorer"
     } else {
         "xdg-open"
+    }
+}
+
+// -----------------------------------------------------------------------------------------
+// Rendering
+// -----------------------------------------------------------------------------------------
+
+/// One line of confirmation, because the result of `open` is a window appearing.
+///
+/// The path is the exception: with `--print-path` it *is* the output, so it is printed
+/// plainly enough to be copied or piped into another command.
+impl Render for OpenReport {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        match &self.opened_with {
+            Some(cmd) => {
+                p.marked(Mark::Ok, p.paint(cmd, Ink::Cyan))?;
+                p.nest(|p| p.line(p.paint(&self.path, Ink::Dim)))?;
+            }
+            None => p.line(&self.path)?,
+        }
+
+        let what = format!(
+            "{} · {} · {}{}",
+            self.source,
+            self.kind,
+            render::bytes(self.bytes as u64),
+            if self.derived { " · extracted text" } else { "" },
+        );
+        p.nest(|p| p.line(p.paint(&what, Ink::Dim)))?;
+
+        if !self.other_matches.is_empty() {
+            p.nest(|p| {
+                let note = format!(
+                    "{} other matched; this is the first",
+                    render::plural(self.other_matches.len(), "address", "addresses")
+                );
+                p.line(p.paint(&note, Ink::Yellow))
+            })?;
+        }
+        Ok(())
     }
 }

@@ -50,10 +50,10 @@ pub struct SearchResult {
     pub score: f64,
     /// The passage itself.
     pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// Markdown heading trail the passage sits under.
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub heading: String,
     pub source: String,
     /// Where it came from.
@@ -68,7 +68,7 @@ pub struct SearchResult {
     pub char_start: usize,
     pub char_end: usize,
     /// Other addresses carrying this identical passage.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also_at: Vec<String>,
 }
 
@@ -141,4 +141,87 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
         results,
         total_chunks_indexed: index.stats()?.chunks,
     })
+}
+
+// -----------------------------------------------------------------------------------------
+// Rendering
+// -----------------------------------------------------------------------------------------
+
+/// A ranked list, read top to bottom.
+///
+/// The passage is the answer, so it gets the width and the plain ink; everything else is
+/// provenance and sits dim around it. The one piece of provenance promoted to the same
+/// line as the title is the **source**, because "which city said this" changes what the
+/// passage means and the others do not.
+///
+/// `blob_sha` and the character span are not printed. They are the evidentiary anchor and
+/// they matter enormously — to a verifier, who should be reading `--json` and hashing the
+/// blob, not eyeballing twelve hex characters in a terminal.
+impl Render for SearchReport {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        let aside = format!(
+            "{} · {} · {} indexed",
+            render::plural(self.results.len(), "result", "results"),
+            self.method,
+            render::plural(self.total_chunks_indexed, "chunk", "chunks"),
+        );
+        p.title(&self.query, &aside)?;
+
+        if self.results.is_empty() {
+            p.blank()?;
+            return p.line(p.paint("Nothing matched.", Ink::Dim));
+        }
+
+        for result in &self.results {
+            p.blank()?;
+            result.render(p)?;
+        }
+        Ok(())
+    }
+}
+
+impl Render for SearchResult {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        // The heading trail beats the document title: it says where *in* the document the
+        // passage sits, which is the more specific of the two and never wrong when both
+        // are present.
+        let named = !self.heading.is_empty() || self.title.is_some();
+        let label = if !self.heading.is_empty() {
+            &self.heading
+        } else {
+            self.title.as_deref().unwrap_or(&self.url)
+        };
+
+        let rank = p.paint(&format!("{:>2}", self.rank), Ink::Dim);
+        let name = p.paint(&render::truncate(label, p.width().saturating_sub(24)), Ink::Bold);
+        let score = p.paint(&format!("{} · {:.2}", self.source, self.score), Ink::Dim);
+        p.line(format!("{rank}  {name}  {score}"))?;
+
+        p.nest(|p| {
+            p.nest(|p| {
+                p.wrapped(&self.text, Ink::Plain)?;
+                // An untitled passage already used its URL as the headline. Printing it
+                // again underneath is the JSON habit — repeating a field because the
+                // structure has a slot for it.
+                let provenance = if named {
+                    format!(
+                        "{}  ·  {}",
+                        render::truncate_start(&self.url, p.width().saturating_sub(22)),
+                        render::short_time(&self.observed_at),
+                    )
+                } else {
+                    render::short_time(&self.observed_at)
+                };
+                p.line(p.paint(&provenance, Ink::Dim))?;
+                if !self.also_at.is_empty() {
+                    let also = format!(
+                        "also at {}",
+                        render::plural(self.also_at.len(), "address", "addresses")
+                    );
+                    p.line(p.paint(&also, Ink::Dim))?;
+                }
+                Ok(())
+            })
+        })
+    }
 }

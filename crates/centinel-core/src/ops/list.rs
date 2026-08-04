@@ -21,7 +21,7 @@ pub struct SourceSummary {
     /// Addresses not currently `Live`. Capped by `--max-problems`, because a source
     /// that WAF-blocked wholesale would otherwise dump thousands of identical lines.
     pub problems: Vec<Problem>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problems_truncated: Option<usize>,
 }
 
@@ -31,7 +31,7 @@ pub struct Problem {
     pub state: Liveness,
     pub since: String,
     pub consecutive_failures: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 
@@ -117,4 +117,110 @@ pub async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<ListReport> {
         store_root: ctx.store.root().display().to_string(),
         sources: out,
     })
+}
+
+/// One block per source: the counts, the liveness roll-up, then the addresses that are
+/// not `Live`.
+///
+/// `store_root` is not printed. An HTTP caller needs to be told which store answered; a
+/// person typed `--root` or accepted the default two seconds ago, and repeating it back
+/// is the kind of line that trains people to stop reading output.
+impl Render for ListReport {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        if self.sources.is_empty() {
+            p.line(p.paint("No sources yet.", Ink::Dim))?;
+            return p.note("centinel discover --source <name> --site <url>");
+        }
+
+        for (i, source) in self.sources.iter().enumerate() {
+            if i > 0 {
+                p.blank()?;
+            }
+            source.render(p)?;
+        }
+        Ok(())
+    }
+}
+
+impl Render for SourceSummary {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        let counts = format!(
+            "{} · {}",
+            render::plural(self.resources, "resource", "resources"),
+            render::plural(self.observations, "observation", "observations"),
+        );
+        p.title(&self.source, &counts)?;
+
+        p.nest(|p| {
+            // Live first, then the rest — the reading order is "is this healthy, and if
+            // not, how much of it isn't".
+            let mut states: Vec<(&String, &usize)> = self.liveness.iter().collect();
+            states.sort_by_key(|(name, _)| (name.as_str() != "live", name.as_str()));
+
+            let roll_up: Vec<String> = states
+                .iter()
+                .map(|(name, n)| {
+                    format!(
+                        "{} {} {}",
+                        liveness_mark(name).painted(p),
+                        p.paint(&render::count(**n as u64), Ink::Bold),
+                        p.paint(name, Ink::Dim),
+                    )
+                })
+                .collect();
+            if !roll_up.is_empty() {
+                p.line(roll_up.join("   "))?;
+            }
+
+            if self.problems.is_empty() {
+                return Ok(());
+            }
+            p.blank()?;
+            for problem in &self.problems {
+                problem.render(p)?;
+            }
+            if let Some(more) = self.problems_truncated {
+                let text = format!("… and {} more, raise --max-problems to see them", render::count(more as u64));
+                p.line(p.paint(&text, Ink::Dim))?;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl Render for Problem {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        let mark = self.state.mark();
+        let state = format!("{:<8}", self.state);
+        let head = format!(
+            "{}{}",
+            p.paint(&state, mark.ink()),
+            render::truncate(&self.natural_key, p.width().saturating_sub(12)),
+        );
+        p.marked(mark, head)?;
+
+        // Consecutive failures and `since` are the difference between "this broke in the
+        // run you just watched" and "this has been broken for a month", which is the only
+        // thing that decides whether it is worth your afternoon.
+        let mut aside = format!(
+            "{} since {}",
+            render::plural(self.consecutive_failures as usize, "failure", "failures"),
+            render::short_time(&self.since),
+        );
+        if let Some(detail) = &self.detail {
+            aside.push_str(" · ");
+            aside.push_str(&render::one_line(detail));
+        }
+        p.nest(|p| p.wrapped(&aside, Ink::Dim))
+    }
+}
+
+/// The glyph for a liveness *name*, for the roll-up where the state arrives as a map key
+/// rather than as a [`Liveness`].
+fn liveness_mark(name: &str) -> Mark {
+    match name {
+        "live" => Mark::Ok,
+        "blocked" => Mark::Warn,
+        _ => Mark::Bad,
+    }
 }

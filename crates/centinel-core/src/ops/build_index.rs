@@ -203,6 +203,43 @@ fn first_heading(text: &str) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+// -----------------------------------------------------------------------------------------
+// Rendering
+// -----------------------------------------------------------------------------------------
+
+/// The counters, with deduplication called out.
+///
+/// `chunks_deduplicated` is the interesting one and the reason it gets a sentence rather
+/// than a row: it is boilerplate collapsing. A council site repeats the same navigation
+/// header on nine hundred pages, and the figure that shows the index refusing to store it
+/// nine hundred times is the one that explains why `total_chunks` is smaller than a person
+/// expects.
+impl Render for IndexReport {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        p.title(
+            &self.sources.join(", "),
+            &format!("{} of text", render::count(self.total_chars as u64)),
+        )?;
+        p.nest(|p| {
+            p.figures(&[
+                (self.derivations as u64, "derivations"),
+                (self.already_indexed as u64, "already indexed"),
+                (self.documents_indexed as u64, "documents indexed"),
+                (self.chunks_written as u64, "chunks written"),
+                (self.chunks_deduplicated as u64, "chunks deduplicated"),
+            ])?;
+
+            p.blank()?;
+            let totals = format!(
+                "{} in the index, at {}",
+                render::plural(self.total_chunks, "chunk", "chunks"),
+                render::plural(self.total_placements, "placement", "placements"),
+            );
+            p.line(p.paint(&totals, Ink::Dim))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

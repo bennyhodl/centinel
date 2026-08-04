@@ -174,3 +174,90 @@ pub async fn ingest(
         outcomes,
     })
 }
+
+// -----------------------------------------------------------------------------------------
+// Rendering
+// -----------------------------------------------------------------------------------------
+
+/// The four counters, then one line per URL.
+///
+/// `changed` is the counter worth looking at. `stored` says bytes arrived; `changed` says
+/// the record moved — and the gap between them is §5.3's whole point, that a re-fetch of
+/// an unchanged page is archived faithfully without being an event.
+impl Render for IngestReport {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        p.title(&self.source, "")?;
+        p.nest(|p| {
+            p.figures(&[
+                (self.attempted as u64, "attempted"),
+                (self.stored as u64, "stored"),
+                (self.changed as u64, "changed"),
+                (self.failed as u64, "failed"),
+            ])?;
+
+            if self.outcomes.is_empty() {
+                return Ok(());
+            }
+            p.blank()?;
+            for outcome in &self.outcomes {
+                outcome.render(p)?;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl Render for IngestOutcome {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        match self {
+            IngestOutcome::Stored {
+                url,
+                blob_sha,
+                bytes,
+                changed,
+                first_seen,
+                ..
+            } => {
+                // An unchanged re-fetch is a success that did nothing, and dimming it is
+                // how a run over a hundred stable pages shows its six real changes.
+                let ink = if *changed { Ink::Plain } else { Ink::Dim };
+                let head = p.paint(&render::truncate(url, p.width().saturating_sub(4)), ink);
+                p.marked(Mark::Ok, head)?;
+                let note = format!(
+                    "{}  {}  {}",
+                    render::short_sha(blob_sha),
+                    render::bytes(*bytes as u64),
+                    if *first_seen {
+                        "first seen"
+                    } else if *changed {
+                        "changed"
+                    } else {
+                        "unchanged"
+                    },
+                );
+                p.nest(|p| p.line(p.paint(&note, Ink::Dim)))
+            }
+            IngestOutcome::Failed {
+                url,
+                state,
+                detail,
+                consecutive_failures,
+            } => {
+                let mark = state.mark();
+                let state_text = format!("{state:<8}");
+                let head = format!(
+                    "{}{}",
+                    p.paint(&state_text, mark.ink()),
+                    render::truncate(url, p.width().saturating_sub(12)),
+                );
+                p.marked(mark, head)?;
+                let note = format!(
+                    "{} · {}",
+                    render::plural(*consecutive_failures as usize, "failure", "failures"),
+                    render::one_line(detail),
+                );
+                p.nest(|p| p.wrapped(&note, Ink::Dim))
+            }
+        }
+    }
+}

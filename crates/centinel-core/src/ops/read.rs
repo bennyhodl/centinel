@@ -62,7 +62,7 @@ pub struct ReadReport {
     /// True when `offset + chars < total_chars`.
     pub truncated: bool,
     /// Other matches for an ambiguous target. The first was used.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub other_matches: Vec<String>,
 }
 
@@ -157,4 +157,59 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> anyhow::Result<ReadReport> {
         truncated: args.offset + chars < total_chars,
         other_matches,
     })
+}
+
+// -----------------------------------------------------------------------------------------
+// Rendering
+// -----------------------------------------------------------------------------------------
+
+/// A header of provenance, then the document.
+///
+/// The text is what was asked for, so it is printed unwrapped and unpainted — a terminal's
+/// own wrapping preserves the line structure the extractor produced, and re-flowing it here
+/// would silently destroy the paragraph breaks and timestamps that make a transcript
+/// readable.
+impl Render for ReadReport {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        p.title(&render::truncate(&self.url, p.width()), "")?;
+
+        let provenance = format!(
+            "{} · {} · {} · {}",
+            self.source,
+            self.kind,
+            self.tool,
+            render::short_time(&self.observed_at),
+        );
+        p.line(p.paint(&provenance, Ink::Dim))?;
+
+        if !self.other_matches.is_empty() {
+            let note = format!(
+                "{} other {} matched; this is the first",
+                self.other_matches.len(),
+                if self.other_matches.len() == 1 { "address" } else { "addresses" },
+            );
+            p.marked(Mark::Warn, p.paint(&note, Ink::Dim))?;
+        }
+
+        p.blank()?;
+        for line in self.text.lines() {
+            p.line(line)?;
+        }
+
+        // Where the reader is in the document, and how to get the rest. Printed only when
+        // there *is* a rest — a complete document needs no paging instructions.
+        if self.truncated {
+            p.blank()?;
+            let position = format!(
+                "{}–{} of {} characters",
+                render::count(self.offset as u64),
+                render::count((self.offset + self.chars) as u64),
+                render::count(self.total_chars as u64),
+            );
+            p.line(p.paint(&position, Ink::Dim))?;
+            let next = format!("--offset {}", self.offset + self.chars);
+            p.line(p.paint(&next, Ink::Cyan))?;
+        }
+        Ok(())
+    }
 }

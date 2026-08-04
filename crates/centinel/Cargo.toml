@@ -23,6 +23,8 @@ axum.workspace = true
 tokio-stream.workspace = true
 async-stream = "0.3"
 indicatif = "0.18"
+# Terminal size only. Already in the tree under indicatif, so this costs no new download.
+console = "0.16"
 
 [dev-dependencies]
 tempfile = "3"

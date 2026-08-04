@@ -182,6 +182,14 @@ pub type InvokeFn = fn(
     Progress,
 ) -> BoxFuture<'static, anyhow::Result<serde_json::Value>>;
 
+/// Renders an op's result for a person at a terminal.
+///
+/// Takes the same erased JSON [`InvokeFn`] produced, so the CLI needs no second call path
+/// and cannot render something the other two surfaces did not receive. The macro puts the
+/// concrete type back on before handing off to [`crate::render::Render`] — which is what
+/// lets a renderer read `report.failures[0].detail` instead of indexing a `Value`.
+pub type RenderFn = fn(&serde_json::Value, &mut crate::render::Painter<'_>) -> anyhow::Result<()>;
+
 /// One registered operation.
 ///
 /// Built by [`centinel_macros::op`] and submitted to the `inventory` registry. Nothing
@@ -213,6 +221,8 @@ pub struct OpDef {
     /// JSON Schema for the argument type — MCP `inputSchema`, HTTP request body.
     pub schema: fn() -> serde_json::Value,
     pub invoke: InvokeFn,
+    /// How this op's report reads on a terminal. CLI-only; HTTP and MCP want the JSON.
+    pub render: RenderFn,
 }
 
 inventory::collect!(OpDef);
@@ -254,6 +264,25 @@ pub mod __private {
 
     /// Re-exported so expansion sites can name these without importing them.
     pub use super::{Ctx, OpDef, Progress};
+    pub use crate::render::{Painter, Render};
+
+    /// Builds the `render` body: JSON → the concrete report → its own prose.
+    ///
+    /// The round-trip through `Value` is deliberate. Rendering the *serialized* form is
+    /// what guarantees a terminal and an HTTP caller are looking at the same report — a
+    /// field that `skip_serializing_if` hides from the wire is equally invisible here,
+    /// rather than appearing on one surface only.
+    pub fn render_as<O>(
+        value: &serde_json::Value,
+        p: &mut Painter<'_>,
+    ) -> anyhow::Result<()>
+    where
+        O: serde::de::DeserializeOwned + Render,
+    {
+        let report: O = serde_json::from_value(value.clone())?;
+        report.render(p)?;
+        Ok(())
+    }
 
     /// Builds the `args_from_matches` body: clap → struct → JSON.
     ///
@@ -366,5 +395,76 @@ mod tests {
             serde_json::from_str(r#"{"message":"old","done":1,"total":2}"#).unwrap();
         assert!(ev.id.is_none());
         assert_eq!(ev.unit, Unit::Count);
+    }
+}
+
+#[cfg(test)]
+mod render_path_tests {
+    use super::*;
+    use crate::render::Painter;
+    use crate::store::Store;
+
+    /// Renders an op's real output through the erased [`RenderFn`], exactly as the CLI does.
+    async fn render_op(name: &str, args: serde_json::Value) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let ctx = Arc::new(Ctx::new(store));
+
+        let def = find(name).unwrap_or_else(|| panic!("op `{name}` is not registered"));
+        let value = (def.invoke)(ctx, args, Progress::none())
+            .await
+            .expect("op failed");
+
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut p = Painter::new(&mut buf, false, 100);
+            (def.render)(&value, &mut p)
+                .unwrap_or_else(|e| panic!("rendering `{name}` failed: {e}"));
+        }
+        String::from_utf8(buf).unwrap()
+    }
+
+    /// The end-to-end guard on the erased render path.
+    ///
+    /// `render` re-deserializes the JSON that `invoke` produced, so any report field with
+    /// `skip_serializing_if` and no matching `default` makes the CLI fail at the last
+    /// step — after the work is done — on a report the HTTP surface returns happily.
+    /// That is not a rendering bug; it means the type cannot be parsed from its own output,
+    /// and any Rust consumer of the HTTP API hits it too.
+    #[tokio::test]
+    async fn a_report_can_be_rendered_from_its_own_serialized_form() {
+        let out = render_op("list", serde_json::json!({"max_problems": 20})).await;
+        assert!(out.contains("No sources"), "unexpected empty-store render: {out:?}");
+
+        // `doctor` is the one that actually broke: `GateStatus::missing` is skipped when
+        // empty, so a machine with every model installed produced JSON that would not
+        // deserialize back.
+        let out = render_op("doctor", serde_json::json!({"skip_blob_count": true})).await;
+        assert!(out.contains("binaries") && out.contains("gates"), "{out:?}");
+    }
+
+    /// Rendering must not emit escape codes when colour is off — the property that keeps
+    /// `--pretty > file` and `NO_COLOR` honest.
+    #[tokio::test]
+    async fn rendering_without_colour_stays_plain_text() {
+        let out = render_op("doctor", serde_json::json!({"skip_blob_count": true})).await;
+        assert!(!out.contains('\x1b'), "escape codes leaked with colour off");
+    }
+
+    /// Every op must be renderable, not just the ones with a test above. The macro makes
+    /// this a compile-time guarantee; this asserts the registry actually carries it.
+    #[test]
+    fn every_op_carries_a_renderer() {
+        for def in all() {
+            let rendered = {
+                let mut buf: Vec<u8> = Vec::new();
+                let mut p = Painter::new(&mut buf, false, 100);
+                // A null value cannot deserialize into any report, so this must be an
+                // error rather than a panic — a renderer that unwraps would take the CLI
+                // down instead of reporting.
+                (def.render)(&serde_json::Value::Null, &mut p).is_err()
+            };
+            assert!(rendered, "op `{}` rendered from null", def.name);
+        }
     }
 }

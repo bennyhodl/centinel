@@ -10,7 +10,7 @@ A **library** first. The CLI, the HTTP server and the MCP server are thin consum
 
 ```
 crates/
-  centinel-core/    domain model · store · op registry · ops
+  centinel-core/    domain model · store · op registry · ops · rendering
   centinel-macros/  the #[op] attribute
   centinel/         the binary: CLI, HTTP, MCP
 docs/
@@ -110,7 +110,8 @@ The registry is what they share:
         │
         ├── augment_clap ─────────► CLI flags + help text
         ├── schema ───────────────► MCP tool JSON Schema / HTTP request body
-        └── invoke ───────────────► one type-erased call path for all three
+        ├── invoke ───────────────► one type-erased call path for all three
+        └── render ───────────────► the report, in a terminal's idiom (CLI only)
 ```
 
 Registration is link-time via `inventory`, so there is nowhere to forget to add an op. The binary names no individual op; it iterates the registry.
@@ -119,13 +120,30 @@ Registration is link-time via `inventory`, so there is nowhere to forget to add 
 
 **Where the mapping is deliberately not mechanical.** Presence is uniform, prose is not. Every op is reachable from all three surfaces unless it opts out of MCP, but each surface renders the same schema in its own idiom.
 
+### Reports are rendered, not printed
+
+A report is the right shape for HTTP and for MCP — a model reads JSON better than it reads a table — and the wrong shape for a person, who gets forty lines of quoted keys where four lines would do. So the CLI renders it:
+
+```console
+$ centinel list                    # a terminal → prose
+$ centinel list | jq '.sources'    # a pipe → JSON, exactly as before
+$ centinel list --json             # force JSON on a terminal
+$ centinel search x --pretty | less -R    # force prose into a pager
+```
+
+The destination decides the default; `--json` / `--pretty` override the format and `--color=auto|always|never` overrides the colour, independently. `NO_COLOR` is honoured and loses only to an explicit `--color always`.
+
+Rendering reads **the same erased JSON `invoke` produced**, so a terminal can never be shown a field HTTP would not return — and a report that `skip_serializing_if` hides from the wire is equally invisible here. That round-trip means every report type must deserialize from its own serialized form, which is a property any Rust consumer of the HTTP API needs anyway.
+
+Each report implements `Render` beside its own definition, and there is **no structural fallback** — a new op will not compile until its report says how it reads. That is the opposite of a central list: forgetting is impossible because the compiler asks at the definition site, in the one place that knows what the numbers mean. What gets dropped is as deliberate as what gets kept — `store_root`, the `action` discriminant and the full digests are all load-bearing on the wire and noise to a person who just typed the command.
+
 ### Long-running operations
 
 The hardest case. Ops emit progress one way and never learn who called them:
 
 | Surface | Rendering |
 |---|---|
-| CLI | progress bars on stderr when stderr is a terminal, plain lines when it is a pipe — stdout stays a clean JSON stream either way |
+| CLI | progress bars on stderr when stderr is a terminal, plain lines when it is a pipe — so stdout carries only the report, and stays a clean JSON stream whenever it is piped |
 | HTTP | `POST /ops/{name}/stream` → SSE progress frames, then a terminal `result` or `error` |
 | MCP | waits and returns once — base MCP has no streaming channel for tool results |
 
