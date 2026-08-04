@@ -162,7 +162,15 @@ pub async fn extract(
             report.attempted += 1;
             *report.by_kind.entry(kind.to_string()).or_default() += 1;
 
-            let outcome = extract_bytes(kind, &bytes, Some(&resource.natural_key));
+            // The Source's own title, where it has one. A YouTube recording's title is
+            // never spoken aloud, so it reaches the text only from here — see
+            // `extract_captions`.
+            let outcome = extract_bytes(
+                kind,
+                &bytes,
+                Some(&resource.natural_key),
+                obs.meta.get("title").map(String::as_str),
+            );
 
             match &outcome {
                 Extracted::Unextractable { reason } => {

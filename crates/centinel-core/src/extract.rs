@@ -92,12 +92,12 @@ impl Extracted {
 }
 
 /// Extracts text from bytes, dispatching on the content kind from [`crate::fetch`].
-pub fn extract(kind: &str, bytes: &[u8], url: Option<&str>) -> Extracted {
+pub fn extract(kind: &str, bytes: &[u8], url: Option<&str>, title: Option<&str>) -> Extracted {
     match kind {
         "html" => extract_html(bytes, url),
         "pdf" => extract_pdf(bytes),
         "spreadsheet" => extract_spreadsheet(bytes),
-        "captions" => extract_captions(bytes),
+        "captions" => extract_captions(bytes, title),
         "text" | "csv" | "json" | "xml" => match std::str::from_utf8(bytes) {
             Ok(s) => Extracted::Text(Extraction {
                 text: s.to_string(),
@@ -121,11 +121,18 @@ pub fn extract(kind: &str, bytes: &[u8], url: Option<&str>) -> Extracted {
 /// Deliberately **not** the passthrough the `json` arm would apply. Indexing the raw
 /// document would put `wireMagic`, `acAsrConf` and 4,250 newline markers into the search
 /// corpus, and the words a searcher wants would be a minority of the text.
-fn extract_captions(bytes: &[u8]) -> Extracted {
+///
+/// **The `title` is load-bearing and comes from outside the bytes.** A recording titled
+/// *"Mayor Jane Castor 2026 Budget Presentation"* contains the word "Castor" exactly zero
+/// times — nobody says the mayor's surname aloud. Without the title in the text, the most
+/// identifying fact about a meeting is absent from the index and the obvious query finds
+/// nothing. As an `# H1` it becomes the chunker's heading path, so **every** chunk of the
+/// meeting carries it.
+fn extract_captions(bytes: &[u8], title: Option<&str>) -> Extracted {
     match crate::captions::parse_json3(bytes) {
         Ok(caps) => Extracted::Text(Extraction {
-            text: caps.to_markdown(None),
-            title: None,
+            text: caps.to_markdown(title),
+            title: title.map(str::to_string),
             // Named for what produced the *captions*, not for what parsed them: these are
             // YouTube's ASR, and a reader of the provenance needs to know the words were
             // never transcribed locally. `whisper.cpp` on the same audio is a different
@@ -324,6 +331,7 @@ mod tests {
             "html",
             DRUPAL_ISH.as_bytes(),
             Some("https://www.tampa.gov/x"),
+            None,
         );
         let text = out.text().expect("should extract");
 
@@ -346,7 +354,7 @@ mod tests {
         let listing = r#"<html><body><h1>Documents</h1>
             <ul><li><a href="/a.pdf">Budget A</a></li><li><a href="/b.pdf">Budget B</a></li></ul>
             </body></html>"#;
-        let out = extract("html", listing.as_bytes(), None);
+        let out = extract("html", listing.as_bytes(), None, None);
         let text = out.text().expect("must not be dropped");
 
         assert!(text.contains("Budget A"), "listing content was lost");
@@ -358,7 +366,7 @@ mod tests {
     fn scripts_and_styles_never_reach_the_text_even_on_the_fallback_path() {
         let noisy = r#"<html><body><script>var drupalSettings={"a":1}</script>
             <style>body{margin:0}</style><p>Short.</p></body></html>"#;
-        let text = extract("html", noisy.as_bytes(), None)
+        let text = extract("html", noisy.as_bytes(), None, None)
             .text()
             .unwrap()
             .to_string();
@@ -369,26 +377,90 @@ mod tests {
     #[test]
     fn unknown_formats_are_recorded_not_guessed() {
         // .dwg and .dgn CAD files really are in the Hillsborough County corpus.
-        let out = extract("other", b"\x00\x01AC1027", None);
+        let out = extract("other", b"\x00\x01AC1027", None, None);
         assert!(matches!(out, Extracted::Unextractable { .. }));
         assert!(out.text().is_none());
     }
 
     #[test]
     fn a_corrupt_pdf_is_unextractable_rather_than_a_panic() {
-        let out = extract("pdf", b"%PDF-1.7\nnot really a pdf", None);
+        let out = extract("pdf", b"%PDF-1.7\nnot really a pdf", None, None);
         assert!(matches!(out, Extracted::Unextractable { .. }));
     }
 
     #[test]
     fn plain_text_passes_through() {
-        let out = extract("text", b"just some text", None);
+        let out = extract("text", b"just some text", None, None);
         assert_eq!(out.text(), Some("just some text"));
     }
 
     #[test]
     fn invalid_utf8_claiming_to_be_text_is_rejected() {
-        let out = extract("text", &[0xff, 0xfe, 0x00], None);
+        let out = extract("text", &[0xff, 0xfe, 0x00], None, None);
         assert!(matches!(out, Extracted::Unextractable { .. }));
+    }
+
+    fn caption_track() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "wireMagic": "pb3",
+            "events": [
+                { "tStartMs": 1000, "dDurationMs": 4000, "segs": [
+                    {"utf8": "I am proud to present the city's FY 2026 budget."}
+                ]}
+            ]
+        }))
+        .unwrap()
+    }
+
+    /// Measured on a real recording titled *"Mayor Jane Castor 2026 Budget Presentation"*:
+    /// the surname "Castor" appears **zero** times in three hours of speech, because
+    /// nobody says the mayor's name aloud. The title is the most identifying fact about
+    /// the document and it exists only outside the bytes, so extraction has to be handed
+    /// it or the obvious query finds nothing.
+    #[test]
+    fn a_caption_track_carries_the_title_that_is_never_spoken() {
+        let out = extract(
+            "captions",
+            &caption_track(),
+            None,
+            Some("Mayor Jane Castor 2026 Budget Presentation"),
+        );
+        let text = out.text().expect("captions should extract");
+
+        assert!(
+            text.starts_with("# Mayor Jane Castor 2026 Budget Presentation\n"),
+            "the title must lead, so the chunker adopts it as the heading path: {text}"
+        );
+        assert!(text.contains("[00:00:01] I am proud to present"));
+        assert!(
+            !text.contains("wireMagic"),
+            "the raw document must not reach the index"
+        );
+    }
+
+    #[test]
+    fn a_caption_track_without_a_title_still_extracts() {
+        let out = extract("captions", &caption_track(), None, None);
+        let text = out.text().expect("captions should extract");
+        assert!(!text.starts_with('#'));
+        assert!(text.contains("[00:00:01] I am proud to present"));
+    }
+
+    /// A caption track is `application/json`, and so is a video's metadata document. The
+    /// passthrough would index `wireMagic` and 4,250 newline markers as if they were
+    /// speech, so the sniff — not the declared type — has to pick the extractor.
+    #[test]
+    fn a_caption_track_is_not_treated_as_plain_json() {
+        use std::collections::BTreeMap;
+        let mut meta = BTreeMap::new();
+        meta.insert("content-type".to_string(), "application/json".to_string());
+        assert_eq!(
+            crate::fetch::content_kind(&meta, &caption_track()),
+            "captions"
+        );
+        assert_eq!(
+            crate::fetch::content_kind(&meta, br#"{"id":"abc","title":"a video"}"#),
+            "json"
+        );
     }
 }
