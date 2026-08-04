@@ -66,6 +66,22 @@ fn default_sample() -> usize {
     10
 }
 
+/// So a caller inside the library — [`crate::ops::run`] — gets the same limits the CLI
+/// does, rather than a second set that drifts from the `default_value_t` above.
+impl Default for DiscoverArgs {
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            site: String::new(),
+            rps: default_rps(),
+            max_sitemaps: default_max_sitemaps(),
+            max_urls: default_max_urls(),
+            sample: default_sample(),
+            dry_run: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DiscoverReport {
     pub source: String,
@@ -89,7 +105,7 @@ pub struct DiscoverReport {
 }
 
 /// Discover every URL a site declares via robots.txt and its sitemaps.
-#[op(long_running)]
+#[op(long_running, group = "stage")]
 pub async fn discover(
     ctx: &Ctx,
     args: DiscoverArgs,

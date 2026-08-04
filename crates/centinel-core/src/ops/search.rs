@@ -82,7 +82,7 @@ pub struct SearchReport {
 }
 
 /// Search the corpus for a passage.
-#[op]
+#[op(group = "corpus")]
 pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport> {
     let db_path = ctx.store.root().join("centinel.db");
     anyhow::ensure!(

@@ -59,7 +59,7 @@ fn default_max_problems() -> usize {
 }
 
 /// List sources in the store with resource counts and liveness.
-#[op]
+#[op(group = "corpus")]
 pub async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<ListReport> {
     let sources = match &args.source {
         Some(s) => vec![SourceId::new(s.clone())?],

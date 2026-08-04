@@ -50,6 +50,19 @@ fn default_sample() -> usize {
     5
 }
 
+/// So [`crate::ops::run`] inherits the CLI's defaults instead of restating them.
+impl Default for ExtractArgs {
+    fn default() -> Self {
+        Self {
+            source: None,
+            limit: None,
+            refresh: false,
+            kind: None,
+            sample: default_sample(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ExtractSample {
     pub url: String,
@@ -91,7 +104,7 @@ pub struct ExtractReport {
 }
 
 /// Derive searchable text from collected documents.
-#[op(long_running)]
+#[op(long_running, group = "stage")]
 pub async fn extract(
     ctx: &Ctx,
     args: ExtractArgs,

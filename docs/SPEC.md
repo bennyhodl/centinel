@@ -432,7 +432,11 @@ Multiple hits from one document appear separately. Every hit is **independently 
 
 [#9](https://github.com/bennyhodl/centinel/issues/9) — the single-definition mechanism — is **closed**. Its decision is recorded in `crates/centinel-core/src/op.rs` rather than here, since the module doc sits beside the code it constrains: a `#[op]` macro with link-time registration via `inventory`, one args struct deriving both `clap::Args` and `JsonSchema`, presence uniform across surfaces while prose is not, and `local_only` enforced on call rather than merely omitted from `tools/list`.
 
-Also unspecified: the concrete `centinel.toml` schema, server access control, and the teardown plan for the v1 codebase.
+The **`centinel.toml` schema** is now partly settled, and its decision is recorded in `crates/centinel-core/src/config.rs` rather than here, beside the code it constrains. What is fixed: `[[source]]` blocks carrying `id` plus exactly one of `site` or `channel` — the §4.1 claim that the two Source kinds differ only in acquisition, spelled as one key; a `[defaults]` table each source may override; `[open]` as before; and unknown keys rejected rather than ignored, because `[[sources]]` typed by reflex would otherwise parse cleanly and collect nothing.
+
+What that does **not** settle is scheduling. `centinel run` walks the sources and every stage skips work it has already done, so a cron entry is enough for cadence — but *when* to recrawl, when `Live` becomes `Gone`, and whether a vendor `LastModifiedUtc` can be trusted instead of a crawl all still belong to [#7](https://github.com/bennyhodl/centinel/issues/7).
+
+Also unspecified: server access control, and the teardown plan for the v1 codebase.
 
 ---
 
@@ -455,4 +459,4 @@ Sections 3–6 are decided. **Do not relitigate them** — each carries its reas
 
 If implementation reveals a decision here is wrong, that is a real finding: say so explicitly, name which section, and reopen the ticket it came from. Silent drift away from this document is the failure mode it exists to prevent.
 
-The seven open decisions in §8 must be resolved before the system is fully specified. They do not block starting on §3–§6.
+The six open decisions in §8 must be resolved before the system is fully specified. They do not block starting on §3–§6.

@@ -76,6 +76,21 @@ fn default_max_failures() -> usize {
     20
 }
 
+/// So [`crate::ops::run`] inherits the CLI's limits instead of restating them.
+impl Default for CollectArgs {
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            limit: None,
+            rps: default_rps(),
+            refresh: false,
+            matches: Vec::new(),
+            max_mb: default_max_mb(),
+            max_failures: default_max_failures(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct CollectFailure {
     pub url: String,
@@ -108,7 +123,7 @@ pub struct CollectReport {
 }
 
 /// Fetch every address the latest discovery run found, skipping what is already stored.
-#[op(long_running)]
+#[op(long_running, group = "stage")]
 pub async fn collect(
     ctx: &Ctx,
     args: CollectArgs,

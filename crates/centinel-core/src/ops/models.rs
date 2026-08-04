@@ -158,7 +158,7 @@ pub enum ModelsReport {
 }
 
 /// Inspect, fetch, verify and remove model weights.
-#[op(long_running, local_only)]
+#[op(long_running, local_only, group = "host")]
 pub async fn models(
     _ctx: &Ctx,
     args: ModelsArgs,

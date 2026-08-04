@@ -190,6 +190,48 @@ pub type InvokeFn = fn(
 /// lets a renderer read `report.failures[0].detail` instead of indexing a `Value`.
 pub type RenderFn = fn(&serde_json::Value, &mut crate::render::Painter<'_>) -> anyhow::Result<()>;
 
+/// Which heading an op lists under in `centinel --help`.
+///
+/// Presentation only — every surface still reaches every op, and nothing here changes
+/// what an op *is*. It exists because a flat alphabetical list of sixteen verbs makes
+/// `collect`, `embed` and `doctor` look like peer choices when the first two are steps
+/// of a pipeline `run` performs for you and the third is a health check.
+///
+/// Declared at the op, so the grouping is not a list in the CLI crate to forget to
+/// update — the same reason registration is link-time (SPEC §8, ticket #9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    /// What you run. `run` and the config that feeds it.
+    Pipeline,
+    /// One stage of what `run` does, for when you want just that stage.
+    Stage,
+    /// Questions asked of what has already been collected.
+    Corpus,
+    /// The machine, not the corpus.
+    Host,
+}
+
+impl Group {
+    /// Reading order for `--help`: what to type first, then its parts, then the corpus,
+    /// then the machine.
+    pub const ORDER: [Group; 4] = [Self::Pipeline, Self::Stage, Self::Corpus, Self::Host];
+
+    /// The heading text. Plural where the group holds interchangeable members.
+    pub fn heading(&self) -> &'static str {
+        match self {
+            Self::Pipeline => "Pipeline",
+            Self::Stage => "Stages",
+            Self::Corpus => "Corpus",
+            Self::Host => "Host",
+        }
+    }
+}
+
+/// Every op in a group, in registry (alphabetical) order.
+pub fn in_group(group: Group) -> Vec<&'static OpDef> {
+    all().into_iter().filter(|o| o.group == group).collect()
+}
+
 /// One registered operation.
 ///
 /// Built by [`centinel_macros::op`] and submitted to the `inventory` registry. Nothing
@@ -199,6 +241,8 @@ pub struct OpDef {
     pub name: &'static str,
     /// One line. Becomes clap's `about` and the MCP tool description.
     pub about: &'static str,
+    /// Which `--help` heading this op lists under. CLI presentation only.
+    pub group: Group,
     /// Whether this op reports progress worth streaming. Surfaces use it to decide
     /// between a plain response and a streamed one.
     pub long_running: bool,
@@ -263,7 +307,7 @@ pub mod __private {
     pub use serde_json;
 
     /// Re-exported so expansion sites can name these without importing them.
-    pub use super::{Ctx, OpDef, Progress};
+    pub use super::{Ctx, Group, OpDef, Progress};
     pub use crate::render::{Painter, Render};
 
     /// Builds the `render` body: JSON → the concrete report → its own prose.

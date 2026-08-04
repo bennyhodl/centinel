@@ -123,7 +123,7 @@ pub struct DoctorArgs {
 }
 
 /// Report host readiness: required binaries, store location, corpus size.
-#[op]
+#[op(group = "host")]
 pub async fn doctor(ctx: &Ctx, args: DoctorArgs) -> anyhow::Result<DoctorReport> {
     let mut binaries = vec![
         probe(

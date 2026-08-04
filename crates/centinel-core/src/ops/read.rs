@@ -67,7 +67,7 @@ pub struct ReadReport {
 }
 
 /// Read the extracted text of a collected document.
-#[op]
+#[op(group = "corpus")]
 pub async fn read(ctx: &Ctx, args: ReadArgs) -> anyhow::Result<ReadReport> {
     let sources = match &args.source {
         Some(s) => vec![SourceId::new(s.clone())?],

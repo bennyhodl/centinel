@@ -2,7 +2,7 @@
 
 How Centinel is built. For *why*, see [the README](../README.md); for the settled design decisions and their reasoning, see [`SPEC.md`](SPEC.md).
 
-> **Status: spine.** The domain model, the store, and the CLI/MCP/HTTP derivation are built and tested. Search and retrieval is specified but **not implemented**. Seven design decisions remain open — [`SPEC.md`](SPEC.md) §8 lists them and what each one owns.
+> **Status: spine.** The domain model, the store, and the CLI/MCP/HTTP derivation are built and tested. Search and retrieval is specified but **not implemented**. Six design decisions remain open — [`SPEC.md`](SPEC.md) §8 lists them and what each one owns.
 
 ## The shape
 
@@ -10,12 +10,13 @@ A **library** first. The CLI, the HTTP server and the MCP server are thin consum
 
 ```
 crates/
-  centinel-core/    domain model · store · op registry · ops · rendering
+  centinel-core/    domain model · store · config · op registry · ops · rendering
   centinel-macros/  the #[op] attribute
   centinel/         the binary: CLI, HTTP, MCP
 docs/
   SPEC.md           the settled specification — read this first
   research/         ~3,850 lines, ~450 primary-source citations
+centinel.toml       what to collect
 ```
 
 ## Files are the only truth
@@ -87,6 +88,74 @@ Two ideas carry most of the weight:
 
 `Document`, `Transcript` and `Sitemap` are **not entities**. Derived artifacts are Blobs linked by a `Derivation` carrying tool, version and model tier — so "the source changed" stays mechanically distinguishable from "tesseract was upgraded". A sitemap is a `DiscoveryRun` snapshot.
 
+## The pipeline
+
+Collection is one process with six stages. Typing them in order is a chore that also has to be got right — `index` before `extract` silently indexes nothing — so the order is written down once, in `centinel.toml`:
+
+```toml
+[[source]]
+id   = "tampa"
+site = "https://www.tampa.gov"
+
+[[source]]
+id      = "tampa-council"
+channel = "https://www.youtube.com/@CityofTampa"
+```
+
+```console
+$ centinel run                      # every source: discover → collect → extract → index → embed
+$ centinel run --source tampa       # one of them
+$ centinel run --skip embed         # stop before the hours-long stage
+```
+
+`site` versus `channel` is the *whole* of the website/YouTube difference, mirroring the domain model: the two Source kinds are peers differing only in acquisition, so the config difference is one key and everything downstream is shared.
+
+### The config is intent; the store is fact
+
+They can disagree. Running `centinel discover --source hillsborough --site …` by hand collects a source the config never named — so `run` ignores it, correctly, because nothing declared it. Left there, that is an invisible corpus.
+
+So `source list` reports the **union**, marking what the config does not name:
+
+```console
+$ centinel source list
+   source        kind  resources             target
+✓  tampa         site      1,847             https://www.tampa.gov
+   hillsborough  site        412  untracked  https://www.hillsboroughcounty.org
+
+1 source is in the store but not in the config — `centinel run` skips it.
+  centinel source adopt
+```
+
+Those addresses are **read back out of the log, not guessed**. `DiscoveryRun::method` says `sitemap` or `playlist`, and the resources say where from — provenance recorded for other reasons, answering this. A channel is the interesting case: the log records the videos, never the channel they were listed from, but the archived `yt-dlp -J` document beside each recording carries `uploader_url`. Retaining originals (§5.4) pays for a question nobody had yet.
+
+`centinel source adopt` writes every recoverable one into the config; `centinel source add <id>` with no `--site`/`--channel` does the same for one. A source whose address cannot be recovered is **named and skipped** rather than written as a block that would fail on the next run.
+
+### Two phases, because model loads dominate
+
+```
+  per source   discover → collect                      network-bound, per-host paced
+  then once    extract → transcribe → index → embed    CPU-bound, model-backed
+```
+
+Acquisition is per source because politeness is per host and a 403 on one site must not stop the next. Derivation is corpus-wide because `transcribe` and `embed` each build a multi-gigabyte model — with twenty sources, naive per-source chaining spends more time loading weights than embedding. It also fixes an ordering hazard for free: `index` runs after *every* source has extracted, so a chunk appearing in two sources is placed against both.
+
+A stage whose model is not installed is **skipped, not failed** — an hour of crawling must not be thrown away over a download that was never started, and the stage resumes on the next run once the weights are there. A source that fails is isolated: its remaining stages are skipped, every other source still runs, and the report says which broke.
+
+### Incremental is inherited, not implemented
+
+Nothing in `run` diffs anything. Every stage already skips work it has done:
+
+| Stage | Work list | Falls out of |
+|---|---|---|
+| `collect` | latest `DiscoveryRun` − resources already observed | the append-only log |
+| `extract` | observations − blobs that already have a derivation | the append-only log |
+| `index` | derivations − those already chunked in | the index |
+| `embed` | indexed chunk hashes − hashes already cached | the content-addressed cache |
+
+Each is a consequence of files-being-truth rather than a checkpoint file, which is what the storage design in [`SPEC.md`](SPEC.md) §5 was bought for. So a second run does nothing, at every stage, for the same structural reason the first one was resumable — and a re-crawled site is ~95% identical text, so identical chunks hash identically and never reach the model twice (§6.1).
+
+That is what makes this the cron command. Twice a day costs one sitemap walk per source plus whatever actually changed, and a run that found nothing says `nothing new` in one line.
+
 ## One definition, three surfaces
 
 An op is an ordinary async function. Annotating it puts it on the CLI, in the MCP tool list, and at an HTTP route — with **no central registration list to update**:
@@ -119,6 +188,8 @@ Registration is link-time via `inventory`, so there is nowhere to forget to add 
 **Why a proc macro** rather than build-time codegen or a runtime registry: codegen puts generated source in the tree and makes the definition site not the source of truth; a runtime registry needs an explicit `register(…)` call per op — exactly the central list this avoids, and exactly the thing people forget. *Accepted cost:* proc macros degrade error messages, mitigated by keeping expansion thin.
 
 **Where the mapping is deliberately not mechanical.** Presence is uniform, prose is not. Every op is reachable from all three surfaces unless it opts out of MCP, but each surface renders the same schema in its own idiom.
+
+Each op also declares a **group** — `pipeline`, `stage`, `corpus` or `host` — which decides only the heading it lists under in `centinel --help`. Sixteen verbs in one alphabetical column make `collect`, `embed` and `doctor` look like peer choices, when the first two are steps of what `run` does for you. The group lives on the op rather than in the CLI crate for the same reason registration does: there is nowhere to forget it.
 
 ### Reports are rendered, not printed
 
@@ -177,15 +248,11 @@ cargo build
 # What is this machine missing?
 centinel doctor
 
-# What does a city say it has? ~3 seconds for Tampa's 11,476 URLs.
-centinel discover --source tampa --site https://www.tampa.gov --rps 3
+# Name a source, then collect it. --limit tries a site before committing an hour.
+centinel source add tampa --site https://www.tampa.gov
+centinel run --limit 50
 
-# Fetch it. --limit lets you try a site before committing an hour.
-centinel collect --source tampa --limit 50 --rps 5
-
-# Bytes -> text -> searchable passages
-centinel extract
-centinel index
+# Ask it something
 centinel search "lobbyist meeting log"
 
 # What is in the store, and what state is it in?
@@ -194,6 +261,20 @@ centinel list
 # Serve it
 centinel serve          # HTTP + MCP over HTTP
 centinel mcp            # MCP over stdio
+```
+
+Re-run `centinel run` and it says `nothing new`. Put it in cron and that is the steady state — it costs one sitemap walk per source plus whatever changed.
+
+### The stages, individually
+
+`run` performs these in order; each is also its own command, for when you want one of them:
+
+```bash
+centinel discover --source tampa --site https://www.tampa.gov --rps 3
+centinel collect  --source tampa --limit 50 --rps 5
+centinel extract
+centinel index
+centinel embed
 ```
 
 `collect` is **resumable with no checkpoint file**: the work list is the latest
@@ -392,4 +473,4 @@ than a prerequisite.
 Hybrid RRF fusion, reranking, crawling, YouTube, scheduling. The pieces exist —
 FTS5 BM25, the vector cache, and a working embedder — but nothing fuses them yet.
 
-[`SPEC.md`](SPEC.md) §3–§6 are settled and should not be relitigated without reopening the ticket they came from. §8 lists the seven open decisions.
+[`SPEC.md`](SPEC.md) §3–§6 are settled and should not be relitigated without reopening the ticket they came from. §8 lists the six open decisions.
