@@ -419,17 +419,18 @@ Multiple hits from one document appear separately. Every hit is **independently 
 
 ## 8. Not yet specified
 
-**Seven decisions remain open.** They are independent of one another and sit on top of §3–§6.
+**Six decisions remain open.** They are independent of one another and sit on top of §3–§6.
 
 | # | Ticket | Owns |
 |---|---|---|
 | [#4](https://github.com/bennyhodl/centinel/issues/4) | Crawl scope, boundary & politeness | Build-vs-buy on Firecrawl · site boundary · the per-host UA/rate/contact policy table · robots stance · what is captured vs merely mapped |
 | [#7](https://github.com/bennyhodl/centinel/issues/7) | Change detection & scheduling | **The `fingerprint` normalization rules** · trusting vendor `LastModifiedUtc` · when `Live` becomes `Gone` · cadence · idempotency and resumability · the phantom-diff *policy* |
 | [#8](https://github.com/bennyhodl/centinel/issues/8) | YouTube as a Source | ~~Whisper tier~~ (§3.6, registry) · ~~VAD~~ (§3.6, mandatory) · audio retention · metadata change semantics · whether Granicus/Swagit demotes YouTube to a fallback · **the bot wall** — measured to persist across yt-dlp 2026.03.17 → 2026.07.04, so it is the IP and not a stale extractor: whether cookies or a PO-token provider are in scope, or a blocked day is simply a blocked day |
-| [#9](https://github.com/bennyhodl/centinel/issues/9) | Single-definition → CLI/MCP/HTTP | The generation mechanism · how long operations express themselves across three consumers · what is deliberately not exposed |
-| [#11](https://github.com/bennyhodl/centinel/issues/11) | Distribution & packaging | Install channel · whether `cargo install` survives `whisper-rs`'s C++ build · platform matrix · where the version-pin table lives |
-| [#12](https://github.com/bennyhodl/centinel/issues/12) | Document extraction pipeline | Routing thresholds · per-page OCR · broken-encoding fallback · table representation · non-PDF formats · failure semantics |
-| [#13](https://github.com/bennyhodl/centinel/issues/13) | Hardware profiling & model tiers | What is profiled · whisper tiers · the floor machine · model registry integrity |
+| [#11](https://github.com/bennyhodl/centinel/issues/11) | Distribution & packaging | Install channel · whether `cargo install` survives **two** C++ builds · platform matrix · where the version-pin table lives · that Centinel now ships as two executables (§3.6) |
+| [#12](https://github.com/bennyhodl/centinel/issues/12) | Document extraction pipeline | Routing thresholds · per-page OCR (**never executed** — `pdftoppm` absent) · broken-encoding fallback · table representation · DOCX/PPTX |
+| [#13](https://github.com/bennyhodl/centinel/issues/13) | Hardware profiling & model tiers | What is profiled · the floor machine · whether better hardware replaces or versions an artifact. ~~Model registry integrity~~ — pinned by repo + revision, checksum-verified, licence recorded |
+
+[#9](https://github.com/bennyhodl/centinel/issues/9) — the single-definition mechanism — is **closed**. Its decision is recorded in `crates/centinel-core/src/op.rs` rather than here, since the module doc sits beside the code it constrains: a `#[op]` macro with link-time registration via `inventory`, one args struct deriving both `clap::Args` and `JsonSchema`, presence uniform across surfaces while prose is not, and `local_only` enforced on call rather than merely omitted from `tools/list`.
 
 Also unspecified: the concrete `centinel.toml` schema, server access control, and the teardown plan for the v1 codebase.
 
