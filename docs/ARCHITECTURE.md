@@ -110,6 +110,26 @@ $ centinel run --skip embed         # stop before the hours-long stage
 
 `site` versus `channel` is the *whole* of the website/YouTube difference, mirroring the domain model: the two Source kinds are peers differing only in acquisition, so the config difference is one key and everything downstream is shared.
 
+### The config is intent; the store is fact
+
+They can disagree. Running `centinel discover --source hillsborough --site …` by hand collects a source the config never named — so `run` ignores it, correctly, because nothing declared it. Left there, that is an invisible corpus.
+
+So `source list` reports the **union**, marking what the config does not name:
+
+```console
+$ centinel source list
+   source        kind  resources             target
+✓  tampa         site      1,847             https://www.tampa.gov
+   hillsborough  site        412  untracked  https://www.hillsboroughcounty.org
+
+1 source is in the store but not in the config — `centinel run` skips it.
+  centinel source adopt
+```
+
+Those addresses are **read back out of the log, not guessed**. `DiscoveryRun::method` says `sitemap` or `playlist`, and the resources say where from — provenance recorded for other reasons, answering this. A channel is the interesting case: the log records the videos, never the channel they were listed from, but the archived `yt-dlp -J` document beside each recording carries `uploader_url`. Retaining originals (§5.4) pays for a question nobody had yet.
+
+`centinel source adopt` writes every recoverable one into the config; `centinel source add <id>` with no `--site`/`--channel` does the same for one. A source whose address cannot be recovered is **named and skipped** rather than written as a block that would fail on the next run.
+
 ### Two phases, because model loads dominate
 
 ```

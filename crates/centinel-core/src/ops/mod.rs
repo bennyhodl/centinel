@@ -43,7 +43,7 @@ pub use list::{ListArgs, ListReport, Problem, SourceSummary, list};
 pub use run::{RunArgs, RunReport, SourceKind, SourceRun, Stage, StageRun, StageStatus, run};
 pub use search::{SearchArgs, SearchReport, SearchResult, search};
 pub use source::{
-    AddArgs, ConfiguredSource, RemoveArgs as SourceRemoveArgs, SourceAction, SourceArgs,
+    AddArgs, AdoptArgs, ConfiguredSource, RemoveArgs as SourceRemoveArgs, SourceAction, SourceArgs,
     SourceReport, source,
 };
 pub use transcribe::{
