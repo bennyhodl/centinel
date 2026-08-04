@@ -32,6 +32,7 @@ use syn::{FnArg, ItemFn, LitBool, LitStr, ReturnType, Type, spanned::Spanned};
 struct OpAttr {
     name: Option<String>,
     about: Option<String>,
+    group: Option<(String, proc_macro2::Span)>,
     long_running: bool,
     mcp: Option<bool>,
     local_only: bool,
@@ -57,6 +58,8 @@ struct OpAttr {
 ///
 /// - `name = "…"` — override the derived kebab-case name
 /// - `about = "…"` — override the description (defaults to the first doc-comment line)
+/// - `group = "…"` — which heading this op lists under in `centinel --help`:
+///   `pipeline`, `stage`, `corpus` (the default) or `host`
 /// - `long_running` — hint that surfaces should stream progress
 /// - `mcp = false` — exclude from the MCP tool list while keeping CLI and HTTP
 /// - `local_only` — act on the host; exclude from **both** MCP and HTTP
@@ -68,6 +71,9 @@ pub fn op(attr: TokenStream, item: TokenStream) -> TokenStream {
             parsed.name = Some(meta.value()?.parse::<LitStr>()?.value());
         } else if meta.path.is_ident("about") {
             parsed.about = Some(meta.value()?.parse::<LitStr>()?.value());
+        } else if meta.path.is_ident("group") {
+            let lit = meta.value()?.parse::<LitStr>()?;
+            parsed.group = Some((lit.value(), lit.span()));
         } else if meta.path.is_ident("long_running") {
             // Bare flag, or `long_running = true`.
             parsed.long_running = match meta.value() {
@@ -86,7 +92,8 @@ pub fn op(attr: TokenStream, item: TokenStream) -> TokenStream {
             });
         } else {
             return Err(meta.error(
-                "unknown `op` option; expected one of: name, about, long_running, mcp, local_only",
+                "unknown `op` option; expected one of: name, about, group, long_running, mcp, \
+                 local_only",
             ));
         }
         Ok(())
@@ -145,6 +152,7 @@ fn expand(attr: OpAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     let long_running = attr.long_running;
     let mcp = attr.mcp.unwrap_or(true);
     let local_only = attr.local_only;
+    let group = group_variant(attr.group)?;
 
     // A private module per op keeps four generated helpers out of the parent namespace
     // while still letting `use super::*` see the function and its argument type.
@@ -218,6 +226,7 @@ fn expand(attr: OpAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                 __p::OpDef {
                     name: #name,
                     about: #about,
+                    group: __p::Group::#group,
                     long_running: #long_running,
                     mcp: #mcp,
                     local_only: #local_only,
@@ -230,6 +239,34 @@ fn expand(attr: OpAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
     })
+}
+
+/// Maps `group = "…"` to a `centinel_core::op::Group` variant.
+///
+/// Resolved here rather than passed through as a string so a typo is a compile error at
+/// the annotation, naming the four headings. A misfiled op is only cosmetic, but the
+/// cost of catching it is one match arm.
+fn group_variant(group: Option<(String, proc_macro2::Span)>) -> syn::Result<proc_macro2::Ident> {
+    let Some((name, span)) = group else {
+        // An op that does not say is one that reads the corpus — the common addition,
+        // and the heading where an unclassified verb is least surprising.
+        return Ok(format_ident!("Corpus"));
+    };
+    let variant = match name.as_str() {
+        "pipeline" => "Pipeline",
+        "stage" => "Stage",
+        "corpus" => "Corpus",
+        "host" => "Host",
+        other => {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "unknown op group `{other}`; expected one of: pipeline, stage, corpus, host"
+                ),
+            ));
+        }
+    };
+    Ok(format_ident!("{}", variant))
 }
 
 /// Extracts `O` from `-> anyhow::Result<O>`.

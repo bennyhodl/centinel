@@ -10,7 +10,7 @@
 
 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — How it is built. The store, the domain model, and how one function definition becomes a CLI command, an MCP tool, and an HTTP route. Includes the quickstart.
 
-**[docs/SPEC.md](docs/SPEC.md)** — The settled specification. Every locked decision with its reasoning and its accepted costs, plus the seven that are still open.
+**[docs/SPEC.md](docs/SPEC.md)** — The settled specification. Every locked decision with its reasoning and its accepted costs, plus the six that are still open.
 
 **[docs/research/](docs/research/)** — The evidence underneath it. ~3,850 lines, ~450 primary-source citations.
 

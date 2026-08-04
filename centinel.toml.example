@@ -1,9 +1,33 @@
 # Centinel configuration.
 #
-# Only [open] is currently read. The rest of the schema is not yet specified.
+# `centinel run` walks every [[source]] below: discover, collect, extract, index, then
+# one corpus-wide embed. Every stage skips work it has already done, so running it twice
+# is cheap and running it from cron is the intended use.
+
+[defaults]
+# Requests per second, per host. Deliberately slow.
+rps = 1.0
+embed_model = "qwen3-embedding-4b"
+transcribe_model = "whisper-large-v3-turbo"
+lang = "en"
+
+# A website. `site` is any URL on it; only the origin is used.
+#   [[source]]
+#   id = "tampa"
+#   site = "https://www.tampa.gov"
+
+# A YouTube channel — a peer of a website, differing only in how it is acquired.
+#   [[source]]
+#   id = "tampa-council"
+#   channel = "https://www.youtube.com/@CityofTampa"
+#   audio_if_no_captions = true
 
 [open]
-pdf      = "Preview"
-markdown = "TextEdit"
-html     = "Safari"
-default  = "system"
+# Either an application name, or a command template containing {path}.
+#   pdf      = "Adobe Acrobat"
+#   markdown = "Obsidian"
+#   html     = "Safari"
+#   text     = "nvim {path}"
+#
+# "system" hands the file to the OS default handler.
+default = "system"

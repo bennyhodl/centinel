@@ -19,7 +19,9 @@ mod list;
 mod models;
 mod open;
 mod read;
+mod run;
 mod search;
+mod source;
 mod transcribe;
 mod youtube;
 
@@ -38,7 +40,12 @@ pub use embed::{EmbedArgs, EmbedReport, Skipped, embed};
 pub use extract::{ExtractArgs, ExtractReport, ExtractSample, Unreadable, extract};
 pub use ingest::{IngestArgs, IngestOutcome, IngestReport, ingest};
 pub use list::{ListArgs, ListReport, Problem, SourceSummary, list};
+pub use run::{RunArgs, RunReport, SourceKind, SourceRun, Stage, StageRun, StageStatus, run};
 pub use search::{SearchArgs, SearchReport, SearchResult, search};
+pub use source::{
+    AddArgs, ConfiguredSource, RemoveArgs as SourceRemoveArgs, SourceAction, SourceArgs,
+    SourceReport, source,
+};
 pub use transcribe::{
     TranscribeArgs, TranscribeFailure, TranscribeReport, TranscribedItem, transcribe,
 };

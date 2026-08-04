@@ -77,6 +77,20 @@ fn default_batch() -> usize {
     DEFAULT_BATCH
 }
 
+/// So [`crate::ops::run`] batches as the CLI does — the measured 6.1 vs 18.5 chunks/sec
+/// difference documented above is not something a second default should be able to lose.
+impl Default for EmbedArgs {
+    fn default() -> Self {
+        Self {
+            model: default_model(),
+            variant: None,
+            batch: default_batch(),
+            limit: None,
+            dry_run: false,
+        }
+    }
+}
+
 /// A chunk that could not be embedded. One failure does not abandon the run.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Skipped {
@@ -105,7 +119,7 @@ pub struct EmbedReport {
 }
 
 /// Embed indexed chunks into the durable vector cache.
-#[op(long_running)]
+#[op(long_running, group = "stage")]
 pub async fn embed(ctx: &Ctx, args: EmbedArgs, progress: &Progress) -> anyhow::Result<EmbedReport> {
     anyhow::ensure!(args.batch > 0, "--batch must be at least 1");
 

@@ -87,6 +87,24 @@ fn default_model() -> String {
     "whisper-large-v3-turbo".to_string()
 }
 
+/// So [`crate::ops::run`] inherits the CLI's defaults — including `allow_no_vad: false`,
+/// which is the documented mitigation for Whisper hallucinating over dead air and must
+/// not become opt-out by way of a second default.
+impl Default for TranscribeArgs {
+    fn default() -> Self {
+        Self {
+            source: None,
+            model: default_model(),
+            variant: None,
+            language: None,
+            limit: None,
+            refresh: false,
+            allow_no_vad: false,
+            dry_run: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct TranscribedItem {
     pub url: String,
@@ -130,7 +148,7 @@ pub struct TranscribeReport {
 }
 
 /// Transcribe collected audio with a local Whisper model.
-#[op(long_running)]
+#[op(long_running, group = "stage")]
 pub async fn transcribe(
     ctx: &Ctx,
     args: TranscribeArgs,

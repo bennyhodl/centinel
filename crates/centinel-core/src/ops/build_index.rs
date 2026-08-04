@@ -47,6 +47,20 @@ fn default_overlap() -> usize {
     crate::chunk::DEFAULT_OVERLAP_CHARS
 }
 
+/// So [`crate::ops::run`] chunks exactly as the CLI does. Chunk geometry is baked into
+/// every `chunk_hash`, so a second set of defaults here would silently re-embed the
+/// corpus the first time the two disagreed.
+impl Default for IndexArgs {
+    fn default() -> Self {
+        Self {
+            source: None,
+            rebuild: false,
+            target_chars: default_target(),
+            overlap_chars: default_overlap(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct IndexReport {
     pub sources: Vec<String>,
@@ -64,7 +78,7 @@ pub struct IndexReport {
 }
 
 /// Chunk extracted text into the search index.
-#[op(long_running)]
+#[op(long_running, group = "stage")]
 pub async fn index(ctx: &Ctx, args: IndexArgs, progress: &Progress) -> anyhow::Result<IndexReport> {
     let sources = match &args.source {
         Some(s) => vec![SourceId::new(s.clone())?],

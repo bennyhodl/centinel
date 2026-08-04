@@ -85,7 +85,7 @@ pub struct IngestReport {
 }
 
 /// Fetch one or more URLs into the content-addressed store.
-#[op(long_running)]
+#[op(long_running, group = "stage")]
 pub async fn ingest(
     ctx: &Ctx,
     args: IngestArgs,

@@ -73,7 +73,7 @@ pub struct OpenReport {
 /// template, so exposing it over MCP or HTTP would be arbitrary command execution
 /// against a server that has no authentication. Agents wanting the *content* of a
 /// document should call `read`, which returns text and touches nothing.
-#[op(local_only)]
+#[op(local_only, group = "corpus")]
 pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
     let sources = match &args.source {
         Some(s) => vec![SourceId::new(s.clone())?],

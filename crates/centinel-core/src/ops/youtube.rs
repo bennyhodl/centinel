@@ -136,6 +136,25 @@ fn default_delay() -> f64 {
     2.0
 }
 
+/// So [`crate::ops::run`] inherits the CLI's pacing. `delay_secs` is the real dial
+/// against the bot wall, and a pipeline that quietly defaulted it to zero would look
+/// like a blocked channel rather than an impatient one.
+impl Default for FetchArgs {
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            limit: None,
+            lang: default_lang(),
+            audio: false,
+            audio_if_no_captions: false,
+            no_captions: false,
+            refresh: false,
+            delay_secs: default_delay(),
+            yt_dlp_args: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct VideoOutcome {
     pub video_id: String,
@@ -197,7 +216,7 @@ pub enum YoutubeReport {
 }
 
 /// Enumerate and fetch a YouTube channel.
-#[op(long_running)]
+#[op(long_running, group = "stage")]
 pub async fn youtube(
     ctx: &Ctx,
     args: YoutubeArgs,
