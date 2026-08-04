@@ -113,7 +113,17 @@ pub fn content_kind(meta: &BTreeMap<String, String>, bytes: &[u8]) -> &'static s
         "text/html" | "application/xhtml+xml" => return "html",
         "application/pdf" => return "pdf",
         "text/plain" => return "text",
-        "application/json" => return "json",
+        // A caption track is served as ordinary JSON, so the declared type cannot tell
+        // it apart from a vendor API response. Sniffed rather than trusted to the
+        // `content-type` we wrote — which also means blobs collected before this
+        // existed are recognised on the next `extract`.
+        "application/json" => {
+            return if crate::captions::looks_like_json3(bytes) {
+                "captions"
+            } else {
+                "json"
+            };
+        }
         "text/xml" | "application/xml" => return "xml",
         "text/csv" => return "csv",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

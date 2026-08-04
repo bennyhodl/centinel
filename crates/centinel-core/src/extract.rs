@@ -97,6 +97,7 @@ pub fn extract(kind: &str, bytes: &[u8], url: Option<&str>) -> Extracted {
         "html" => extract_html(bytes, url),
         "pdf" => extract_pdf(bytes),
         "spreadsheet" => extract_spreadsheet(bytes),
+        "captions" => extract_captions(bytes),
         "text" | "csv" | "json" | "xml" => match std::str::from_utf8(bytes) {
             Ok(s) => Extracted::Text(Extraction {
                 text: s.to_string(),
@@ -111,6 +112,35 @@ pub fn extract(kind: &str, bytes: &[u8], url: Option<&str>) -> Extracted {
         },
         other => Extracted::Unextractable {
             reason: format!("no extractor for content kind `{other}`"),
+        },
+    }
+}
+
+/// A YouTube `json3` caption track, rendered as timestamped markdown.
+///
+/// Deliberately **not** the passthrough the `json` arm would apply. Indexing the raw
+/// document would put `wireMagic`, `acAsrConf` and 4,250 newline markers into the search
+/// corpus, and the words a searcher wants would be a minority of the text.
+fn extract_captions(bytes: &[u8]) -> Extracted {
+    match crate::captions::parse_json3(bytes) {
+        Ok(caps) => Extracted::Text(Extraction {
+            text: caps.to_markdown(None),
+            title: None,
+            // Named for what produced the *captions*, not for what parsed them: these are
+            // YouTube's ASR, and a reader of the provenance needs to know the words were
+            // never transcribed locally. `whisper.cpp` on the same audio is a different
+            // tool at a different quality, and the two must not look alike in the log.
+            tool: "youtube-asr-json3".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            notes: vec![format!(
+                "{} cues from {} events; {} carried no text",
+                caps.cues.len(),
+                caps.events,
+                caps.empty_events
+            )],
+        }),
+        Err(e) => Extracted::Unextractable {
+            reason: format!("caption track could not be parsed: {e}"),
         },
     }
 }

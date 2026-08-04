@@ -83,16 +83,12 @@ impl Transcript {
     /// document is a transcript, so any chunk it produces still opens with the timestamp
     /// of the speech it contains. No chunking special case, no anchor table to join.
     pub fn to_markdown(&self, title: Option<&str>) -> String {
-        let mut out = String::new();
-        if let Some(title) = title {
-            out.push_str("# ");
-            out.push_str(title);
-            out.push_str("\n\n");
-        }
-        for seg in &self.segments {
-            out.push_str(&format!("[{}] {}\n", hms(seg.start_ms), seg.text));
-        }
-        out
+        render_markdown(
+            self.segments
+                .iter()
+                .map(|s| (s.start_ms, s.end_ms, s.text.as_str())),
+            title,
+        )
     }
 
     /// Time ranges for [`crate::domain::Derivation::anchors`] — the structured form of
@@ -115,6 +111,88 @@ impl Transcript {
             .collect::<Vec<_>>()
             .join(" ")
     }
+}
+
+/// Characters to accumulate before a paragraph may end.
+///
+/// Cue-per-line is unreadable and wasteful at caption granularity: a 3-hour meeting is
+/// ~8,500 cues of about four seconds each, so one line apiece would spend more of the
+/// document on timestamps than on speech. Grouping to a paragraph puts a citable offset
+/// roughly every minute, which is still finer than the ~1,200-character chunks §6.5 asks
+/// for — so every chunk keeps a timestamp without the document drowning in them.
+const PARAGRAPH_CHARS: usize = 600;
+
+/// Silence that forces a paragraph break regardless of length.
+///
+/// **The correctness rule, not a formatting preference.** A paragraph carries one
+/// timestamp, so everything inside it is cited at that offset. Two short passages an hour
+/// apart — ordinary once VAD has removed the silence between them — would otherwise share
+/// a paragraph, and the second half would be cited 71 minutes from where it was said.
+/// That is precisely the claim §6.4 exists to make trustworthy.
+const GAP_BREAK_MS: i64 = 10_000;
+
+/// Renders timestamped cues as markdown paragraphs, each opening with its offset.
+///
+/// Shared by Whisper output and by YouTube captions **on purpose**: a passage retrieved
+/// from a machine transcript and one retrieved from a caption track should be the same
+/// shape downstream, so chunking, embedding and citation need no idea which produced it.
+/// The provenance difference lives on the `Derivation`, where it belongs.
+pub fn render_markdown<'a>(
+    cues: impl IntoIterator<Item = (i64, i64, &'a str)>,
+    title: Option<&str>,
+) -> String {
+    let mut out = String::new();
+    if let Some(title) = title {
+        out.push_str("# ");
+        out.push_str(title);
+        out.push_str("\n\n");
+    }
+
+    let mut para = String::new();
+    let mut para_start: Option<i64> = None;
+    let mut previous_end: Option<i64> = None;
+
+    let flush = |out: &mut String, para: &mut String, start: &mut Option<i64>| {
+        if !para.is_empty() {
+            out.push_str(&format!(
+                "[{}] {}\n\n",
+                hms(start.take().unwrap_or(0)),
+                para
+            ));
+            para.clear();
+        }
+    };
+
+    for (start_ms, end_ms, text) in cues {
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+
+        // A long silence ends the paragraph before this cue joins it.
+        if previous_end.is_some_and(|prev| start_ms - prev > GAP_BREAK_MS) {
+            flush(&mut out, &mut para, &mut para_start);
+        }
+
+        if para_start.is_none() {
+            para_start = Some(start_ms);
+        } else {
+            para.push(' ');
+        }
+        para.push_str(text);
+        previous_end = Some(end_ms);
+
+        // Break on a sentence end once long enough, or hard-cap so an ASR track with no
+        // punctuation at all — which is the norm for auto-captions — still breaks.
+        let long_enough = para.len() >= PARAGRAPH_CHARS;
+        let ends_sentence = para.ends_with('.') || para.ends_with('?') || para.ends_with('!');
+        if (long_enough && ends_sentence) || para.len() >= PARAGRAPH_CHARS * 2 {
+            flush(&mut out, &mut para, &mut para_start);
+        }
+    }
+
+    flush(&mut out, &mut para, &mut para_start);
+    out
 }
 
 /// `4271000` → `01:11:11`. The `&t=` form a citation needs.
@@ -441,13 +519,56 @@ mod tests {
         let md = transcript().to_markdown(Some("Council Meeting"));
 
         assert!(md.starts_with("# Council Meeting\n\n"));
-        assert!(md.contains("[00:00:00] The council meeting will come to order."));
-        assert!(md.contains("[01:11:11] The first item is the drinking water sampling report."));
 
         // Chunked anywhere, a chunk still opens with a timestamp.
         for line in md.lines().filter(|l| !l.is_empty() && !l.starts_with('#')) {
             assert!(line.starts_with('['), "untimestamped line: {line}");
         }
+    }
+
+    /// A paragraph carries **one** timestamp, so everything in it is cited at that
+    /// offset. These two passages are short enough to group by length but sit 71 minutes
+    /// apart — grouping them would cite the second an hour from where it was said, which
+    /// is the exact claim §6.4 exists to make trustworthy.
+    #[test]
+    fn a_silence_splits_a_paragraph_even_when_it_is_short() {
+        let md = transcript().to_markdown(None);
+
+        assert!(
+            md.contains("[00:00:00] The council meeting will come to order."),
+            "{md}"
+        );
+        assert!(
+            md.contains("[01:11:11] The first item is the drinking water sampling report."),
+            "the second passage must keep its own offset, not inherit 00:00:00:\n{md}"
+        );
+    }
+
+    /// The other half of the rule: contiguous speech must *not* be split, or a 3-hour
+    /// meeting becomes thousands of one-line paragraphs and the timestamps outweigh the
+    /// words.
+    #[test]
+    fn contiguous_speech_groups_into_one_paragraph() {
+        let contiguous = Transcript {
+            segments: (0..6)
+                .map(|i| Segment {
+                    start_ms: i * 4_000,
+                    end_ms: (i + 1) * 4_000,
+                    text: "the commission discussed the matter".into(),
+                    no_speech_prob: 0.0,
+                })
+                .collect(),
+            ..transcript()
+        };
+
+        let paragraphs: Vec<_> = contiguous
+            .to_markdown(None)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_string)
+            .collect();
+        assert_eq!(paragraphs.len(), 1, "{paragraphs:#?}");
+        assert!(paragraphs[0].starts_with("[00:00:00] "));
     }
 
     #[test]

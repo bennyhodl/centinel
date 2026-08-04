@@ -21,6 +21,7 @@
 // exactly as they do for downstream users.
 extern crate self as centinel_core;
 
+pub mod captions;
 pub mod chunk;
 pub mod config;
 pub mod discovery;
