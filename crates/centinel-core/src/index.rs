@@ -310,6 +310,26 @@ impl Index {
             .execute_batch("DELETE FROM placement; DELETE FROM chunk;")?;
         Ok(())
     }
+
+    /// Drops one Source's placements, and any chunk left with none.
+    ///
+    /// Exists because `--rebuild --source tampa` clearing the *whole* index is a
+    /// surprise: a flag scoped by `--source` must not delete beyond it. Rebuilding the
+    /// others costs only time, but silently making a caller re-index a corpus they did
+    /// not name is the kind of thing that is noticed much later.
+    ///
+    /// Chunks are shared across placements — that is §6's boilerplate-collapsing property
+    /// — so a chunk is removed only once nothing points at it any more.
+    pub fn clear_source(&mut self, source: &str) -> anyhow::Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM placement WHERE source = ?1", [source])?;
+        tx.execute(
+            "DELETE FROM chunk WHERE chunk_hash NOT IN (SELECT chunk_hash FROM placement)",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 /// Turns user input into a safe FTS5 MATCH expression.
@@ -512,5 +532,61 @@ mod tests {
         idx.clear().unwrap();
         assert_eq!(idx.stats().unwrap().chunks, 0);
         assert!(idx.search("indexed", 10, None).unwrap().is_empty());
+    }
+
+    /// `--rebuild --source tampa` must not take the other sources with it. The index is
+    /// derived so nothing is lost, but silently making someone re-index a corpus they
+    /// did not name is discovered long after the fact.
+    #[test]
+    fn clearing_one_source_leaves_the_others_indexed() {
+        let mut idx = Index::in_memory().unwrap();
+        let doc = |heading: &str| {
+            format!("# {heading}\n\nA passage about stormwater that is long enough to keep.")
+        };
+        for (source, url, md) in [
+            ("tampa", "https://tampa.gov/a", doc("Tampa")),
+            ("hillsborough", "https://hcfl.gov/b", doc("Hillsborough")),
+        ] {
+            for c in chunk_markdown(&md, &ChunkConfig::default()) {
+                idx.insert(&c, &placement(source, url, &"cc".repeat(32)))
+                    .unwrap();
+            }
+        }
+        assert_eq!(idx.search("stormwater", 10, None).unwrap().len(), 2);
+
+        idx.clear_source("tampa").unwrap();
+
+        let hits = idx.search("stormwater", 10, None).unwrap();
+        assert_eq!(hits.len(), 1, "only tampa should have gone");
+        assert!(
+            hits[0]
+                .placements
+                .iter()
+                .all(|p| p.source == "hillsborough")
+        );
+    }
+
+    /// Chunks are shared across placements — §6's boilerplate-collapsing property — so
+    /// clearing one source must not delete text another source still points at.
+    #[test]
+    fn a_shared_chunk_survives_clearing_one_of_its_sources() {
+        let mut idx = Index::in_memory().unwrap();
+        let shared = "# Notice\n\nThis identical footer appears on every page of both sites.";
+        // Distinct `derived_sha` per source, because that is what sharing looks like:
+        // one chunk of text reached from two different documents. Reusing one would
+        // collide on the placement primary key and store a single row.
+        for (source, derived) in [("tampa", "dd"), ("hillsborough", "ee")] {
+            for c in chunk_markdown(shared, &ChunkConfig::default()) {
+                idx.insert(&c, &placement(source, "https://x/1", &derived.repeat(32)))
+                    .unwrap();
+            }
+        }
+        assert_eq!(idx.stats().unwrap().placements, 2);
+
+        idx.clear_source("tampa").unwrap();
+
+        let hits = idx.search("identical footer", 10, None).unwrap();
+        assert_eq!(hits.len(), 1, "the shared text is still hillsborough's");
+        assert!(idx.stats().unwrap().chunks > 0, "the chunk row must remain");
     }
 }

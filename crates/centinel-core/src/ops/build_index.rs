@@ -21,7 +21,10 @@ pub struct IndexArgs {
     #[serde(default)]
     pub source: Option<String>,
 
-    /// Empty the index first. The index is derived, so this costs only time.
+    /// Re-index from scratch. The index is derived, so this costs only time.
+    ///
+    /// Scoped by `--source`: with one named, only that source is cleared. The path after
+    /// changing an extractor, when the old chunks would otherwise linger beside the new.
     #[arg(long)]
     #[serde(default)]
     pub rebuild: bool,
@@ -71,7 +74,14 @@ pub async fn index(ctx: &Ctx, args: IndexArgs, progress: &Progress) -> anyhow::R
     let db_path = ctx.store.root().join("centinel.db");
     let mut index = Index::open(&db_path)?;
     if args.rebuild {
-        index.clear()?;
+        match &args.source {
+            Some(_) => {
+                for source in &sources {
+                    index.clear_source(source.as_str())?;
+                }
+            }
+            None => index.clear()?,
+        }
     }
 
     let config = ChunkConfig {
