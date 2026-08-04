@@ -14,20 +14,28 @@
 //! ## Failure is normal here, and it is not absence
 //!
 //! yt-dlp shipped 26 releases in 2025 in emergency clusters, with 185 open issues on the
-//! bot-detection wall alone. Measured against a live channel while writing this module,
-//! with yt-dlp 2026.03.17 (4½ months stale):
+//! bot-detection wall alone. Measured against a live channel while writing this module:
 //!
 //! ```text
 //! --flat-playlist enumeration   ->  worked
 //! per-video metadata            ->  "Sign in to confirm you're not a bot"
 //! ```
 //!
-//! …on every one of `android_vr`, `tv`, `web_embedded`, `ios` and `mweb`. That is
-//! [`Liveness::Blocked`] and emphatically **not** [`Liveness::Gone`]: the video is there,
-//! we are being refused. SPEC §4.4 exists for exactly this distinction — recording a
-//! bot-wall as absence would write a false disappearance into a transparency record.
-//! [`classify`] is where that judgement is made, and it is the most load-bearing function
-//! in this file.
+//! …on every one of `android_vr`, `tv`, `web_embedded`, `ios` and `mweb`, and **on both**
+//! yt-dlp 2026.03.17 and 2026.07.04. Upgrading did not lift it, which locates the
+//! challenge at the requesting IP rather than at a stale extractor; cookies are the
+//! documented remedy and they are the operator's call, not this module's.
+//!
+//! That state is [`Liveness::Blocked`] and emphatically **not** [`Liveness::Gone`]: the
+//! video is there, we are being refused. SPEC §4.4 exists for exactly this distinction —
+//! recording a bot wall as absence would write a false disappearance into a transparency
+//! record. [`classify`] is where that judgement is made, and it is the most load-bearing
+//! function in this file.
+//!
+//! **Enumeration is the half that keeps working**, which is why [`channel_tabs`] and
+//! [`parse_listing`] are strict: on a day when nothing can be downloaded, the snapshot of
+//! *what exists* is the whole product, and a snapshot that is quietly wrong is worse than
+//! no snapshot at all.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -96,6 +104,15 @@ pub struct VideoRef {
     pub duration_secs: Option<f64>,
 }
 
+/// What one tab contributed to a listing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TabCount {
+    pub url: String,
+    pub videos: usize,
+    /// Videos this tab listed that another tab had already contributed.
+    pub duplicates: usize,
+}
+
 /// A channel's uploads, as one snapshot.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChannelListing {
@@ -104,6 +121,85 @@ pub struct ChannelListing {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
     pub videos: Vec<VideoRef>,
+    /// Which tabs were walked and what each contributed. Provenance for a suspiciously
+    /// small result, and the thing that makes a missing tab visible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tabs: Vec<TabCount>,
+    /// Entries that were not videos. Non-zero means yt-dlp returned something this code
+    /// declined to treat as a recording — see [`parse_listing`].
+    #[serde(default)]
+    pub rejected: usize,
+}
+
+/// YouTube video ids are 11 characters of `[A-Za-z0-9_-]`.
+///
+/// Checked rather than assumed, because the failure it catches is not hypothetical: a
+/// bare `@handle` URL makes yt-dlp list a channel's **tabs**, whose `id` is the 24-char
+/// channel id. Taken at face value that produced two identical bogus Resources and two
+/// `Video unavailable` failures against an id that was never a video.
+pub fn is_video_id(s: &str) -> bool {
+    s.len() == 11
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Path segments that name a channel tab, rather than being part of its address.
+const TAB_SEGMENTS: &[&str] = &[
+    "videos",
+    "streams",
+    "shorts",
+    "live",
+    "playlists",
+    "featured",
+    "community",
+    "about",
+    "releases",
+    "podcasts",
+    "courses",
+];
+
+/// The tabs a channel URL should be enumerated as.
+///
+/// **A channel root expands to more than one tab, and that is load-bearing.** Measured on
+/// `@cityoftampameetings`:
+///
+/// | tab | videos | hours |
+/// |---|---|---|
+/// | `/videos` | 401 | 989 |
+/// | `/streams` | 831 | 2,364 |
+/// | overlap | **0** | |
+///
+/// The two are disjoint, and the larger set is the *streams* — because council meetings
+/// are live-streamed, so the recordings that matter most land in the tab a naive
+/// `/videos` walk never reads. Enumerating one tab would have silently dropped two
+/// thirds of that corpus with no error and a plausible-looking count.
+///
+/// An explicit tab, playlist or watch URL is returned untouched: if the operator named
+/// something specific, expanding it would override a deliberate choice.
+pub fn channel_tabs(url: &str) -> Vec<String> {
+    let trimmed = url.trim_end_matches('/');
+
+    // A playlist or a single video is not a channel at all.
+    if trimmed.contains("/playlist") || trimmed.contains("/watch") {
+        return vec![trimmed.to_string()];
+    }
+
+    let last = trimmed
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .split('?')
+        .next()
+        .unwrap_or_default();
+
+    if TAB_SEGMENTS.contains(&last) {
+        return vec![trimmed.to_string()];
+    }
+
+    ["videos", "streams", "shorts"]
+        .iter()
+        .map(|tab| format!("{trimmed}/{tab}"))
+        .collect()
 }
 
 /// A yt-dlp invocation that failed, already classified.
@@ -220,23 +316,90 @@ impl YtDlp {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
-    /// Enumerates a channel's uploads without fetching any video.
+    /// Enumerates a channel across every tab that holds recordings.
     ///
     /// `--flat-playlist` is one HTTP round trip per page and needs no API key. It is also
     /// the *only* path measured to still work through the bot wall, which is why
     /// discovery and acquisition are separate ops: a channel can be enumerated even on a
     /// day when nothing can be downloaded.
+    ///
+    /// See [`channel_tabs`] for why this walks several URLs. A tab that does not exist
+    /// (most channels have no `/shorts`) is skipped rather than failing the run — but a
+    /// tab that fails for any *other* reason propagates, because silently returning a
+    /// short list is how a corpus loses two thirds of itself without anyone noticing.
     pub async fn enumerate_channel(
         &self,
         channel_url: &str,
         limit: Option<usize>,
     ) -> Result<ChannelListing, YtFailure> {
+        let tabs = channel_tabs(channel_url);
+        let mut listing = ChannelListing::default();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut first_error: Option<YtFailure> = None;
+
+        for tab in &tabs {
+            let doc = match self.enumerate_one(tab, limit).await {
+                Ok(doc) => doc,
+                Err(f) => {
+                    // An absent tab is ordinary; anything else is remembered in case no
+                    // tab at all succeeds.
+                    first_error.get_or_insert(f);
+                    listing.tabs.push(TabCount {
+                        url: tab.clone(),
+                        videos: 0,
+                        duplicates: 0,
+                    });
+                    continue;
+                }
+            };
+
+            let one = parse_listing(&doc);
+            listing.channel_id = listing.channel_id.or(one.channel_id);
+            listing.channel = listing.channel.or(one.channel);
+            listing.rejected += one.rejected;
+
+            let (mut fresh, mut duplicates) = (0usize, 0usize);
+            for video in one.videos {
+                if seen.insert(video.id.clone()) {
+                    listing.videos.push(video);
+                    fresh += 1;
+                } else {
+                    duplicates += 1;
+                }
+            }
+            listing.tabs.push(TabCount {
+                url: tab.clone(),
+                videos: fresh,
+                duplicates,
+            });
+        }
+
+        // Every tab failed. Report the reason rather than an empty channel.
+        if listing.videos.is_empty()
+            && let Some(f) = first_error
+        {
+            return Err(f);
+        }
+
+        // `--limit` means "this many videos", not "this many per tab".
+        if let Some(n) = limit {
+            listing.videos.truncate(n);
+        }
+
+        Ok(listing)
+    }
+
+    async fn enumerate_one(
+        &self,
+        url: &str,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, YtFailure> {
         let mut cmd = self.command();
         cmd.args(["--flat-playlist", "-J"]);
         if let Some(n) = limit {
             cmd.args(["--playlist-end", &n.to_string()]);
         }
-        cmd.arg(channel_url);
+        cmd.arg(url);
 
         let out = cmd.output().await.map_err(|e| YtFailure {
             state: Liveness::Error,
@@ -247,13 +410,10 @@ impl YtDlp {
             return Err(classify(&String::from_utf8_lossy(&out.stderr)));
         }
 
-        let doc: serde_json::Value =
-            serde_json::from_slice(&out.stdout).map_err(|e| YtFailure {
-                state: Liveness::Error,
-                detail: format!("yt-dlp returned output that is not JSON: {e}"),
-            })?;
-
-        Ok(parse_listing(&doc))
+        serde_json::from_slice(&out.stdout).map_err(|e| YtFailure {
+            state: Liveness::Error,
+            detail: format!("yt-dlp returned output that is not JSON: {e}"),
+        })
     }
 
     /// The full `-J` metadata document for one video.
@@ -354,31 +514,47 @@ impl YtDlp {
 /// Pulls the fields we rely on out of a `--flat-playlist -J` document.
 ///
 /// Hand-written rather than derived, because this is a **scraped** surface: yt-dlp's
-/// per-entry fields are documented to be thin and have changed. Missing keys degrade to
-/// `None` instead of failing the whole enumeration — losing a duration is not worth
-/// losing a channel.
+/// per-entry fields are documented to be thin and have changed. Missing *optional* keys
+/// degrade to `None` — losing a duration is not worth losing a channel.
+///
+/// An entry that is not a video is **rejected and counted**, never coerced. yt-dlp uses
+/// one `entries` array for both videos and playlists, distinguished by `_type` and
+/// `ie_key`; a tab entry carries `_type: "playlist"` and the channel's own id. Trusting
+/// `id` alone turned a bare `@handle` URL into two identical fake Resources and two
+/// `Video unavailable` failures against something that was never a video.
 fn parse_listing(doc: &serde_json::Value) -> ChannelListing {
-    let videos = doc
+    let mut videos = Vec::new();
+    let mut rejected = 0usize;
+
+    for entry in doc
         .get("entries")
         .and_then(|e| e.as_array())
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|e| {
-                    let id = e.get("id")?.as_str()?.to_string();
-                    Some(VideoRef {
-                        title: e
-                            .get("title")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        duration_secs: e.get("duration").and_then(|d| d.as_f64()),
-                        id,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let is_video = entry.get("_type").and_then(|t| t.as_str()) == Some("url")
+            && entry.get("ie_key").and_then(|k| k.as_str()) == Some("Youtube");
+        let id = entry.get("id").and_then(|i| i.as_str()).unwrap_or_default();
+
+        if !is_video || !is_video_id(id) {
+            rejected += 1;
+            continue;
+        }
+
+        videos.push(VideoRef {
+            id: id.to_string(),
+            title: entry
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            // Negative durations appear on some live entries; they are not a length.
+            duration_secs: entry
+                .get("duration")
+                .and_then(|d| d.as_f64())
+                .filter(|d| *d > 0.0),
+        });
+    }
 
     ChannelListing {
         channel_id: doc
@@ -390,6 +566,8 @@ fn parse_listing(doc: &serde_json::Value) -> ChannelListing {
             .and_then(|v| v.as_str())
             .map(str::to_string),
         videos,
+        tabs: Vec::new(),
+        rejected,
     }
 }
 
@@ -517,26 +695,107 @@ mod tests {
         assert_eq!(f.state, Liveness::Error);
     }
 
-    /// The exact shape observed from `yt-dlp --flat-playlist -J` on a live channel.
+    /// The exact shape observed from `yt-dlp --flat-playlist -J` on a live `/videos` tab.
     #[test]
     fn a_flat_playlist_document_parses() {
         let doc = serde_json::json!({
-            "id": "UCx4-4RHo_bhTMQJNh6Du0AA",
-            "channel": "City of Tampa",
-            "channel_id": "UCx4-4RHo_bhTMQJNh6Du0AA",
+            "id": "UCLzohJmEgvfJOEd4YJNIHbg",
+            "channel": "City Of Tampa Meetings",
+            "channel_id": "UCLzohJmEgvfJOEd4YJNIHbg",
             "entries": [
-                { "id": "fxR1inkgnGY", "title": "Chief Bercaw Off the Clock",
-                  "duration": 351.0, "url": "https://www.youtube.com/watch?v=fxR1inkgnGY" },
-                { "id": "second", "title": "Council Meeting", "duration": null }
+                { "_type": "url", "ie_key": "Youtube", "id": "_vdkiPxxyTM",
+                  "title": "Charter Review Advisory Commission 07/28", "duration": 10636 },
+                { "_type": "url", "ie_key": "Youtube", "id": "VjgVqTiJSz0",
+                  "title": "Council Meeting", "duration": null }
             ]
         });
         let listing = parse_listing(&doc);
-        assert_eq!(listing.channel.as_deref(), Some("City of Tampa"));
+        assert_eq!(listing.channel.as_deref(), Some("City Of Tampa Meetings"));
         assert_eq!(listing.videos.len(), 2);
-        assert_eq!(listing.videos[0].id, "fxR1inkgnGY");
-        assert_eq!(listing.videos[0].duration_secs, Some(351.0));
-        // A live stream has no duration; that must not drop the video.
+        assert_eq!(listing.videos[0].id, "_vdkiPxxyTM");
+        assert_eq!(listing.videos[0].duration_secs, Some(10636.0));
+        // A stream that has not ended has no duration; that must not drop the video.
         assert_eq!(listing.videos[1].duration_secs, None);
+        assert_eq!(listing.rejected, 0);
+    }
+
+    /// The regression. A bare `@handle` makes yt-dlp list the channel's **tabs**, whose
+    /// `id` is the 24-character channel id — and both tabs carry the *same* id. Trusting
+    /// it produced two identical fake Resources and two `Video unavailable` failures
+    /// against something that was never a video.
+    #[test]
+    fn channel_tab_entries_are_rejected_rather_than_treated_as_videos() {
+        let doc = serde_json::json!({
+            "id": "@cityoftampameetings",
+            "title": "City Of Tampa Meetings",
+            "entries": [
+                { "_type": "playlist", "id": "UCLzohJmEgvfJOEd4YJNIHbg",
+                  "title": "City Of Tampa Meetings - Videos", "duration": null },
+                { "_type": "playlist", "id": "UCLzohJmEgvfJOEd4YJNIHbg",
+                  "title": "City Of Tampa Meetings - Live", "duration": null }
+            ]
+        });
+        let listing = parse_listing(&doc);
+        assert!(listing.videos.is_empty(), "a tab is not a video");
+        assert_eq!(
+            listing.rejected, 2,
+            "rejections must be counted, not silent"
+        );
+    }
+
+    #[test]
+    fn a_video_id_is_eleven_url_safe_characters() {
+        assert!(is_video_id("_vdkiPxxyTM"));
+        assert!(is_video_id("fxR1inkgnGY"));
+        // The channel id that caused the bug.
+        assert!(!is_video_id("UCLzohJmEgvfJOEd4YJNIHbg"));
+        assert!(!is_video_id("keeper"));
+        assert!(!is_video_id("has spaces"));
+    }
+
+    /// Measured: `/videos` had 401 recordings and `/streams` had 831, with **zero**
+    /// overlap — because council meetings are live-streamed. Enumerating one tab would
+    /// silently drop two thirds of that corpus.
+    #[test]
+    fn a_bare_channel_url_expands_to_every_tab_that_holds_recordings() {
+        let tabs = channel_tabs("https://www.youtube.com/@cityoftampameetings");
+        assert!(tabs.iter().any(|t| t.ends_with("/videos")));
+        assert!(
+            tabs.iter().any(|t| t.ends_with("/streams")),
+            "streams held twice as much as videos on the measured channel: {tabs:?}"
+        );
+
+        // Every channel-address spelling behaves the same way.
+        for root in [
+            "https://www.youtube.com/@handle",
+            "https://www.youtube.com/channel/UCLzohJmEgvfJOEd4YJNIHbg",
+            "https://www.youtube.com/c/SomeChannel",
+            "https://www.youtube.com/user/legacy/",
+        ] {
+            assert!(
+                channel_tabs(root).len() > 1,
+                "`{root}` should expand to several tabs"
+            );
+        }
+    }
+
+    /// An operator who named a tab meant it; expanding would override the choice.
+    #[test]
+    fn an_explicit_tab_or_playlist_is_left_alone() {
+        assert_eq!(
+            channel_tabs("https://www.youtube.com/@x/streams"),
+            vec!["https://www.youtube.com/@x/streams"]
+        );
+        assert_eq!(
+            channel_tabs("https://www.youtube.com/@x/videos/"),
+            vec!["https://www.youtube.com/@x/videos"],
+            "a trailing slash is not a new tab"
+        );
+        assert_eq!(
+            channel_tabs("https://www.youtube.com/playlist?list=PL1").len(),
+            1
+        );
+        assert_eq!(channel_tabs("https://www.youtube.com/watch?v=abc").len(), 1);
     }
 
     /// yt-dlp's flat entries are documented to be thin and have changed shape before.
@@ -544,11 +803,27 @@ mod tests {
     #[test]
     fn entries_without_an_id_are_skipped_rather_than_fatal() {
         let doc = serde_json::json!({
-            "entries": [ { "title": "no id here" }, { "id": "keeper" } ]
+            "entries": [
+                { "_type": "url", "ie_key": "Youtube", "title": "no id here" },
+                { "_type": "url", "ie_key": "Youtube", "id": "_vdkiPxxyTM" }
+            ]
         });
         let listing = parse_listing(&doc);
         assert_eq!(listing.videos.len(), 1);
-        assert_eq!(listing.videos[0].id, "keeper");
+        assert_eq!(listing.videos[0].id, "_vdkiPxxyTM");
+        assert_eq!(listing.rejected, 1);
+    }
+
+    /// Observed on live entries: a negative duration is not a length, and summing it
+    /// produced the `-0.0` total that made the bug visible.
+    #[test]
+    fn a_nonpositive_duration_is_absent_rather_than_negative() {
+        let doc = serde_json::json!({
+            "entries": [
+                { "_type": "url", "ie_key": "Youtube", "id": "_vdkiPxxyTM", "duration": -0.0 }
+            ]
+        });
+        assert_eq!(parse_listing(&doc).videos[0].duration_secs, None);
     }
 
     #[test]

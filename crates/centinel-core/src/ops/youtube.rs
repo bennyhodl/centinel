@@ -61,10 +61,12 @@ pub struct DiscoverChannelArgs {
     #[serde(default)]
     pub limit: Option<usize>,
 
-    /// Extra arguments for yt-dlp, e.g. `--cookies-from-browser=firefox`.
+    /// Extra arguments for yt-dlp, e.g. `--yt-dlp-arg=--cookies-from-browser=brave`.
     ///
     /// The escape hatch for the bot wall, which no amount of code here can argue with.
-    #[arg(long = "yt-dlp-arg")]
+    /// `allow_hyphen_values` because every argument worth passing starts with `--`, and
+    /// clap would otherwise read it as an unknown flag of our own.
+    #[arg(long = "yt-dlp-arg", allow_hyphen_values = true)]
     #[serde(default)]
     pub yt_dlp_args: Vec<String>,
 }
@@ -143,10 +145,20 @@ pub enum YoutubeReport {
         #[serde(skip_serializing_if = "Option::is_none")]
         channel_id: Option<String>,
         yt_dlp_version: String,
+        /// Every video in this snapshot. The DiscoveryRun records **all** of them —
+        /// discovery is a full snapshot, not a delta (§4.3).
         videos: usize,
-        /// Videos in this run that no previous run had seen.
+        /// How many of those no previous run had seen. A counter for the operator, not a
+        /// filter: `videos` is what was stored.
         new_videos: usize,
+        /// Which channel tabs were walked, and what each contributed. A council channel
+        /// keeps its meetings in `/streams`, disjointly from `/videos`, so this is the
+        /// line that shows a tab silently returning nothing.
+        tabs: Vec<crate::youtube::TabCount>,
+        /// Entries yt-dlp returned that were not videos.
+        rejected: usize,
         total_duration_secs: f64,
+        total_duration_hours: f64,
     },
     Fetch {
         source: String,
@@ -194,9 +206,14 @@ async fn discover_channel(
         .await
         .map_err(|f| {
             anyhow::anyhow!(
-                "{f}\nEnumeration is the path that usually survives; if this is the bot \
-                 wall, `--yt-dlp-arg --cookies-from-browser=firefox` is the documented \
-                 workaround and a stale yt-dlp is the usual cause."
+                "{f}\n\
+                 Enumeration is normally the path that survives the bot wall. If it did \
+                 not, the documented workarounds are a newer yt-dlp and browser cookies:\n  \
+                 centinel youtube discover --source {} --channel {} \
+                 --yt-dlp-arg=--cookies-from-browser=brave\n\
+                 (note the `=`; `--yt-dlp-arg` takes the whole flag as one token)",
+                args.source,
+                args.channel,
             )
         })?;
 
@@ -239,9 +256,11 @@ async fn discover_channel(
         )
         .await?;
 
+    let seconds: f64 = listing.videos.iter().filter_map(|v| v.duration_secs).sum();
     progress.say(format!(
-        "{} videos ({} new)",
+        "{} videos, {:.0} hours ({} new)",
         listing.videos.len(),
+        seconds / 3600.0,
         new_videos
     ));
 
@@ -252,7 +271,10 @@ async fn discover_channel(
         yt_dlp_version: version,
         videos: listing.videos.len(),
         new_videos,
-        total_duration_secs: listing.videos.iter().filter_map(|v| v.duration_secs).sum(),
+        tabs: listing.tabs,
+        rejected: listing.rejected,
+        total_duration_secs: seconds,
+        total_duration_hours: (seconds / 36.0).round() / 100.0,
     })
 }
 
