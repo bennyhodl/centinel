@@ -65,7 +65,14 @@ pub async fn serve(ctx: Arc<Ctx>, bind: &str) -> Result<()> {
     eprintln!("  POST /ops/{{name}}/stream    invoke with progress (SSE)");
     eprintln!("  POST /mcp                  MCP over HTTP");
 
+    // The banner above is the greeting; this is the first line of the log. It exists so
+    // that an operator can tell, before sending a single request, whether the log they
+    // are watching is on at all.
+    tracing::info!(%addr, ops = op::remote_ops().len(), "http server listening");
+
     axum::serve(listener, app).await?;
+
+    tracing::info!("http server stopped");
     Ok(())
 }
 
@@ -94,6 +101,7 @@ async fn list_ops() -> Json<Value> {
             })
         })
         .collect();
+    tracing::debug!(count = ops.len(), "listing ops");
     Json(json!({ "ops": ops }))
 }
 
@@ -108,7 +116,10 @@ async fn invoke(
     // An absent body is an empty argument set, so zero-arg ops work with `curl -X POST`.
     let args = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
 
-    match (def.invoke)(ctx, args, Progress::none()).await {
+    // No sink: this route returns once and has nowhere to put progress, so `logging`
+    // sends it to the log rather than dropping it. `/stream` below is the route that
+    // does have somewhere better.
+    match crate::logging::invoke("http", def, ctx, args, None).await {
         Ok(value) => Json(value).into_response(),
         Err(e) => op_error(e),
     }
@@ -126,7 +137,9 @@ async fn invoke_streaming(
     let args = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
 
     let (progress, mut rx) = Progress::channel();
-    let handle = tokio::spawn(async move { (def.invoke)(ctx, args, progress).await });
+    let handle = tokio::spawn(async move {
+        crate::logging::invoke("http-stream", def, ctx, args, Some(progress)).await
+    });
 
     let stream = async_stream::stream! {
         while let Some(ev) = rx.recv().await {
@@ -158,6 +171,8 @@ async fn invoke_streaming(
 
 /// MCP over HTTP, delegating to the same handler stdio uses.
 async fn mcp_over_http(State(ctx): State<Arc<Ctx>>, Json(req): Json<Value>) -> Response {
+    // The dispatch itself logs the method; this only records which transport it arrived on.
+    tracing::debug!("mcp over http");
     match crate::mcp::handle(&ctx, req).await {
         Some(resp) => Json(resp).into_response(),
         // A notification: accepted, nothing to say.
@@ -175,6 +190,9 @@ fn remote_op(name: &str) -> Option<&'static op::OpDef> {
 }
 
 fn not_found(name: &str) -> Response {
+    // Warn, not debug: over HTTP this is either a typo or a client built against a
+    // different build, and both are worth seeing without raising the level.
+    tracing::warn!(op = %name, "no such op, or host-local");
     (
         StatusCode::NOT_FOUND,
         Json(json!({ "error": format!("unknown op `{name}`") })),

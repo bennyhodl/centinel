@@ -6,6 +6,7 @@
 //! without touching this file, which is the property ticket #9 was about.
 
 mod http;
+mod logging;
 mod mcp;
 mod progress;
 
@@ -55,7 +56,7 @@ fn build_cli() -> Command {
                 .short('v')
                 .global(true)
                 .action(ArgAction::SetTrue)
-                .help("Log to stderr"),
+                .help("Log debug detail to stderr (`serve` and `mcp` log at info without it)"),
         )
         .arg(
             Arg::new("json")
@@ -185,28 +186,23 @@ async fn main() -> Result<()> {
         .get_one::<String>("root")
         .expect("root has a default")
         .clone();
-    let verbose = matches.get_flag("verbose");
+    let (name, sub) = matches
+        .subcommand()
+        .expect("subcommand_required guarantees one");
 
-    // Always stderr. Under `centinel mcp`, stdout carries JSON-RPC frames and a stray
-    // log line would corrupt the protocol stream.
-    if verbose {
-        tracing_subscriber::fmt()
-            .with_writer(std::io::stderr)
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "centinel=debug,centinel_core=debug".into()),
-            )
-            .init();
-    }
+    // Installed before the store opens, so that opening it is inside the log rather than
+    // the first thing missing from it. Which levels reach stderr is [`logging`]'s
+    // decision — it is the one that knows a server has no other way to speak.
+    logging::install(
+        name,
+        matches.get_flag("verbose"),
+        matches.get_flag("no-color-env"),
+    );
 
     let store = Store::open(&root)
         .await
         .with_context(|| format!("opening store at {root}"))?;
     let ctx = Arc::new(Ctx::new(store));
-
-    let (name, sub) = matches
-        .subcommand()
-        .expect("subcommand_required guarantees one");
 
     match name {
         "serve" => {
@@ -301,7 +297,7 @@ async fn run_op(
 
     let printer = rx.map(progress::spawn);
 
-    let result = (def.invoke)(ctx, args, progress).await;
+    let result = logging::invoke("cli", def, ctx, args, Some(progress)).await;
 
     if let Some(handle) = printer {
         // The sink was dropped with `progress`, so the printer terminates on its own.

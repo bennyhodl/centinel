@@ -10,12 +10,14 @@
 //! dependency would obscure exactly the derivation this module exists to demonstrate.
 //!
 //! **stdout is the protocol channel.** Anything written there that is not a JSON-RPC
-//! frame corrupts the stream — which is why logging is pinned to stderr in `main`.
+//! frame corrupts the stream — which is why logging is pinned to stderr in [`crate::logging`].
+//! Every client this server has runs it as a child process and captures that stderr, so
+//! the log is where an operator watches a session happen.
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use centinel_core::op::{self, Ctx, Progress};
+use centinel_core::op::{self, Ctx};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -27,6 +29,15 @@ pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
 
+    // The first line of the log, and the only proof available that the server started at
+    // all: a stdio server that a client failed to launch and one waiting on a client
+    // that never spoke look identical from outside.
+    tracing::info!(
+        protocol = PROTOCOL_VERSION,
+        tools = op::mcp_tools().len(),
+        "mcp server ready on stdio"
+    );
+
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
@@ -34,11 +45,14 @@ pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
 
         let response = match serde_json::from_str::<Value>(&line) {
             Ok(req) => handle(&ctx, req).await,
-            Err(e) => Some(error_response(
-                Value::Null,
-                -32700,
-                &format!("parse error: {e}"),
-            )),
+            Err(e) => {
+                tracing::warn!(error = %e, bytes = line.len(), "frame did not parse as JSON-RPC");
+                Some(error_response(
+                    Value::Null,
+                    -32700,
+                    &format!("parse error: {e}"),
+                ))
+            }
         };
 
         // Notifications produce no response — replying to one is a protocol violation.
@@ -49,6 +63,8 @@ pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
             stdout.flush().await?;
         }
     }
+
+    tracing::info!("stdin closed; mcp server stopping");
     Ok(())
 }
 
@@ -64,21 +80,48 @@ pub async fn handle(ctx: &Arc<Ctx>, req: Value) -> Option<Value> {
     let params = req.get("params").cloned().unwrap_or(Value::Null);
 
     // No `id` means a notification: act, but never reply.
-    let id = id?;
+    let Some(id) = id else {
+        tracing::debug!(method, "notification");
+        return None;
+    };
+    tracing::debug!(method, %id, "request");
 
     let result = match method {
-        "initialize" => Ok(json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": { "tools": { "listChanged": false } },
-            "serverInfo": {
-                "name": "centinel",
-                "version": env!("CARGO_PKG_VERSION"),
-            },
-        })),
+        // The one exchange worth an info line on its own. A client that never gets past
+        // the handshake is the usual way an MCP integration fails, and it fails
+        // identically to one that was never launched — so the log has to distinguish them.
+        "initialize" => {
+            let client = params
+                .get("clientInfo")
+                .and_then(|info| info.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("unnamed");
+            let requested = params
+                .get("protocolVersion")
+                .and_then(Value::as_str)
+                .unwrap_or("unstated");
+            tracing::info!(
+                client,
+                requested,
+                serving = PROTOCOL_VERSION,
+                "client connected"
+            );
+            Ok(json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": { "tools": { "listChanged": false } },
+                "serverInfo": {
+                    "name": "centinel",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            }))
+        }
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_list() })),
         "tools/call" => return Some(call_tool(ctx, id, params).await),
-        other => Err((-32601, format!("method not found: {other}"))),
+        other => {
+            tracing::warn!(method = other, "method not found");
+            Err((-32601, format!("method not found: {other}")))
+        }
     };
 
     Some(match result {
@@ -119,11 +162,13 @@ async fn call_tool(ctx: &Arc<Ctx>, id: Value, params: Value) -> Value {
         .unwrap_or_else(|| json!({}));
 
     let Some(def) = op::find(name) else {
+        tracing::warn!(tool = %name, "unknown tool");
         return error_response(id, -32602, &format!("unknown tool: {name}"));
     };
     // Checked on call, not merely omitted from `tools/list` — a client may hold a stale
     // list, or simply guess a name.
     if !def.mcp || def.local_only {
+        tracing::warn!(tool = def.name, "tool refused: not exposed over MCP");
         return error_response(
             id,
             -32602,
@@ -131,10 +176,12 @@ async fn call_tool(ctx: &Arc<Ctx>, id: Value, params: Value) -> Value {
         );
     }
 
-    // Progress is dropped here. Base MCP has no streaming channel for tool results, so
-    // a long op simply takes a while and returns once — the honest mapping, and the
-    // reason `long_running` exists as a hint the *other* surfaces act on.
-    match (def.invoke)(Arc::clone(ctx), arguments, Progress::none()).await {
+    // Base MCP has no streaming channel for tool results, so a long op simply takes a
+    // while and returns once — the honest mapping, and the reason `long_running` exists
+    // as a hint the *other* surfaces act on. Passing `None` sends its progress to the
+    // log instead of dropping it, so "returns once" does not also mean "is silent for an
+    // hour" to whoever is watching stderr.
+    match crate::logging::invoke("mcp", def, Arc::clone(ctx), arguments, None).await {
         Ok(value) => {
             let text = serde_json::to_string_pretty(&value)
                 .unwrap_or_else(|e| format!("<unserializable result: {e}>"));
