@@ -6,6 +6,7 @@
 //! `collect` and `discover` used to spend knowing they were talking to a website.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
@@ -14,6 +15,7 @@ use crate::discovery::{Discoverer, DiscoveryLimits};
 use crate::domain::{
     Acquired, Enumeration, Note, NoteMark, Refusal, Resource, Source, SourceId, SourceKind,
 };
+use crate::enclosure;
 use crate::fetch::Fetcher;
 use crate::op::Progress;
 use crate::policy::{HostPolicy, Pacer};
@@ -33,7 +35,14 @@ pub struct SiteSource {
     /// both. Held in a `Mutex` rather than threaded through the caller because pacing is
     /// this Source's business, not its caller's.
     pacers: Mutex<HashMap<String, Arc<Pacer>>>,
+    /// Documents that refused, so a run can say so without failing over them.
+    partial: Mutex<Vec<String>>,
+    enclosed: AtomicUsize,
+    dropped: AtomicUsize,
 }
+
+/// How many refused documents a report names before it stops listing them.
+const MAX_REMARKS: usize = 10;
 
 impl SiteSource {
     pub fn new(
@@ -49,7 +58,34 @@ impl SiteSource {
             discoverer: Discoverer::new(policy.clone(), limits)?,
             policy,
             pacers: Mutex::new(HashMap::new()),
+            partial: Mutex::new(Vec::new()),
+            enclosed: AtomicUsize::new(0),
+            dropped: AtomicUsize::new(0),
         })
+    }
+
+    fn note_partial(&self, detail: String) {
+        let mut partial = self.partial.lock().expect("remark list is never poisoned");
+        if partial.len() < MAX_REMARKS {
+            partial.push(detail);
+        }
+    }
+
+    /// The documents a fetched page encloses, and nothing for anything that is not a page.
+    ///
+    /// Gated on the content kind rather than on the extension in the URL: a `.gov` CMS
+    /// serves plenty of HTML from paths that end in neither `.html` nor a slash, and a PDF
+    /// must never be scanned as though it were markup.
+    fn enclosures(&self, fetched: &crate::domain::Fetched, base: &str) -> Vec<String> {
+        if crate::fetch::content_kind(&fetched.meta, &fetched.bytes) != "html" {
+            return Vec::new();
+        }
+        let html = String::from_utf8_lossy(&fetched.bytes);
+        let found = enclosure::documents(&html, base, enclosure::MAX_PER_PAGE);
+
+        self.enclosed.fetch_add(found.urls.len(), Ordering::Relaxed);
+        self.dropped.fetch_add(found.dropped, Ordering::Relaxed);
+        found.urls
     }
 
     /// The limiter for a URL's host, created on first sight.
@@ -144,20 +180,94 @@ impl Source for SiteSource {
         })
     }
 
+    /// The page, and any document it encloses.
+    ///
+    /// A page used to be one artifact, which is true right up until the page is a wrapper
+    /// around a PDF its CMS renders in a viewer. Then the bytes we stored are a date and a
+    /// print notice, the document is at an address nothing fetched, and the corpus holds a
+    /// page that looks collected and carries nothing.
+    ///
+    /// So a page is now up to `1 + n` artifacts, which is the shape a video has had all
+    /// along — one address holding metadata, captions and audio. The marker stays the page
+    /// ([`Source::marker`]'s default), so a document that 404s does not make the run
+    /// re-fetch the page forever; it is recorded as a remark and the page stands.
     fn acquire<'a>(
         &'a self,
         resource: &'a Resource,
-        _progress: &'a Progress,
+        progress: &'a Progress,
     ) -> BoxFuture<'a, Result<Vec<Acquired>, Refusal>> {
         Box::pin(async move {
             self.pacer_for(&resource.natural_key).wait().await;
             let fetched = self.fetcher.get(&resource.natural_key).await?;
-            // A page is one artifact at its own address.
-            Ok(vec![Acquired {
+
+            // Where the bytes actually came from, so a document relative to a redirected
+            // page resolves against the page it really is.
+            let base = fetched
+                .meta
+                .get("final_url")
+                .cloned()
+                .unwrap_or_else(|| resource.natural_key.clone());
+            let enclosed = self.enclosures(&fetched, &base);
+
+            let mut out = vec![Acquired {
                 resource: resource.clone(),
                 fetched,
-            }])
+            }];
+
+            for url in enclosed {
+                self.pacer_for(&url).wait().await;
+                match self.fetcher.get(&url).await {
+                    Ok(document) => out.push(Acquired {
+                        resource: Resource::new(self.id.clone(), url),
+                        fetched: document,
+                    }),
+                    // A document that refuses is evidence about the document, not about
+                    // the page that named it. One site's broken attachment must not cancel
+                    // the page it hangs off, for the same reason one source's WAF block
+                    // does not cancel the nineteen behind it.
+                    Err(refusal) => {
+                        progress.say(format!("{url} — {}", refusal.detail));
+                        self.note_partial(format!("{url} — {}", refusal.detail));
+                    }
+                }
+            }
+
+            Ok(out)
         })
+    }
+
+    fn remarks(&self, _parts: &BTreeMap<String, usize>, _attempted: usize) -> Vec<Note> {
+        let partial = self.partial.lock().expect("remark list is never poisoned");
+        let mut notes = Vec::new();
+
+        let enclosed = self.enclosed.load(Ordering::Relaxed);
+        if enclosed > 0 {
+            notes.push(Note::new(
+                "documents",
+                format!(
+                    "{} fetched from inside pages",
+                    crate::render::count(enclosed as u64)
+                ),
+            ));
+        }
+
+        // A cap that says nothing reads exactly like a page that had nothing to give.
+        let dropped = self.dropped.load(Ordering::Relaxed);
+        if dropped > 0 {
+            notes.push(Note::marked(
+                "documents",
+                format!(
+                    "{dropped} past the {} per page were left to the sitemap",
+                    enclosure::MAX_PER_PAGE
+                ),
+                NoteMark::Warn,
+            ));
+        }
+
+        for detail in partial.iter() {
+            notes.push(Note::marked("document", detail.clone(), NoteMark::Warn));
+        }
+        notes
     }
 }
 

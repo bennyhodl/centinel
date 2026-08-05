@@ -31,10 +31,22 @@ while its job was done twice by hand.
 **Artifact** (`Acquired`) — one thing retrieved, at its own address. A page is one; a
 video is up to three. Each becomes its own Observation with its own history.
 
+**Enclosure** — a document a page carries at its own address rather than contains: the PDF
+a CMS renders in a viewer, an RFQ's attached drawings. Found in the page's HTML, fetched
+during `acquire`, and stored as its own Artifact with its own Observation and history.
+*Why it matters:* without it the page is a wrapper that enters the corpus looking collected
+and carrying nothing — on `tampa.gov`, 915 of 1005 pages whose extracted text was a date
+and a print notice, with the proclamation itself at an address nothing had fetched. **One
+level, same host.** The page's own HTML is scanned and what comes back is not, because a
+second level makes acquisition a recursive crawler with no snapshot to bound it — and that
+is `enumerate`'s job, which is where a *complete* address set comes from.
+
 **Marker** — the address whose presence in the log proves a Resource was acquired. The
 page itself for a site; the *metadata* sub-resource for a video. The single line on which
 resumption varies. *Why it matters:* keying resumption on captions would re-fetch a whole
-catalogue every run, because ~7% of a real council channel has none and never will.
+catalogue every run, because ~7% of a real council channel has none and never will. An
+enclosure is the same case one level down: a page whose attachment 404s is still a page we
+have, and keying on the attachment would re-fetch the page forever.
 
 **Refusal** — an acquisition that failed, carrying a `Liveness` rather than an error type.
 Because the caller's job is to record *what kind* of failure this was, not to propagate
