@@ -125,7 +125,7 @@ Fetched by explicit `centinel models pull` into a cache directory. **Missing wei
 | Jina reranker | CC-BY-NC-4.0 | Not redistributable |
 | `html2md` (Rust), `html2text` (Py), `ultimate-sitemap-parser` | GPL-3.0+ | Permissive substitutes exist |
 
-**Safe:** Qwen3 embed + rerank (Apache-2.0), `pdf-inspector` (MIT), LanceDB (Apache-2.0), `sqlite-vec` (Apache-2.0/MIT), whisper.cpp GGML weights (MIT), Silero VAD (MIT). Shelling out to GPL poppler is **licence-safe across the process boundary**.
+**Safe:** Qwen3 embed + rerank (Apache-2.0), `pdf-inspector` (MIT), `anydoc` (MIT), LanceDB (Apache-2.0), `sqlite-vec` (Apache-2.0/MIT), whisper.cpp GGML weights (MIT), Silero VAD (MIT). Shelling out to GPL poppler is **licence-safe across the process boundary**.
 
 ### 3.6 Transcription runs in a separate process, and it is not optional
 
@@ -451,7 +451,7 @@ Multiple hits from one document appear separately. Every hit is **independently 
 | [#7](https://github.com/bennyhodl/centinel/issues/7) | Change detection & scheduling | **The `fingerprint` normalization rules** · trusting vendor `LastModifiedUtc` · when `Live` becomes `Gone` · cadence · idempotency and resumability · the phantom-diff *policy* |
 | [#8](https://github.com/bennyhodl/centinel/issues/8) | YouTube as a Source | ~~Whisper tier~~ (§3.6, registry) · ~~VAD~~ (§3.6, mandatory) · audio retention · metadata change semantics · whether Granicus/Swagit demotes YouTube to a fallback · **the bot wall** — measured to persist across yt-dlp 2026.03.17 → 2026.07.04, so it is the IP and not a stale extractor: whether cookies or a PO-token provider are in scope, or a blocked day is simply a blocked day |
 | [#11](https://github.com/bennyhodl/centinel/issues/11) | Distribution & packaging | Install channel · whether `cargo install` survives **two** C++ builds · platform matrix · where the version-pin table lives · that Centinel now ships as two executables (§3.6) |
-| [#12](https://github.com/bennyhodl/centinel/issues/12) | Document extraction pipeline | Routing thresholds · per-page OCR (**never executed** — `pdftoppm` absent) · broken-encoding fallback · table representation · DOCX/PPTX |
+| [#12](https://github.com/bennyhodl/centinel/issues/12) | Document extraction pipeline | Routing thresholds · per-page OCR (**never executed** — `pdftoppm` absent) · broken-encoding fallback · table representation · ~~DOCX/PPTX~~ — answered by `anydoc` (MIT, pure Rust, wraps `pdf-inspector` for PDFs and is **not** used for them; see the correction in `research/pdf-and-ocr.md`) |
 | [#13](https://github.com/bennyhodl/centinel/issues/13) | Hardware profiling & model tiers | What is profiled · the floor machine · whether better hardware replaces or versions an artifact. ~~Model registry integrity~~ — pinned by repo + revision, checksum-verified, licence recorded |
 
 [#9](https://github.com/bennyhodl/centinel/issues/9) — the single-definition mechanism — is **closed**. Its decision is recorded in `crates/centinel-core/src/op.rs` rather than here, since the module doc sits beside the code it constrains: a `#[op]` macro with link-time registration via `inventory`, one args struct deriving both `clap::Args` and `JsonSchema`, presence uniform across surfaces while prose is not, and `local_only` enforced on call rather than merely omitted from `tools/list`.

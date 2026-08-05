@@ -41,6 +41,16 @@ Because the caller's job is to record *what kind* of failure this was, not to pr
 it. A WAF 403 and a 404 are the same `Err` and completely different facts. One type for
 HTTP and `yt-dlp` alike.
 
+**Content kind** — one word for what a blob *is*, and deliberately coarser than its
+format. `document` covers Word, PowerPoint, OpenDocument, RTF and EPUB, because
+extraction asks all five the same question. It is decided from a 4 KB head, so it can
+only ever answer what the first bytes prove: a `.docx` and a `.pptx` are both
+`zip-container` until something reads the ZIP central directory at the *end* of the file.
+*Why it matters:* the precise format is a **different question, answered later**, by
+`extract_document`, which holds the whole verified blob. Sharpening the kind instead —
+making it say `docx` — would put a guess in the record at the one point where nothing has
+read enough of the file to know, and every stage downstream would carry the guess.
+
 **Note** — a line of provenance a Source wants shown, and how it should read. Lets a
 report print which sitemaps were walked or which channel tabs returned nothing without the
 renderer learning what a sitemap or a tab is. A new adapter explains itself through this

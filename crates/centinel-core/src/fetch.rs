@@ -99,6 +99,9 @@ pub fn classify(status: u16) -> Liveness {
 /// between building a transcription work list and reading the entire corpus to build one.
 pub const SNIFF_BYTES: usize = crate::captions::SNIFF_BYTES;
 
+/// The [MS-CFB] signature every legacy Office file opens with.
+const OLE_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+
 /// A coarse content kind, from the `content-type` header with a magic-byte fallback.
 ///
 /// Deliberately coarse: acquisition should not hold opinions about formats. This exists
@@ -134,9 +137,20 @@ pub fn content_kind(meta: &BTreeMap<String, String>, bytes: &[u8]) -> &'static s
         "text/xml" | "application/xml" => return "xml",
         "text/csv" => return "csv",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        | "application/vnd.ms-excel" => return "spreadsheet",
+        | "application/vnd.ms-excel"
+        | "application/vnd.oasis.opendocument.spreadsheet" => return "spreadsheet",
+        // One word for eight formats, because extraction asks one question of all of
+        // them and `anydoc` answers it. Which of the eight this is gets decided from the
+        // whole bytes at extraction time, not from a header a server filled in by guess.
         "application/msword"
-        | "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
+        | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        | "application/vnd.ms-powerpoint"
+        | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        | "application/vnd.oasis.opendocument.text"
+        | "application/vnd.oasis.opendocument.presentation"
+        | "application/rtf"
+        | "text/rtf"
+        | "application/epub+zip" => {
             return "document";
         }
         _ => {}
@@ -151,7 +165,16 @@ pub fn content_kind(meta: &BTreeMap<String, String>, bytes: &[u8]) -> &'static s
     if bytes.starts_with(b"%PDF-") {
         return "pdf";
     }
-    // ZIP magic: xlsx/docx are zip containers.
+    // The two document signatures that fit in a head. An OLE compound file is a legacy
+    // `.doc`, `.ppt` or `.xls`, and which one is written in a directory sector that can
+    // sit anywhere in the file — so this says `document` and extraction, holding the
+    // whole blob, sorts the spreadsheets back out.
+    if bytes.starts_with(b"{\\rtf") || bytes.starts_with(&OLE_MAGIC) {
+        return "document";
+    }
+    // ZIP magic: xlsx/docx are zip containers. Which one is in the central directory at
+    // the *end* of the file, which a head read cannot reach, so this is as far as
+    // classification gets and `extract` finishes the job.
     if bytes.starts_with(b"PK\x03\x04") {
         return "zip-container";
     }
@@ -261,6 +284,41 @@ mod tests {
             content_kind(&meta("application/octet-stream"), b"PK\x03\x04junk"),
             "zip-container"
         );
+        // The two document containers whose identity fits in a head.
+        assert_eq!(
+            content_kind(&meta("application/octet-stream"), br"{\rtf1\ansi"),
+            "document"
+        );
+        assert_eq!(
+            content_kind(&meta("application/octet-stream"), &OLE_MAGIC),
+            "document"
+        );
+    }
+
+    /// Every office type a `.gov` server labels correctly reaches one of two words.
+    /// A type with no arm falls through to `other` and the blob is never read.
+    #[test]
+    fn every_office_content_type_reaches_an_extractor() {
+        for ct in [
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.ms-powerpoint",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/vnd.oasis.opendocument.text",
+            "application/vnd.oasis.opendocument.presentation",
+            "application/rtf",
+            "text/rtf",
+            "application/epub+zip",
+        ] {
+            assert_eq!(content_kind(&meta(ct), b""), "document", "{ct}");
+        }
+        for ct in [
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-excel",
+            "application/vnd.oasis.opendocument.spreadsheet",
+        ] {
+            assert_eq!(content_kind(&meta(ct), b""), "spreadsheet", "{ct}");
+        }
     }
 
     #[test]

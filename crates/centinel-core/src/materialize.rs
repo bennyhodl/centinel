@@ -44,14 +44,34 @@ pub fn extension_for(kind: &str, head: &[u8]) -> &'static str {
         "captions" => "json",
         "xml" => "xml",
         "text" => "txt",
-        // `content_kind` folds .doc into .docx, and the older format is vanishing.
-        "document" => "docx",
+        // One word, eight formats. The head settles the two containers that announce
+        // themselves in their first bytes; the rest hide their identity at the end of the
+        // file, past anything this function holds, so `.docx` is the commonest guess.
+        // [`relative_path`] does better, because it has the address to read.
+        "document" => document_container(head).unwrap_or("docx"),
         // yt-dlp's default for this project's sources, and so the safest fallback when
         // the head was not read or the container is one we do not know.
         "audio" => crate::fetch::audio_container(head).unwrap_or("m4a"),
         "zip-container" => "zip",
         _ => "bin",
     }
+}
+
+/// Which document container, as a file extension, where the first bytes can say.
+///
+/// RTF announces itself in five bytes. An OLE compound file announces only that it is
+/// one: whether it holds Word, PowerPoint or Excel is written in a directory sector that
+/// can sit anywhere in the file, so `.doc` is the answer — the commonest of the three on
+/// a `.gov` server, and one Word will at least open. `.docx` on those bytes opens in
+/// nothing, because Word checks the container before the extension.
+fn document_container(head: &[u8]) -> Option<&'static str> {
+    if head.starts_with(b"{\\rtf") {
+        return Some("rtf");
+    }
+    if head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
+        return Some("doc");
+    }
+    None
 }
 
 /// Every container signature this file decides on fits in the first dozen bytes.
@@ -102,13 +122,33 @@ fn sanitize(segment: &str) -> String {
     head
 }
 
+/// The extension the address itself names, where it names a document format.
+///
+/// `content_kind` folds eight office formats into one word and a `.pptx` linked in as
+/// `.docx` opens in nothing — the exact failure this tree exists to prevent. The bytes
+/// cannot settle it: telling a `.docx` from a `.pptx` means reading the ZIP central
+/// directory at the end of the file. The URL can, and for these formats a `.gov` server
+/// nearly always spells it out.
+///
+/// Kept verbatim rather than folded onto the parser's name, because `.docm` and `.xlsb`
+/// are what the server served and what their handler expects to be given.
+fn extension_from_url(url: &str, kind: &str) -> Option<String> {
+    if !matches!(kind, "document" | "zip-container" | "spreadsheet") {
+        return None;
+    }
+    let path = url.split(['?', '#']).next()?;
+    let ext = path.rsplit('/').next()?.rsplit_once('.')?.1;
+    anydoc::Format::from_extension(ext).map(|_| ext.to_ascii_lowercase())
+}
+
 /// Maps a URL onto a relative path under `current/<source>/`.
 ///
 /// Query strings are folded into the filename as a short hash rather than dropped.
 /// `.gov` agenda systems are routinely query-string addressed — `MeetingView.aspx?id=1`
 /// and `?id=2` are different documents, and collapsing them would silently overwrite.
 pub fn relative_path(url: &str, kind: &str, head: &[u8]) -> PathBuf {
-    let ext = extension_for(kind, head);
+    let ext =
+        extension_from_url(url, kind).unwrap_or_else(|| extension_for(kind, head).to_string());
 
     // A hostless "URL" is an opaque identifier, not an address — `legistar:matter:5107`
     // parses fine but has no host and no meaningful path structure. Treat the whole
@@ -137,7 +177,7 @@ pub fn relative_path(url: &str, kind: &str, head: &[u8]) -> PathBuf {
 
     // Preserve an existing correct extension rather than doubling it up.
     let stem = match last.rsplit_once('.') {
-        Some((stem, e)) if e.eq_ignore_ascii_case(ext) => stem.to_string(),
+        Some((stem, e)) if e.eq_ignore_ascii_case(&ext) => stem.to_string(),
         _ => last.clone(),
     };
     let mut name = sanitize(&stem);
@@ -303,6 +343,54 @@ mod tests {
         let name = one.rsplit('/').next().unwrap();
         assert!(name.len() < 200, "component still too long: {}", name.len());
         assert_ne!(one, two, "truncation must not collapse distinct URLs");
+    }
+
+    /// `content_kind` folds eight formats into `document`, so the kind alone would name
+    /// every deck and e-book `.docx` — a file PowerPoint refuses and Word cannot open.
+    /// The address carries the answer the bytes cannot, and it is kept verbatim so
+    /// `.docm` stays `.docm`.
+    #[test]
+    fn a_document_keeps_the_extension_its_address_names() {
+        assert_eq!(
+            p("https://x.gov/agendas/Presentation.pptx", "zip-container"),
+            "x.gov/agendas/Presentation.pptx"
+        );
+        assert_eq!(
+            p("https://x.gov/Ordinance.docm", "document"),
+            "x.gov/Ordinance.docm"
+        );
+        assert_eq!(
+            p("https://x.gov/Budget.xlsb", "spreadsheet"),
+            "x.gov/Budget.xlsb"
+        );
+        // Upper case as served, lower case on disk.
+        assert_eq!(
+            p("https://x.gov/Minutes.ODT", "document"),
+            "x.gov/Minutes.odt"
+        );
+        // An address that names no document format falls back to the kind, keeping its
+        // own name — `.aspx` is how the agenda system addresses it, not how it opens.
+        assert_eq!(
+            p("https://x.gov/GetFile.aspx", "document"),
+            "x.gov/GetFile.aspx.docx"
+        );
+        // And the fallback stays confined to the kinds that need it: an HTML page whose
+        // URL ends `.doc` is still HTML.
+        assert_eq!(p("https://x.gov/page.doc", "html"), "x.gov/page.doc.html");
+    }
+
+    #[test]
+    fn a_legacy_container_is_named_by_its_signature_not_by_the_common_case() {
+        assert_eq!(extension_for("document", br"{\rtf1\ansi"), "rtf");
+        assert_eq!(
+            extension_for(
+                "document",
+                &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
+            ),
+            "doc",
+            "a .docx name on OLE bytes opens in nothing — Word checks the container"
+        );
+        assert_eq!(extension_for("document", b""), "docx");
     }
 
     #[test]

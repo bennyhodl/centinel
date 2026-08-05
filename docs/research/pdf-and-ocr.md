@@ -1203,3 +1203,58 @@ Rust's PDF gap narrows from *"extraction, tables, markdown, layout, and OCR"* to
 - **Version fragmentation reveals the priority order:** npm is at **1.11.2 across 50 releases**; crates.io is at **0.1.7 across 8**. Firecrawl is a TypeScript shop, and the Rust crate is the least-released surface of their own Rust library — the same batch-port pattern seen in their SDKs. Mitigation: depend on the git repo rather than crates.io.
 - The benchmark is **vendor-run**, though on a third-party corpus with published reproducible results.
 - **The corpus is not `.gov` agenda packets.** §8's recommendation of a 30–50 document internal benchmark still stands — it now has a specific first candidate to test.
+
+---
+
+## Correction: `anydoc` (added on review, 2026-08-05)
+
+**§6 is out of date, and the finding it drove — that office formats push the language choice toward Python — no longer holds.** `firecrawl/anydoc` did not exist when §6 was written; it was first published on crates.io three days before this correction. Verified directly against the source during review.
+
+| Field | Value |
+|---|---|
+| Repo | <https://github.com/firecrawl/anydoc> — MIT, **pure Rust** |
+| Published | crates.io `0.1.3` (2026-08-04) · npm `@firecrawl/anydoc` · PyPI `firecrawl-anydoc` |
+| Dependencies | `calamine`, `cfb`, `csv`, `encoding_rs`, `flate2`, `pdf-inspector`, `quick-xml`, `zip`. **No ML models, no external services, no JVM, no LibreOffice.** |
+| Formats | 14: `.doc` `.docx` `.docm` · `.ppt` `.pps` `.pot` `.pptx` `.pptm` `.ppsx` `.ppsm` · `.xls` `.xlsx` `.xlsm` `.xlsb` · `.odt` `.ods` `.odp` · `.rtf` · `.epub` · `.csv` · `.pdf` |
+
+### Claims in §6.1 that it falsifies
+
+The coverage table said Rust's options were thin bindings or a stale Tika port. Every row it touches is now wrong:
+
+- ~~"DOCX: `docx-rs`, `dotext` (thin); `extractous` (Tika)"~~ — full WordprocessingML, Transitional and Strict.
+- ~~"PPTX: `extractous` only"~~ — PresentationML including speaker notes.
+- ~~"Legacy `.doc`/`.xls`: `extractous` (Tika)"~~ — read natively through `cfb`, with no LibreOffice and no GraalVM.
+
+§6.2's conclusion that **"TypeScript has no equivalent"** and that `docling` was *"the closest thing to a drop-in answer that exists in any language"* is superseded for everything except PDF understanding and OCR: `anydoc` covers more formats than `docling` (14 against 4 in its own benchmark) in-process, with no Python runtime.
+
+### Published benchmark
+
+100 real-world documents, LLM judge (Claude Sonnet 5) scoring blind against LibreOffice-rendered ground truth, each pair judged twice with outputs swapped to cancel position bias:
+
+| tool | formats | median ms | score |
+|---|---|---|---|
+| **anydoc** | **14/14** | **4.7** | **80** |
+| unstructured | 8/14 | 572.9 | 65 |
+| markitdown | 6/14 | 134.8 | 65 |
+| pandoc | 5/14 | 102.1 | 57 |
+| docling | 4/14 | 513.6 | 57 |
+| libreoffice | 12/14 | 1129.5 | 40 |
+
+Vendor-run, and the corpus is not redistributable — so unverifiable independently, exactly like the `pdf-inspector` benchmark above. The format coverage claim, unlike the scores, was verified from source.
+
+### What it does NOT change
+
+**It is not a better PDF reader, and adopting it for PDFs would be a regression.** Its PDF path calls the same `pdf_inspector::process_pdf_mem` this project already calls, then collapses the result to a `String`: `pages_needing_ocr`, `has_encoding_issues`, `page_count` and `title` all go to `log::warn!` and are discarded, and a PDF with no text layer returns `Err(Unsupported)` rather than a per-page routing decision.
+
+That is precisely the structure §4 argued for and the correction above credited `pdf-inspector` with providing. **`extract_pdf` therefore stays on `pdf-inspector` directly**, and the dispatcher never routes a PDF to `anydoc`.
+
+Spreadsheets are the same story one level down: `anydoc` reads them through `calamine` — the crate this project already uses — and renders markdown tables, which `extract_spreadsheet` rejected on purpose for 40-column `.gov` budget sheets. Workbooks are routed back to the existing path.
+
+So the gain is **the formats this pipeline could not read at all**: Word, PowerPoint, OpenDocument, RTF and EPUB.
+
+### Caveats
+
+- **Younger than `pdf-inspector` was at its correction.** `0.1.3`, published 2026-08-04, ~500 downloads at time of review.
+- **Same vendor as `pdf-inspector`**, which is already load-bearing here. This adds surface, not a new single-vendor bet.
+- **`ConvertError` is `#[non_exhaustive]`** — matches on it need a wildcard arm and will keep needing one.
+- **`Format::from_bytes` needs the whole file.** ZIP package identity lives in the central directory at the end of the file, so it cannot run against the 4 KB head `content_kind` classifies from. The format is therefore decided at extraction, not at classification.

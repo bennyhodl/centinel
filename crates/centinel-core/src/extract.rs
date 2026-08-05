@@ -32,7 +32,8 @@ use serde::{Deserialize, Serialize};
 const HTMD_VERSION: &str = "0.5.5";
 const DOM_SMOOTHIE_VERSION: &str = "0.18.0";
 const PDF_INSPECTOR_VERSION: &str = "0.1.7";
-const CALAMINE_VERSION: &str = "0.35.0";
+const CALAMINE_VERSION: &str = "0.36.1";
+const ANYDOC_VERSION: &str = "0.1.3";
 
 /// Readability output shorter than this is treated as a failure to find an article.
 ///
@@ -69,7 +70,10 @@ pub const PIPELINE: &str = "centinel-extract";
 /// a corpus re-attempt blobs an earlier version gave up on. Deliberately not the crate
 /// version: a patch release that changes nothing about extraction should not re-read
 /// every audio file in the archive.
-pub const PIPELINE_VERSION: &str = "1";
+///
+/// `2` — `document` and `zip-container` became readable, so every Word file, deck and
+/// e-book an earlier run wrote off as unreadable is worth another attempt.
+pub const PIPELINE_VERSION: &str = "2";
 
 /// What extraction produced.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -113,6 +117,11 @@ pub fn extract(kind: &str, bytes: &[u8], url: Option<&str>, title: Option<&str>)
         "html" => extract_html(bytes, url),
         "pdf" => extract_pdf(bytes),
         "spreadsheet" => extract_spreadsheet(bytes),
+        // Two words, one extractor. `document` is what the `content-type` declared;
+        // `zip-container` is what the magic bytes could tell on their own, which for a
+        // `.docx` served as `application/octet-stream` is only "this is a zip". Both
+        // reach the same question, and `extract_document` is where it gets answered.
+        "document" | "zip-container" => extract_document(bytes),
         "captions" => extract_captions(bytes, title),
         "text" | "csv" | "json" | "xml" => match std::str::from_utf8(bytes) {
             Ok(s) => Extracted::Text(Extraction {
@@ -265,6 +274,66 @@ fn extract_pdf(bytes: &[u8]) -> Extracted {
     }
 }
 
+/// Word files, decks, OpenDocument, RTF and EPUB, through `anydoc`.
+///
+/// One arm for eight formats because they are one pipeline: every parser produces the
+/// same document model and one serializer renders it, so a `.docx` and a `.pptx` are not
+/// two tools in the record's sense — they are one tool given different bytes. The format
+/// goes in the notes, which is where a reader who needs it can find it.
+///
+/// **The format is decided here rather than by [`crate::fetch::content_kind`], and it has
+/// to be.** Telling a `.docx` from a `.pptx` means reading the ZIP central directory,
+/// which sits at the *end* of the file; classification holds a 4 KB head and cannot see
+/// it. Extraction holds the whole verified blob, so this is the first point at which the
+/// question can be answered honestly rather than guessed from a URL.
+fn extract_document(bytes: &[u8]) -> Extracted {
+    let Some(format) = anydoc::Format::from_bytes(bytes) else {
+        // A `.zip` of photographs is a real thing to find on a `.gov` server, and it is
+        // not a failure. Saying so is what stops the next run reading it again.
+        return Extracted::Unextractable {
+            reason: "container holds no document format we can read".into(),
+        };
+    };
+
+    match format {
+        // `anydoc` reads these through `calamine` and renders markdown tables.
+        // `extract_spreadsheet` is the same reader with the output shape this corpus
+        // needs, so the route back is deliberate — see its own note on 40-column sheets.
+        anydoc::Format::Excel | anydoc::Format::Ods => return extract_spreadsheet(bytes),
+        // The dispatcher sends PDFs to `extract_pdf` and never here. Guarded rather than
+        // assumed, because `anydoc`'s PDF path collapses `pdf-inspector`'s result to a
+        // `String`: a PDF arriving through this arm would lose its per-page OCR routing,
+        // and lose it silently.
+        anydoc::Format::Pdf => return extract_pdf(bytes),
+        _ => {}
+    }
+
+    match anydoc::to_markdown_bytes(bytes, format) {
+        Ok(md) => {
+            let text = md.trim().to_string();
+            if text.is_empty() {
+                // An empty deck parses perfectly and holds no words. That is a fact about
+                // the document, not a fault in the reader, and it belongs in the record.
+                return Extracted::Unextractable {
+                    reason: format!("{format:?} parsed but holds no text"),
+                };
+            }
+            Extracted::Text(Extraction {
+                text,
+                // `anydoc` renders the document's own title into the body when it has
+                // one; there is no separate title on the markdown it returns.
+                title: None,
+                tool: "anydoc".into(),
+                version: ANYDOC_VERSION.into(),
+                notes: vec![format!("{format:?} detected from content")],
+            })
+        }
+        Err(e) => Extracted::Unextractable {
+            reason: format!("{format:?} extraction failed: {e}"),
+        },
+    }
+}
+
 /// Spreadsheets as tab-separated rows under per-sheet headings.
 ///
 /// Deliberately not markdown tables: `.gov` budget sheets are routinely 40 columns wide,
@@ -396,6 +465,149 @@ mod tests {
         let out = extract("other", b"\x00\x01AC1027", None, None);
         assert!(matches!(out, Extracted::Unextractable { .. }));
         assert!(out.text().is_none());
+    }
+
+    /// A zip package, built part by part so the test says what makes it a `.docx`.
+    fn zip_of(parts: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in parts {
+            w.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(bytes).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    fn docx(body: &str) -> Vec<u8> {
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>"#;
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:body>{body}</w:body>
+               </w:document>"#
+        );
+        zip_of(&[
+            ("_rels/.rels", rels),
+            ("word/document.xml", document.as_bytes()),
+        ])
+    }
+
+    fn paragraph(text: &str) -> String {
+        format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>")
+    }
+
+    /// The formats this pipeline could not read at all until anydoc landed. RTF is the
+    /// one that needs no container, so the assertion sits beside its own input.
+    #[test]
+    fn an_rtf_document_extracts_and_says_which_tool_read_it() {
+        let rtf = br"{\rtf1\ansi\deff0 {\fonttbl{\f0 Times;}}
+            \b Ordinance 2026-114\b0\par
+            The City Council hereby amends the zoning code.\par}";
+
+        let out = extract("document", rtf, None, None);
+        let text = out.text().expect("rtf should extract");
+
+        assert!(text.contains("Ordinance 2026-114"), "{text}");
+        assert!(text.contains("amends the zoning code"), "{text}");
+
+        let (tool, version) = out.tool().unwrap();
+        assert_eq!(tool, "anydoc");
+        assert_eq!(version, ANYDOC_VERSION);
+    }
+
+    /// The measured shape of the gap: `.gov` servers serve `.docx` as
+    /// `application/octet-stream`, so the header says nothing and the magic bytes say
+    /// only "a zip". Both used to end as `Unextractable`.
+    #[test]
+    fn a_document_served_as_a_bare_zip_still_extracts() {
+        use std::collections::BTreeMap;
+
+        let bytes = docx(&paragraph("Notice of public hearing on the FY2027 budget."));
+
+        assert_eq!(
+            crate::fetch::content_kind(&BTreeMap::new(), &bytes),
+            "zip-container",
+            "the head cannot tell a .docx from any other zip, and must not pretend to"
+        );
+
+        let out = extract("zip-container", &bytes, None, None);
+        let text = out
+            .text()
+            .expect("a docx must not be lost for want of a header");
+        assert!(text.contains("public hearing"), "{text}");
+        assert_eq!(out.tool().unwrap().0, "anydoc");
+    }
+
+    /// The routing that keeps one decision from quietly overriding another: anydoc reads
+    /// workbooks through calamine and renders markdown tables, and a 40-column budget
+    /// sheet must not become one. Arriving as an unlabelled zip changes nothing.
+    #[test]
+    fn a_workbook_is_routed_back_to_the_spreadsheet_shape() {
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+        </Relationships>"#;
+        let workbook =
+            br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <sheets><sheet name="General Fund" sheetId="1" r:id="rId1"/></sheets>
+        </workbook>"#;
+        let wb_rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+        </Relationships>"#;
+        let sheet =
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+            <sheetData>
+              <row r="1"><c r="A1" t="inlineStr"><is><t>Department</t></is></c>
+                         <c r="B1" t="inlineStr"><is><t>Adopted</t></is></c></row>
+            </sheetData>
+        </worksheet>"#;
+        let bytes = zip_of(&[
+            ("_rels/.rels", rels),
+            ("xl/workbook.xml", workbook),
+            ("xl/_rels/workbook.xml.rels", wb_rels),
+            ("xl/worksheets/sheet1.xml", sheet),
+        ]);
+
+        let out = extract("zip-container", &bytes, None, None);
+        let text = out.text().expect("a workbook should extract");
+
+        assert_eq!(
+            out.tool().unwrap().0,
+            "calamine",
+            "workbooks belong to the spreadsheet path, whichever kind they arrived as"
+        );
+        assert!(
+            text.contains("Department\tAdopted"),
+            "tab-separated, not a markdown table: {text}"
+        );
+    }
+
+    /// A zip of photographs is a real thing to find on a `.gov` server. Recording that we
+    /// hold it and cannot read it is what stops every later run reading it again.
+    #[test]
+    fn a_zip_that_holds_no_document_is_recorded_rather_than_retried_forever() {
+        let bytes = zip_of(&[("site-plan.dwg", b"\x00\x01AC1027")]);
+        let out = extract("zip-container", &bytes, None, None);
+
+        assert!(matches!(out, Extracted::Unextractable { .. }));
+        assert!(out.text().is_none());
+    }
+
+    /// A PDF must never reach the anydoc arm, whatever a server called it: anydoc's PDF
+    /// path discards `pages_needing_ocr`, so a mislabelled scan would lose its per-page
+    /// routing without saying so.
+    #[test]
+    fn a_pdf_mislabelled_as_a_document_keeps_the_pdf_path() {
+        let out = extract("document", b"%PDF-1.7\nnot really a pdf", None, None);
+        match out {
+            Extracted::Unextractable { reason } => {
+                assert!(reason.starts_with("pdf parse failed"), "{reason}");
+            }
+            other => panic!("a PDF must be read as a PDF: {other:?}"),
+        }
     }
 
     #[test]
