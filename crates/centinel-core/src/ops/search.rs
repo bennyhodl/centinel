@@ -154,9 +154,13 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
 /// line as the title is the **source**, because "which city said this" changes what the
 /// passage means and the others do not.
 ///
-/// `blob_sha` and the character span are not printed. They are the evidentiary anchor and
-/// they matter enormously — to a verifier, who should be reading `--json` and hashing the
-/// blob, not eyeballing twelve hex characters in a terminal.
+/// The blob hash *is* printed, short, in cyan — because it is not only provenance, it is
+/// the handle. A result you cannot act on is a dead end, and `centinel open <hash>` or
+/// `centinel read <hash>` is what turns a passage back into the document it came from.
+/// Twelve hex characters is the shortest form both commands accept.
+///
+/// The character span is not printed. That one really is for a verifier, who should be
+/// reading `--json` and hashing the blob rather than eyeballing offsets in a terminal.
 impl Render for SearchReport {
     fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
         let aside = format!(
@@ -203,16 +207,19 @@ impl Render for SearchResult {
                 // An untitled passage already used its URL as the headline. Printing it
                 // again underneath is the JSON habit — repeating a field because the
                 // structure has a slot for it.
+                //
+                // The hash leads the line because it is the one thing here you type back.
+                let hash = p.paint(&render::short_sha(&self.blob_sha), Ink::Cyan);
                 let provenance = if named {
                     format!(
                         "{}  ·  {}",
-                        render::truncate_start(&self.url, p.width().saturating_sub(22)),
+                        render::truncate_start(&self.url, p.width().saturating_sub(39)),
                         render::short_time(&self.observed_at),
                     )
                 } else {
                     render::short_time(&self.observed_at)
                 };
-                p.line(p.paint(&provenance, Ink::Dim))?;
+                p.line(format!("{hash}  ·  {}", p.paint(&provenance, Ink::Dim)))?;
                 if !self.also_at.is_empty() {
                     let also = format!(
                         "also at {}",

@@ -8,6 +8,12 @@
 //! Both halves of a document are reachable — the **original** bytes as served, and the
 //! **derived** markdown. Reading the extraction next to its source is the fastest way to
 //! judge whether extraction is doing a good job.
+//!
+//! The original is the default, because for almost every kind it is the better artefact:
+//! a browser renders the HTML, Acrobat renders the PDF, a player plays the audio, and
+//! the extraction is a lossy summary of any of them. The exception is a caption track,
+//! which is a machine interchange format whose only human content is the text inside it.
+//! Those open as their transcript unless `--original` says otherwise.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -15,12 +21,13 @@ use serde::{Deserialize, Serialize};
 use crate::config::{Config, SYSTEM_DEFAULT};
 use crate::fetch::content_kind;
 use crate::materialize::materialize;
+use crate::ops::target::resolve;
 use crate::prelude::*;
 use crate::store::LogRecord;
 
 #[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct OpenArgs {
-    /// A URL, a substring of one, or a blob hash.
+    /// A URL, a substring of one, or a blob hash — the short hash `search` prints is enough.
     #[arg(value_name = "TARGET")]
     pub target: String,
 
@@ -28,6 +35,11 @@ pub struct OpenArgs {
     #[arg(long)]
     #[serde(default)]
     pub derived: bool,
+
+    /// Open the bytes as served, even for a kind that defaults to its extracted text.
+    #[arg(long, conflicts_with = "derived")]
+    #[serde(default)]
+    pub original: bool,
 
     /// Application or `command {path}` template, overriding the config.
     #[arg(long = "with")]
@@ -75,48 +87,31 @@ pub struct OpenReport {
 /// document should call `read`, which returns text and touches nothing.
 #[op(local_only, group = "corpus")]
 pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
-    let sources = match &args.source {
-        Some(s) => vec![SourceId::new(s.clone())?],
-        None => ctx.store.sources().await?,
+    let found = resolve(ctx, &args.target, args.source.as_deref()).await?;
+    let (source, resource, obs) = (found.source, found.resource, found.observation);
+    let other_matches = found.other_matches;
+
+    // ---- pick the half --------------------------------------------------------------
+    //
+    // For nearly every kind the original is the thing you want: a browser renders the
+    // HTML, Acrobat renders the PDF, a player plays the audio. A json3 caption track is
+    // the exception, and the only one — it is a timing structure with words threaded
+    // through it, and the words are the entire reason anybody opens one. Defaulting it
+    // to the served bytes hands over five megabytes of machine JSON and calls it done.
+    //
+    // Classification needs the bytes, so it is skipped when the flags already decided.
+    let original_bytes = if args.derived || args.original {
+        None
+    } else {
+        Some(ctx.store.get_blob(&obs.blob_sha).await?)
     };
-
-    // ---- resolve the target ---------------------------------------------------------
-    let looks_like_hash =
-        args.target.len() == 64 && args.target.chars().all(|c| c.is_ascii_hexdigit());
-
-    let mut matches: Vec<(SourceId, Resource, Observation)> = Vec::new();
-    for source in &sources {
-        for (resource, obs) in ctx.store.latest_observations(source).await? {
-            let hit = if looks_like_hash {
-                obs.blob_sha.as_str() == args.target
-            } else {
-                resource.natural_key == args.target || resource.natural_key.contains(&args.target)
-            };
-            if hit {
-                matches.push((source.clone(), resource, obs));
-            }
-        }
-    }
-
-    anyhow::ensure!(
-        !matches.is_empty(),
-        "nothing in the store matches `{}`. Try `centinel search` first, or pass a full URL.",
-        args.target
-    );
-
-    // Prefer an exact URL match over a substring one, so a precise target is never
-    // shadowed by a longer URL that happens to contain it.
-    matches.sort_by_key(|(_, r, _)| (r.natural_key != args.target, r.natural_key.clone()));
-    let (source, resource, obs) = matches.first().cloned().expect("non-empty");
-    let other_matches = matches
-        .iter()
-        .skip(1)
-        .take(10)
-        .map(|(_, r, _)| r.natural_key.clone())
-        .collect();
+    let reads_as_machine_format = original_bytes
+        .as_deref()
+        .is_some_and(|bytes| content_kind(&obs.meta, bytes) == "captions");
+    let derived = args.derived || reads_as_machine_format;
 
     // ---- pick the blob --------------------------------------------------------------
-    let (blob_sha, kind) = if args.derived {
+    let (blob_sha, kind) = if derived {
         let derivation = ctx
             .store
             .read_log(&source)
@@ -129,13 +124,18 @@ pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
             .next_back()
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "no extracted text for {} — run `centinel extract` first",
+                    "no extracted text for {} — run `centinel extract` first, or \
+                     `--original` to open the bytes as served",
                     resource.natural_key
                 )
             })?;
         (derivation.to_sha, "markdown".to_string())
     } else {
-        let bytes = ctx.store.get_blob(&obs.blob_sha).await?;
+        // Read once: the default path already fetched these to classify them.
+        let bytes = match original_bytes {
+            Some(bytes) => bytes,
+            None => ctx.store.get_blob(&obs.blob_sha).await?,
+        };
         (
             obs.blob_sha.clone(),
             content_kind(&obs.meta, &bytes).to_string(),
@@ -164,7 +164,7 @@ pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
         path: path.display().to_string(),
         blob_sha: blob_sha.to_string(),
         bytes,
-        derived: args.derived,
+        derived,
         opened_with,
         other_matches,
     })
@@ -242,6 +242,9 @@ impl Render for OpenReport {
             None => p.line(&self.path)?,
         }
 
+        // The hash of what was actually opened — with `--derived` that is the extracted
+        // text's blob, not the original's, and the two are worth being able to tell apart.
+        let hash = p.paint(&render::short_sha(&self.blob_sha), Ink::Cyan);
         let what = format!(
             "{} · {} · {}{}",
             self.source,
@@ -249,7 +252,18 @@ impl Render for OpenReport {
             render::bytes(self.bytes as u64),
             if self.derived { " · extracted text" } else { "" },
         );
-        p.nest(|p| p.line(p.paint(&what, Ink::Dim)))?;
+        p.nest(|p| p.line(format!("{hash} · {}", p.paint(&what, Ink::Dim))))?;
+
+        // Say so when the extracted text was opened, and name the way back. Silently
+        // handing over a *different file* than the one whose hash was typed is the kind
+        // of helpfulness that costs trust the first time somebody notices.
+        if self.derived {
+            p.nest(|p| {
+                let flag = p.paint("--original", Ink::Cyan);
+                let rest = p.paint("opens the bytes as served", Ink::Dim);
+                p.line(format!("{flag}  {rest}"))
+            })?;
+        }
 
         if !self.other_matches.is_empty() {
             p.nest(|p| {

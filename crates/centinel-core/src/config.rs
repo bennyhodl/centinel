@@ -61,7 +61,7 @@ pub struct Config {
 /// Which application opens which kind of document.
 ///
 /// Keys are the content kinds from [`crate::fetch::content_kind`] — `pdf`, `html`,
-/// `markdown`, `spreadsheet`, `text`.
+/// `markdown`, `spreadsheet`, `document`, `text`, `json`, `captions`, `audio`.
 ///
 /// A value is either an **application name** (`"Adobe Acrobat"`) or a **command
 /// template** containing `{path}` (`"nvim {path}"`). The distinction is the presence of

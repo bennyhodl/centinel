@@ -10,12 +10,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::fetch::content_kind;
+use crate::ops::target::resolve;
 use crate::prelude::*;
 use crate::store::LogRecord;
 
 #[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ReadArgs {
-    /// A URL, a substring of one, or a blob hash — the same targets `search` reports.
+    /// A URL, a substring of one, or a blob hash — the same targets `search` reports,
+    /// including the short hash it prints.
     #[arg(value_name = "TARGET")]
     pub target: String,
 
@@ -69,43 +71,9 @@ pub struct ReadReport {
 /// Read the extracted text of a collected document.
 #[op(group = "corpus")]
 pub async fn read(ctx: &Ctx, args: ReadArgs) -> anyhow::Result<ReadReport> {
-    let sources = match &args.source {
-        Some(s) => vec![SourceId::new(s.clone())?],
-        None => ctx.store.sources().await?,
-    };
-
-    let looks_like_hash =
-        args.target.len() == 64 && args.target.chars().all(|c| c.is_ascii_hexdigit());
-
-    let mut matches: Vec<(SourceId, Resource, Observation)> = Vec::new();
-    for source in &sources {
-        for (resource, obs) in ctx.store.latest_observations(source).await? {
-            let hit = if looks_like_hash {
-                obs.blob_sha.as_str() == args.target
-            } else {
-                resource.natural_key == args.target || resource.natural_key.contains(&args.target)
-            };
-            if hit {
-                matches.push((source.clone(), resource, obs));
-            }
-        }
-    }
-
-    anyhow::ensure!(
-        !matches.is_empty(),
-        "nothing in the store matches `{}`. Try `search` first, or pass a full URL.",
-        args.target
-    );
-
-    // An exact URL never loses to a longer one that merely contains it.
-    matches.sort_by_key(|(_, r, _)| (r.natural_key != args.target, r.natural_key.clone()));
-    let (source, resource, obs) = matches.first().cloned().expect("non-empty");
-    let other_matches = matches
-        .iter()
-        .skip(1)
-        .take(10)
-        .map(|(_, r, _)| r.natural_key.clone())
-        .collect();
+    let found = resolve(ctx, &args.target, args.source.as_deref()).await?;
+    let (source, resource, obs) = (found.source, found.resource, found.observation);
+    let other_matches = found.other_matches;
 
     let derivation = ctx
         .store
@@ -165,6 +133,10 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> anyhow::Result<ReadReport> {
 
 /// A header of provenance, then the document.
 ///
+/// The header leads with the blob hash for the same reason `search` does: it is what you
+/// pass to `open` to see this document in an application, or back to `read` to page
+/// through it, and a citation you have to reconstruct is a citation nobody follows.
+///
 /// The text is what was asked for, so it is printed unwrapped and unpainted — a terminal's
 /// own wrapping preserves the line structure the extractor produced, and re-flowing it here
 /// would silently destroy the paragraph breaks and timestamps that make a transcript
@@ -173,6 +145,7 @@ impl Render for ReadReport {
     fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
         p.title(&render::truncate(&self.url, p.width()), "")?;
 
+        let hash = p.paint(&render::short_sha(&self.blob_sha), Ink::Cyan);
         let provenance = format!(
             "{} · {} · {} · {}",
             self.source,
@@ -180,7 +153,7 @@ impl Render for ReadReport {
             self.tool,
             render::short_time(&self.observed_at),
         );
-        p.line(p.paint(&provenance, Ink::Dim))?;
+        p.line(format!("{hash} · {}", p.paint(&provenance, Ink::Dim)))?;
 
         if !self.other_matches.is_empty() {
             let note = format!(

@@ -167,32 +167,44 @@ pub fn content_kind(meta: &BTreeMap<String, String>, bytes: &[u8]) -> &'static s
 /// blob path has no extension — this is how `transcribe` finds its work list, and how
 /// ffmpeg's job is confirmed before it is asked to do it.
 fn is_audio(bytes: &[u8]) -> bool {
+    audio_container(bytes).is_some()
+}
+
+/// Which container, as a file extension — the same sniff asked a more specific question.
+///
+/// `content_kind` answers with one word, `audio`, because that is the distinction
+/// `transcribe` needs. Naming a file needs the next one down: every player refuses a
+/// WebM called `.m4a`, so `open` cannot round five containers to one extension.
+///
+/// `None` means the bytes are not audio at all, which is a different answer from "audio
+/// of a container I do not recognise" — the caller decides what to do with each.
+pub fn audio_container(bytes: &[u8]) -> Option<&'static str> {
     // ISO base media (m4a): `....ftyp` — the size field comes first.
     if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
         // `ftypmp42`/`ftypM4A ` are audio; `ftypisom` is usually video, but a
         // video-carrying blob is still something ffmpeg can pull an audio track from.
-        return true;
+        return Some("m4a");
     }
     // Matroska / WebM.
     if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
-        return true;
+        return Some("webm");
     }
     // RIFF....WAVE
     if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE" {
-        return true;
+        return Some("wav");
     }
     // Ogg (Opus/Vorbis).
     if bytes.starts_with(b"OggS") {
-        return true;
+        return Some("ogg");
     }
     // MP3: an ID3 tag, or a bare frame sync.
     if bytes.starts_with(b"ID3") {
-        return true;
+        return Some("mp3");
     }
     if bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0 {
-        return true;
+        return Some("mp3");
     }
-    false
+    None
 }
 
 #[cfg(test)]

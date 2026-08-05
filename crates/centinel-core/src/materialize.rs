@@ -21,7 +21,17 @@ use crate::domain::{BlobSha, SourceId};
 use crate::store::Store;
 
 /// File extension for a content kind.
-pub fn extension_for(kind: &str) -> &'static str {
+///
+/// Every kind [`crate::fetch::content_kind`] can return needs an arm here. A kind that
+/// falls through to `bin` produces a file no application will open, which defeats the
+/// entire purpose of `current/` — the point of this tree is that the bytes arrive
+/// wearing a name their handler recognises.
+///
+/// `head` is the first bytes of the blob, and matters only for kinds the vocabulary
+/// deliberately generalises: `audio` is one word for five containers. Pass an empty
+/// slice when the bytes are not to hand; the answer degrades to the commonest container
+/// rather than to `bin`.
+pub fn extension_for(kind: &str, head: &[u8]) -> &'static str {
     match kind {
         "pdf" => "pdf",
         "html" => "html",
@@ -29,11 +39,35 @@ pub fn extension_for(kind: &str) -> &'static str {
         "spreadsheet" => "xlsx",
         "csv" => "csv",
         "json" => "json",
+        // A json3 caption track is JSON however machine-shaped it reads, and JSON opens
+        // in every editor and browser on the machine. `.bin` opens in none of them.
+        "captions" => "json",
         "xml" => "xml",
         "text" => "txt",
+        // `content_kind` folds .doc into .docx, and the older format is vanishing.
+        "document" => "docx",
+        // yt-dlp's default for this project's sources, and so the safest fallback when
+        // the head was not read or the container is one we do not know.
+        "audio" => crate::fetch::audio_container(head).unwrap_or("m4a"),
         "zip-container" => "zip",
         _ => "bin",
     }
+}
+
+/// Every container signature this file decides on fits in the first dozen bytes.
+const HEAD_BYTES: usize = 16;
+
+/// Bytes enough to recognise a container by.
+///
+/// Read from the blob rather than passed in, because the caller holding a 200 MB audio
+/// blob's *hash* should not have to hold its contents to give it a filename.
+async fn head_of(path: &Path) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+
+    let file = tokio::fs::File::open(path).await?;
+    let mut head = Vec::with_capacity(HEAD_BYTES);
+    file.take(HEAD_BYTES as u64).read_to_end(&mut head).await?;
+    Ok(head)
 }
 
 /// Filesystem components cap at 255 bytes; leave room for an extension and suffix.
@@ -73,8 +107,8 @@ fn sanitize(segment: &str) -> String {
 /// Query strings are folded into the filename as a short hash rather than dropped.
 /// `.gov` agenda systems are routinely query-string addressed — `MeetingView.aspx?id=1`
 /// and `?id=2` are different documents, and collapsing them would silently overwrite.
-pub fn relative_path(url: &str, kind: &str) -> PathBuf {
-    let ext = extension_for(kind);
+pub fn relative_path(url: &str, kind: &str, head: &[u8]) -> PathBuf {
+    let ext = extension_for(kind, head);
 
     // A hostless "URL" is an opaque identifier, not an address — `legistar:matter:5107`
     // parses fine but has no host and no meaningful path structure. Treat the whole
@@ -120,10 +154,16 @@ pub fn relative_path(url: &str, kind: &str) -> PathBuf {
 }
 
 /// Where a document lands under the store root.
-pub fn target_path(root: &Path, source: &SourceId, url: &str, kind: &str) -> PathBuf {
+pub fn target_path(
+    root: &Path,
+    source: &SourceId,
+    url: &str,
+    kind: &str,
+    head: &[u8],
+) -> PathBuf {
     root.join("current")
         .join(source.as_str())
-        .join(relative_path(url, kind))
+        .join(relative_path(url, kind, head))
 }
 
 /// Links a blob into `current/` under a usable name, returning the path.
@@ -138,7 +178,8 @@ pub async fn materialize(
     blob_sha: &BlobSha,
     kind: &str,
 ) -> anyhow::Result<PathBuf> {
-    let dest = target_path(store.root(), source, url, kind);
+    let src = store.blob_path_of(blob_sha);
+    let dest = target_path(store.root(), source, url, kind, &head_of(&src).await?);
 
     if tokio::fs::try_exists(&dest).await? {
         return Ok(dest);
@@ -150,7 +191,6 @@ pub async fn materialize(
     // Verifies the hash on the way through, so materialising cannot propagate a
     // corrupt blob into something a person will read and trust.
     let bytes = store.get_blob(blob_sha).await?;
-    let src = store.blob_path_of(blob_sha);
 
     match tokio::fs::hard_link(&src, &dest).await {
         Ok(()) => Ok(dest),
@@ -166,7 +206,7 @@ mod tests {
     use super::*;
 
     fn p(url: &str, kind: &str) -> String {
-        relative_path(url, kind)
+        relative_path(url, kind, b"")
             .to_string_lossy()
             .replace('\\', "/")
     }
@@ -230,7 +270,7 @@ mod tests {
             "..",
             "https://x.gov/a/../../../../b",
         ] {
-            let path = relative_path(target, "text");
+            let path = relative_path(target, "text", b"");
             assert!(path.is_relative(), "{target} produced an absolute path");
             for component in path.components() {
                 assert!(
@@ -266,9 +306,58 @@ mod tests {
 
     #[test]
     fn extensions_cover_the_kinds_the_fetcher_reports() {
-        assert_eq!(extension_for("pdf"), "pdf");
-        assert_eq!(extension_for("markdown"), "md");
-        assert_eq!(extension_for("spreadsheet"), "xlsx");
-        assert_eq!(extension_for("other"), "bin");
+        assert_eq!(extension_for("pdf", b""), "pdf");
+        assert_eq!(extension_for("markdown", b""), "md");
+        assert_eq!(extension_for("spreadsheet", b""), "xlsx");
+        assert_eq!(extension_for("other", b""), "bin");
+    }
+
+    /// The gap that shipped: `captions` had no arm, so every YouTube caption track
+    /// materialised as `watch~ec1ba331.bin` and opened in nothing.
+    ///
+    /// Kept as a list rather than a spot-check because the failure mode is silent —
+    /// `content_kind` gains a word, `extension_for` does not, and nobody finds out until
+    /// they try to open one.
+    #[test]
+    fn no_kind_the_fetcher_reports_falls_through_to_bin() {
+        for kind in [
+            "pdf",
+            "html",
+            "text",
+            "json",
+            "captions",
+            "xml",
+            "csv",
+            "spreadsheet",
+            "document",
+            "audio",
+            "zip-container",
+            "markdown",
+        ] {
+            assert_ne!(
+                extension_for(kind, b""),
+                "bin",
+                "`{kind}` materialises as .bin — add an arm to extension_for"
+            );
+        }
+    }
+
+    /// One word, five containers: a player refuses a WebM called `.m4a`, so the head
+    /// decides. An unread head still beats `.bin`.
+    #[test]
+    fn audio_is_named_by_its_container() {
+        assert_eq!(extension_for("audio", b"\x00\x00\x00\x20ftypM4A "), "m4a");
+        assert_eq!(extension_for("audio", &[0x1A, 0x45, 0xDF, 0xA3]), "webm");
+        assert_eq!(extension_for("audio", b"OggS\0\x02"), "ogg");
+        assert_eq!(extension_for("audio", b"ID3\x04\0\0"), "mp3");
+        assert_eq!(extension_for("audio", b""), "m4a");
+    }
+
+    #[test]
+    fn a_caption_track_is_named_as_the_json_it_is() {
+        assert_eq!(
+            p("https://www.youtube.com/watch?v=VPMDoKtJQG8#captions.json3", "captions"),
+            "www.youtube.com/watch~92aa30ca.json"
+        );
     }
 }
