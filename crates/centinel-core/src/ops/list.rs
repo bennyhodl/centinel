@@ -68,11 +68,10 @@ pub async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<ListReport> {
 
     let mut out = Vec::with_capacity(sources.len());
     for source in sources {
-        let statuses = ctx.store.statuses(&source).await?;
-        let observations = ctx
-            .store
-            .read_log(&source)
-            .await?
+        let replay = ctx.store.replay(&source).await?;
+        let statuses = replay.statuses();
+        let observations = replay
+            .records()
             .iter()
             .filter(|r| matches!(r, LogRecord::Observation(_)))
             .count();
@@ -180,7 +179,10 @@ impl Render for SourceSummary {
                 problem.render(p)?;
             }
             if let Some(more) = self.problems_truncated {
-                let text = format!("… and {} more, raise --max-problems to see them", render::count(more as u64));
+                let text = format!(
+                    "… and {} more, raise --max-problems to see them",
+                    render::count(more as u64)
+                );
                 p.line(p.paint(&text, Ink::Dim))?;
             }
             Ok(())

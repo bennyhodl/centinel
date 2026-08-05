@@ -20,12 +20,11 @@
 pub mod channel;
 pub mod site;
 
-use crate::acquire;
 use crate::config::{Acquisition, Defaults, SourceConfig};
 use crate::discovery::DiscoveryLimits;
 use crate::domain::{Source, SourceId, SourceKind};
 use crate::policy::HostPolicy;
-use crate::store::{LogRecord, Store};
+use crate::store::{LogRecord, Replay, Store};
 
 pub use channel::{AudioPolicy, ChannelSource};
 pub use site::SiteSource;
@@ -131,16 +130,22 @@ impl Inferred {
 /// covers a source collected with `ingest`, which writes Observations and never a
 /// DiscoveryRun.
 pub async fn infer(store: &Store, id: &SourceId) -> anyhow::Result<Option<Inferred>> {
-    let log = store.read_log(id).await?;
-    if log.is_empty() {
+    infer_from(store, &store.replay(id).await?).await
+}
+
+/// [`infer`], against a log the caller has already read.
+///
+/// For a caller that also wants the resource count, which is another view of the same
+/// pass. Asking for both used to read the log twice.
+pub async fn infer_from(store: &Store, replay: &Replay) -> anyhow::Result<Option<Inferred>> {
+    if replay.is_empty() {
         return Ok(None);
     }
 
-    let method = acquire::recorded_method(store, id).await?;
-
     // Natural keys, newest last — a site's origin and a channel's video ids both come
     // from here.
-    let keys: Vec<&str> = log
+    let keys: Vec<&str> = replay
+        .records()
         .iter()
         .filter_map(|r| match r {
             LogRecord::Observation(o) => Some(o.resource.natural_key.as_str()),
@@ -149,10 +154,10 @@ pub async fn infer(store: &Store, id: &SourceId) -> anyhow::Result<Option<Inferr
         })
         .collect();
 
-    if channel::claims(&method, &keys) {
+    if channel::claims(replay.discovery_method(), &keys) {
         return Ok(Some(Inferred {
             kind: SourceKind::Channel,
-            target: channel_url(store, &log).await,
+            target: channel_url(store, replay.records()).await,
         }));
     }
 

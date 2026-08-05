@@ -30,6 +30,7 @@
 
 use crate::domain::BlobSha;
 use crate::prelude::*;
+use crate::store::Replay;
 
 /// The shortest hash prefix treated as a hash rather than as URL text.
 ///
@@ -42,6 +43,12 @@ pub struct Resolved {
     pub source: SourceId,
     pub resource: Resource,
     pub observation: Observation,
+    /// The resolved source's log, already read.
+    ///
+    /// Handed on rather than dropped, because both callers' very next question — "what
+    /// is the extracted text of this?" — is one this answers, and re-reading the log to
+    /// ask it is a cost nobody chose.
+    pub replay: Replay,
     /// Set when the target named a **derived** blob rather than the original bytes.
     ///
     /// Callers use it to open the thing that was actually asked for, so that a hash
@@ -63,10 +70,19 @@ pub async fn resolve(ctx: &Ctx, target: &str, source: Option<&str>) -> anyhow::R
         None => ctx.store.sources().await?,
     };
 
-    let mut candidates: Vec<(SourceId, Resource, Observation)> = Vec::new();
+    // One pass per source, not two. This function asks each log two different questions —
+    // what was observed, and what was derived — and used to read every one of them twice
+    // to do it. On a five-source store that made resolving a single hash eleven full log
+    // reads before anything was even opened.
+    let mut replays = Vec::with_capacity(sources.len());
     for source in &sources {
-        for (resource, obs) in ctx.store.latest_observations(source).await? {
-            candidates.push((source.clone(), resource, obs));
+        replays.push(ctx.store.replay(source).await?);
+    }
+
+    let mut candidates: Vec<(SourceId, Resource, Observation)> = Vec::new();
+    for replay in &replays {
+        for (resource, obs) in replay.latest_observations() {
+            candidates.push((replay.source().clone(), resource, obs));
         }
     }
 
@@ -85,24 +101,21 @@ pub async fn resolve(ctx: &Ctx, target: &str, source: Option<&str>) -> anyhow::R
         // anchor and wins any prefix it shares — which, at twelve hex characters, it
         // never will.
         if matches.is_empty() {
-            for source in &sources {
-                for (to, from) in ctx.store.derived_from(source).await? {
+            'derived: for replay in &replays {
+                for (to, from) in replay.derived_from() {
                     if !to.as_str().starts_with(&prefix) {
                         continue;
                     }
                     let found: Vec<_> = candidates
                         .iter()
-                        .filter(|(s, _, obs)| s == source && obs.blob_sha == from)
+                        .filter(|(s, _, obs)| s == replay.source() && &obs.blob_sha == from)
                         .cloned()
                         .collect();
                     if !found.is_empty() {
-                        matched_derived = Some(to);
+                        matched_derived = Some(to.clone());
                         matches = found;
-                        break;
+                        break 'derived;
                     }
-                }
-                if matched_derived.is_some() {
-                    break;
                 }
             }
         }
@@ -130,10 +143,16 @@ pub async fn resolve(ctx: &Ctx, target: &str, source: Option<&str>) -> anyhow::R
         .map(|(_, r, _)| r.natural_key.clone())
         .collect();
 
+    let replay = replays
+        .into_iter()
+        .find(|r| r.source() == &source)
+        .expect("the winning match came from one of these");
+
     Ok(Resolved {
         source,
         resource,
         observation,
+        replay,
         matched_derived,
         other_matches,
     })

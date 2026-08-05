@@ -132,21 +132,15 @@ pub async fn extract(
     };
 
     for source in &sources {
-        let log = ctx.store.read_log(source).await?;
+        let replay = ctx.store.replay(source).await?;
 
         // Blobs that already have a derivation. Keyed by source blob only: the HTML
         // pipeline picks between two tools at runtime, so the tool is not known until
         // after extraction and cannot be part of a skip key. `--refresh` is the
         // deliberate escape hatch after a tool upgrade.
-        let derived: HashSet<_> = log
-            .iter()
-            .filter_map(|r| match r {
-                LogRecord::Derivation(d) => Some(d.from_sha.clone()),
-                _ => None,
-            })
-            .collect();
+        let derived: HashSet<_> = replay.derivations().map(|d| &d.from_sha).collect();
 
-        let latest = ctx.store.latest_observations(source).await?;
+        let latest = replay.latest_observations();
         report.observations += latest.len();
 
         let total = latest.len() as u64;
@@ -342,7 +336,10 @@ impl Render for Unreadable {
 impl Render for ExtractSample {
     fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
         let label = self.title.as_deref().unwrap_or(&self.url);
-        let head = p.paint(&render::truncate(label, p.width().saturating_sub(22)), Ink::Bold);
+        let head = p.paint(
+            &render::truncate(label, p.width().saturating_sub(22)),
+            Ink::Bold,
+        );
         let aside = p.paint(
             &format!("{} · {}", self.tool, render::count(self.chars as u64)),
             Ink::Dim,

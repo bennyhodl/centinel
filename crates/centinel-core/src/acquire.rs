@@ -27,9 +27,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use jiff::Timestamp;
 
-use crate::domain::{
-    DiscoveryRun, Fingerprint, Liveness, Note, Resource, ResourceStatus, Source, SourceId,
-};
+use crate::domain::{DiscoveryRun, Fingerprint, Liveness, Note, Resource, ResourceStatus, Source};
 use crate::op::Progress;
 use crate::store::{LogRecord, Store};
 
@@ -77,14 +75,10 @@ pub async fn discover(
     let enumeration = source.enumerate(progress).await?;
 
     let previous: Option<Vec<Resource>> = store
-        .read_log(&id)
+        .replay(&id)
         .await?
-        .iter()
-        .filter_map(|r| match r {
-            LogRecord::DiscoveryRun(d) => Some(d.resources.clone()),
-            _ => None,
-        })
-        .next_back();
+        .latest_discovery()
+        .map(|d| d.resources.clone());
 
     let previous_run = previous.as_ref().map(Vec::len);
     let known: std::collections::HashSet<&str> = previous
@@ -227,15 +221,11 @@ pub async fn collect(
     let id = source.id().clone();
 
     // One pass over the log for the work list, the resume state and the change baseline.
-    let log = store.read_log(&id).await?;
+    let replay = store.replay(&id).await?;
 
-    let discovered: Vec<Resource> = log
-        .iter()
-        .filter_map(|r| match r {
-            LogRecord::DiscoveryRun(d) => Some(d.resources.clone()),
-            _ => None,
-        })
-        .next_back()
+    let discovered: Vec<Resource> = replay
+        .latest_discovery()
+        .map(|d| d.resources.clone())
         .unwrap_or_default();
 
     anyhow::ensure!(
@@ -245,7 +235,7 @@ pub async fn collect(
 
     let mut seen: HashMap<Resource, Fingerprint> = HashMap::new();
     let mut statuses: BTreeMap<Resource, ResourceStatus> = BTreeMap::new();
-    for rec in &log {
+    for rec in replay.records() {
         match rec {
             LogRecord::Observation(o) => {
                 seen.insert(o.resource.clone(), o.fingerprint.clone());
@@ -430,27 +420,10 @@ fn push_failure(report: &mut Collected, max: usize, failure: Failure) {
     }
 }
 
-/// The most recent DiscoveryRun's `method`, or empty when the store holds none.
-///
-/// The discriminator that recovers a Source's kind from the store alone — see
-/// [`crate::sources::kind_of`].
-pub async fn recorded_method(store: &Store, id: &SourceId) -> anyhow::Result<String> {
-    Ok(store
-        .read_log(id)
-        .await?
-        .iter()
-        .rev()
-        .find_map(|r| match r {
-            LogRecord::DiscoveryRun(d) => Some(d.method.clone()),
-            _ => None,
-        })
-        .unwrap_or_default())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Acquired, Enumeration, Fetched, Refusal, SourceKind};
+    use crate::domain::{Acquired, Enumeration, Fetched, Refusal, SourceId, SourceKind};
     use futures::future::BoxFuture;
     use std::sync::Mutex;
 
@@ -636,8 +609,8 @@ mod tests {
         assert_eq!(out.notes[0].label, "scripted");
 
         // The method on the record is the Source's own word, not the caller's guess.
-        let method = recorded_method(&store, src.id()).await.unwrap();
-        assert_eq!(method, "scripted");
+        let replay = store.replay(src.id()).await.unwrap();
+        assert_eq!(replay.discovery_method(), "scripted");
     }
 
     #[tokio::test]

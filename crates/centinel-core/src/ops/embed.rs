@@ -123,8 +123,7 @@ pub struct EmbedReport {
 pub async fn embed(ctx: &Ctx, args: EmbedArgs, progress: &Progress) -> anyhow::Result<EmbedReport> {
     anyhow::ensure!(args.batch > 0, "--batch must be at least 1");
 
-    let root = ctx.store.root().to_path_buf();
-    let index = Index::open(root.join("centinel.db"))?;
+    let index = Index::open(ctx.store.require_index()?)?;
     let indexed = index.chunk_hashes()?;
 
     // Dimensions come from the registry so the cache can be opened — and the outstanding
@@ -135,7 +134,7 @@ pub async fn embed(ctx: &Ctx, args: EmbedArgs, progress: &Progress) -> anyhow::R
         .ok_or_else(|| anyhow::anyhow!("`{}` is not an embedding model", args.model))?
         as usize;
 
-    let cache = VectorCache::open(&root, spec.id, dims)?;
+    let cache = VectorCache::open(&ctx.store.vector_cache_dir(), spec.id, dims)?;
     let cached = cache.hashes()?;
     let already_cached = indexed.iter().filter(|h| cached.contains(*h)).count();
 
@@ -342,7 +341,7 @@ mod tests {
     async fn indexed_store(n: usize) -> (tempfile::TempDir, Ctx) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
-        let mut index = Index::open(dir.path().join("centinel.db")).unwrap();
+        let mut index = Index::open(store.index_path()).unwrap();
 
         for i in 0..n {
             let chunk = Chunk::new(format!("passage number {i}"), i, String::new(), 0);
@@ -436,11 +435,12 @@ mod tests {
     /// the work list is the difference rather than the whole index.
     #[tokio::test]
     async fn cached_chunks_are_subtracted_from_the_work_list() {
-        let (dir, ctx) = indexed_store(10).await;
-        let index = Index::open(dir.path().join("centinel.db")).unwrap();
+        let (_dir, ctx) = indexed_store(10).await;
+        let index = Index::open(ctx.store.require_index().unwrap()).unwrap();
         let hashes = index.chunk_hashes().unwrap();
 
-        let cache = VectorCache::open(dir.path(), "qwen3-embedding-4b", 2560).unwrap();
+        let cache =
+            VectorCache::open(&ctx.store.vector_cache_dir(), "qwen3-embedding-4b", 2560).unwrap();
         let seeded: Vec<(String, Vec<f32>)> = hashes[..4]
             .iter()
             .map(|h| (h.clone(), vec![0.0; 2560]))

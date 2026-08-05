@@ -34,7 +34,8 @@ fn main() -> anyhow::Result<()> {
 
     let model = "qwen3-embedding-4b";
     let dims = models::require(model)?.dims.unwrap() as usize;
-    let cache = VectorCache::open(&root, model, dims)?;
+    let store = centinel_core::store::Store::at(&root);
+    let cache = VectorCache::open(&store.vector_cache_dir(), model, dims)?;
 
     let load = Instant::now();
     let stored = cache.load_all()?;
@@ -65,7 +66,7 @@ fn main() -> anyhow::Result<()> {
     println!("scan:   {scan:.2?} for {} vectors\n", stored.len());
     println!("query:  {query:?}\n");
 
-    let index = Index::open(root.join("centinel.db"))?;
+    let index = Index::open(store.require_index()?)?;
     for (score, hash) in scored.iter().take(5) {
         let text = index.chunk_texts(std::slice::from_ref(*hash))?;
         let snippet: String = text[0]

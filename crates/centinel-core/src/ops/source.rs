@@ -293,7 +293,7 @@ async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<SourceReport> {
     // the config would answer "what did I declare"; the question being asked is "what
     // is here", and a source collected by hand is very much here.
     if !args.configured_only {
-        for (id, inferred) in untracked(ctx, &config).await? {
+        for (id, inferred, resources) in untracked(ctx, &config).await? {
             sources.push(ConfiguredSource {
                 id: id.to_string(),
                 kind: inferred.kind,
@@ -301,7 +301,7 @@ async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<SourceReport> {
                 // Not "disabled" — nothing turned it off. `run` ignores it because the
                 // config does not mention it, which `tracked` is what says.
                 enabled: false,
-                resources: ctx.store.statuses(&id).await.map(|s| s.len()).unwrap_or(0),
+                resources,
                 tracked: false,
             });
         }
@@ -313,15 +313,21 @@ async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<SourceReport> {
     })
 }
 
-/// Every source the store holds that the config does not name.
-async fn untracked(ctx: &Ctx, config: &Config) -> anyhow::Result<Vec<(SourceId, Inferred)>> {
+/// Every source the store holds that the config does not name, with what it holds.
+///
+/// The resource count comes out of the same log pass as the inference. Asking for them
+/// separately — which is what the two call sites below did — read every loose source's
+/// log twice.
+async fn untracked(ctx: &Ctx, config: &Config) -> anyhow::Result<Vec<(SourceId, Inferred, usize)>> {
     let mut out = Vec::new();
     for id in ctx.store.sources().await? {
         if config.source(id.as_str()).is_some() {
             continue;
         }
-        if let Some(inferred) = sources::infer(&ctx.store, &id).await? {
-            out.push((id, inferred));
+        let replay = ctx.store.replay(&id).await?;
+        if let Some(inferred) = sources::infer_from(&ctx.store, &replay).await? {
+            let resources = replay.statuses().len();
+            out.push((id, inferred, resources));
         }
     }
     Ok(out)
@@ -340,7 +346,7 @@ async fn adopt(ctx: &Ctx, args: AdoptArgs) -> anyhow::Result<SourceReport> {
 
     let mut adopted = Vec::new();
     let mut skipped = Vec::new();
-    for (id, inferred) in untracked(ctx, &config).await? {
+    for (id, inferred, resources) in untracked(ctx, &config).await? {
         let Some(source) = inferred.to_config(&id) else {
             // The store has it but cannot say where from. Naming it is better than
             // writing a block that would fail on the next run.
@@ -353,7 +359,7 @@ async fn adopt(ctx: &Ctx, args: AdoptArgs) -> anyhow::Result<SourceReport> {
             kind: inferred.kind,
             target: inferred.target,
             enabled: true,
-            resources: ctx.store.statuses(&id).await.map(|s| s.len()).unwrap_or(0),
+            resources,
             tracked: true,
         });
     }

@@ -106,14 +106,7 @@ pub struct SearchReport {
 /// Search the corpus for a passage.
 #[op(group = "corpus")]
 pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport> {
-    let db_path = ctx.store.root().join("centinel.db");
-    anyhow::ensure!(
-        db_path.exists(),
-        "no index at {} — run `centinel index` first",
-        db_path.display()
-    );
-
-    let index = Index::open(&db_path)?;
+    let index = Index::open(ctx.store.require_index()?)?;
     let hits = index.search(&args.query, args.limit, args.source.as_deref())?;
 
     let results = hits

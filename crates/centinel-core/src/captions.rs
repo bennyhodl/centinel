@@ -47,7 +47,7 @@ const MARKERS: &[&str] = &["wireMagic", "tStartMs"];
 
 /// How much of a blob the sniff reads. Generous enough to survive a reordered document's
 /// preamble, small enough that this stays free on a path that runs per blob.
-const SNIFF_BYTES: usize = 4096;
+pub const SNIFF_BYTES: usize = 4096;
 
 /// One caption cue.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

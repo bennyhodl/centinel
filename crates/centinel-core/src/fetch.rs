@@ -92,6 +92,13 @@ pub fn classify(status: u16) -> Liveness {
     }
 }
 
+/// How many leading bytes [`content_kind`] can need.
+///
+/// Sized by the deepest sniff it performs — the `json3` marker scan. A caller holding
+/// this much can classify a blob without reading the whole thing, which is the difference
+/// between building a transcription work list and reading the entire corpus to build one.
+pub const SNIFF_BYTES: usize = crate::captions::SNIFF_BYTES;
+
 /// A coarse content kind, from the `content-type` header with a magic-byte fallback.
 ///
 /// Deliberately coarse: acquisition should not hold opinions about formats. This exists

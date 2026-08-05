@@ -85,7 +85,7 @@ pub async fn index(ctx: &Ctx, args: IndexArgs, progress: &Progress) -> anyhow::R
         None => ctx.store.sources().await?,
     };
 
-    let db_path = ctx.store.root().join("centinel.db");
+    let db_path = ctx.store.index_path();
     let mut index = Index::open(&db_path)?;
     if args.rebuild {
         match &args.source {

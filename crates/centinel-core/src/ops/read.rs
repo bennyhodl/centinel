@@ -76,10 +76,10 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> anyhow::Result<ReadReport> {
     let (source, resource, obs) = (found.source, found.resource, found.observation);
     let other_matches = found.other_matches;
 
-    let derivation = ctx
-        .store
-        .latest_derivation(&source, &obs.blob_sha)
-        .await?
+    // From the log `resolve` already read, not a second pass over it.
+    let derivation = found
+        .replay
+        .latest_derivation(&obs.blob_sha)
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "no extracted text for {} — run `extract` first",

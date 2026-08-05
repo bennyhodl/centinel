@@ -46,6 +46,28 @@ report print which sitemaps were walked or which channel tabs returned nothing w
 renderer learning what a sitemap or a tab is. A new adapter explains itself through this
 and edits no renderer.
 
+## The store
+
+**Truth vs derived** — only `blobs/` and `log/` are truth. `current/`, `centinel.db` and
+the vector cache are derived and can be deleted at any time. *Why it matters:* it is what
+makes the index disposable and the corpus something you can hand to somebody with `rsync`.
+
+**Replay** — one Source's log, read once and answerable many times. Every derived view —
+liveness, the latest Observation per Resource, what was derived from what — is an
+in-memory scan over the records that one disk read produced. A `Replay` is a **snapshot**:
+it answers what the log said when it was read, so a caller that appends and wants to see
+the append takes a new one.
+
+**The layout** — where each thing lives under the store root is named in `store` and
+nowhere else. A path spelled out by a caller is a second, unenforced copy of this file's
+header.
+
+**Head read vs whole read** — `get_blob` reads the whole file and verifies it against its
+address, because this is an evidentiary archive. `blob_head` reads the first few kilobytes
+and verifies nothing, because a partial read cannot be checked against a whole-file digest.
+Classification uses the second; anything shown to a person or written back into the record
+uses the first.
+
 ## Retrieval
 
 **Handle** — a hash that identifies one blob *and* that the tool will accept back. The

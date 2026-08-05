@@ -168,7 +168,7 @@ pub async fn doctor(ctx: &Ctx, args: DoctorArgs) -> anyhow::Result<DoctorReport>
     let blob_count = if args.skip_blob_count {
         0
     } else {
-        count_blobs(ctx.store.root()).await?
+        ctx.store.count_blobs().await?
     };
 
     Ok(DoctorReport {
@@ -362,39 +362,6 @@ async fn version_of(name: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// Walks `blobs/ab/cd/*`, counting files.
-async fn count_blobs(root: &std::path::Path) -> anyhow::Result<u64> {
-    let blobs = root.join("blobs");
-    let mut count = 0u64;
-
-    let mut lvl1 = match tokio::fs::read_dir(&blobs).await {
-        Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(e.into()),
-    };
-    while let Some(a) = lvl1.next_entry().await? {
-        if !a.file_type().await?.is_dir() {
-            continue;
-        }
-        let mut lvl2 = tokio::fs::read_dir(a.path()).await?;
-        while let Some(b) = lvl2.next_entry().await? {
-            if !b.file_type().await?.is_dir() {
-                continue;
-            }
-            let mut lvl3 = tokio::fs::read_dir(b.path()).await?;
-            while let Some(f) = lvl3.next_entry().await? {
-                // Skip in-flight `.<sha>.tmp` writes.
-                if f.file_type().await?.is_file()
-                    && !f.file_name().to_string_lossy().starts_with('.')
-                {
-                    count += 1;
-                }
-            }
-        }
-    }
-    Ok(count)
 }
 
 // -----------------------------------------------------------------------------------------

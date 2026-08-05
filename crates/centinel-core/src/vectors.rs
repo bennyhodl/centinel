@@ -60,18 +60,21 @@ pub struct VectorCache {
 impl VectorCache {
     /// Opens or creates the cache for a model, validating an existing file's header.
     ///
+    /// Takes the directory rather than the store root: where the cache lives under a
+    /// store is [`crate::store::Store::vector_cache_dir`]'s business, and this module
+    /// knowing that layout is how a path ends up spelled out in two places.
+    ///
     /// A dimension or model mismatch is an error rather than a silent append: vectors
     /// from two models are not comparable, and §6.2 makes mixing them a corpus-level
     /// mistake rather than a recoverable one.
-    pub fn open(store_root: &Path, model_id: &str, dims: usize) -> anyhow::Result<Self> {
+    pub fn open(dir: &Path, model_id: &str, dims: usize) -> anyhow::Result<Self> {
         anyhow::ensure!(dims > 0, "a model with zero dimensions cannot be cached");
         anyhow::ensure!(
             model_id.len() <= MODEL_ID_LEN,
             "model id `{model_id}` exceeds {MODEL_ID_LEN} bytes"
         );
 
-        let dir = store_root.join("cache").join("embeddings");
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(dir)?;
         let cache = Self {
             path: dir.join(format!("{model_id}-{dims}.vec")),
             model_id: model_id.to_string(),
@@ -407,12 +410,7 @@ mod tests {
     #[test]
     fn a_foreign_file_is_not_mistaken_for_a_cache() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir
-            .path()
-            .join("cache")
-            .join("embeddings")
-            .join(format!("test-model-{DIMS}.vec"));
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path = dir.path().join(format!("test-model-{DIMS}.vec"));
         std::fs::write(&path, vec![0xABu8; 128]).unwrap();
 
         let err = VectorCache::open(dir.path(), "test-model", DIMS)
@@ -429,13 +427,12 @@ mod tests {
         assert!(c.is_empty().unwrap());
     }
 
+    /// One file per model and width, in the directory it was handed. *Which* directory
+    /// that is under a store is asserted in `store`, beside the accessor that decides it.
     #[test]
-    fn the_file_lives_under_the_path_spec_5_names() {
+    fn the_file_is_named_for_its_model_and_width() {
         let dir = tempfile::tempdir().unwrap();
         let c = cache(dir.path());
-        assert!(
-            c.path()
-                .ends_with(format!("cache/embeddings/test-model-{DIMS}.vec"))
-        );
+        assert_eq!(c.path(), dir.path().join(format!("test-model-{DIMS}.vec")));
     }
 }
