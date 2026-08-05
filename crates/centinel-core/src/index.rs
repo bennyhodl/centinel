@@ -92,12 +92,8 @@ CREATE TABLE IF NOT EXISTS placement (
     observed_at TEXT NOT NULL,
     tool        TEXT NOT NULL,
     title       TEXT,
-    PRIMARY KEY (chunk_hash, derived_sha, ordinal)
+    PRIMARY KEY (chunk_hash, source, resource, derived_sha, ordinal)
 );
-
-CREATE INDEX IF NOT EXISTS placement_by_chunk  ON placement(chunk_hash);
-CREATE INDEX IF NOT EXISTS placement_by_source ON placement(source);
-CREATE INDEX IF NOT EXISTS placement_by_derived ON placement(derived_sha);
 
 -- External-content FTS5: the text lives once, in `chunk`.
 CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
@@ -116,6 +112,25 @@ CREATE TRIGGER IF NOT EXISTS chunk_ad AFTER DELETE ON chunk BEGIN
 END;
 "#;
 
+/// Kept apart from [`SCHEMA`] because a migration that replaces `placement` drops these
+/// with it, and the one copy is what stops the rebuilt table from quietly losing an index.
+const PLACEMENT_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS placement_by_chunk   ON placement(chunk_hash);
+CREATE INDEX IF NOT EXISTS placement_by_source  ON placement(source);
+CREATE INDEX IF NOT EXISTS placement_by_derived ON placement(derived_sha);
+
+-- Serves the resume predicate in `ops::build_index`. The primary key leads with
+-- `chunk_hash`, so it cannot answer "is this derived text already placed at this address".
+CREATE INDEX IF NOT EXISTS placement_by_address ON placement(source, resource, derived_sha);
+"#;
+
+/// The shape of `placement`'s primary key, and the only thing versioned here.
+///
+/// `2` — the address joined the key. At `1` it was `(chunk_hash, derived_sha, ordinal)`,
+/// which silently discarded every address after the first whenever two of them shared one
+/// derived blob.
+const SCHEMA_VERSION: i64 = 2;
+
 pub struct Index {
     conn: Connection,
 }
@@ -125,14 +140,90 @@ impl Index {
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Self { conn })
+        let index = Self { conn };
+        index.migrate()?;
+        Ok(index)
     }
 
     /// An in-memory index, for tests.
     pub fn in_memory() -> anyhow::Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Self { conn })
+        let index = Self { conn };
+        index.migrate()?;
+        Ok(index)
+    }
+
+    /// Brings an older `placement` table up to [`SCHEMA_VERSION`], keeping its rows.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` cannot change a primary key, so a table written at
+    /// version 1 keeps the narrow key until something replaces it. This does, by copy —
+    /// **not** by dropping and re-deriving. The rows are still correct as far as they go;
+    /// what version 1 got wrong is the addresses it never wrote, and those come back on the
+    /// next `centinel index` now that the resume predicate asks about addresses. Re-deriving
+    /// instead would leave every read path answering from an empty index until that run
+    /// finished, which is a worse failure than the one being fixed.
+    ///
+    /// Chunk text is untouched, so no `chunk_hash` moves and no cached vector is orphaned.
+    fn migrate(&self) -> anyhow::Result<()> {
+        let recorded: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|v| v.parse().ok());
+
+        if recorded == Some(SCHEMA_VERSION) {
+            self.conn.execute_batch(PLACEMENT_INDEXES)?;
+            return Ok(());
+        }
+
+        // An unversioned but *empty* table is a fresh one this build just created at the
+        // current shape. Only a populated one was written by an older build.
+        let populated: i64 =
+            self.conn
+                .query_row("SELECT EXISTS(SELECT 1 FROM placement)", [], |r| r.get(0))?;
+
+        if recorded.is_none() && populated != 0 {
+            self.conn.execute_batch(
+                r#"
+                CREATE TABLE placement_migrating (
+                    chunk_hash  TEXT NOT NULL,
+                    source      TEXT NOT NULL,
+                    resource    TEXT NOT NULL,
+                    blob_sha    TEXT NOT NULL,
+                    derived_sha TEXT NOT NULL,
+                    ordinal     INTEGER NOT NULL,
+                    heading     TEXT NOT NULL,
+                    char_start  INTEGER NOT NULL,
+                    char_end    INTEGER NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    tool        TEXT NOT NULL,
+                    title       TEXT,
+                    PRIMARY KEY (chunk_hash, source, resource, derived_sha, ordinal)
+                );
+
+                INSERT INTO placement_migrating
+                SELECT chunk_hash, source, resource, blob_sha, derived_sha, ordinal,
+                       heading, char_start, char_end, observed_at, tool, title
+                FROM placement;
+
+                DROP TABLE placement;
+                ALTER TABLE placement_migrating RENAME TO placement;
+                "#,
+            )?;
+        }
+
+        self.conn.execute_batch(PLACEMENT_INDEXES)?;
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![SCHEMA_VERSION.to_string()],
+        )?;
+        Ok(())
     }
 
     /// Inserts a chunk and one placement.
@@ -155,7 +246,7 @@ impl Index {
                (chunk_hash, source, resource, blob_sha, derived_sha, ordinal,
                 heading, char_start, char_end, observed_at, tool, title)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
-             ON CONFLICT(chunk_hash, derived_sha, ordinal) DO NOTHING",
+             ON CONFLICT(chunk_hash, source, resource, derived_sha, ordinal) DO NOTHING",
             params![
                 chunk.chunk_hash,
                 placement.source,
@@ -175,7 +266,6 @@ impl Index {
         Ok(())
     }
 
-    /// True when this derived blob has already been chunked into the index.
     /// The chunk geometry this index's hashes were built with, if it has been recorded.
     ///
     /// A `chunk_hash` is the hash of the chunk's *text*, and the text is decided by the
@@ -212,10 +302,24 @@ impl Index {
         Ok(())
     }
 
-    pub fn has_derived(&self, derived_sha: &str) -> anyhow::Result<bool> {
+    /// True when this derived text is already placed at this address.
+    ///
+    /// Keyed on the **address**, not on the derived blob alone. One derived blob can be
+    /// the extracted text of many addresses — two proclamations issued on the same day
+    /// reduce to the same bytes, a PDF is linked from two pages — and `WHERE derived_sha =
+    /// ?` calls the second address done the moment the first is written. On the corpus that
+    /// found this, that silently dropped 285 of 1005 pages: collected, extracted, and
+    /// absent from every search, with another page's URL cited in place of each.
+    pub fn has_placement(
+        &self,
+        source: &str,
+        resource: &str,
+        derived_sha: &str,
+    ) -> anyhow::Result<bool> {
         let n: i64 = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM placement WHERE derived_sha = ?1)",
-            params![derived_sha],
+            "SELECT EXISTS(SELECT 1 FROM placement
+                           WHERE source = ?1 AND resource = ?2 AND derived_sha = ?3)",
+            params![source, resource, derived_sha],
             |r| r.get(0),
         )?;
         Ok(n != 0)
@@ -555,13 +659,140 @@ mod tests {
     }
 
     #[test]
-    fn has_derived_tracks_what_is_already_indexed() {
+    fn has_placement_tracks_what_is_already_indexed() {
         let idx = indexed(&[(
             "u",
             "# T\n\nSome indexed content that is long enough to keep.",
         )]);
-        assert!(idx.has_derived(&format!("{:064x}", 0)).unwrap());
-        assert!(!idx.has_derived(&"ff".repeat(32)).unwrap());
+        let derived = format!("{:064x}", 0);
+        assert!(idx.has_placement("tampa", "u", &derived).unwrap());
+        assert!(!idx.has_placement("tampa", "u", &"ff".repeat(32)).unwrap());
+    }
+
+    /// The defect that made 285 of one corpus's 1005 pages unsearchable. Two addresses
+    /// whose pages extract to identical text share a derived blob, and the resume
+    /// predicate must still call the second one outstanding.
+    #[test]
+    fn a_second_address_sharing_a_derived_blob_is_not_already_indexed() {
+        let mut idx = Index::in_memory().unwrap();
+        let shared = "# Proclamation\n\nIssued on Tuesday, March 1, 2022 by the mayor.";
+        let derived = "dd".repeat(32);
+
+        for c in chunk_markdown(shared, &ChunkConfig::default()) {
+            idx.insert(
+                &c,
+                &placement("tampa", "https://tampa.gov/red-cross", &derived),
+            )
+            .unwrap();
+        }
+
+        assert!(
+            !idx.has_placement("tampa", "https://tampa.gov/irish-heritage", &derived)
+                .unwrap(),
+            "a different address has not been placed just because the text was"
+        );
+        assert!(
+            !idx.has_placement("pinellas", "https://tampa.gov/red-cross", &derived)
+                .unwrap(),
+            "an address is a source and a natural key, not a natural key alone"
+        );
+    }
+
+    /// Both addresses survive the insert. Under the version-1 key the second one collided
+    /// with the first and was silently dropped.
+    #[test]
+    fn two_addresses_sharing_a_derived_blob_both_get_placements() {
+        let mut idx = Index::in_memory().unwrap();
+        let shared = "# Proclamation\n\nIssued on Tuesday, March 1, 2022 by the mayor.";
+        let derived = "dd".repeat(32);
+
+        for url in [
+            "https://tampa.gov/red-cross",
+            "https://tampa.gov/irish-heritage",
+        ] {
+            for c in chunk_markdown(shared, &ChunkConfig::default()) {
+                idx.insert(&c, &placement("tampa", url, &derived)).unwrap();
+            }
+        }
+
+        let hits = idx.search("proclamation", 10, None).unwrap();
+        assert_eq!(hits.len(), 1, "one chunk, because the text is identical");
+        let cited: Vec<_> = hits[0].placements.iter().map(|p| &p.resource).collect();
+        assert_eq!(cited.len(), 2, "both addresses are citable: {cited:?}");
+        assert_eq!(
+            idx.stats().unwrap().chunks,
+            1,
+            "the text is still stored once"
+        );
+    }
+
+    /// The version-1 table, written by a build that keyed placements on the derived blob.
+    fn v1_index_at(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE chunk (
+                id INTEGER PRIMARY KEY, chunk_hash TEXT NOT NULL UNIQUE,
+                text TEXT NOT NULL, chars INTEGER NOT NULL
+            );
+            CREATE TABLE placement (
+                chunk_hash TEXT NOT NULL, source TEXT NOT NULL, resource TEXT NOT NULL,
+                blob_sha TEXT NOT NULL, derived_sha TEXT NOT NULL, ordinal INTEGER NOT NULL,
+                heading TEXT NOT NULL, char_start INTEGER NOT NULL, char_end INTEGER NOT NULL,
+                observed_at TEXT NOT NULL, tool TEXT NOT NULL, title TEXT,
+                PRIMARY KEY (chunk_hash, derived_sha, ordinal)
+            );
+            INSERT INTO chunk (chunk_hash, text, chars) VALUES ('c1', 'a shared notice', 15);
+            INSERT INTO placement VALUES
+                ('c1','tampa','https://tampa.gov/red-cross','aa','dd',0,'',0,15,'t','htmd','T');
+            "#,
+        )
+        .unwrap();
+    }
+
+    /// An older index keeps its rows. Re-deriving instead would leave every read path
+    /// answering from an empty index until the next `centinel index` finished.
+    #[test]
+    fn migrating_from_version_one_keeps_the_placements_it_had() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("centinel.db");
+        v1_index_at(&path);
+
+        let idx = Index::open(&path).unwrap();
+        assert_eq!(idx.stats().unwrap().placements, 1, "the row survived");
+        assert!(
+            idx.has_placement("tampa", "https://tampa.gov/red-cross", "dd")
+                .unwrap()
+        );
+    }
+
+    /// And the address it never recorded is reported as outstanding, so the next index
+    /// run writes it. Under version 1 this answered `true` and the page stayed invisible.
+    #[test]
+    fn migrating_from_version_one_reopens_the_addresses_it_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("centinel.db");
+        v1_index_at(&path);
+
+        let idx = Index::open(&path).unwrap();
+        assert!(
+            !idx.has_placement("tampa", "https://tampa.gov/irish-heritage", "dd")
+                .unwrap(),
+            "the second address is outstanding, not done"
+        );
+    }
+
+    /// Migrating twice is not a second migration.
+    #[test]
+    fn reopening_a_migrated_index_leaves_it_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("centinel.db");
+        v1_index_at(&path);
+
+        Index::open(&path).unwrap();
+        let idx = Index::open(&path).unwrap();
+        assert_eq!(idx.stats().unwrap().placements, 1);
     }
 
     #[test]

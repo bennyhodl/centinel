@@ -65,7 +65,7 @@ impl Default for IndexArgs {
 pub struct IndexReport {
     pub sources: Vec<String>,
     pub derivations: usize,
-    /// Skipped because this derived text was already chunked in.
+    /// Skipped because every address this derived text sits at is already placed.
     pub already_indexed: usize,
     pub documents_indexed: usize,
     pub chunks_written: usize,
@@ -125,23 +125,56 @@ pub async fn index(ctx: &Ctx, args: IndexArgs, progress: &Progress) -> anyhow::R
 
         // A blob can sit at more than one address — the same PDF linked from two pages.
         // Every address is a legitimate citation, so all of them become placements.
-        let mut addresses: HashMap<BlobSha, Vec<(String, String)>> = HashMap::new();
+        //
+        // One entry per address, holding the *earliest* observation of these bytes there.
+        // Re-collecting an unchanged page appends another Observation of the same blob, so
+        // without the fold a page collected weekly for a year contributes fifty-two
+        // identical inserts. Earliest rather than latest because that is first-seen, it
+        // does not churn on every run, and it is the only value an `ON CONFLICT DO NOTHING`
+        // insert could ever come to hold anyway.
+        let mut addresses: HashMap<BlobSha, Vec<(String, jiff::Timestamp)>> = HashMap::new();
         for rec in &log {
             if let LogRecord::Observation(o) = rec {
-                addresses
-                    .entry(o.blob_sha.clone())
-                    .or_default()
-                    .push((o.resource.natural_key.clone(), o.at.to_string()));
+                let at_this_blob = addresses.entry(o.blob_sha.clone()).or_default();
+                match at_this_blob
+                    .iter_mut()
+                    .find(|(resource, _)| *resource == o.resource.natural_key)
+                {
+                    Some((_, first_seen)) => *first_seen = (*first_seen).min(o.at),
+                    None => at_this_blob.push((o.resource.natural_key.clone(), o.at)),
+                }
             }
         }
 
-        let derivations: Vec<_> = log
-            .iter()
-            .filter_map(|r| match r {
-                LogRecord::Derivation(d) => Some(d.clone()),
-                _ => None,
-            })
-            .collect();
+        // The **latest** derivation per blob, not every derivation ever recorded.
+        //
+        // The log is append-only truth, so `extract --refresh` does not replace an
+        // extraction — it appends a better one beside the one it supersedes. Indexing all
+        // of them makes the corpus answer twice for every page: once from the extractor
+        // its operator deliberately replaced. That stayed invisible while a re-extraction
+        // produced identical bytes and therefore the same derived blob; the first change
+        // that moved the text put a stale copy of all 1005 Tampa pages in the index, still
+        // titled from the boilerplate the new extractor had learned to look past.
+        //
+        // Safe because one blob has one current text: `extract` and `transcribe` are the
+        // only producers, and a blob either has bytes to extract or audio to transcribe.
+        let mut latest: HashMap<BlobSha, crate::domain::Derivation> = HashMap::new();
+        for rec in &log {
+            if let LogRecord::Derivation(d) = rec {
+                match latest.get(&d.from_sha) {
+                    // `>=`, so a re-run recorded within the same instant still wins on log
+                    // order. Append-only means later in the file is later in time.
+                    Some(held) if d.at < held.at => {}
+                    _ => {
+                        latest.insert(d.from_sha.clone(), d.clone());
+                    }
+                }
+            }
+        }
+        let mut derivations: Vec<_> = latest.into_values().collect();
+        // A HashMap has no order, and the progress bar and insert order should not vary
+        // run to run.
+        derivations.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.to_sha.cmp(&b.to_sha)));
         report.derivations += derivations.len();
 
         let total = derivations.len() as u64;
@@ -149,7 +182,20 @@ pub async fn index(ctx: &Ctx, args: IndexArgs, progress: &Progress) -> anyhow::R
             if i % 25 == 0 {
                 progress.step(format!("{} chunks", report.chunks_written), i as u64, total);
             }
-            if !args.rebuild && index.has_derived(d.to_sha.as_str())? {
+            // Resumption subtracts *placements*, not derived blobs. Keying it on the blob
+            // alone made "this text is somewhere in the index" stand in for "this text is
+            // in the index at this address", and the two differ for every address after
+            // the first that shares a derived blob with another.
+            let places = addresses.get(&d.from_sha).cloned().unwrap_or_default();
+            let mut pending = Vec::with_capacity(places.len());
+            for (resource, observed_at) in places {
+                if args.rebuild
+                    || !index.has_placement(source.as_str(), &resource, d.to_sha.as_str())?
+                {
+                    pending.push((resource, observed_at));
+                }
+            }
+            if pending.is_empty() {
                 report.already_indexed += 1;
                 continue;
             }
@@ -170,10 +216,9 @@ pub async fn index(ctx: &Ctx, args: IndexArgs, progress: &Progress) -> anyhow::R
             }
             report.documents_indexed += 1;
 
-            let places = addresses.get(&d.from_sha).cloned().unwrap_or_default();
             for chunk in &chunks {
                 let before = index.stats()?.chunks;
-                for (resource, observed_at) in &places {
+                for (resource, observed_at) in &pending {
                     index.insert(
                         chunk,
                         &Placement {
@@ -185,7 +230,7 @@ pub async fn index(ctx: &Ctx, args: IndexArgs, progress: &Progress) -> anyhow::R
                             heading: chunk.heading.clone(),
                             char_start: chunk.char_start,
                             char_end: chunk.char_end,
-                            observed_at: observed_at.clone(),
+                            observed_at: observed_at.to_string(),
                             tool: format!("{} {}", d.tool, d.version),
                             title: title.clone(),
                         },
@@ -542,26 +587,43 @@ mod tests {
         )
     }
 
-    /// The defect `run --refresh` now avoids. Re-extracting produces a *new* derived
-    /// blob, so its chunks are added — and nothing removes the previous extraction's, so
-    /// search answers from both.
+    /// Re-extraction supersedes; it does not accumulate.
+    ///
+    /// The log is append-only, so a better extractor appends its text beside the text it
+    /// replaces and nothing ever removes the old record. Only the newest is indexed —
+    /// otherwise the corpus answers twice for every page, the second time from an
+    /// extractor its operator deliberately replaced.
     #[tokio::test]
-    async fn re_extraction_leaves_the_old_chunks_unless_the_index_is_rebuilt() {
+    async fn only_the_latest_extraction_of_a_blob_is_indexed() {
         let (_dir, ctx) = store_with_extractions(&[&body("budget"), &body("zoning")]).await;
 
         let added = index(&ctx, IndexArgs::default(), &Progress::none())
             .await
             .unwrap();
-        assert_eq!(added.derivations, 2);
-        let both = added.total_chunks;
-        assert!(both > 2, "{both} chunks");
+        assert_eq!(
+            added.derivations, 1,
+            "two extractions of one blob are one document"
+        );
 
-        // Both extractions are in there, which is the corpus answering twice.
         let idx = Index::open(ctx.store.index_path()).unwrap();
-        assert!(!idx.search("budget", 5, None).unwrap().is_empty());
-        assert!(!idx.search("zoning", 5, None).unwrap().is_empty());
+        assert!(
+            !idx.search("zoning", 5, None).unwrap().is_empty(),
+            "the newest extraction answers"
+        );
+        assert!(
+            idx.search("budget", 5, None).unwrap().is_empty(),
+            "the superseded one does not"
+        );
+    }
 
-        // What `run --refresh` now asks for.
+    /// And a rebuild does not resurrect it.
+    #[tokio::test]
+    async fn a_rebuild_does_not_bring_back_a_superseded_extraction() {
+        let (_dir, ctx) = store_with_extractions(&[&body("budget"), &body("zoning")]).await;
+
+        let first = index(&ctx, IndexArgs::default(), &Progress::none())
+            .await
+            .unwrap();
         let rebuilt = index(
             &ctx,
             IndexArgs {
@@ -572,10 +634,86 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            rebuilt.total_chunks, both,
-            "a rebuild replaces the index rather than adding to it"
-        );
+
+        assert_eq!(rebuilt.total_chunks, first.total_chunks);
+        let idx = Index::open(ctx.store.index_path()).unwrap();
+        assert!(idx.search("budget", 5, None).unwrap().is_empty());
+    }
+
+    /// Two addresses whose pages extract to the same text — the shape that made 285 of
+    /// one corpus's 1005 pages unsearchable, and which `centinel index` must resume into
+    /// rather than call done.
+    #[tokio::test]
+    async fn two_addresses_sharing_one_derived_blob_are_both_indexed() {
+        use crate::domain::Derivation;
+        use crate::store::{LogRecord, Store};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).await.unwrap();
+        let id = SourceId::new("tampa").unwrap();
+
+        // Both pages carry the same date and the same print notice, so both reduce to one
+        // derived blob — as two proclamations issued on the same day really do.
+        let text = "# Proclamation\n\n".to_string()
+            + &"Issued by the mayor on Tuesday, March 1, 2022. ".repeat(30);
+        let to_sha = store.put_blob(text.as_bytes()).await.unwrap();
+
+        let urls = [
+            "https://tampa.gov/proclamation/american-red-cross-month",
+            "https://tampa.gov/proclamation/irish-american-heritage-month",
+        ];
+        for (i, url) in urls.iter().enumerate() {
+            let obs = store
+                .record_observation(
+                    &Resource::new(id.clone(), *url),
+                    format!("<html>page {i}</html>").as_bytes(),
+                    jiff::Timestamp::now(),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            store
+                .append(
+                    &id,
+                    &LogRecord::Derivation(Derivation {
+                        from_sha: obs.blob_sha.clone(),
+                        to_sha: to_sha.clone(),
+                        tool: "dom_smoothie+htmd".into(),
+                        version: "0.18.0+0.5.5".into(),
+                        model_tier: None,
+                        at: jiff::Timestamp::now(),
+                        anchors: Vec::new(),
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+
+        let ctx = Ctx::new(store);
+        let report = index(&ctx, IndexArgs::default(), &Progress::none())
+            .await
+            .unwrap();
+        assert_eq!(report.derivations, 2);
+        assert_eq!(report.already_indexed, 0, "neither address was skipped");
+
+        let idx = Index::open(ctx.store.index_path()).unwrap();
+        let hits = idx.search("proclamation", 10, None).unwrap();
+        let cited: std::collections::HashSet<_> = hits
+            .iter()
+            .flat_map(|h| &h.placements)
+            .map(|p| p.resource.as_str())
+            .collect();
+        for url in urls {
+            assert!(cited.contains(url), "{url} is not citable; got {cited:?}");
+        }
+
+        // And a second run has nothing left to do, so the widened key did not cost
+        // resumption.
+        let again = index(&ctx, IndexArgs::default(), &Progress::none())
+            .await
+            .unwrap();
+        assert_eq!(again.documents_indexed, 0, "the second run redid work");
+        assert_eq!(again.already_indexed, 2);
     }
 
     #[test]

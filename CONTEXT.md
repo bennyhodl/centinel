@@ -98,7 +98,7 @@ work that was never done.
 | collect | observed markers from the latest DiscoveryRun | the log |
 | extract | blobs with a Derivation **or an Underivable** from the latest Observations | the log |
 | transcribe | blobs derived by the transcriber from the audio blobs | the log |
-| index | derived blobs already chunked in | `centinel.db` |
+| index | **placements** already written, per address | `centinel.db` |
 | embed | cached chunk hashes from indexed chunk hashes | the vector cache |
 
 **Underivable** — a derivation that was attempted and produced nothing. The peer of
@@ -156,7 +156,19 @@ the Observation it was derived *from* and saying so.
 **Placement** — where a chunk of text sits: which address, which derived blob, which
 character span. A chunk can have several, because identical text appears under several
 addresses; each placement is a separate document with its own bytes, so each carries its
-own handle.
+own handle. *Why it matters:* **the address is part of a placement's identity, and the
+derived blob is not enough on its own.** Two pages can extract to byte-identical text —
+two proclamations issued the same day, once the template is stripped — and every rule that
+treated one derived blob as one document lost the addresses after the first: the index key
+collapsed them, and the resume predicate called them done. That is 285 of 1005 pages
+collected, extracted, and absent from every search, each citing another page's URL.
+
+**Title** — the document's own name, which on a `.gov` page is in `<title>`, `og:title`
+and `<h1>` and **nowhere in the body**. So it is written into the extracted text as an
+`# H1`, not merely recorded beside it: only the text is searched, and as a heading it
+enters every chunk's heading path. The same rule the caption extractor already followed,
+for the same reason — a recording titled *"Mayor Castor 2026 Budget"* never says "Castor"
+aloud, and a proclamation page never says what it proclaims.
 
 ## Host readiness
 
