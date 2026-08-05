@@ -615,7 +615,7 @@ async fn run_derivation(
 
         Stage::Transcribe => {
             let model = &config.defaults.transcribe_model;
-            if let Some(reason) = missing_model(model) {
+            if let Some(reason) = missing_model(model, crate::models::ModelRole::Transcription) {
                 return StageRun::skipped(stage, reason);
             }
             let mut transcribed = 0u64;
@@ -722,7 +722,7 @@ async fn run_derivation(
 
         Stage::Embed => {
             let model = &config.defaults.embed_model;
-            if let Some(reason) = missing_model(model) {
+            if let Some(reason) = missing_model(model, crate::models::ModelRole::Embedding) {
                 return StageRun::skipped(stage, reason);
             }
             match super::embed(
@@ -767,18 +767,15 @@ async fn run_derivation(
 /// hour of crawling at the last step over a download that was never started. A missing
 /// model is a **skip**, not a failure: what was collected is collected, and the stage
 /// resumes on the next run once the weights are there.
-fn missing_model(id: &str) -> Option<String> {
-    let Some(spec) = crate::models::find(id) else {
-        return Some(format!("unknown model `{id}`"));
-    };
+fn missing_model(id: &str, role: crate::models::ModelRole) -> Option<String> {
     let dir = match crate::models::models_dir() {
         Ok(dir) => dir,
         Err(e) => return Some(format!("model directory unavailable: {e}")),
     };
-    if crate::models::status(spec, &dir).installed {
-        return None;
-    }
-    Some(format!("{id} not installed — centinel models pull {id}"))
+    // The error already carries the command that fixes it, in the one spelling there is.
+    crate::models::resolve(id, role, None, &dir)
+        .err()
+        .map(|e| e.to_string())
 }
 
 // ── rendering ─────────────────────────────────────────────────────────────────

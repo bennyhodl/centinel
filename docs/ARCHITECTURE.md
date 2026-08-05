@@ -301,8 +301,8 @@ Rust 1.85+. Centinel shells out to standalone binaries rather than running a sec
 
 | Binary | Needed for | Required |
 |---|---|---|
-| `pdftoppm` (poppler) | rasterising PDF pages for OCR — Rust cannot do this natively | yes |
-| `tesseract` | OCR | yes |
+| `pdftoppm` (poppler) | rasterising PDF pages for OCR — Rust cannot do this natively | not yet — nothing calls it |
+| `tesseract` | OCR | not yet — nothing calls it |
 | `yt-dlp` | YouTube acquisition | yes |
 | `ffmpeg` | audio extraction | no |
 

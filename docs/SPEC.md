@@ -69,14 +69,16 @@ A search result must be citable back to a specific page of a specific document f
 
 ### 3.1 Required external binaries
 
-| Binary | For | Contract |
-|---|---|---|
-| `poppler` (`pdftoppm`) | rasterising scanned pages | pinned minimum version |
-| `tesseract` | OCR | pinned minimum version |
-| `yt-dlp` | YouTube acquisition | pinned minimum version |
-| `ffmpeg` | decoding audio to 16 kHz mono PCM | pinned minimum version |
+| Binary | For | Contract | Called today |
+|---|---|---|---|
+| `yt-dlp` | YouTube acquisition | pinned minimum version | **yes** |
+| `ffmpeg` | decoding audio to 16 kHz mono PCM | pinned minimum version | **yes** |
+| `poppler` (`pdftoppm`) | rasterising scanned pages | pinned minimum version | no — ticket #12 |
+| `tesseract` | OCR | pinned minimum version | no — ticket #12 |
 
-These are **one-shot subprocesses, not services**. All are **required**.
+These are **one-shot subprocesses, not services**.
+
+The last column is load-bearing for `doctor`. `extract` counts the pages that would need OCR and stops there; neither poppler nor tesseract has a call site. Reporting them as *required* meant a machine able to do everything this code does was told it was **not ready** — and a readiness check that is wrong in the pessimistic direction is not the safe kind of wrong, it is the kind people learn to ignore. They are reported as `planned` until the pipeline that needs them exists.
 
 A fifth subprocess, `centinel-whisper`, is **ours** — built from this workspace, not installed. See §3.6.
 

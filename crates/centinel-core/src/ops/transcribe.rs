@@ -232,10 +232,22 @@ pub async fn transcribe(
     // non-vocal — a transcript produced without VAD is a different artifact, not a
     // slightly worse one.
     if !transcriber.has_vad() && !args.allow_no_vad {
+        // The command comes from `models::resolve`, so it names the VAD the registry
+        // actually pins rather than the one that was current when this was written.
+        let fix = crate::models::REGISTRY
+            .iter()
+            .find(|s| s.role == crate::models::ModelRole::VoiceActivity)
+            .and_then(|s| {
+                crate::models::resolve(s.id, crate::models::ModelRole::VoiceActivity, None, &root)
+                    .err()
+                    .and_then(|e| e.fix().map(str::to_string))
+            })
+            .unwrap_or_else(|| "centinel models pull".to_string());
+
         anyhow::bail!(
             "no VAD weights installed. Whisper hallucinates over the dead air a council \
              recording is full of, so transcription without VAD is refused by default.\n  \
-             fix:      centinel models pull silero-vad\n  \
+             fix:      {fix}\n  \
              override: --allow-no-vad (recorded on every derivation)"
         );
     }

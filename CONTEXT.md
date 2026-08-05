@@ -117,6 +117,29 @@ character span. A chunk can have several, because identical text appears under s
 addresses; each placement is a separate document with its own bytes, so each carries its
 own handle.
 
+## Host readiness
+
+**Need** — what a missing binary costs: `required` (code calls it and a stage stops),
+`optional` (code calls it and a stage degrades), or `planned` (nothing calls it yet, and
+the pipeline that will is not built). *Why it matters:* `pdftoppm` and `tesseract` were
+reported as required with zero call sites between them, so a correctly installed machine
+was told it was not ready. A readiness check that is wrong pessimistically is the kind
+people learn to ignore.
+
+**Gate** — a pipeline stage that a set of weights blocks: search, or transcription. Rolled
+up per *role*, not per model, because the registry carries alternates and any one
+installed model fills its role.
+
+**The fix** — the command that resolves a missing dependency. `centinel models pull` is
+spelled in exactly one place, `models::resolve`'s error. It was written out at seven call
+sites, so renaming the command would have left six of them telling people to run something
+that does not exist.
+
+**Stale** — a binary that is present and working but old enough that breakage is expected
+rather than surprising. Only `yt-dlp` answers, because it is the one dependency whose
+staleness is a *predictable* failure: it warns at ninety days and ships releases in
+emergency clusters.
+
 ## External programs
 
 **Tool** — one invocation of an external program: `yt-dlp`, `ffmpeg`, the whisper worker,

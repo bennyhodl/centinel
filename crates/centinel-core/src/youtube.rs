@@ -53,6 +53,31 @@ pub const YT_DLP: &str = "yt-dlp";
 /// yt-dlp is old"* instead of leaving the operator to guess.
 pub const STALE_AFTER_DAYS: i64 = 90;
 
+/// How many days old a `yt-dlp` release is, from its `YYYY.MM.DD` version string.
+///
+/// `None` when the string is not a release date — a git build, or a fork that versions
+/// itself some other way. Silence is the right answer there: refusing to guess beats
+/// telling somebody their working install is 20,000 days stale.
+///
+/// Takes `now` rather than reading the clock, so the threshold this feeds is testable
+/// without waiting ninety days for it.
+pub fn staleness_days(version: &str, now: jiff::Timestamp) -> Option<i64> {
+    let mut parts = version.trim().split('.');
+    let year: i16 = parts.next()?.parse().ok()?;
+    let month: i8 = parts.next()?.parse().ok()?;
+    let day: i8 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let released = jiff::civil::date(year, month, day);
+    let today = now.to_zoned(jiff::tz::TimeZone::UTC).date();
+    let span = today
+        .since(jiff::civil::DateDifference::new(released).largest(jiff::Unit::Day))
+        .ok()?;
+    Some(span.get_days() as i64)
+}
+
 // ── deadlines ─────────────────────────────────────────────────────────────────
 //
 // One per call rather than one for the module, because these differ by three orders of
@@ -839,5 +864,50 @@ mod tests {
     #[test]
     fn a_document_with_no_entries_is_an_empty_channel_not_a_parse_error() {
         assert!(parse_listing(&serde_json::json!({})).videos.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod staleness_tests {
+    use super::*;
+
+    fn at(s: &str) -> jiff::Timestamp {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_release_date_becomes_an_age_in_days() {
+        let now = at("2026-08-05T00:00:00Z");
+        assert_eq!(staleness_days("2026.08.05", now), Some(0));
+        assert_eq!(staleness_days("2026.07.04", now), Some(32));
+        assert_eq!(staleness_days("2026.01.15", now), Some(202));
+    }
+
+    /// The threshold this exists to feed. yt-dlp warns at 90 days, and past it breakage
+    /// is expected rather than surprising.
+    #[test]
+    fn the_ninety_day_line_falls_where_yt_dlp_puts_it() {
+        let now = at("2026-08-05T00:00:00Z");
+        assert!(staleness_days("2026.05.07", now).unwrap() as i64 == 90);
+        assert!(staleness_days("2026.05.08", now).unwrap() < STALE_AFTER_DAYS);
+        assert!(staleness_days("2026.05.06", now).unwrap() > STALE_AFTER_DAYS);
+    }
+
+    /// A git build or a fork versions itself some other way. Refusing to guess beats
+    /// telling somebody their working install is twenty thousand days old.
+    #[test]
+    fn anything_that_is_not_a_release_date_says_nothing() {
+        let now = at("2026-08-05T00:00:00Z");
+        assert_eq!(staleness_days("2026.07.04.dev0", now), None);
+        assert_eq!(staleness_days("nightly", now), None);
+        assert_eq!(staleness_days("2026.07", now), None);
+        assert_eq!(staleness_days("", now), None);
+    }
+
+    /// A clock behind the release, which happens on a machine with a wrong date.
+    #[test]
+    fn a_release_in_the_future_is_not_stale() {
+        let now = at("2026-01-01T00:00:00Z");
+        assert!(staleness_days("2026.07.04", now).unwrap() < 0);
     }
 }

@@ -60,6 +60,32 @@ pub enum ModelRole {
 }
 
 impl ModelRole {
+    /// Every role, so a caller that must consider all of them cannot miss one.
+    ///
+    /// `doctor` wrote this list out by hand, which meant a fifth role would have been
+    /// added to the registry and silently left out of the readiness rollup — reporting a
+    /// gate as open while the thing behind it was absent.
+    pub const ALL: [Self; 4] = [
+        Self::Embedding,
+        Self::Reranker,
+        Self::Transcription,
+        Self::VoiceActivity,
+    ];
+
+    /// What a model in this role *is*, for a refusal that reads like English.
+    ///
+    /// `Display` gives the adjective — "a reranker model" — and a sentence needs both
+    /// halves: "is a reranker model, not an embedder". Both call sites that refused a
+    /// wrong role wrote their own noun, so the two disagreed in phrasing.
+    pub fn noun(&self) -> &'static str {
+        match self {
+            Self::Embedding => "an embedder",
+            Self::Reranker => "a reranker",
+            Self::Transcription => "a transcriber",
+            Self::VoiceActivity => "a voice-activity detector",
+        }
+    }
+
     /// Which pipeline stage stops working without this model.
     ///
     /// Weights are fatal like a missing binary (SPEC §3.2), but they are not fatal to
@@ -915,5 +941,347 @@ mod tests {
         assert_eq!(resolved, target, "the override must win");
         // `doctor` is a report and must leave nothing behind.
         assert!(!target.exists(), "resolving must not have side effects");
+    }
+}
+
+// ── resolving a model to the file that would be loaded ────────────────────────
+
+/// Why a model cannot be loaded.
+///
+/// One type, so the instruction that fixes it has one spelling. `centinel models pull`
+/// was formatted at seven call sites — `transcribe` twice, `embed`, `run`, `doctor`
+/// twice, and the VAD refusal — so renaming the command would have left six of them
+/// telling people to run something that does not exist.
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum ModelError {
+    #[error("unknown model `{id}` — the registry holds: {}", known.join(", "))]
+    Unknown {
+        id: String,
+        known: Vec<&'static str>,
+    },
+
+    #[error("`{id}` is a {has} model, not {}", wanted.noun())]
+    WrongRole {
+        id: String,
+        has: ModelRole,
+        wanted: ModelRole,
+    },
+
+    /// A variant that does not exist, as opposed to one that is merely absent.
+    ///
+    /// Separate on purpose: telling somebody to `pull --variant q2_k` when there is no
+    /// `q2_k` sends them to fetch something that will never arrive.
+    #[error("`{id}` has no variant `{variant}` — try one of: {}", available.join(", "))]
+    UnknownVariant {
+        id: String,
+        variant: String,
+        available: Vec<&'static str>,
+    },
+
+    #[error("weights missing: {} is not installed — {}", .what, .fix)]
+    NotInstalled {
+        /// `whisper-large-v3-turbo`, or `whisper-large-v3-turbo q5_1` when a variant was
+        /// named — because "not installed" about the wrong variant is a confusing answer.
+        what: String,
+        /// The command to run. See [`Self::fix`].
+        fix: String,
+    },
+}
+
+impl ModelError {
+    /// The command that fixes this, where one exists.
+    ///
+    /// **The only place `centinel models pull` is spelled.**
+    pub fn fix(&self) -> Option<&str> {
+        match self {
+            Self::NotInstalled { fix, .. } => Some(fix),
+            _ => None,
+        }
+    }
+
+    fn not_installed(spec: &ModelSpec, variant: Option<&str>, resumable: bool) -> Self {
+        let what = match variant {
+            Some(v) => format!("`{}` variant `{v}`", spec.id),
+            None => format!("`{}`", spec.id),
+        };
+        let mut fix = format!("centinel models pull {}", spec.id);
+        if let Some(v) = variant {
+            fix.push_str(&format!(" --variant {v}"));
+        }
+        if resumable {
+            // An interrupted download continues rather than restarting, and someone
+            // looking at a half-finished 4 GB file deserves to know that before deciding.
+            fix.push_str(" # resumes");
+        }
+        Self::NotInstalled { what, fix }
+    }
+}
+
+/// An installed model, and the file that would be loaded.
+#[derive(Clone, Debug)]
+pub struct Installed {
+    pub spec: &'static ModelSpec,
+    pub variant: String,
+    pub path: PathBuf,
+}
+
+/// Resolves a model id to the weights on disk.
+///
+/// **The single answer to "is this model installed, and where".** Four callers asked it
+/// four different ways, and they did not agree: `embed` tested `path.is_file()` while
+/// `status` tests each file against its *pinned size*, so a truncated download read as
+/// installed to the loader and as missing to `doctor` — and the load failed somewhere
+/// inside llama.cpp instead of saying which model to pull.
+///
+/// `role` is checked here too, because both callers that had a role in mind checked it
+/// separately and phrased the refusal differently.
+pub fn resolve(
+    id: &str,
+    role: ModelRole,
+    variant: Option<&str>,
+    root: &Path,
+) -> Result<Installed, ModelError> {
+    let spec = find(id).ok_or_else(|| ModelError::Unknown {
+        id: id.to_string(),
+        known: REGISTRY.iter().map(|m| m.id).collect(),
+    })?;
+    if spec.role != role {
+        return Err(ModelError::WrongRole {
+            id: id.to_string(),
+            has: spec.role,
+            wanted: role,
+        });
+    }
+
+    // A variant that does not exist is refused before disk is consulted, and refused
+    // differently: "not installed" would send somebody to pull something that does not
+    // exist and wait for it.
+    if let Some(name) = variant
+        && !spec.variants.iter().any(|v| v.name == name)
+    {
+        return Err(ModelError::UnknownVariant {
+            id: id.to_string(),
+            variant: name.to_string(),
+            available: spec.variants.iter().map(|v| v.name).collect(),
+        });
+    }
+
+    let status = status(spec, root);
+    let chosen = match variant {
+        Some(name) => status
+            .variants
+            .iter()
+            .find(|v| v.variant == name && v.installed)
+            .ok_or_else(|| {
+                let resumable = status
+                    .variants
+                    .iter()
+                    .any(|v| v.variant == name && !v.resumable.is_empty());
+                ModelError::not_installed(spec, Some(name), resumable)
+            })?,
+        None => status
+            .active()
+            .ok_or_else(|| ModelError::not_installed(spec, None, status.resumable()))?,
+    };
+
+    let file = spec
+        .variant(Some(&chosen.variant))
+        .expect("a status variant is a spec variant")
+        .files
+        .first()
+        .expect("every variant has a file");
+
+    Ok(Installed {
+        spec,
+        variant: chosen.variant.clone(),
+        path: spec.dir(root).join(file.path),
+    })
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    /// Installs a variant by writing each file at its pinned size — which is what
+    /// `status` checks, and what the loader used to *not* check.
+    fn install(spec: &'static ModelSpec, variant: &str, root: &Path) {
+        let dir = spec.dir(root);
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in spec.files_for(spec.variant(Some(variant)).unwrap()) {
+            let path = dir.join(file.path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, vec![0u8; file.size as usize]).unwrap();
+        }
+    }
+
+    #[test]
+    fn every_role_in_the_registry_is_listed_in_all() {
+        // The list `doctor` used to write out by hand. A fifth role added to the registry
+        // and left out of it would report a gate as open with nothing behind it.
+        for spec in REGISTRY {
+            assert!(
+                ModelRole::ALL.contains(&spec.role),
+                "`{}` has role {} which ALL does not list",
+                spec.id,
+                spec.role
+            );
+        }
+    }
+
+    #[test]
+    fn an_installed_model_resolves_to_the_file_that_would_be_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = require("whisper-tiny").unwrap();
+        let variant = spec.default_variant;
+        install(spec, variant, dir.path());
+
+        let found = resolve("whisper-tiny", ModelRole::Transcription, None, dir.path()).unwrap();
+        assert_eq!(found.variant, variant);
+        assert!(found.path.is_file());
+        assert!(found.path.starts_with(spec.dir(dir.path())));
+    }
+
+    /// The one spelling of the instruction. Seven call sites formatted this by hand.
+    #[test]
+    fn a_missing_model_carries_the_command_that_fixes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve("whisper-tiny", ModelRole::Transcription, None, dir.path()).unwrap_err();
+
+        assert_eq!(err.fix(), Some("centinel models pull whisper-tiny"));
+        assert!(err.to_string().contains("weights missing"), "{err}");
+    }
+
+    #[test]
+    fn naming_a_variant_names_it_in_the_fix_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = require("whisper-tiny").unwrap();
+        let other = spec
+            .variants
+            .iter()
+            .find(|v| v.name != spec.default_variant)
+            .map(|v| v.name)
+            .unwrap_or(spec.default_variant);
+
+        let err = resolve(
+            "whisper-tiny",
+            ModelRole::Transcription,
+            Some(other),
+            dir.path(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.fix(),
+            Some(format!("centinel models pull whisper-tiny --variant {other}").as_str())
+        );
+    }
+
+    /// A variant that does not exist is a different answer from one that is merely
+    /// absent: `pull --variant q2_k` would send somebody to wait for nothing.
+    #[test]
+    fn an_unknown_variant_is_refused_rather_than_offered_for_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve(
+            "qwen3-embedding-4b",
+            ModelRole::Embedding,
+            Some("q2_k"),
+            dir.path(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ModelError::UnknownVariant { .. }), "{err}");
+        assert_eq!(err.fix(), None, "there is nothing to pull");
+        assert!(err.to_string().contains("q8_0"), "the real ones: {err}");
+    }
+
+    /// Both callers that had a role in mind checked it separately and phrased the
+    /// refusal differently. It reads the way it always did, from one place.
+    #[test]
+    fn the_wrong_role_is_refused_in_english() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve(
+            "qwen3-reranker-0.6b",
+            ModelRole::Embedding,
+            None,
+            dir.path(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not an embedder"), "{err}");
+
+        let err = resolve(
+            "qwen3-embedding-4b",
+            ModelRole::Transcription,
+            None,
+            dir.path(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not a transcriber"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_model_lists_the_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve(
+            "whisper-enormous",
+            ModelRole::Transcription,
+            None,
+            dir.path(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("whisper-tiny"), "{err}");
+    }
+
+    /// What the loader used to miss. `status` checks each file against its **pinned
+    /// size**; `embed` checked `path.is_file()` — so a file present but short read as
+    /// installed to the loader and as missing to `doctor`, and the load failed somewhere
+    /// inside llama.cpp instead of naming the model to pull.
+    #[test]
+    fn a_file_that_is_present_but_short_is_not_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = require("whisper-tiny").unwrap();
+        let variant = spec.variant(Some(spec.default_variant)).unwrap();
+
+        let model_dir = spec.dir(dir.path());
+        std::fs::create_dir_all(&model_dir).unwrap();
+        for file in spec.files_for(variant) {
+            let path = model_dir.join(file.path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, vec![0u8; (file.size / 2) as usize]).unwrap();
+            assert!(path.is_file(), "which is all the loader used to ask");
+        }
+
+        let err = resolve("whisper-tiny", ModelRole::Transcription, None, dir.path()).unwrap_err();
+        assert!(matches!(err, ModelError::NotInstalled { .. }), "{err}");
+        // Not resumable: a short *final* file is not a download in flight, so `pull`
+        // starts over rather than continuing. The `.part` file is what resumes.
+        assert_eq!(err.fix(), Some("centinel models pull whisper-tiny"));
+    }
+
+    /// A download that was interrupted continues rather than restarting, and somebody
+    /// looking at a half-finished multi-gigabyte file deserves to know that first.
+    #[test]
+    fn an_interrupted_download_says_it_resumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = require("whisper-tiny").unwrap();
+        let variant = spec.variant(Some(spec.default_variant)).unwrap();
+
+        let model_dir = spec.dir(dir.path());
+        for file in spec.files_for(variant) {
+            let path = model_dir.join(file.path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                download::part_path(&path),
+                vec![0u8; (file.size / 2) as usize],
+            )
+            .unwrap();
+        }
+
+        let err = resolve("whisper-tiny", ModelRole::Transcription, None, dir.path()).unwrap_err();
+        assert_eq!(
+            err.fix(),
+            Some("centinel models pull whisper-tiny # resumes")
+        );
     }
 }

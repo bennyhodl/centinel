@@ -24,23 +24,53 @@ use std::time::Duration;
 use crate::prelude::*;
 use crate::tool::Tool;
 
+/// What a missing binary actually costs.
+/// Ordered so `Required` sorts first: the rows that can stop a run lead the table.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Need {
+    /// Code calls it, and a pipeline stage stops without it.
+    Required,
+    /// Code calls it, and a stage degrades without it.
+    Optional,
+    /// **Nothing calls it yet.** SPEC §3.1 lists it because the pipeline that will need
+    /// it is specified; that pipeline is not built.
+    ///
+    /// This variant exists because `pdftoppm` and `tesseract` were reported as required
+    /// with zero call sites between them, so a correctly installed machine — one able to
+    /// do everything this code can do — was told it was **not ready**. A readiness check
+    /// that is wrong in the pessimistic direction is not the safe kind of wrong: it is
+    /// the kind people learn to ignore.
+    Planned,
+}
+
 /// A subprocess dependency Centinel shells out to.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Binary {
     pub name: String,
-    /// Required binaries gate the pipeline stage that needs them; optional ones degrade it.
-    pub required: bool,
+    pub need: Need,
     /// What this binary is needed for — so a missing one is actionable, not just red.
     pub purpose: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Set when the binary is present but old enough that breakage is expected rather
+    /// than surprising.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale: Option<String>,
 }
 
 impl Binary {
     fn found(&self) -> bool {
         self.path.is_some()
+    }
+
+    /// Whether this binary's absence should make the machine read as not ready.
+    fn gates_readiness(&self) -> bool {
+        self.need == Need::Required
     }
 }
 
@@ -129,23 +159,31 @@ pub struct DoctorArgs {
 #[op(group = "host")]
 pub async fn doctor(ctx: &Ctx, args: DoctorArgs) -> anyhow::Result<DoctorReport> {
     let mut binaries = vec![
+        // Both of these are §3.1 requirements for a pipeline nobody has written. `extract`
+        // counts `pages_needing_ocr` and stops there; neither binary has a call site.
+        // Reporting them as required told a working machine it was broken, every time.
         probe(
             "pdftoppm",
-            true,
-            "rasterises PDF pages for OCR — Rust cannot do this natively",
+            Need::Planned,
+            "will rasterise PDF pages for OCR — ticket #12",
         )
         .await,
-        probe("tesseract", true, "OCR for scanned documents").await,
-        probe("yt-dlp", true, "YouTube acquisition").await,
+        probe(
+            "tesseract",
+            Need::Planned,
+            "will OCR scanned documents — ticket #12",
+        )
+        .await,
+        probe("yt-dlp", Need::Required, "YouTube acquisition").await,
         probe(
             "ffmpeg",
-            true,
+            Need::Required,
             "decodes audio to 16kHz mono PCM for transcription",
         )
         .await,
         worker_probe(),
     ];
-    binaries.sort_by(|a, b| b.required.cmp(&a.required).then(a.name.cmp(&b.name)));
+    binaries.sort_by(|a, b| a.need.cmp(&b.need).then(a.name.cmp(&b.name)));
 
     let models_dir = models::models_dir()?;
     let models: Vec<Weights> = models::REGISTRY
@@ -154,7 +192,7 @@ pub async fn doctor(ctx: &Ctx, args: DoctorArgs) -> anyhow::Result<DoctorReport>
         .collect();
     let gates = gate_statuses(&models);
 
-    let binaries_ready = binaries.iter().all(|b| !b.required || b.found());
+    let binaries_ready = binaries.iter().all(|b| !b.gates_readiness() || b.found());
     let models_ready = gates.iter().all(|g| g.ready);
 
     let sources = ctx
@@ -195,16 +233,9 @@ fn gate_statuses(models: &[Weights]) -> Vec<GateStatus> {
     [Gate::Search, Gate::Transcription]
         .into_iter()
         .map(|gate| {
-            let roles = [
-                ModelRole::Embedding,
-                ModelRole::Reranker,
-                ModelRole::Transcription,
-                ModelRole::VoiceActivity,
-            ];
-
             // For each unfilled role, name the model a user should actually pull: the
             // first the registry lists, which is the preferred one.
-            let missing: Vec<String> = roles
+            let missing: Vec<String> = ModelRole::ALL
                 .into_iter()
                 .filter(|role| role.gates() == gate)
                 .filter(|role| {
@@ -229,11 +260,18 @@ fn gate_statuses(models: &[Weights]) -> Vec<GateStatus> {
                 }
                 .to_string(),
                 // `models pull` takes one model, so a two-model gap is two commands.
-                // Chained rather than listed, because the point is to be pasted.
+                // Chained rather than listed, because the point is to be pasted. Each
+                // command comes from the model's own `fix`, which `models::resolve`
+                // wrote — so this cannot drift from what the loader would have said.
                 fix: (!missing.is_empty()).then(|| {
                     missing
                         .iter()
-                        .map(|id| format!("centinel models pull {id}"))
+                        .filter_map(|id| {
+                            models
+                                .iter()
+                                .find(|m| &m.id == id)
+                                .and_then(|m| m.fix.clone())
+                        })
                         .collect::<Vec<_>>()
                         .join(" && ")
                 }),
@@ -271,13 +309,12 @@ fn weights(spec: &'static models::ModelSpec, root: &std::path::Path) -> Weights 
         bytes_present: variant.bytes_present,
         bytes_total: variant.bytes_total,
         resumable: status.resumable(),
-        fix: (!status.installed).then(|| {
-            if status.resumable() {
-                format!("centinel models pull {} # resumes", status.id)
-            } else {
-                format!("centinel models pull {}", status.id)
-            }
-        }),
+        // Not formatted here. `models::resolve` owns the one spelling of the
+        // instruction, and asking it is how this stays the same string the loader
+        // would have printed.
+        fix: models::resolve(&status.id, status.role, None, root)
+            .err()
+            .and_then(|e| e.fix().map(str::to_string)),
     }
 }
 
@@ -292,11 +329,12 @@ fn worker_probe() -> Binary {
     let path = crate::transcribe::worker_path().ok();
     Binary {
         name: crate::transcribe::WORKER.to_string(),
-        required: true,
+        need: Need::Required,
         purpose: "runs whisper.cpp in its own process, out of llama.cpp's ggml".to_string(),
         // Not run for a version: it loads no model to answer, but it is still a process
         // spawn on an op that must stay instant.
         version: None,
+        stale: None,
         path: path.map(|p| p.display().to_string()),
     }
 }
@@ -306,20 +344,43 @@ fn worker_probe() -> Binary {
 /// Version strings are captured rather than parsed: SPEC §3 pins *minimum* versions,
 /// but the pinning table is owned by ticket #11 and does not exist yet. Recording the
 /// raw string now means the check can be added later without another round of probing.
-async fn probe(name: &str, required: bool, purpose: &str) -> Binary {
+async fn probe(name: &str, need: Need, purpose: &str) -> Binary {
     let path = which(name).await;
     let version = if path.is_some() {
         version_of(name).await
     } else {
         None
     };
+    let stale = version.as_deref().and_then(|v| staleness(name, v));
     Binary {
         name: name.to_string(),
-        required,
+        need,
         purpose: purpose.to_string(),
         path,
         version,
+        stale,
     }
+}
+
+/// Whether a present binary is old enough to expect trouble from.
+///
+/// Only `yt-dlp` answers, and only because it is the one dependency whose staleness is a
+/// **predictable** failure: it shipped 26 releases in 2025 in emergency clusters and warns
+/// at ninety days. `crate::youtube::STALE_AFTER_DAYS` was written down with a comment
+/// saying `doctor` would surface it, and then nothing read it — so a run failing against
+/// the bot wall could not say *"and your yt-dlp is four months old"*, which is the first
+/// thing anybody should check.
+fn staleness(name: &str, version: &str) -> Option<String> {
+    if name != crate::youtube::YT_DLP {
+        return None;
+    }
+    let days = crate::youtube::staleness_days(version, jiff::Timestamp::now())?;
+    (days > crate::youtube::STALE_AFTER_DAYS).then(|| {
+        format!(
+            "released {days} days ago; yt-dlp warns past {} and breakage is expected",
+            crate::youtube::STALE_AFTER_DAYS
+        )
+    })
 }
 
 /// A probe's deadline.
@@ -397,11 +458,15 @@ impl Render for DoctorReport {
             let mut table = Table::bare(&[Align::Left, Align::Left, Align::Left, Align::Left]);
             for bin in &self.binaries {
                 let found = bin.found();
-                // An absent *optional* binary degrades rather than breaks, so it is amber.
-                let mark = match (found, bin.required) {
+                // Three states, because a missing binary costs three different things.
+                // A binary nothing calls yet is not a fault, and painting it red was how
+                // `doctor` told a correctly installed machine it was broken.
+                let mark = match (found, bin.need) {
+                    (true, _) if bin.stale.is_some() => Mark::Warn,
                     (true, _) => Mark::Ok,
-                    (false, true) => Mark::Bad,
-                    (false, false) => Mark::Warn,
+                    (false, Need::Required) => Mark::Bad,
+                    (false, Need::Optional) => Mark::Warn,
+                    (false, Need::Planned) => Mark::None,
                 };
                 // A binary that answered but reports no version is *present*. Saying
                 // "missing" next to a green tick is the one thing this column must never
@@ -409,16 +474,32 @@ impl Render for DoctorReport {
                 let version = match (&bin.version, found) {
                     (Some(raw), _) => short_version(raw),
                     (None, true) => String::new(),
+                    // A binary nothing calls yet is not missing in the sense that
+                    // matters, and the word belongs to the rows that can stop a run.
+                    (None, false) if bin.need == Need::Planned => "not needed yet".into(),
                     (None, false) => "missing".to_string(),
+                };
+                let ink = match (found, bin.need) {
+                    (true, _) => Ink::Cyan,
+                    (false, Need::Required) => Ink::Red,
+                    (false, _) => Ink::Dim,
                 };
                 table.push(vec![
                     Cell::mark(mark),
                     Cell::plain(&bin.name),
-                    Cell::new(version, if found { Ink::Cyan } else { Ink::Red }),
+                    Cell::new(version, ink),
                     Cell::dim(render::truncate(&bin.purpose, 52)),
                 ]);
             }
-            p.table(&table)
+            p.table(&table)?;
+
+            // Below the table rather than in it: a stale binary is present and working,
+            // and the sentence that explains why it might not be is worth the width.
+            for bin in self.binaries.iter().filter(|b| b.stale.is_some()) {
+                let note = format!("{} {}", bin.name, bin.stale.as_deref().unwrap_or_default());
+                p.marked(Mark::Warn, p.paint(&note, Ink::Dim))?;
+            }
+            Ok(())
         })?;
 
         p.section("models")?;
@@ -504,6 +585,106 @@ fn short_version(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn binary(name: &str, need: Need, found: bool, version: Option<&str>) -> Binary {
+        Binary {
+            name: name.into(),
+            need,
+            purpose: "does a thing".into(),
+            path: found.then(|| format!("/usr/bin/{name}")),
+            version: version.map(str::to_string),
+            stale: None,
+        }
+    }
+
+    /// The defect. `pdftoppm` and `tesseract` are SPEC §3.1 requirements for a pipeline
+    /// nobody has written — no call site exists for either — so requiring them told a
+    /// machine that can do everything this code does that it was not ready.
+    #[test]
+    fn a_binary_nothing_calls_yet_does_not_block_readiness() {
+        let binaries = [
+            binary("pdftoppm", Need::Planned, false, None),
+            binary("tesseract", Need::Planned, false, None),
+            binary("yt-dlp", Need::Required, true, Some("2026.07.04")),
+            binary("ffmpeg", Need::Required, true, Some("7.1.1")),
+        ];
+        assert!(binaries.iter().all(|b| !b.gates_readiness() || b.found()));
+    }
+
+    #[test]
+    fn a_binary_that_is_called_and_absent_still_blocks_it() {
+        let binaries = [
+            binary("pdftoppm", Need::Planned, false, None),
+            binary("yt-dlp", Need::Required, false, None),
+        ];
+        assert!(!binaries.iter().all(|b| !b.gates_readiness() || b.found()));
+    }
+
+    /// The rows that can stop a run lead the table.
+    #[test]
+    fn required_binaries_sort_above_planned_ones() {
+        let mut binaries = [
+            binary("pdftoppm", Need::Planned, false, None),
+            binary("yt-dlp", Need::Required, true, None),
+        ];
+        binaries.sort_by(|a, b| a.need.cmp(&b.need).then(a.name.cmp(&b.name)));
+        assert_eq!(binaries[0].name, "yt-dlp");
+    }
+
+    /// `STALE_AFTER_DAYS` was written down with a comment saying `doctor` would surface
+    /// it, and then nothing read it.
+    #[test]
+    fn an_old_yt_dlp_is_named_as_old() {
+        // Well past the ninety-day line, whenever this test runs.
+        let old = staleness(crate::youtube::YT_DLP, "2019.01.01").unwrap();
+        assert!(old.contains("90"), "{old}");
+        assert!(old.contains("days ago"), "{old}");
+    }
+
+    #[test]
+    fn a_fresh_yt_dlp_and_every_other_binary_say_nothing() {
+        let today = jiff::Timestamp::now()
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .date();
+        let fresh = format!("{}.{:02}.{:02}", today.year(), today.month(), today.day());
+        assert_eq!(staleness(crate::youtube::YT_DLP, &fresh), None);
+
+        // Only yt-dlp answers: it is the one dependency whose staleness is a predictable
+        // failure rather than a guess about somebody's package manager.
+        assert_eq!(staleness("ffmpeg", "1.0.0"), None);
+        assert_eq!(staleness(crate::youtube::YT_DLP, "nightly"), None);
+    }
+
+    /// A stale binary is present and working. Painting it as missing would be a lie, and
+    /// saying nothing would waste the one check that explains a bot-wall failure.
+    #[test]
+    fn a_stale_binary_reads_as_a_warning_not_a_fault() {
+        let mut bin = binary("yt-dlp", Need::Required, true, Some("2019.01.01"));
+        bin.stale = staleness(crate::youtube::YT_DLP, "2019.01.01");
+        assert!(bin.stale.is_some());
+        assert!(bin.found(), "it is installed and it works");
+
+        let report = DoctorReport {
+            store_root: "/tmp/store".into(),
+            blob_count: 0,
+            sources: vec![],
+            binaries: vec![bin],
+            models_dir: "/tmp/models".into(),
+            models: vec![],
+            gates: vec![],
+            binaries_ready: true,
+            models_ready: true,
+            ready: true,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut p = Painter::new(&mut buf, false, 100);
+            report.render(&mut p).unwrap();
+        }
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("ready"), "{out}");
+        assert!(out.contains("days ago"), "the warning is shown: {out}");
+    }
     use crate::models::ModelSpec;
 
     fn embedder() -> &'static ModelSpec {

@@ -284,29 +284,26 @@ impl Transcriber {
         variant: Option<&str>,
         language: Option<String>,
     ) -> anyhow::Result<Self> {
-        let spec = models::require(model_id)?;
-        anyhow::ensure!(
-            spec.role == models::ModelRole::Transcription,
-            "`{model_id}` is a {} model, not a transcriber",
-            spec.role
-        );
-
-        let (model, variant) = installed_file(spec, variant, root)?;
+        let found = models::resolve(model_id, models::ModelRole::Transcription, variant, root)?;
 
         // Any installed VAD, since the registry pins one version at a time.
         let vad_model = models::REGISTRY
             .iter()
             .filter(|s| s.role == models::ModelRole::VoiceActivity)
-            .find_map(|s| installed_file(s, None, root).ok().map(|(p, _)| p));
+            .find_map(|s| {
+                models::resolve(s.id, models::ModelRole::VoiceActivity, None, root)
+                    .ok()
+                    .map(|i| i.path)
+            });
 
         Ok(Self {
             worker: worker_path()?,
             decoder: PathBuf::from(DECODER),
             stall_timeout: STALL_TIMEOUT,
-            model,
+            model: found.path,
             vad_model,
-            spec,
-            variant,
+            spec: found.spec,
+            variant: found.variant,
             language,
         })
     }
@@ -520,43 +517,6 @@ impl Transcriber {
             )
         })
     }
-}
-
-/// The on-disk path of an installed variant, preferring the default.
-fn installed_file(
-    spec: &'static ModelSpec,
-    variant: Option<&str>,
-    root: &Path,
-) -> anyhow::Result<(PathBuf, String)> {
-    let status = models::status(spec, root);
-    let chosen = match variant {
-        Some(name) => status
-            .variants
-            .iter()
-            .find(|v| v.variant == name)
-            .filter(|v| v.installed)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "`{}` variant `{name}` is not installed — `centinel models pull {} --variant {name}`",
-                    spec.id,
-                    spec.id
-                )
-            })?,
-        None => status.active().ok_or_else(|| {
-            anyhow::anyhow!(
-                "`{}` is not installed — `centinel models pull {}`",
-                spec.id,
-                spec.id
-            )
-        })?,
-    };
-
-    let file = spec
-        .variant(Some(&chosen.variant))?
-        .files
-        .first()
-        .expect("every variant has a file");
-    Ok((spec.dir(root).join(file.path), chosen.variant.clone()))
 }
 
 #[cfg(test)]
