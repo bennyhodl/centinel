@@ -61,6 +61,15 @@ pub struct Binary {
     /// than surprising.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale: Option<String>,
+    /// The command that installs this binary, when it is one Centinel ships.
+    ///
+    /// `None` for the external tools, and deliberately so: `ffmpeg` and `yt-dlp` come
+    /// from whichever package manager the host uses, and a guessed `brew install` is
+    /// wrong on most machines. A wrong fix is worse than none — it is the kind of line
+    /// somebody pastes. Only `centinel-whisper` can be named with certainty, because
+    /// this workspace builds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
 }
 
 impl Binary {
@@ -320,11 +329,12 @@ fn weights(spec: &'static models::ModelSpec, root: &std::path::Path) -> Weights 
 
 /// Locates the transcription worker.
 ///
-/// Unlike the others this one is *ours* — `cargo build` produces it beside `centinel`.
-/// It is reported here anyway because it can genuinely be absent: it links whisper.cpp
-/// and so needs a C++ toolchain, which means `cargo build -p centinel` alone leaves it
-/// out. Probed by path rather than by `command -v`, since it is normally a sibling of
-/// the running executable and not on `PATH` at all.
+/// Unlike the others this one is *ours* — this workspace builds it. It is reported here
+/// anyway because it can genuinely be absent: it is a **separate package**, so neither
+/// `cargo build -p centinel` nor `cargo install --path crates/centinel` produces it, and
+/// the machine that results looks correctly installed and transcribes nothing. Probed by
+/// path rather than by `command -v`, since it is normally a sibling of the running
+/// executable and not on `PATH` at all.
 fn worker_probe() -> Binary {
     let path = crate::transcribe::worker_path().ok();
     Binary {
@@ -335,6 +345,10 @@ fn worker_probe() -> Binary {
         // spawn on an op that must stay instant.
         version: None,
         stale: None,
+        // The one binary whose fix this workspace can state rather than guess.
+        fix: path
+            .is_none()
+            .then(|| crate::transcribe::WORKER_FIX.to_string()),
         path: path.map(|p| p.display().to_string()),
     }
 }
@@ -359,6 +373,8 @@ async fn probe(name: &str, need: Need, purpose: &str) -> Binary {
         path,
         version,
         stale,
+        // An external tool. See `Binary::fix` for why this is not a guessed `brew install`.
+        fix: None,
     }
 }
 
@@ -499,6 +515,19 @@ impl Render for DoctorReport {
                 let note = format!("{} {}", bin.name, bin.stale.as_deref().unwrap_or_default());
                 p.marked(Mark::Warn, p.paint(&note, Ink::Dim))?;
             }
+
+            // Painted like the gates' fix, because it is the same thing: a command to
+            // paste. A red row that names no remedy is where somebody stops and guesses.
+            //
+            // It repeats the binary's name because it cannot sit directly under the row
+            // it fixes — a table renders as one unit, and the row above may be four lines
+            // up. A bare command under a five-row table belongs to no visible row.
+            for bin in self.binaries.iter().filter(|b| !b.found()) {
+                if let Some(fix) = &bin.fix {
+                    let note = format!("{}  {}", bin.name, p.paint(fix, Ink::Cyan));
+                    p.marked(Mark::Bad, note)?;
+                }
+            }
             Ok(())
         })?;
 
@@ -594,6 +623,7 @@ mod tests {
             path: found.then(|| format!("/usr/bin/{name}")),
             version: version.map(str::to_string),
             stale: None,
+            fix: None,
         }
     }
 
@@ -629,6 +659,33 @@ mod tests {
         ];
         binaries.sort_by(|a, b| a.need.cmp(&b.need).then(a.name.cmp(&b.name)));
         assert_eq!(binaries[0].name, "yt-dlp");
+    }
+
+    /// The defect this closes. `centinel-whisper` is a separate package, so the obvious
+    /// install — `cargo install --path crates/centinel` — leaves it out, and `doctor`
+    /// then printed a red row with no command on it. The gap it reported was the one
+    /// gap it could not tell anybody how to close.
+    #[test]
+    fn a_missing_whisper_worker_carries_the_command_that_installs_it() {
+        // Built rather than probed: `worker_probe` reads `$CENTINEL_WHISPER_BIN` and the
+        // real filesystem, and this test is about what the row carries, not about lookup.
+        let absent = Binary {
+            fix: Some(crate::transcribe::WORKER_FIX.to_string()),
+            ..binary(crate::transcribe::WORKER, Need::Required, false, None)
+        };
+        assert!(!absent.found());
+        assert_eq!(
+            absent.fix.as_deref(),
+            Some("cargo install --path crates/centinel-whisper"),
+        );
+    }
+
+    /// A fix is a line somebody pastes, so an absent one beats a guessed one. `ffmpeg`
+    /// arrives by a different route on every host and this workspace cannot name it.
+    #[test]
+    fn an_external_binary_offers_no_guessed_fix() {
+        let probed = binary("ffmpeg", Need::Required, false, None);
+        assert_eq!(probed.fix, None);
     }
 
     /// `STALE_AFTER_DAYS` was written down with a comment saying `doctor` would surface

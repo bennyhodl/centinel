@@ -63,4 +63,66 @@ Light the candle.
 
 ---
 
+## Install
+
+Rust 1.85+, and a C++ toolchain — two of the dependencies compile `llama.cpp` and `whisper.cpp`.
+
+**Centinel is two binaries, and you need both.**
+
+```bash
+cargo install --git https://github.com/bennyhodl/centinel centinel centinel-whisper
+```
+
+From a clone, install each package in turn. Cargo cannot take two `--path` arguments, and the workspace root is a virtual manifest:
+
+```bash
+cargo install --path crates/centinel
+cargo install --path crates/centinel-whisper
+```
+
+Expect a long first build. Both packages compile a C++ library from source.
+
+### Why two
+
+`whisper.cpp` and `llama.cpp` each vendor their own copy of **`ggml`**, and both export the same ~534 `ggml_*` symbols. Linked into one binary the linker keeps one copy and silently resolves the other library's calls to it. The two versions are not the same. Measured on identical audio and model, the linked crates the only variable:
+
+| binary | result |
+|---|---|
+| `whisper-rs` alone | 2 segments — *"The council meeting will come to order."* |
+| `whisper-rs` + `llama-cpp-2` | **0 segments**, every token at `p=0.000` |
+
+It links without a warning, runs without a crash, and transcribes nothing. There is no error to catch. So `centinel` links `llama.cpp`, `centinel-whisper` links `whisper.cpp`, and the two meet over a pipe. [`docs/SPEC.md`](docs/SPEC.md) §3.6 has the full reasoning and the alternatives it rejected.
+
+`centinel` finds the worker beside itself first, then `$CENTINEL_WHISPER_BIN`, then `PATH`. Installing both with the same command puts them in the same directory, which is all it needs.
+
+### External tools
+
+Centinel shells out rather than running a second language runtime.
+
+| Binary | Needed for | Required |
+|---|---|---|
+| `yt-dlp` | YouTube acquisition | yes |
+| `ffmpeg` | decodes audio to 16 kHz mono PCM for transcription | yes |
+| `pdftoppm` (poppler), `tesseract` | OCR | not yet — nothing calls them |
+
+```bash
+brew install yt-dlp ffmpeg          # macOS
+sudo apt install yt-dlp ffmpeg      # Debian/Ubuntu
+```
+
+Keep `yt-dlp` current. It ships releases in emergency clusters when YouTube changes, and `centinel doctor` warns once yours is past ninety days.
+
+### Then
+
+```bash
+centinel doctor         # what this machine is missing, and the command for each gap
+centinel models pull    # weights for search and transcription
+```
+
+`doctor` is the check to run first and after every step. It names the fix beside each gap it finds.
+
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has the quickstart — adding a source, collecting it, and searching what comes back.
+
+---
+
 *MIT licensed. Fork this for your city.*

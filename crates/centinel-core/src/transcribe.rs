@@ -42,6 +42,17 @@ use crate::tool::{Pipes, Tool};
 pub const WORKER: &str = "centinel-whisper";
 pub const ENV_WORKER: &str = "CENTINEL_WHISPER_BIN";
 
+/// The command that installs the worker, spelled in exactly one place.
+///
+/// `centinel-whisper` is a **separate package**, so `cargo install --path crates/centinel`
+/// builds every binary except this one and leaves a machine that transcribes nothing. The
+/// install form rather than `cargo build -p` because the person who reads this got here by
+/// installing: a `target/release/` binary is no help to somebody running `~/.cargo/bin`.
+///
+/// Read by [`worker_path`]'s error and by `doctor`'s binary row. It was written out at the
+/// first of those and nowhere else, so `doctor` reported the gap and could not close it.
+pub const WORKER_FIX: &str = "cargo install --path crates/centinel-whisper";
+
 /// The program that decodes audio into the PCM the worker reads.
 pub const DECODER: &str = "ffmpeg";
 
@@ -243,8 +254,8 @@ pub fn worker_path() -> anyhow::Result<PathBuf> {
 
     which(WORKER).ok_or_else(|| {
         anyhow::anyhow!(
-            "cannot find `{WORKER}`. It ships with centinel — build it with \
-             `cargo build --release -p centinel-whisper`, or set {ENV_WORKER}"
+            "cannot find `{WORKER}`. It ships with centinel as a second binary — \
+             install it with `{WORKER_FIX}`, or set {ENV_WORKER}"
         )
     })
 }

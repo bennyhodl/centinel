@@ -590,9 +590,17 @@ mod tests {
         .unwrap_err()
         .to_string();
 
-        // On a machine with no weights at all the model resolves first; either way the
-        // message has to name a `models pull` that fixes it.
-        assert!(err.contains("models pull"), "unhelpful refusal: {err}");
+        // Which dependency is missing depends on the machine, and there are three states,
+        // not the two this assertion first named: no weights, no worker, or neither. A
+        // developer box with weights but no `centinel-whisper` — the shape `cargo install
+        // --path crates/centinel` leaves behind — hit the case that demanded `models pull`
+        // and failed the test over a machine that was merely missing something else.
+        //
+        // What the refusal owes the reader is the same either way: a command to paste.
+        assert!(
+            err.contains("models pull") || err.contains(crate::transcribe::WORKER_FIX),
+            "unhelpful refusal, names no command that fixes it: {err}"
+        );
     }
 
     #[tokio::test]
