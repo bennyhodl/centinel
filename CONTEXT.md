@@ -99,6 +99,29 @@ text. Changing it produces a wholly different set of hashes, so the old chunks s
 index and every vector in the cache is orphaned. The index records the geometry its hashes
 were built with, and refuses a change that is not a rebuild.
 
+## The run report
+
+**Tally** — the numbers one stage produced, folded across however many calls it took. Two
+kinds of figure, and confusing them records something false:
+
+| | | |
+|---|---|---|
+| **count** | work *this run* did | two calls **add** — 30 chunks + 30 chunks is 60 |
+| **total** | what the store now *holds* | two calls do **not** add — the last answer wins |
+
+`total_chunks` is the size of the whole index, so summing a three-source run's three
+answers would report the index as three times its size.
+
+**Partial failure** — a corpus-wide stage where some targets failed and others did not.
+Each stage used to return on the first error, so one broken source left every source behind
+it underived and unmentioned — the mistake acquisition already avoids, where one site's WAF
+block does not cancel the nineteen after it. The stage is still a failure, and it keeps the
+numbers of the calls that worked: half a corpus extracted is still half a corpus extracted.
+
+**Summary vs error** — a `StageRun` carries both. The `summary` is the line a person reads
+and says `1 of 19 failed`; the `error` is every failure joined, for a machine. Rendering the
+second in place of the first shows one source's error as though it were the whole story.
+
 ## Retrieval
 
 **Handle** — a hash that identifies one blob *and* that the tool will accept back. The

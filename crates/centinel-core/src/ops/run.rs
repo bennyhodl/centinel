@@ -158,6 +158,74 @@ pub enum StageStatus {
     },
 }
 
+/// The numbers one stage produced, folded across however many calls it took.
+///
+/// A stage answers in its own vocabulary — `extracted`, `transcribed`, `documents_indexed`
+/// — and nothing here learns those words. Figures are added by name, so a report that
+/// grows a field grows a figure, and a stage nobody has written yet needs no change here.
+#[derive(Clone, Debug, Default)]
+struct Tally {
+    /// The count the report leads with, and the one [`RunReport::is_quiet`] tests.
+    new: u64,
+    /// Counts of *this run's* work. Two calls' counts **add**.
+    counts: BTreeMap<String, u64>,
+    /// Standing totals of the store. Two calls' totals do **not** add: `total_chunks` is
+    /// the size of one index, so summing a three-source run's three answers would report
+    /// the index as three times its size.
+    totals: BTreeMap<String, u64>,
+}
+
+impl Tally {
+    /// The headline count, plus the figures that add.
+    fn of(new: u64, counts: &[(&str, u64)]) -> Self {
+        Self {
+            new,
+            counts: counts.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            totals: BTreeMap::new(),
+        }
+    }
+
+    /// A figure that is a standing total rather than a count of this call's work.
+    fn total(mut self, key: &str, value: u64) -> Self {
+        self.totals.insert(key.to_string(), value);
+        self
+    }
+
+    /// Figures the caller counted for itself.
+    ///
+    /// Kept open-ended because what a Source counts is the Source's business: a crawled
+    /// site reports `disallowed`, a channel reports `rejected`, and a third kind will
+    /// report something nobody has thought of yet.
+    fn and(mut self, extra: BTreeMap<String, u64>) -> Self {
+        self.counts.extend(extra);
+        self
+    }
+
+    /// Folds another call's answer in. Counts add; totals are replaced.
+    fn absorb(&mut self, other: Self) {
+        self.new += other.new;
+        for (k, v) in other.counts {
+            *self.counts.entry(k).or_default() += v;
+        }
+        self.totals.extend(other.totals);
+    }
+
+    /// One figure, by the name its report gave it. Zero when the stage never counted it.
+    fn get(&self, key: &str) -> u64 {
+        self.counts
+            .get(key)
+            .or_else(|| self.totals.get(key))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn into_figures(self) -> BTreeMap<String, u64> {
+        let mut figures = self.counts;
+        figures.extend(self.totals);
+        figures
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct StageRun {
     pub stage: Stage,
@@ -187,43 +255,53 @@ impl StageRun {
         }
     }
 
+    /// A stage whose one call failed.
     fn failed(stage: Stage, error: impl std::fmt::Display, elapsed: f64) -> Self {
-        let error = error.to_string();
+        Self::faulted(stage, Tally::default(), vec![error.to_string()], 1, elapsed)
+    }
+
+    /// A stage where at least one of `attempted` calls failed.
+    ///
+    /// Keeps the numbers of the calls that did not. Half a corpus extracted is still half
+    /// a corpus extracted, and dropping those figures would report work that happened as
+    /// work that never did. The stage is a failure either way — it is still marked, still
+    /// counted by `failed_stages`, and still keeps the run out of `is_quiet`.
+    fn faulted(
+        stage: Stage,
+        tally: Tally,
+        errors: Vec<String>,
+        attempted: usize,
+        elapsed: f64,
+    ) -> Self {
+        let first = render::one_line(errors.first().map_or("failed", String::as_str));
+        // Naming the count is the whole difference between "the stage is broken" and "one
+        // of your nineteen sources is". Without it a partial failure reads as a total one.
+        let summary = if errors.len() >= attempted {
+            first
+        } else {
+            format!("{} of {attempted} failed \u{00b7} {first}", errors.len())
+        };
         Self {
             stage,
-            summary: crate::render::one_line(&error),
-            status: StageStatus::Failed { error },
-            figures: BTreeMap::new(),
-            new: 0,
+            status: StageStatus::Failed {
+                error: errors.join("; "),
+            },
+            summary,
+            new: tally.new,
+            figures: tally.into_figures(),
             elapsed_secs: elapsed,
         }
     }
 
-    fn ran(
-        stage: Stage,
-        new: u64,
-        summary: impl Into<String>,
-        figures: &[(&str, u64)],
-        elapsed: f64,
-    ) -> Self {
+    fn ran(stage: Stage, tally: Tally, summary: impl Into<String>, elapsed: f64) -> Self {
         Self {
             stage,
             status: StageStatus::Ran,
             summary: summary.into(),
-            figures: figures.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
-            new,
+            new: tally.new,
+            figures: tally.into_figures(),
             elapsed_secs: elapsed,
         }
-    }
-
-    /// Folds a Source's own figures in beside the stage's.
-    ///
-    /// Kept open-ended because what a Source counts is the Source's business: a crawled
-    /// site reports `disallowed`, a channel reports `rejected`, and a third kind will
-    /// report something nobody has thought of yet.
-    fn with_figures(mut self, extra: BTreeMap<String, u64>) -> Self {
-        self.figures.extend(extra);
-        self
     }
 
     pub fn is_failure(&self) -> bool {
@@ -474,17 +552,19 @@ async fn run_acquisition(
             match acquire::discover(&ctx.store, source, &DiscoverOpts::default(), progress).await {
                 Ok(r) => StageRun::ran(
                     stage,
-                    r.new as u64,
+                    Tally::of(
+                        r.new as u64,
+                        &[("found", r.found as u64), ("new", r.new as u64)],
+                    )
+                    .and(r.figures),
                     format!(
                         "{} {} \u{00b7} {} new",
                         render::count(r.found as u64),
                         noun(r.found as u64, "address", "addresses"),
                         render::count(r.new as u64)
                     ),
-                    &[("found", r.found as u64), ("new", r.new as u64)],
                     secs(),
-                )
-                .with_figures(r.figures),
+                ),
                 Err(e) => StageRun::failed(stage, e, secs()),
             }
         }
@@ -514,24 +594,26 @@ async fn run_acquisition(
                     }
                     StageRun::ran(
                         stage,
-                        r.stored as u64,
+                        Tally::of(
+                            r.stored as u64,
+                            &[
+                                ("stored", r.stored as u64),
+                                ("changed", r.changed as u64),
+                                ("already_had", r.already_had as u64),
+                                ("failed", r.failed as u64),
+                                ("blocked", r.blocked as u64),
+                                ("remaining", r.remaining as u64),
+                                ("bytes", r.bytes),
+                            ],
+                        )
+                        .and(
+                            r.parts
+                                .into_iter()
+                                .map(|(k, v)| (format!("part_{k}"), v as u64))
+                                .collect(),
+                        ),
                         summary,
-                        &[
-                            ("stored", r.stored as u64),
-                            ("changed", r.changed as u64),
-                            ("already_had", r.already_had as u64),
-                            ("failed", r.failed as u64),
-                            ("blocked", r.blocked as u64),
-                            ("remaining", r.remaining as u64),
-                            ("bytes", r.bytes),
-                        ],
                         secs(),
-                    )
-                    .with_figures(
-                        r.parts
-                            .into_iter()
-                            .map(|(k, v)| (format!("part_{k}"), v as u64))
-                            .collect(),
                     )
                 }
                 Err(e) => StageRun::failed(stage, e, secs()),
@@ -543,7 +625,58 @@ async fn run_acquisition(
     }
 }
 
+/// Runs one op once per target and folds the answers into a single [`StageRun`].
+///
+/// The loop, the clock, the failure accounting and the figures map are identical for every
+/// derivation stage. What varies is which op to call for one target, and how the folded
+/// numbers read — so a fifth stage is two closures rather than a fourth copy of all four.
+///
+/// **A target that fails no longer abandons the ones behind it.** Each stage used to
+/// `return` on the first error, so `--source a --source b --source c` with a broken `a`
+/// left `b` and `c` underived and reported only `a` — the mistake `run` already avoids one
+/// level up, where one site's WAF block does not cancel the nineteen after it.
+async fn fold_targets<Fut>(
+    stage: Stage,
+    targets: Vec<Option<String>>,
+    run_one: impl Fn(Option<String>) -> Fut,
+    summarize: impl Fn(&Tally, f64) -> String,
+) -> StageRun
+where
+    // Spelled out rather than `AsyncFn` because `run` is a `Send` op, and `AsyncFn` gives
+    // no way to say its future is `Send` on this toolchain.
+    Fut: Future<Output = anyhow::Result<Tally>> + Send,
+{
+    let t0 = Instant::now();
+    let attempted = targets.len();
+    let mut tally = Tally::default();
+    let mut errors = Vec::new();
+
+    for target in targets {
+        // The error is named after its target while we still know which one it was.
+        // "1 of 19 failed · connection reset" says nothing without the source id.
+        let named = target.clone();
+        match run_one(target).await {
+            Ok(t) => tally.absorb(t),
+            Err(e) => errors.push(match named {
+                Some(id) => format!("{id}: {e}"),
+                None => e.to_string(),
+            }),
+        }
+    }
+
+    let secs = t0.elapsed().as_secs_f64();
+    if errors.is_empty() {
+        let summary = summarize(&tally, secs);
+        StageRun::ran(stage, tally, summary, secs)
+    } else {
+        StageRun::faulted(stage, tally, errors, attempted, secs)
+    }
+}
+
 /// Runs one corpus-wide derivation stage across `scope` (empty means every source).
+///
+/// Each arm says three things and no more: what to skip for, how to call the op for one
+/// target, and how the total reads. Everything else is [`fold_targets`].
 async fn run_derivation(
     ctx: &Ctx,
     config: &Config,
@@ -552,8 +685,6 @@ async fn run_derivation(
     scope: &[String],
     progress: &Progress,
 ) -> StageRun {
-    let t0 = Instant::now();
-
     // One call per named source, or one unscoped call covering the store. Folding the
     // results keeps the report shape identical either way.
     let targets: Vec<Option<String>> = if scope.is_empty() {
@@ -564,53 +695,41 @@ async fn run_derivation(
 
     match stage {
         Stage::Extract => {
-            let mut extracted = 0u64;
-            let mut chars = 0u64;
-            let mut unextractable = 0u64;
-            let mut ocr = 0u64;
-            for target in targets {
-                match super::extract(
-                    ctx,
-                    ExtractArgs {
-                        source: target,
-                        limit: args.limit,
-                        refresh: args.refresh,
-                        ..Default::default()
-                    },
-                    progress,
-                )
-                .await
-                {
-                    Ok(r) => {
-                        extracted += r.extracted as u64;
-                        chars += r.chars_of_text as u64;
-                        unextractable += r.unextractable as u64;
-                        ocr += r.ocr_pages_pending as u64;
-                    }
-                    Err(e) => return StageRun::failed(stage, e, t0.elapsed().as_secs_f64()),
-                }
-            }
-            StageRun::ran(
+            fold_targets(
                 stage,
-                extracted,
-                format!(
-                    "{} {} · {} chars",
-                    crate::render::count(extracted),
-                    if extracted == 1 {
-                        "document"
-                    } else {
-                        "documents"
-                    },
-                    crate::render::count(chars)
-                ),
-                &[
-                    ("extracted", extracted),
-                    ("chars_of_text", chars),
-                    ("unextractable", unextractable),
-                    ("ocr_pages_pending", ocr),
-                ],
-                t0.elapsed().as_secs_f64(),
+                targets,
+                |source| async move {
+                    let r = super::extract(
+                        ctx,
+                        ExtractArgs {
+                            source,
+                            limit: args.limit,
+                            refresh: args.refresh,
+                            ..Default::default()
+                        },
+                        progress,
+                    )
+                    .await?;
+                    Ok(Tally::of(
+                        r.extracted as u64,
+                        &[
+                            ("extracted", r.extracted as u64),
+                            ("chars_of_text", r.chars_of_text as u64),
+                            ("unextractable", r.unextractable as u64),
+                            ("ocr_pages_pending", r.ocr_pages_pending as u64),
+                        ],
+                    ))
+                },
+                |t, _| {
+                    format!(
+                        "{} {} \u{00b7} {} chars",
+                        render::count(t.new),
+                        noun(t.new, "document", "documents"),
+                        render::count(t.get("chars_of_text"))
+                    )
+                },
             )
+            .await
         }
 
         Stage::Transcribe => {
@@ -618,106 +737,85 @@ async fn run_derivation(
             if let Some(reason) = missing_model(model, crate::models::ModelRole::Transcription) {
                 return StageRun::skipped(stage, reason);
             }
-            let mut transcribed = 0u64;
-            let mut failed = 0u64;
-            let mut chars = 0u64;
-            for target in targets {
-                match super::transcribe(
-                    ctx,
-                    TranscribeArgs {
-                        source: target,
-                        model: model.clone(),
-                        language: Some(config.defaults.lang.clone()),
-                        limit: args.limit,
-                        refresh: args.refresh,
-                        ..Default::default()
-                    },
-                    progress,
-                )
-                .await
-                {
-                    Ok(r) => {
-                        transcribed += r.transcribed as u64;
-                        failed += r.failed as u64;
-                        chars += r.transcribed_chars as u64;
-                    }
-                    Err(e) => return StageRun::failed(stage, e, t0.elapsed().as_secs_f64()),
-                }
-            }
-            StageRun::ran(
+            fold_targets(
                 stage,
-                transcribed,
-                format!(
-                    "{} {} · {} chars",
-                    crate::render::count(transcribed),
-                    if transcribed == 1 {
-                        "recording"
-                    } else {
-                        "recordings"
-                    },
-                    crate::render::count(chars)
-                ),
-                &[
-                    ("transcribed", transcribed),
-                    ("failed", failed),
-                    ("transcribed_chars", chars),
-                ],
-                t0.elapsed().as_secs_f64(),
+                targets,
+                |source| async move {
+                    let r = super::transcribe(
+                        ctx,
+                        TranscribeArgs {
+                            source,
+                            model: model.clone(),
+                            language: Some(config.defaults.lang.clone()),
+                            limit: args.limit,
+                            refresh: args.refresh,
+                            ..Default::default()
+                        },
+                        progress,
+                    )
+                    .await?;
+                    Ok(Tally::of(
+                        r.transcribed as u64,
+                        &[
+                            ("transcribed", r.transcribed as u64),
+                            ("failed", r.failed as u64),
+                            ("transcribed_chars", r.transcribed_chars as u64),
+                        ],
+                    ))
+                },
+                |t, _| {
+                    format!(
+                        "{} {} \u{00b7} {} chars",
+                        render::count(t.new),
+                        noun(t.new, "recording", "recordings"),
+                        render::count(t.get("transcribed_chars"))
+                    )
+                },
             )
+            .await
         }
 
         Stage::Index => {
-            let mut documents = 0u64;
-            let mut chunks = 0u64;
-            let mut deduplicated = 0u64;
-            let mut total_chunks = 0u64;
-            for target in targets {
-                match super::index(
-                    ctx,
-                    IndexArgs {
-                        source: target,
-                        // A re-extraction produces a *new* derived blob, so its chunks are
-                        // added — and the previous extraction's chunks stay, because
-                        // nothing removes them. Search then returns both, which is the
-                        // corpus quietly answering twice. `--refresh` clears the scope it
-                        // is refreshing.
-                        rebuild: args.refresh,
-                        ..Default::default()
-                    },
-                    progress,
-                )
-                .await
-                {
-                    Ok(r) => {
-                        documents += r.documents_indexed as u64;
-                        chunks += r.chunks_written as u64;
-                        deduplicated += r.chunks_deduplicated as u64;
-                        total_chunks = r.total_chunks as u64;
-                    }
-                    Err(e) => return StageRun::failed(stage, e, t0.elapsed().as_secs_f64()),
-                }
-            }
-            StageRun::ran(
+            fold_targets(
                 stage,
-                documents,
-                format!(
-                    "{} {} · {} chunks",
-                    crate::render::count(documents),
-                    if documents == 1 {
-                        "document"
-                    } else {
-                        "documents"
-                    },
-                    crate::render::count(chunks)
-                ),
-                &[
-                    ("documents_indexed", documents),
-                    ("chunks_written", chunks),
-                    ("chunks_deduplicated", deduplicated),
-                    ("total_chunks", total_chunks),
-                ],
-                t0.elapsed().as_secs_f64(),
+                targets,
+                |source| async move {
+                    let r = super::index(
+                        ctx,
+                        IndexArgs {
+                            source,
+                            // A re-extraction produces a *new* derived blob, so its chunks
+                            // are added — and the previous extraction's chunks stay,
+                            // because nothing removes them. Search then returns both,
+                            // which is the corpus quietly answering twice. `--refresh`
+                            // clears the scope it is refreshing.
+                            rebuild: args.refresh,
+                            ..Default::default()
+                        },
+                        progress,
+                    )
+                    .await?;
+                    Ok(Tally::of(
+                        r.documents_indexed as u64,
+                        &[
+                            ("documents_indexed", r.documents_indexed as u64),
+                            ("chunks_written", r.chunks_written as u64),
+                            ("chunks_deduplicated", r.chunks_deduplicated as u64),
+                        ],
+                    )
+                    // The size of the whole index, not of this call's work.
+                    .total("total_chunks", r.total_chunks as u64))
+                },
+                |t, _| {
+                    format!(
+                        "{} {} \u{00b7} {} chunks",
+                        render::count(t.new),
+                        noun(t.new, "document", "documents"),
+                        render::count(t.get("chunks_written"))
+                    )
+                },
             )
+            .await
         }
 
         Stage::Embed => {
@@ -725,35 +823,42 @@ async fn run_derivation(
             if let Some(reason) = missing_model(model, crate::models::ModelRole::Embedding) {
                 return StageRun::skipped(stage, reason);
             }
-            match super::embed(
-                ctx,
-                EmbedArgs {
-                    model: model.clone(),
-                    limit: args.limit,
-                    ..Default::default()
+            // One call, whatever the scope: the vector cache is keyed by chunk hash, which
+            // is corpus-wide by construction (SPEC §5.2), so `embed` has no source axis.
+            fold_targets(
+                stage,
+                vec![None],
+                |_| async move {
+                    let r = super::embed(
+                        ctx,
+                        EmbedArgs {
+                            model: model.clone(),
+                            limit: args.limit,
+                            ..Default::default()
+                        },
+                        progress,
+                    )
+                    .await?;
+                    Ok(Tally::of(
+                        r.embedded as u64,
+                        &[
+                            ("embedded", r.embedded as u64),
+                            ("already_cached", r.already_cached as u64),
+                            ("remaining", r.remaining as u64),
+                        ],
+                    ))
                 },
-                progress,
+                // A rate is counts over the clock, and the clock is the driver's.
+                |t, secs| {
+                    format!(
+                        "{} {} \u{00b7} {:.1}/sec",
+                        render::count(t.new),
+                        noun(t.new, "chunk", "chunks"),
+                        t.new as f64 / secs.max(f64::EPSILON)
+                    )
+                },
             )
             .await
-            {
-                Ok(r) => StageRun::ran(
-                    stage,
-                    r.embedded as u64,
-                    format!(
-                        "{} {} · {:.1}/sec",
-                        crate::render::count(r.embedded as u64),
-                        if r.embedded == 1 { "chunk" } else { "chunks" },
-                        r.chunks_per_sec
-                    ),
-                    &[
-                        ("embedded", r.embedded as u64),
-                        ("already_cached", r.already_cached as u64),
-                        ("remaining", r.remaining as u64),
-                    ],
-                    t0.elapsed().as_secs_f64(),
-                ),
-                Err(e) => StageRun::failed(stage, e, t0.elapsed().as_secs_f64()),
-            }
         }
 
         // Acquisition stages never reach here.
@@ -891,10 +996,13 @@ fn noun(n: u64, singular: &'static str, plural: &'static str) -> &'static str {
 /// and so carries its own glyph.
 fn render_stage(p: &mut Painter<'_>, stage: &StageRun, standalone: bool) -> std::io::Result<()> {
     let name = format!("{:<STAGE_COL$}", stage.stage.name());
+    // Every status reads from `summary`. `error` is the machine field and holds every
+    // failure joined; the summary is the one that says "1 of 19 failed" rather than
+    // showing the first error as though it were the whole story.
     let (ink, text) = match &stage.status {
         StageStatus::Ran => (Ink::Plain, stage.summary.clone()),
-        StageStatus::Skipped { reason } => (Ink::Dim, format!("skipped — {reason}")),
-        StageStatus::Failed { error } => (Ink::Red, render::one_line(error)),
+        StageStatus::Skipped { .. } => (Ink::Dim, format!("skipped — {}", stage.summary)),
+        StageStatus::Failed { .. } => (Ink::Red, render::one_line(&stage.summary)),
     };
 
     // A stage that did nothing is dimmed whole, so a quiet run reads as one grey block
@@ -931,7 +1039,7 @@ mod tests {
     use super::*;
 
     fn stage_ran(stage: Stage, new: u64) -> StageRun {
-        StageRun::ran(stage, new, "summary", &[("x", new)], 1.0)
+        StageRun::ran(stage, Tally::of(new, &[("x", new)]), "summary", 1.0)
     }
 
     fn source_run(id: &str, stages: Vec<StageRun>) -> SourceRun {
@@ -1100,6 +1208,106 @@ mod tests {
         assert_eq!(back.sources.len(), 1);
         assert_eq!(back.new_documents, 1);
         assert!(matches!(back.derive[0].status, StageStatus::Skipped { .. }));
+    }
+
+    /// The bug this driver exists to fix. Each derivation stage used to `return` on the
+    /// first error, so `--source a --source b --source c` with a broken `a` left `b` and
+    /// `c` underived — and said so nowhere.
+    #[tokio::test]
+    async fn one_target_failing_does_not_abandon_the_rest() {
+        let seen = std::sync::Mutex::new(Vec::new());
+        let run = fold_targets(
+            Stage::Extract,
+            vec![Some("a".into()), Some("b".into()), Some("c".into())],
+            |target| {
+                let id = target.unwrap();
+                seen.lock().unwrap().push(id.clone());
+                async move {
+                    if id == "a" {
+                        anyhow::bail!("disk full");
+                    }
+                    Ok(Tally::of(5, &[("chars_of_text", 100)]))
+                }
+            },
+            |t, _| format!("{} documents", t.new),
+        )
+        .await;
+
+        assert_eq!(*seen.lock().unwrap(), ["a", "b", "c"]);
+        assert!(run.is_failure());
+        // `b` and `c` worked, and what they did survives the report.
+        assert_eq!(run.new, 10);
+        assert_eq!(run.figures["chars_of_text"], 200);
+        assert!(run.summary.contains("1 of 3 failed"), "{}", run.summary);
+        // Without the source id, "1 of 19 failed · connection reset" says nothing.
+        assert!(run.summary.contains("a: disk full"), "{}", run.summary);
+    }
+
+    /// A total that is the size of the store, folded as if it were a count of this run's
+    /// work, would report a three-source run's index as three times its size.
+    #[tokio::test]
+    async fn a_standing_total_is_not_summed_across_sources() {
+        let run =
+            fold_targets(
+                Stage::Index,
+                vec![Some("a".into()), Some("b".into())],
+                |_| async move {
+                    Ok(Tally::of(1, &[("chunks_written", 30)]).total("total_chunks", 900))
+                },
+                |t, _| format!("{} documents", t.new),
+            )
+            .await;
+
+        assert!(!run.is_failure());
+        assert_eq!(run.new, 2);
+        assert_eq!(run.figures["chunks_written"], 60);
+        assert_eq!(run.figures["total_chunks"], 900);
+    }
+
+    /// The ratio has to survive to the screen. `render_stage` used to print the `error`
+    /// field, which holds the failures and nothing about the calls that worked — so a run
+    /// where eighteen of nineteen sources extracted read as one flat error.
+    #[tokio::test]
+    async fn the_terminal_says_how_many_failed_not_just_the_first_error() {
+        let run = fold_targets(
+            Stage::Extract,
+            vec![Some("a".into()), Some("b".into())],
+            |target| {
+                let id = target.unwrap();
+                async move {
+                    if id == "a" {
+                        anyhow::bail!("disk full");
+                    }
+                    Ok(Tally::of(5, &[("chars_of_text", 100)]))
+                }
+            },
+            |t, _| format!("{} documents", t.new),
+        )
+        .await;
+
+        let out = render_to_string(&report(
+            vec![source_run("tampa", vec![stage_ran(Stage::Collect, 0)])],
+            vec![run],
+        ));
+        assert!(out.contains("1 of 2 failed"), "{out}");
+        assert!(out.contains("a: disk full"), "{out}");
+    }
+
+    /// When everything failed there is no ratio worth printing — the error is the report.
+    #[tokio::test]
+    async fn a_stage_that_failed_everywhere_just_says_why() {
+        let run = fold_targets(
+            Stage::Extract,
+            vec![None],
+            |_| async move { Err::<Tally, _>(anyhow::anyhow!("no index")) },
+            |t, _| format!("{} documents", t.new),
+        )
+        .await;
+
+        assert!(run.is_failure());
+        assert_eq!(run.summary, "no index");
+        assert_eq!(run.new, 0);
+        assert!(run.figures.is_empty());
     }
 
     #[test]
