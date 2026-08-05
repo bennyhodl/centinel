@@ -195,9 +195,12 @@ fn extract_html(bytes: &[u8], url: Option<&str>) -> Extracted {
             if let Ok(md) = converter.convert(&inner) {
                 let md = md.trim().to_string();
                 if md.chars().count() >= MIN_READABLE_CHARS {
+                    let title = Some(article.title.to_string())
+                        .filter(|t| !t.is_empty())
+                        .or_else(|| html_title(&html));
                     return Extracted::Text(Extraction {
-                        text: md,
-                        title: Some(article.title.to_string()).filter(|t| !t.is_empty()),
+                        text: with_title(title.as_deref(), &md),
+                        title,
                         tool: "dom_smoothie+htmd".into(),
                         version: format!("{DOM_SMOOTHIE_VERSION}+{HTMD_VERSION}"),
                         notes,
@@ -216,17 +219,110 @@ fn extract_html(bytes: &[u8], url: Option<&str>) -> Extracted {
     // Fallback: the whole page, minus scripts. Worse for search, but a listing page
     // with no article is still content worth having.
     match converter.convert(&html) {
-        Ok(md) => Extracted::Text(Extraction {
-            text: md.trim().to_string(),
-            title: None,
-            tool: "htmd".into(),
-            version: HTMD_VERSION.into(),
-            notes,
-        }),
+        Ok(md) => {
+            let title = html_title(&html);
+            Extracted::Text(Extraction {
+                text: with_title(title.as_deref(), md.trim()),
+                title,
+                tool: "htmd".into(),
+                version: HTMD_VERSION.into(),
+                notes,
+            })
+        }
         Err(e) => Extracted::Unextractable {
             reason: format!("html conversion failed: {e}"),
         },
     }
+}
+
+/// Puts the document title into the text, as an `# H1`, unless it is already the first
+/// heading.
+///
+/// The reasoning is [`extract_captions`]', and HTML makes the case sharper. A `.gov` CMS
+/// puts the subject of a page in `<title>`, `og:title` and `<h1>` and **nowhere in the
+/// body**, so what Readability hands back is an article that never names itself. Nine
+/// hundred Tampa proclamation pages extracted to a date and a print notice: collected,
+/// indexed, and unreachable by the one query anybody would type, because the words
+/// *Irish American Heritage Month* were in none of them.
+///
+/// As an `# H1` it becomes the chunker's heading path, so every chunk of the document
+/// carries it — which is worth more than the title field, since only the text is searched.
+fn with_title(title: Option<&str>, body: &str) -> String {
+    let Some(title) = title.map(str::trim).filter(|t| !t.is_empty()) else {
+        return body.to_string();
+    };
+
+    let already_leads = body
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|first| first.trim_start().trim_start_matches('#').trim())
+        .is_some_and(|heading| heading.eq_ignore_ascii_case(title));
+
+    match already_leads {
+        true => body.to_string(),
+        false => format!("# {title}\n\n{body}"),
+    }
+}
+
+/// The page's own title, for when Readability could not name it.
+///
+/// `og:title` first, because a `<title>` is usually the page name plus the site name and
+/// only the first half is the document. Readability strips that suffix itself when it can
+/// match the `<h1>`; this runs where it could not, so it prefers the tag that never
+/// carries the suffix over guessing at a separator.
+fn html_title(html: &str) -> Option<String> {
+    og_title(html).or_else(|| tag_title(html)).and_then(|t| {
+        let t = unescape(t.trim());
+        (!t.is_empty()).then_some(t)
+    })
+}
+
+fn og_title(html: &str) -> Option<&str> {
+    let lower = html.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(open) = lower[from..].find("<meta").map(|i| i + from) {
+        let close = lower[open..].find('>').map(|i| i + open)?;
+        let tag = &html[open..close];
+        if lower[open..close].contains("\"og:title\"") || lower[open..close].contains("'og:title'")
+        {
+            if let Some(value) = attr(tag, "content") {
+                return Some(value);
+            }
+        }
+        from = close + 1;
+    }
+    None
+}
+
+fn tag_title(html: &str) -> Option<&str> {
+    let lower = html.to_ascii_lowercase();
+    let open = lower.find("<title")?;
+    let start = lower[open..].find('>').map(|i| open + i + 1)?;
+    let end = lower[start..].find("</title").map(|i| i + start)?;
+    Some(&html[start..end])
+}
+
+/// The value of `name="…"`, single- or double-quoted.
+fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let lower = tag.to_ascii_lowercase();
+    let at = lower.find(name)?;
+    let rest = &tag[at + name.len()..];
+    let eq = rest.find('=')?;
+    let after = rest[eq + 1..].trim_start();
+    let quote = after.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let value = &after[1..];
+    value.find(quote).map(|end| &value[..end])
+}
+
+/// The five entities that appear in real titles. Anything rarer is left alone rather than
+/// half-decoded.
+fn unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#039;", "'")
+        .replace("&apos;", "'")
 }
 
 fn extract_pdf(bytes: &[u8]) -> Extracted {
@@ -457,6 +553,102 @@ mod tests {
             .to_string();
         assert!(!text.contains("drupalSettings"));
         assert!(!text.contains("margin"));
+    }
+
+    /// A real `tampa.gov` proclamation, reduced to the shape that made 918 of them
+    /// unfindable: the subject is in `<title>`, `og:title` and `<h1>`, and the body that
+    /// Readability keeps is a date and the notice shown when the page is printed.
+    const PROCLAMATION: &str = r#"<html><head>
+        <title>Irish American Heritage Month | City of Tampa</title>
+        <meta property="og:title" content="Irish American Heritage Month" />
+        </head><body>
+        <h1>Irish American Heritage Month</h1>
+        <div class="field__item"><div class="field__label">Date Added</div>
+        <time datetime="2022-03-01T00:00:00Z">Tuesday, March 1, 2022</time></div>
+        <div class="pdf-reader"><div class="d-none d-print-block">
+        <h2>Use the print buttons in the Preview</h2>
+        <p>To properly print this document, hover your mouse over the document PREVIEW
+        area and controls will appear. There you can DOWNLOAD or PRINT this document.</p>
+        <p>Was this page helpful? Thanks for letting us know! Help us improve by leaving a
+        quick comment. Tell us what was confusing, missing or inaccurate about this page.</p>
+        </div></div></body></html>"#;
+
+    /// The one query anybody would type. Before the title was written into the text, the
+    /// words were in no chunk of the document and this found nothing.
+    #[test]
+    fn a_page_whose_subject_is_only_in_its_title_still_carries_it() {
+        let out = extract(
+            "html",
+            PROCLAMATION.as_bytes(),
+            Some("https://www.tampa.gov/proclamation/irish-american-heritage-month"),
+            None,
+        );
+        let text = out.text().expect("should extract");
+
+        assert!(
+            text.contains("Irish American Heritage Month"),
+            "the subject of the page is absent from its own text: {text}"
+        );
+        assert!(
+            text.starts_with("# Irish American Heritage Month"),
+            "as an H1, so the chunker puts it in every chunk's heading path: {text}"
+        );
+    }
+
+    /// Listing pages take the fallback path, and they have titles too.
+    #[test]
+    fn the_fallback_path_recovers_a_title_as_well() {
+        let listing = r#"<html><head><title>Bid Opportunities | City of Tampa</title>
+            <meta property="og:title" content="Bid Opportunities" /></head><body>
+            <h1>Documents</h1><ul><li><a href="/a.pdf">Budget A</a></li></ul>
+            </body></html>"#;
+        let out = extract("html", listing.as_bytes(), None, None);
+        assert_eq!(out.tool().unwrap().0, "htmd", "should have fallen back");
+        assert!(out.text().unwrap().starts_with("# Bid Opportunities"));
+    }
+
+    /// `og:title` first: a `<title>` is usually the page plus the site, and only the first
+    /// half is the document. Repeating the site name on every chunk of every page is the
+    /// boilerplate problem this change exists to reduce.
+    #[test]
+    fn og_title_wins_over_the_title_tag_and_its_site_suffix() {
+        assert_eq!(
+            html_title(
+                r#"<title>Fee Schedule | City of Tampa</title>
+                   <meta property="og:title" content="Fee Schedule">"#
+            ),
+            Some("Fee Schedule".into())
+        );
+        assert_eq!(
+            html_title("<title>Fee Schedule | City of Tampa</title>"),
+            Some("Fee Schedule | City of Tampa".into()),
+            "with no og:title it is taken whole rather than split on a guessed separator"
+        );
+        assert_eq!(html_title("<html><body>no title</body></html>"), None);
+        assert_eq!(html_title("<title>   </title>"), None);
+    }
+
+    #[test]
+    fn a_title_entity_is_decoded_before_it_becomes_a_heading() {
+        assert_eq!(
+            html_title(r#"<meta property="og:title" content="Parks &amp; Recreation">"#),
+            Some("Parks & Recreation".into())
+        );
+    }
+
+    #[test]
+    fn a_title_already_leading_the_body_is_not_repeated() {
+        assert_eq!(
+            with_title(Some("Agenda"), "# Agenda\n\nThe body."),
+            "# Agenda\n\nThe body.",
+            "readability already put it there"
+        );
+        assert_eq!(
+            with_title(Some("Agenda"), "The body."),
+            "# Agenda\n\nThe body."
+        );
+        assert_eq!(with_title(None, "The body."), "The body.");
+        assert_eq!(with_title(Some("  "), "The body."), "The body.");
     }
 
     #[test]

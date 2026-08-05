@@ -89,9 +89,16 @@ pub struct SearchResult {
     /// Character span within the derived text.
     pub char_start: usize,
     pub char_end: usize,
-    /// Other addresses carrying this identical passage.
+    /// Other addresses carrying this identical passage, capped at [`ALSO_CARRIED`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also_at: Vec<AlsoAt>,
+    /// How many there are in total, which `also_at` may not list in full.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub also_at_total: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -116,10 +123,12 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
             // A chunk always has at least one placement; one without is an index bug,
             // and dropping it is better than emitting a citation-less result.
             let primary = hit.placements.first()?;
+            let also_at_total = hit.placements.len().saturating_sub(1);
             let also_at = hit
                 .placements
                 .iter()
                 .skip(1)
+                .take(ALSO_CARRIED)
                 .map(|p| AlsoAt {
                     source: p.source.clone(),
                     url: p.resource.clone(),
@@ -152,6 +161,7 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
                 char_start: primary.char_start,
                 char_end: primary.char_end,
                 also_at,
+                also_at_total,
             })
         })
         .collect();
@@ -211,6 +221,15 @@ impl Render for SearchReport {
 /// pages, and a result that printed all of them would bury the passage it is about.
 const ALSO_SHOWN: usize = 3;
 
+/// How many duplicate placements the *result* carries, terminal or not.
+///
+/// [`ALSO_SHOWN`] only ever governed the terminal, so `--json` and the MCP tool kept the
+/// whole list. One Tampa boilerplate passage sat at 630 addresses and turned a five-result
+/// search into 108 KB, of which 105 KB was one result's `also_at` — enough to blow an
+/// agent's tool-result budget on a query that matched almost nothing worth reading. The
+/// count is what the reader actually needs; the addresses are reachable by the chunk hash.
+const ALSO_CARRIED: usize = 8;
+
 impl Render for SearchResult {
     fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
         // The heading trail beats the document title: it says where *in* the document the
@@ -256,10 +275,11 @@ impl Render for SearchResult {
                 // and the hash cannot be guessed from the one above, because a different
                 // address is a different document with its own bytes.
                 if !self.also_at.is_empty() {
-                    let also = format!(
-                        "also at {}",
-                        render::plural(self.also_at.len(), "address", "addresses")
-                    );
+                    // The total, not the length of the list: `also_at` is capped at
+                    // `ALSO_CARRIED`, and reporting its length would understate a passage
+                    // that sits on six hundred pages as one that sits on eight.
+                    let total = self.also_at_total.max(self.also_at.len());
+                    let also = format!("also at {}", render::plural(total, "address", "addresses"));
                     p.line(p.paint(&also, Ink::Dim))?;
                     for other in self.also_at.iter().take(ALSO_SHOWN) {
                         let hash = p.paint(&render::short_sha(&other.blob_sha), Ink::Cyan);
@@ -267,8 +287,8 @@ impl Render for SearchResult {
                             render::truncate_start(&other.url, p.width().saturating_sub(20));
                         p.line(format!("  {hash}  {}", p.paint(&where_, Ink::Dim)))?;
                     }
-                    if self.also_at.len() > ALSO_SHOWN {
-                        let more = format!("  … and {} more", self.also_at.len() - ALSO_SHOWN);
+                    if total > ALSO_SHOWN {
+                        let more = format!("  … and {} more", total - ALSO_SHOWN);
                         p.line(p.paint(&more, Ink::Dim))?;
                     }
                 }
@@ -311,6 +331,7 @@ mod tests {
             chunk_hash: sha("aa11bb22cc33"),
             char_start: 100,
             char_end: 143,
+            also_at_total: also_at.len(),
             also_at,
         }
     }
