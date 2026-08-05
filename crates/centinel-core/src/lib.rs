@@ -6,6 +6,8 @@
 //!
 //! ```text
 //!   domain  — the nouns (§4).       Source is a trait; a Resource is an address.
+//!   sources — the adapters (§4.1).  The only code that knows a site from a channel.
+//!   acquire — discover and collect. One loop over any Source, whatever its kind.
 //!   store   — files are truth (§5). CAS blob pool + append-only JSONL log.
 //!   op      — the registry (#9).    One definition → CLI + MCP + HTTP.
 //!   ops     — the verbs.            Individual operations, registered by #[op].
@@ -22,6 +24,7 @@
 // exactly as they do for downstream users.
 extern crate self as centinel_core;
 
+pub mod acquire;
 pub mod captions;
 pub mod chunk;
 pub mod config;
@@ -37,6 +40,7 @@ pub mod op;
 pub mod ops;
 pub mod policy;
 pub mod render;
+pub mod sources;
 pub mod store;
 pub mod transcribe;
 pub mod vectors;
@@ -50,8 +54,9 @@ pub use centinel_macros::op;
 pub mod prelude {
     pub use crate::discovery::{Discoverer, DiscoveryLimits, SiteDiscovery};
     pub use crate::domain::{
-        Anchor, BlobSha, ChangeEvent, ChangeKind, ChangeSignal, Derivation, DiscoveryRun, Fetched,
-        Fingerprint, Liveness, ModelTier, Observation, Resource, ResourceStatus, Source, SourceId,
+        Acquired, Anchor, BlobSha, ChangeEvent, ChangeKind, ChangeSignal, Derivation, DiscoveryRun,
+        Enumeration, Fetched, Fingerprint, Liveness, ModelTier, Note, NoteMark, Observation,
+        Refusal, Resource, ResourceStatus, Source, SourceId, SourceKind,
     };
     pub use crate::op::{Ctx, Progress, ProgressEvent, Unit};
     pub use crate::policy::{HostPolicy, PolicyTable};

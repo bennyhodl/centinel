@@ -38,22 +38,31 @@ use std::time::Instant;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Acquisition, Config, SourceConfig};
+use crate::acquire::{self, CollectOpts, DiscoverOpts};
+use crate::config::Config;
 use crate::op::TOTAL_TRACK;
 use crate::prelude::*;
+use crate::sources::{self, Overrides};
 
-use super::{
-    CollectArgs, DiscoverArgs, DiscoverChannelArgs, EmbedArgs, ExtractArgs, FetchArgs, IndexArgs,
-    TranscribeArgs, YoutubeAction, YoutubeArgs, YoutubeReport,
-};
+use super::{EmbedArgs, ExtractArgs, IndexArgs, TranscribeArgs};
 
 /// One step of the pipeline.
 ///
 /// `discover` and `collect` name what happens, not how: for a website they are a sitemap
 /// walk and HTTP GETs, for a channel a playlist listing and `yt-dlp`. That the same two
-/// words fit both is SPEC §4.1's claim that the kinds differ only in acquisition.
+/// words fit both is SPEC §4.1's claim that the kinds differ only in acquisition — and
+/// since that claim became a trait, this file no longer knows which one it is driving.
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    JsonSchema,
     clap::ValueEnum,
 )]
 #[serde(rename_all = "kebab-case")]
@@ -105,9 +114,12 @@ pub struct RunArgs {
     #[serde(default)]
     pub skip: Vec<Stage>,
 
-    /// Stop each acquisition stage after this many items.
+    /// Stop collection after this many addresses, per source.
     ///
-    /// The way to try a source before committing an hour to it.
+    /// The way to try a source before committing an hour to it. Deliberately **not**
+    /// applied to discovery: a DiscoveryRun is a full snapshot (§4.3), and a truncated
+    /// one would look like a source that shrank — corrupting the very signal the
+    /// snapshots exist to carry.
     #[arg(long)]
     #[serde(default)]
     pub limit: Option<usize>,
@@ -137,9 +149,13 @@ pub struct RunArgs {
 pub enum StageStatus {
     Ran,
     /// Not attempted, and why — a skipped stage is not a failed one.
-    Skipped { reason: String },
+    Skipped {
+        reason: String,
+    },
     /// Attempted and failed. The run continues; other sources are unaffected.
-    Failed { error: String },
+    Failed {
+        error: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -200,17 +216,19 @@ impl StageRun {
         }
     }
 
+    /// Folds a Source's own figures in beside the stage's.
+    ///
+    /// Kept open-ended because what a Source counts is the Source's business: a crawled
+    /// site reports `disallowed`, a channel reports `rejected`, and a third kind will
+    /// report something nobody has thought of yet.
+    fn with_figures(mut self, extra: BTreeMap<String, u64>) -> Self {
+        self.figures.extend(extra);
+        self
+    }
+
     pub fn is_failure(&self) -> bool {
         matches!(self.status, StageStatus::Failed { .. })
     }
-}
-
-/// How a source is acquired, as it appears in the report.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceKind {
-    Site,
-    Channel,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -321,39 +339,52 @@ pub async fn run(ctx: &Ctx, args: RunArgs, progress: &Progress) -> anyhow::Resul
     }
 
     let skip = |stage: Stage| args.skip.contains(&stage);
-    let has_channel = selected
-        .iter()
-        .any(|s| matches!(s.acquisition(), Ok(Acquisition::Channel(_))));
+
+    // Built before anything runs. A source that cannot be constructed is a config error,
+    // and finding it after nineteen crawls is finding it too late — the same argument
+    // `Config::validate` makes, applied to the half of the description only the adapter
+    // can check. Building once also means a site's per-host pacing survives from
+    // discovery into collection instead of restarting between them.
+    let mut built: Vec<Box<dyn Source>> = Vec::with_capacity(selected.len());
+    for cfg in &selected {
+        built.push(sources::from_config(
+            cfg,
+            &config.defaults,
+            &Overrides::default(),
+        )?);
+    }
 
     // The aggregate bar's denominator: two acquisition stages per source, plus the
     // corpus-wide tail. Counted before anything runs so the bar never grows a total
     // underneath someone watching it.
-    let derive_stages: Vec<Stage> = [Stage::Extract, Stage::Transcribe, Stage::Index, Stage::Embed]
-        .into_iter()
-        .filter(|s| *s != Stage::Transcribe || has_channel)
-        .collect();
-    let total = (selected.len() * 2 + derive_stages.len()) as u64;
+    let yields_audio = built.iter().any(|s| s.yields_audio());
+    let derive_stages: Vec<Stage> = [
+        Stage::Extract,
+        Stage::Transcribe,
+        Stage::Index,
+        Stage::Embed,
+    ]
+    .into_iter()
+    .filter(|s| *s != Stage::Transcribe || yields_audio)
+    .collect();
+    let total = (built.len() * 2 + derive_stages.len()) as u64;
     let mut done = 0u64;
 
     // ── acquire, per source ───────────────────────────────────────────────────
-    for source in &selected {
+    for source in &built {
         let source_started = Instant::now();
-        let acquisition = source.acquisition()?;
-        let (kind, target) = match acquisition {
-            Acquisition::Site(url) => (SourceKind::Site, url.to_string()),
-            Acquisition::Channel(url) => (SourceKind::Channel, url.to_string()),
-        };
+        let id = source.id().to_string();
 
         let mut stages = Vec::new();
         for stage in [Stage::Discover, Stage::Collect] {
             progress.track(
                 TOTAL_TRACK,
-                format!("{} · {}", source.id, stage.name()),
+                format!("{id} · {}", stage.name()),
                 done,
                 total,
                 Unit::Count,
             );
-            progress.say(format!("{} · {}", source.id, stage.name()));
+            progress.say(format!("{id} · {}", stage.name()));
             done += 1;
 
             let outcome = if skip(stage) {
@@ -361,19 +392,19 @@ pub async fn run(ctx: &Ctx, args: RunArgs, progress: &Progress) -> anyhow::Resul
             } else if args.dry_run {
                 StageRun::skipped(stage, "--dry-run")
             } else if stage == Stage::Collect && stages.iter().any(StageRun::is_failure) {
-                // Collecting against a discovery that just failed would fetch the
+                // Collecting against a discovery that just failed would acquire the
                 // *previous* snapshot and report success. Better to say why it stopped.
                 StageRun::skipped(stage, "discover failed")
             } else {
-                run_acquisition(ctx, source, &config, &args, stage, acquisition, progress).await
+                run_acquisition(ctx, source.as_ref(), &args, stage, progress).await
             };
             stages.push(outcome);
         }
 
         let source_run = SourceRun {
-            source: source.id.clone(),
-            kind,
-            target,
+            source: id,
+            kind: source.kind(),
+            target: source.target().to_string(),
             stages,
             elapsed_secs: source_started.elapsed().as_secs_f64(),
         };
@@ -419,214 +450,96 @@ pub async fn run(ctx: &Ctx, args: RunArgs, progress: &Progress) -> anyhow::Resul
 
 /// Runs one acquisition stage, converting either outcome into a [`StageRun`].
 ///
-/// Errors are captured rather than propagated: one source's WAF block must not cancel
-/// the nineteen after it, and a run that collected most of a corpus should say so.
+/// Errors are captured rather than propagated: one source's WAF block must not cancel the
+/// nineteen after it, and a run that collected most of a corpus should say so.
+///
+/// This used to be a 212-line `match (stage, acquisition)` with four arms, two of them
+/// re-discriminating a report variant that could not occur. Both halves of the variation
+/// now sit behind [`Source`], so what is left is the shaping — the stage's numbers turned
+/// into a line a person reads — which is all this function was ever meant to be.
 async fn run_acquisition(
     ctx: &Ctx,
-    source: &SourceConfig,
-    config: &Config,
+    source: &dyn Source,
     args: &RunArgs,
     stage: Stage,
-    acquisition: Acquisition<'_>,
     progress: &Progress,
 ) -> StageRun {
     let t0 = Instant::now();
-    let rps = source.rps.unwrap_or(config.defaults.rps);
-    let lang = source
-        .lang
-        .clone()
-        .unwrap_or_else(|| config.defaults.lang.clone());
+    let secs = || t0.elapsed().as_secs_f64();
 
-    match (stage, acquisition) {
-        (Stage::Discover, Acquisition::Site(site)) => {
-            let call = super::discover(
-                ctx,
-                DiscoverArgs {
-                    source: source.id.clone(),
-                    site: site.to_string(),
-                    rps,
-                    ..Default::default()
-                },
-                progress,
-            )
-            .await;
-            match call {
-                Ok(r) => {
-                    let found = r.urls_found as u64;
-                    // Against the previous snapshot, so a re-run of an unchanged site
-                    // reads "0 new" rather than restating the whole sitemap as news.
-                    let new = r
-                        .previous_run_urls
-                        .map(|prev| found.saturating_sub(prev as u64))
-                        .unwrap_or(found);
-                    StageRun::ran(
-                        stage,
-                        new,
-                        format!(
-                            "{} {} · {} new",
-                            crate::render::count(found),
-                            if found == 1 { "url" } else { "urls" },
-                            crate::render::count(new)
-                        ),
-                        &[
-                            ("urls_found", found),
-                            ("disallowed", r.disallowed as u64),
-                            ("sitemaps_fetched", r.sitemaps_fetched.len() as u64),
-                        ],
-                        t0.elapsed().as_secs_f64(),
-                    )
-                }
-                Err(e) => StageRun::failed(stage, e, t0.elapsed().as_secs_f64()),
-            }
-        }
-
-        (Stage::Collect, Acquisition::Site(_)) => {
-            let call = super::collect(
-                ctx,
-                CollectArgs {
-                    source: source.id.clone(),
-                    limit: args.limit,
-                    rps,
-                    refresh: args.refresh,
-                    matches: source.matches.clone(),
-                    ..Default::default()
-                },
-                progress,
-            )
-            .await;
-            match call {
+    match stage {
+        Stage::Discover => {
+            // No `limit` here: see `RunArgs::limit`. A truncated snapshot would read as a
+            // source that shrank.
+            match acquire::discover(&ctx.store, source, &DiscoverOpts::default(), progress).await {
                 Ok(r) => StageRun::ran(
                     stage,
-                    r.stored as u64,
+                    r.new as u64,
                     format!(
-                        "{} fetched · {} changed · {}",
-                        crate::render::count(r.stored as u64),
-                        crate::render::count(r.changed as u64),
-                        crate::render::bytes(r.bytes)
+                        "{} {} \u{00b7} {} new",
+                        render::count(r.found as u64),
+                        noun(r.found as u64, "address", "addresses"),
+                        render::count(r.new as u64)
                     ),
-                    &[
-                        ("stored", r.stored as u64),
-                        ("changed", r.changed as u64),
-                        ("already_had", r.already_had as u64),
-                        ("failed", r.failed as u64),
-                        ("remaining", r.remaining as u64),
-                        ("bytes", r.bytes),
-                    ],
-                    t0.elapsed().as_secs_f64(),
-                ),
-                Err(e) => StageRun::failed(stage, e, t0.elapsed().as_secs_f64()),
+                    &[("found", r.found as u64), ("new", r.new as u64)],
+                    secs(),
+                )
+                .with_figures(r.figures),
+                Err(e) => StageRun::failed(stage, e, secs()),
             }
         }
 
-        (Stage::Discover, Acquisition::Channel(channel)) => {
-            let call = super::youtube(
-                ctx,
-                YoutubeArgs {
-                    action: YoutubeAction::Discover(DiscoverChannelArgs {
-                        source: source.id.clone(),
-                        channel: channel.to_string(),
-                        limit: args.limit,
-                        yt_dlp_args: source.yt_dlp_args.clone(),
-                    }),
-                },
-                progress,
-            )
-            .await;
-            match call {
-                Ok(YoutubeReport::Discover {
-                    videos, new_videos, ..
-                }) => StageRun::ran(
-                    stage,
-                    new_videos as u64,
-                    format!(
-                        "{} {} · {} new",
-                        crate::render::count(videos as u64),
-                        if videos == 1 { "video" } else { "videos" },
-                        crate::render::count(new_videos as u64)
-                    ),
-                    &[
-                        ("videos", videos as u64),
-                        ("new_videos", new_videos as u64),
-                    ],
-                    t0.elapsed().as_secs_f64(),
-                ),
-                Ok(_) => StageRun::failed(
-                    stage,
-                    "youtube discover returned a fetch report",
-                    t0.elapsed().as_secs_f64(),
-                ),
-                Err(e) => StageRun::failed(stage, e, t0.elapsed().as_secs_f64()),
-            }
-        }
-
-        (Stage::Collect, Acquisition::Channel(_)) => {
-            // `audio_if_no_captions` defaults on for a channel run. Videos YouTube never
-            // captioned are ~7% of a real council channel, unpredictable from metadata,
-            // and permanently missing from search without audio — so the pipeline's
-            // default is the one that leaves no silent holes.
-            let call = super::youtube(
-                ctx,
-                YoutubeArgs {
-                    action: YoutubeAction::Fetch(FetchArgs {
-                        source: source.id.clone(),
-                        limit: args.limit,
-                        lang,
-                        audio_if_no_captions: source.audio_if_no_captions.unwrap_or(true),
-                        refresh: args.refresh,
-                        yt_dlp_args: source.yt_dlp_args.clone(),
-                        ..Default::default()
-                    }),
-                },
-                progress,
-            )
-            .await;
-            match call {
-                Ok(YoutubeReport::Fetch {
-                    stored,
-                    failed,
-                    blocked,
-                    no_captions,
-                    already_had,
-                    bytes,
-                    ..
-                }) => {
+        Stage::Collect => {
+            let opts = CollectOpts {
+                limit: args.limit,
+                refresh: args.refresh,
+                matches: Vec::new(),
+                ..Default::default()
+            };
+            match acquire::collect(&ctx.store, source, &opts, progress).await {
+                Ok(r) => {
                     let mut summary = format!(
-                        "{} fetched · {}",
-                        crate::render::count(stored as u64),
-                        crate::render::bytes(bytes)
+                        "{} acquired \u{00b7} {} changed \u{00b7} {}",
+                        render::count(r.stored as u64),
+                        render::count(r.changed as u64),
+                        render::bytes(r.bytes)
                     );
-                    if blocked > 0 {
+                    // A wall of refusals with nothing stored is indistinguishable from an
+                    // empty source in the counters alone.
+                    if r.blocked > 0 {
                         summary.push_str(&format!(
-                            " · {} blocked",
-                            crate::render::count(blocked as u64)
+                            " \u{00b7} {} blocked",
+                            render::count(r.blocked as u64)
                         ));
                     }
                     StageRun::ran(
                         stage,
-                        stored as u64,
+                        r.stored as u64,
                         summary,
                         &[
-                            ("stored", stored as u64),
-                            ("already_had", already_had as u64),
-                            ("failed", failed as u64),
-                            ("blocked", blocked as u64),
-                            ("no_captions", no_captions as u64),
-                            ("bytes", bytes),
+                            ("stored", r.stored as u64),
+                            ("changed", r.changed as u64),
+                            ("already_had", r.already_had as u64),
+                            ("failed", r.failed as u64),
+                            ("blocked", r.blocked as u64),
+                            ("remaining", r.remaining as u64),
+                            ("bytes", r.bytes),
                         ],
-                        t0.elapsed().as_secs_f64(),
+                        secs(),
+                    )
+                    .with_figures(
+                        r.parts
+                            .into_iter()
+                            .map(|(k, v)| (format!("part_{k}"), v as u64))
+                            .collect(),
                     )
                 }
-                Ok(_) => StageRun::failed(
-                    stage,
-                    "youtube fetch returned a discover report",
-                    t0.elapsed().as_secs_f64(),
-                ),
-                Err(e) => StageRun::failed(stage, e, t0.elapsed().as_secs_f64()),
+                Err(e) => StageRun::failed(stage, e, secs()),
             }
         }
 
         // `run` only ever calls this with the two acquisition stages.
-        (stage, _) => StageRun::skipped(stage, "not an acquisition stage"),
+        stage => StageRun::skipped(stage, "not an acquisition stage"),
     }
 }
 
@@ -945,14 +858,10 @@ impl Render for RunReport {
 impl Render for SourceRun {
     fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
         let mark = Mark::from_ok(!self.failed());
-        let kind = match self.kind {
-            SourceKind::Site => "site",
-            SourceKind::Channel => "channel",
-        };
         let head = format!(
             "{}  {}  {}",
             p.paint(&format!("{:<20}", self.source), mark.ink()),
-            p.paint(&format!("{kind:<8}"), Ink::Dim),
+            p.paint(&format!("{:<8}", self.kind), Ink::Dim),
             p.paint(&render::duration(self.elapsed_secs), Ink::Dim),
         );
         p.marked(mark, head)?;
@@ -1080,7 +989,10 @@ mod tests {
         let r = report(
             vec![source_run(
                 "tampa",
-                vec![stage_ran(Stage::Discover, 40), stage_ran(Stage::Collect, 12)],
+                vec![
+                    stage_ran(Stage::Discover, 40),
+                    stage_ran(Stage::Collect, 12),
+                ],
             )],
             vec![stage_ran(Stage::Extract, 15), stage_ran(Stage::Embed, 400)],
         );
@@ -1184,10 +1096,7 @@ mod tests {
         let back: RunReport = serde_json::from_value(json).unwrap();
         assert_eq!(back.sources.len(), 1);
         assert_eq!(back.new_documents, 1);
-        assert!(matches!(
-            back.derive[0].status,
-            StageStatus::Skipped { .. }
-        ));
+        assert!(matches!(back.derive[0].status, StageStatus::Skipped { .. }));
     }
 
     #[test]

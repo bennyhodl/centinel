@@ -9,13 +9,13 @@ use std::collections::BTreeMap;
 use crate::domain::{Fetched, Liveness};
 use crate::policy::HostPolicy;
 
-/// A fetch that failed. Carries liveness rather than an error type, because the caller's
-/// job is to record *what kind* of failure this was, not to propagate it.
-#[derive(Clone, Debug)]
-pub struct FetchFailure {
-    pub state: Liveness,
-    pub detail: String,
-}
+/// A fetch that failed.
+///
+/// The name is kept for the call sites; the type is [`crate::domain::Refusal`], which is
+/// what `yt-dlp` failures are too. These were written twice and were always the same
+/// thing — `{state, detail}`, each with its own `classify` — and one shared acquisition
+/// loop cannot exist while a refusal has two types.
+pub use crate::domain::Refusal as FetchFailure;
 
 /// An HTTP client configured by [`HostPolicy`].
 #[derive(Clone, Debug)]

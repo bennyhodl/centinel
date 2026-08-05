@@ -14,10 +14,11 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{self, Acquisition, Config, SourceConfig};
+use crate::config::{self, Config, SourceConfig};
 use crate::prelude::*;
+use crate::sources::{self, Inferred};
 
-use super::run::{RunArgs, RunReport, SourceKind};
+use super::run::{RunArgs, RunReport};
 
 #[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct SourceArgs {
@@ -195,23 +196,22 @@ async fn add(ctx: &Ctx, args: AddArgs, progress: &Progress) -> anyhow::Result<So
     let (mut site, mut channel) = (args.site.clone(), args.channel.clone());
     if site.is_none() && channel.is_none() {
         let id = SourceId::new(args.id.clone())?;
-        match infer_from_store(ctx, &id).await? {
-            Some(Inferred {
-                kind,
-                target: Some(target),
-            }) => {
-                progress.say(format!("inferred {target} from the store"));
-                match kind {
-                    SourceKind::Site => site = Some(target),
-                    SourceKind::Channel => channel = Some(target),
-                }
-            }
-            Some(Inferred { target: None, .. }) => anyhow::bail!(
-                "the store holds `{}` but not enough to say where it came from; \
-                 give --site or --channel",
-                args.id
-            ),
-            None => {}
+        if let Some(inferred) = sources::infer(&ctx.store, &id).await? {
+            // Which key the address lands under is the inference's own answer, not a
+            // decision to re-make here — the same call `source adopt` writes blocks with.
+            let recovered = inferred.to_config(&id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the store holds `{}` but not enough to say where it came from; \
+                     give --site or --channel",
+                    args.id
+                )
+            })?;
+            progress.say(format!(
+                "inferred {} from the store",
+                recovered.acquisition()?.target()
+            ));
+            site = recovered.site;
+            channel = recovered.channel;
         }
     }
 
@@ -229,10 +229,8 @@ async fn add(ctx: &Ctx, args: AddArgs, progress: &Progress) -> anyhow::Result<So
         lang: None,
     };
 
-    let (kind, target) = match source.acquisition()? {
-        Acquisition::Site(url) => (SourceKind::Site, url.to_string()),
-        Acquisition::Channel(url) => (SourceKind::Channel, url.to_string()),
-    };
+    let acquisition = source.acquisition()?;
+    let (kind, target) = (acquisition.kind(), acquisition.target().to_string());
 
     config::append_source(&path, &source)?;
     progress.say(format!("added {} to {}", args.id, path.display()));
@@ -273,10 +271,8 @@ async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<SourceReport> {
 
     let mut sources = Vec::with_capacity(config.sources.len());
     for source in &config.sources {
-        let (kind, target) = match source.acquisition()? {
-            Acquisition::Site(url) => (SourceKind::Site, url.to_string()),
-            Acquisition::Channel(url) => (SourceKind::Channel, url.to_string()),
-        };
+        let acquisition = source.acquisition()?;
+        let (kind, target) = (acquisition.kind(), acquisition.target().to_string());
         // A configured source need not exist in the store yet, so this counts rather
         // than requiring — that gap is exactly what the column is for.
         let resources = match SourceId::new(source.id.clone()) {
@@ -317,108 +313,6 @@ async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<SourceReport> {
     })
 }
 
-/// What the store already knows about a source, for one the config has not been told
-/// about.
-///
-/// Everything here is read back out of `log/<source>/` — no network, no guessing from
-/// the id. A source that was collected has necessarily recorded how it was reached, so
-/// re-deriving its config block is reading, not inventing.
-#[derive(Clone, Debug)]
-struct Inferred {
-    kind: SourceKind,
-    /// `None` when the store proves the source exists but cannot say where from.
-    target: Option<String>,
-}
-
-/// Reconstructs a source's config block from its log, or `None` if the log is empty.
-///
-/// The discriminator is `DiscoveryRun::method` — `playlist` for a channel, anything else
-/// for a crawled site — which SPEC §4.3 records as provenance for exactly this kind of
-/// question. Falling back to the natural keys covers a source collected with `ingest`,
-/// which writes observations and never a DiscoveryRun.
-async fn infer_from_store(ctx: &Ctx, id: &SourceId) -> anyhow::Result<Option<Inferred>> {
-    let log = ctx.store.read_log(id).await?;
-    if log.is_empty() {
-        return Ok(None);
-    }
-
-    let method = log
-        .iter()
-        .rev()
-        .find_map(|r| match r {
-            LogRecord::DiscoveryRun(d) => Some(d.method.clone()),
-            _ => None,
-        })
-        .unwrap_or_default();
-
-    // Natural keys, newest last — a site's origin and a channel's video ids both come
-    // from here.
-    let keys: Vec<&str> = log
-        .iter()
-        .filter_map(|r| match r {
-            LogRecord::Observation(o) => Some(o.resource.natural_key.as_str()),
-            LogRecord::DiscoveryRun(d) => d.resources.first().map(|r| r.natural_key.as_str()),
-            _ => None,
-        })
-        .collect();
-
-    let looks_like_youtube = keys
-        .iter()
-        .any(|k| k.contains("youtube.com/") || k.contains("youtu.be/"));
-
-    if method == "playlist" || (method.is_empty() && looks_like_youtube) {
-        return Ok(Some(Inferred {
-            kind: SourceKind::Channel,
-            target: channel_url(ctx, &log).await,
-        }));
-    }
-
-    Ok(Some(Inferred {
-        kind: SourceKind::Site,
-        target: keys.iter().find_map(|k| origin_of(k)),
-    }))
-}
-
-/// The channel a stored recording came from.
-///
-/// Not in the log: a `DiscoveryRun` records the videos, not the channel they were listed
-/// from. It *is* in the `yt-dlp -J` document archived beside each video, so this reads
-/// one of those blobs back. That is the whole argument for keeping originals (§5.4) —
-/// the metadata was retained without knowing this question would be asked.
-async fn channel_url(ctx: &Ctx, log: &[LogRecord]) -> Option<String> {
-    let metadata_part = format!("#{}", crate::youtube::Part::Metadata.as_str());
-    let sha = log.iter().rev().find_map(|r| match r {
-        LogRecord::Observation(o) if o.resource.natural_key.ends_with(&metadata_part) => {
-            Some(o.blob_sha.clone())
-        }
-        _ => None,
-    })?;
-
-    let bytes = ctx.store.get_blob(&sha).await.ok()?;
-    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-
-    // `channel_url` is the canonical `/channel/UC…`; `uploader_url` is the `@handle`
-    // form, which is what a person would have typed and reads better in the config.
-    for key in ["uploader_url", "channel_url"] {
-        if let Some(url) = json.get(key).and_then(|v| v.as_str())
-            && !url.is_empty()
-        {
-            return Some(url.to_string());
-        }
-    }
-    json.get("channel_id")
-        .and_then(|v| v.as_str())
-        .map(|id| format!("https://www.youtube.com/channel/{id}"))
-}
-
-/// `https://www.tampa.gov/some/page?x=1#frag` → `https://www.tampa.gov`.
-fn origin_of(natural_key: &str) -> Option<String> {
-    let url = url::Url::parse(natural_key).ok()?;
-    let origin = url.origin().ascii_serialization();
-    // Opaque origins (`data:`, `file:`) serialize to this and are not a site.
-    (origin != "null").then_some(origin)
-}
-
 /// Every source the store holds that the config does not name.
 async fn untracked(ctx: &Ctx, config: &Config) -> anyhow::Result<Vec<(SourceId, Inferred)>> {
     let mut out = Vec::new();
@@ -426,7 +320,7 @@ async fn untracked(ctx: &Ctx, config: &Config) -> anyhow::Result<Vec<(SourceId, 
         if config.source(id.as_str()).is_some() {
             continue;
         }
-        if let Some(inferred) = infer_from_store(ctx, &id).await? {
+        if let Some(inferred) = sources::infer(&ctx.store, &id).await? {
             out.push((id, inferred));
         }
     }
@@ -447,21 +341,17 @@ async fn adopt(ctx: &Ctx, args: AdoptArgs) -> anyhow::Result<SourceReport> {
     let mut adopted = Vec::new();
     let mut skipped = Vec::new();
     for (id, inferred) in untracked(ctx, &config).await? {
-        let Some(target) = inferred.target else {
+        let Some(source) = inferred.to_config(&id) else {
             // The store has it but cannot say where from. Naming it is better than
             // writing a block that would fail on the next run.
             skipped.push(id.to_string());
             continue;
         };
-        let source = match inferred.kind {
-            SourceKind::Site => SourceConfig::site(id.to_string(), &target),
-            SourceKind::Channel => SourceConfig::channel(id.to_string(), &target),
-        };
         config::append_source(&path, &source)?;
         adopted.push(ConfiguredSource {
             id: id.to_string(),
             kind: inferred.kind,
-            target: Some(target),
+            target: inferred.target,
             enabled: true,
             resources: ctx.store.statuses(&id).await.map(|s| s.len()).unwrap_or(0),
             tracked: true,
@@ -513,7 +403,7 @@ impl Render for SourceReport {
                     format!(
                         "{} {} {}",
                         p.paint(source, Ink::Bold),
-                        p.paint(kind_label(*kind), Ink::Dim),
+                        p.paint(kind.label(), Ink::Dim),
                         render::truncate(target, p.width().saturating_sub(30)),
                     ),
                 )?;
@@ -539,9 +429,10 @@ impl Render for SourceReport {
                 skipped,
             } => {
                 if adopted.is_empty() && skipped.is_empty() {
-                    return p.line(
-                        p.paint("Nothing to adopt — the config already names every source in the store.", Ink::Dim),
-                    );
+                    return p.line(p.paint(
+                        "Nothing to adopt — the config already names every source in the store.",
+                        Ink::Dim,
+                    ));
                 }
 
                 for s in adopted {
@@ -550,7 +441,7 @@ impl Render for SourceReport {
                         format!(
                             "{} {} {}",
                             p.paint(&format!("{:<20}", s.id), Ink::Bold),
-                            p.paint(&format!("{:<8}", kind_label(s.kind)), Ink::Dim),
+                            p.paint(&format!("{:<8}", s.kind.label()), Ink::Dim),
                             render::truncate(
                                 s.target.as_deref().unwrap_or(""),
                                 p.width().saturating_sub(34)
@@ -640,7 +531,7 @@ impl Render for SourceReport {
                     let mut row = vec![
                         Cell::mark(mark),
                         Cell::new(&s.id, ink),
-                        Cell::dim(kind_label(s.kind)),
+                        Cell::dim(s.kind.label()),
                         Cell::new(resources, Ink::Dim),
                     ];
                     if needs_state {
@@ -678,13 +569,6 @@ impl Render for SourceReport {
                 Ok(())
             }
         }
-    }
-}
-
-fn kind_label(kind: SourceKind) -> &'static str {
-    match kind {
-        SourceKind::Site => "site",
-        SourceKind::Channel => "channel",
     }
 }
 
@@ -801,20 +685,6 @@ mod tests {
             skipped: vec![],
         });
         assert!(out.contains("Nothing to adopt"), "{out}");
-    }
-
-    #[test]
-    fn an_origin_is_taken_from_any_natural_key() {
-        assert_eq!(
-            origin_of("https://www.tampa.gov/some/page?x=1#frag").as_deref(),
-            Some("https://www.tampa.gov")
-        );
-        assert_eq!(
-            origin_of("http://example.gov:8080/a").as_deref(),
-            Some("http://example.gov:8080")
-        );
-        assert_eq!(origin_of("not a url"), None);
-        assert_eq!(origin_of("data:text/plain,hi"), None);
     }
 
     #[test]
@@ -949,7 +819,7 @@ mod tests {
         }
     }
 
-    // ── inferring from the store ───────────────────────────────────────────────
+    // ── the store as a second source of truth ──────────────────────────────────
 
     /// A store with one source that was collected without ever being configured.
     async fn store_with_a_crawled_site(dir: &std::path::Path) -> Ctx {
@@ -973,91 +843,17 @@ mod tests {
         Ctx::new(store)
     }
 
-    #[tokio::test]
-    async fn a_crawled_site_is_recovered_from_its_discovery_run() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = store_with_a_crawled_site(dir.path()).await;
-
-        let got = infer_from_store(&ctx, &SourceId::new("hillsborough").unwrap())
-            .await
-            .unwrap()
-            .expect("the store holds this source");
-        assert_eq!(got.kind, SourceKind::Site);
-        assert_eq!(got.target.as_deref(), Some("https://www.hillsboroughcounty.org"));
-    }
-
-    /// The channel URL is not in the log — it is in the archived `yt-dlp -J` document,
-    /// which is exactly the "keep the original" argument paying off.
-    #[tokio::test]
-    async fn a_channel_is_recovered_from_the_archived_metadata() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::store::Store::open(dir.path().join("store"))
-            .await
-            .unwrap();
-        let id = SourceId::new("tampa-council").unwrap();
-
-        store
-            .append(
-                &id,
-                &LogRecord::DiscoveryRun(crate::domain::DiscoveryRun {
-                    source: id.clone(),
-                    at: jiff::Timestamp::now(),
-                    resources: vec![Resource::new(
-                        id.clone(),
-                        "https://www.youtube.com/watch?v=abc123",
-                    )],
-                    method: "playlist".into(),
-                }),
-            )
-            .await
-            .unwrap();
-
-        let metadata = serde_json::json!({
-            "title": "Council Meeting",
-            "channel_id": "UCLzohJmEgvfJOEd4YJNIHbg",
-            "channel_url": "https://www.youtube.com/channel/UCLzohJmEgvfJOEd4YJNIHbg",
-            "uploader_url": "https://www.youtube.com/@CityofTampa",
-        });
-        let key = crate::youtube::sub_resource("abc123", crate::youtube::Part::Metadata);
-        store
-            .record_observation(
-                &Resource::new(id.clone(), &key),
-                metadata.to_string().as_bytes(),
-                jiff::Timestamp::now(),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-
-        let ctx = Ctx::new(store);
-        let got = infer_from_store(&ctx, &id).await.unwrap().unwrap();
-        assert_eq!(got.kind, SourceKind::Channel);
-        // The handle form, not the /channel/UC… one — it is what a person would type.
-        assert_eq!(
-            got.target.as_deref(),
-            Some("https://www.youtube.com/@CityofTampa")
-        );
-    }
-
-    #[tokio::test]
-    async fn a_source_the_store_has_never_heard_of_infers_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = store_with_a_crawled_site(dir.path()).await;
-        assert!(
-            infer_from_store(&ctx, &SourceId::new("nobody").unwrap())
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-
     /// The whole point: listing surfaces what was collected outside the config.
     #[tokio::test]
     async fn listing_includes_sources_the_config_never_named() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = store_with_a_crawled_site(dir.path()).await;
         let path = dir.path().join("centinel.toml");
-        std::fs::write(&path, "[[source]]\nid = \"tampa\"\nsite = \"https://t.gov\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "[[source]]\nid = \"tampa\"\nsite = \"https://t.gov\"\n",
+        )
+        .unwrap();
 
         let report = list(
             &ctx,
@@ -1090,7 +886,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = store_with_a_crawled_site(dir.path()).await;
         let path = dir.path().join("centinel.toml");
-        std::fs::write(&path, "[[source]]\nid = \"tampa\"\nsite = \"https://t.gov\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "[[source]]\nid = \"tampa\"\nsite = \"https://t.gov\"\n",
+        )
+        .unwrap();
 
         let report = list(
             &ctx,

@@ -400,24 +400,234 @@ pub struct Fetched {
     pub meta: BTreeMap<String, String>,
 }
 
-/// Acquisition. The **only** place the three Source kinds differ (§4.1).
+/// An acquisition that failed, already classified.
 ///
-/// Dyn-compatible on purpose — Sources are constructed from config at runtime, so the
-/// registry holds `Box<dyn Source>`. That is why these return [`BoxFuture`] rather
-/// than using `async fn`.
+/// Carries [`Liveness`] rather than an error type, because the caller's job is to record
+/// *what kind* of failure this was, not to propagate it. A WAF 403 and a 404 are the same
+/// `Result::Err` and completely different facts.
+///
+/// One type for every acquisition path on purpose. HTTP and `yt-dlp` arrived at this
+/// shape independently — `{state, detail}`, each with its own `classify` — and having two
+/// names for it meant the shared loop below could not exist.
+#[derive(Clone, Debug)]
+pub struct Refusal {
+    pub state: Liveness,
+    pub detail: String,
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.detail, self.state)
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// One artifact acquired from a Resource, at **its own address**.
+///
+/// A page is one of these. A video is up to three — metadata, captions, audio — because
+/// those are three addresses that change independently, not three fields of one thing
+/// (§4.2). This is the shape that lets one acquisition loop serve both: it never learns
+/// how many artifacts an address holds, only what came back.
+#[derive(Clone, Debug)]
+pub struct Acquired {
+    /// Where these bytes were served. Equal to the Resource for a single-artifact
+    /// address; a sub-resource of it otherwise.
+    pub resource: Resource,
+    pub fetched: Fetched,
+}
+
+/// A line of provenance a Source wants shown, and how it should read.
+///
+/// Exists so a report can print what only the Source knows — which sitemaps were walked,
+/// which channel tabs returned nothing — without the report learning what a sitemap or a
+/// tab is. A third Source kind explains itself through this and edits no renderer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Note {
+    /// The short left-hand label: `sitemaps`, `/streams`, `robots.txt`.
+    pub label: String,
+    pub detail: String,
+    /// How it reads. `Warn` is for a fact that is not an error but would explain a
+    /// wrong-looking answer — a tab that returned nothing, rules that were assumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<NoteMark>,
+}
+
+/// [`Note`]'s severity, as a serializable peer of [`crate::render::Mark`].
+///
+/// Separate from `Mark` because a Note crosses the wire to MCP and HTTP, and `Mark` is a
+/// painting decision that does not serialize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteMark {
+    Ok,
+    Warn,
+    Bad,
+}
+
+impl Note {
+    pub fn new(label: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            detail: detail.into(),
+            mark: None,
+        }
+    }
+
+    pub fn marked(label: impl Into<String>, detail: impl Into<String>, mark: NoteMark) -> Self {
+        Self {
+            label: label.into(),
+            detail: detail.into(),
+            mark: Some(mark),
+        }
+    }
+
+    /// `Ok` when the fact is unremarkable, `Warn` when it would explain a small answer.
+    pub fn ok_or_warn(label: impl Into<String>, detail: impl Into<String>, ok: bool) -> Self {
+        Self::marked(
+            label,
+            detail,
+            if ok { NoteMark::Ok } else { NoteMark::Warn },
+        )
+    }
+}
+
+impl NoteMark {
+    pub fn mark(self) -> crate::render::Mark {
+        use crate::render::Mark;
+        match self {
+            Self::Ok => Mark::Ok,
+            Self::Warn => Mark::Warn,
+            Self::Bad => Mark::Bad,
+        }
+    }
+}
+
+/// What one enumeration pass found, plus everything that would explain a wrong count.
+///
+/// A snapshot is trusted or it is not, and the fields that decide that are all negative
+/// space — what was assumed rather than read, what was refused, what was skipped. Those
+/// travel with the resources rather than beside them so a caller cannot report the count
+/// without having been handed the caveats.
+#[derive(Clone, Debug, Default)]
+pub struct Enumeration {
+    /// The complete set this pass observed. A snapshot, never a delta (§4.3).
+    pub resources: Vec<Resource>,
+    /// Non-fatal problems. A partial enumeration with recorded warnings is far more
+    /// useful than a hard failure, so nothing here aborts a pass.
+    pub warnings: Vec<String>,
+    /// Provenance worth showing a person.
+    pub notes: Vec<Note>,
+    /// The same provenance for a machine, named as the Source names it.
+    pub figures: BTreeMap<String, u64>,
+}
+
+/// How a Source is acquired, as it appears in reports and on the wire.
+///
+/// A closed enum because it is a *label*: the open axis is [`Source::method`], which is a
+/// string precisely so a new discovery technique needs no variant here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    Site,
+    Channel,
+}
+
+impl SourceKind {
+    /// The single spelling of these words. Previously written out at four call sites,
+    /// where a fifth kind would have had to find all four.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Site => "site",
+            Self::Channel => "channel",
+        }
+    }
+}
+
+impl fmt::Display for SourceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.label())
+    }
+}
+
+/// Acquisition. The **only** place the Source kinds differ (§4.1).
+///
+/// Dyn-compatible on purpose — Sources are constructed from config at runtime, so callers
+/// hold `Box<dyn Source>`. That is why these return [`BoxFuture`] rather than `async fn`.
+///
+/// ## Why `acquire` yields many artifacts
+///
+/// An earlier shape had `fetch(&Resource) -> Fetched`: one address, one blob. Nothing
+/// could implement it. A YouTube video is one address holding up to three artifacts, and
+/// whether the third is fetched depends on whether the second came back — so the kinds
+/// went around the trait rather than through it, and their shared machinery got written
+/// twice. Returning [`Acquired`] is what makes both expressible, and therefore what makes
+/// [`crate::acquire`] able to exist.
+///
+/// ## The pacing is inside
+///
+/// Politeness is not on this interface. A crawled site paces per host; a channel waits
+/// between videos against a bot wall. Both are properties of *how* the Source acquires,
+/// so both live behind [`Self::acquire`] rather than being a dial the caller has to know
+/// to turn.
 pub trait Source: Send + Sync {
     fn id(&self) -> &SourceId;
 
-    /// How this Source discovers resources — `sitemap`, `odata`, `playlist`.
-    /// Recorded on the [`DiscoveryRun`] as provenance.
-    fn discovery_method(&self) -> &'static str;
+    /// The label this Source reads as.
+    fn kind(&self) -> SourceKind;
 
-    /// Enumerate the full Resource set. A sitemap crawl, a paged OData query, a
-    /// playlist listing. Returns a complete snapshot, not a delta.
-    fn discover(&self) -> BoxFuture<'_, anyhow::Result<Vec<Resource>>>;
+    /// How this Source enumerates — `sitemap`, `odata`, `playlist`. Recorded on the
+    /// [`DiscoveryRun`] as provenance, and the discriminator that later recovers a
+    /// Source's kind from the store alone.
+    fn method(&self) -> &'static str;
 
-    /// Retrieve the bytes at one address.
-    fn fetch<'a>(&'a self, resource: &'a Resource) -> BoxFuture<'a, anyhow::Result<Fetched>>;
+    /// The address this Source was configured from — a site origin, a channel URL.
+    fn target(&self) -> &str;
+
+    /// Whether acquiring this Source can produce audio.
+    ///
+    /// Asked once, before a run, to decide whether the corpus-wide transcribe stage is
+    /// worth counting into the progress total. Cheaper than discovering it afterwards
+    /// from the store, and honest about being a declaration rather than a measurement.
+    fn yields_audio(&self) -> bool {
+        false
+    }
+
+    /// Enumerate the full Resource set: a sitemap crawl, a paged OData query, a playlist
+    /// listing. Returns a complete snapshot with its own caveats attached.
+    fn enumerate<'a>(
+        &'a self,
+        progress: &'a crate::op::Progress,
+    ) -> BoxFuture<'a, anyhow::Result<Enumeration>>;
+
+    /// Acquire everything one address holds.
+    ///
+    /// An empty `Vec` is a legitimate success meaning "nothing to store here"; a
+    /// [`Refusal`] is the address declining to be read, which is what liveness records.
+    fn acquire<'a>(
+        &'a self,
+        resource: &'a Resource,
+        progress: &'a crate::op::Progress,
+    ) -> BoxFuture<'a, Result<Vec<Acquired>, Refusal>>;
+
+    /// The address whose presence in the log proves this Resource was acquired.
+    ///
+    /// Defaults to the Resource itself. A channel overrides it, because a video is
+    /// "fetched" when its metadata is stored — captions and audio are separate addresses
+    /// that may legitimately be absent, and keying resumption on them would re-fetch the
+    /// whole catalogue every run.
+    fn marker(&self, resource: &Resource) -> Resource {
+        resource.clone()
+    }
+
+    /// Anything worth saying about a finished collection that only this Source knows.
+    ///
+    /// The counterpart to [`Enumeration::notes`] on the acquisition side: a channel says
+    /// how many videos it found no captions for, without `collect` learning what a
+    /// caption is.
+    fn remarks(&self, _stored_parts: &BTreeMap<String, usize>, _attempted: usize) -> Vec<Note> {
+        Vec::new()
+    }
 
     /// Ask whether a Resource changed **without** fetching it, when the Source can.
     ///

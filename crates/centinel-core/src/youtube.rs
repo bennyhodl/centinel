@@ -203,19 +203,12 @@ pub fn channel_tabs(url: &str) -> Vec<String> {
 }
 
 /// A yt-dlp invocation that failed, already classified.
-#[derive(Clone, Debug)]
-pub struct YtFailure {
-    pub state: Liveness,
-    pub detail: String,
-}
-
-impl std::fmt::Display for YtFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", self.detail, self.state)
-    }
-}
-
-impl std::error::Error for YtFailure {}
+///
+/// The name is kept for the call sites; the type is [`crate::domain::Refusal`], which is
+/// what an HTTP failure is too. A 403 from a WAF and a bot-wall refusal from YouTube are
+/// the same fact about an address, and having two names for it is what kept the two
+/// acquisition paths from sharing a loop.
+pub use crate::domain::Refusal as YtFailure;
 
 /// Reads yt-dlp's stderr and decides what it means for the record.
 ///

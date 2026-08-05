@@ -148,9 +148,10 @@ Both hops stream; a 3-hour meeting is ~691 MB of PCM and is never materialised.
 
 ```
 Source  (trait — acquisition varies, nothing downstream does)
-  ├─ CrawledSite     discover: sitemap + links   id: URL          signal: content hash    (computed)
-  ├─ ApiClient       discover: paged query       id: vendor GUID  signal: LastModifiedUtc (asserted)
-  └─ YouTubeChannel  discover: playlist          id: video id     signal: metadata revision
+  ├─ SiteSource      enumerate: sitemap          id: URL          signal: content hash    (computed)
+  ├─ ChannelSource   enumerate: playlist         id: video id     signal: metadata revision
+  └─ ApiClient       enumerate: paged query      id: vendor GUID  signal: LastModifiedUtc (asserted)
+                     — not implemented; the shape the first two were built to leave room for
 
 DiscoveryRun    full snapshot of the Resource set a run observed
 Resource        (source, natural_key) — an ADDRESS
@@ -163,7 +164,13 @@ ChangeEvent     materialized index, rebuildable from Observations
 
 ### 4.1 `Source` is a trait, not an entity with a `kind`
 
-Three implementations differ in `discover`, `fetch`, and `change_signal`. Everything downstream is one shared model. **Variation is quarantined at the acquisition edge**, which is the only place it genuinely exists.
+Implementations differ in `enumerate`, `acquire`, and `change_signal`. Everything downstream is one shared model. **Variation is quarantined at the acquisition edge**, which is the only place it genuinely exists.
+
+The shared half is `centinel_core::acquire`: one loop that computes the work list from the log, turns refusals into `ResourceStatus`, and keeps the counters — for any Source, whatever its kind. `centinel_core::sources::from_config` is the only code that decides which adapter a `[[source]]` block gets. Consequently there is no `youtube` verb: `discover` and `collect` name what happens, not how.
+
+**`acquire` yields many artifacts, not one blob.** The first shape of this trait was `fetch(&Resource) -> Fetched` — one address, one blob — and nothing could implement it. A video is one address holding up to three artifacts (§4.2), and whether the third is fetched depends on whether the second came back. The kinds went around the trait rather than through it, and their shared machinery got written twice. Returning a list of `(Resource, bytes)` is what makes both kinds expressible through one interface.
+
+**Resumption varies, by exactly one method.** `Source::marker` names the address whose presence proves a Resource was acquired: the page itself for a crawled site, the *metadata* sub-resource for a video. Keying on anything else would re-fetch a whole catalogue every run, because captions and audio may legitimately never exist.
 
 ### 4.2 A Resource is an *address*, not a thing in the world
 
