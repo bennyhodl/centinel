@@ -46,6 +46,24 @@ report print which sitemaps were walked or which channel tabs returned nothing w
 renderer learning what a sitemap or a tab is. A new adapter explains itself through this
 and edits no renderer.
 
+## Retrieval
+
+**Handle** — a hash that identifies one blob *and* that the tool will accept back. The
+rule is that anything Centinel prints, Centinel takes back, by prefix, git-style. A
+citation is only useful if the form on screen is the form you can type; printing an
+identifier the tool then refuses is worse than printing nothing, because it looks like it
+worked. `search`, `read` and `open` all lead their provenance line with one.
+
+**Original vs derived blob** — the bytes as served versus what an extraction or a
+transcription produced from them. Both are addressable. Only the first is an Observation
+— no server ever served the second — which is why resolving a derived hash means finding
+the Observation it was derived *from* and saying so.
+
+**Placement** — where a chunk of text sits: which address, which derived blob, which
+character span. A chunk can have several, because identical text appears under several
+addresses; each placement is a separate document with its own bytes, so each carries its
+own handle.
+
 ## The record
 
 **Resource** — an *address*, not a thing in the world. The same meeting reachable four ways

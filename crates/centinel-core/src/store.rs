@@ -333,6 +333,45 @@ impl Store {
         Ok(map)
     }
 
+    /// The newest Derivation taking `from` as its input, or `None`.
+    ///
+    /// "The extracted text of this document" is the question `read` and `open` both open
+    /// with, and both used to answer it by filtering the log inline — same filter, same
+    /// `next_back`, two copies. Newest wins because a re-extraction with a better tool
+    /// supersedes an older one, and the Derivation carries the tool and version that say
+    /// which is which (§4.6).
+    pub async fn latest_derivation(
+        &self,
+        source: &SourceId,
+        from: &BlobSha,
+    ) -> Result<Option<Derivation>> {
+        Ok(self
+            .read_log(source)
+            .await?
+            .into_iter()
+            .filter_map(|r| match r {
+                LogRecord::Derivation(d) if &d.from_sha == from => Some(d),
+                _ => None,
+            })
+            .next_back())
+    }
+
+    /// Every derived blob this source holds, mapped back to the blob it came from.
+    ///
+    /// The reverse of [`Self::latest_derivation`], and the reason a hash printed by
+    /// `open --derived` can be typed back in. A derived blob is not an Observation — no
+    /// server ever served it — so nothing that looked only at Observations could resolve
+    /// one, and every transcript hash Centinel printed was a dead end.
+    pub async fn derived_from(&self, source: &SourceId) -> Result<BTreeMap<BlobSha, BlobSha>> {
+        let mut map = BTreeMap::new();
+        for rec in self.read_log(source).await? {
+            if let LogRecord::Derivation(d) = rec {
+                map.insert(d.to_sha, d.from_sha);
+            }
+        }
+        Ok(map)
+    }
+
     /// The full Observation history of one Resource, oldest first.
     pub async fn history(&self, resource: &Resource) -> Result<Vec<Observation>> {
         let mut out: Vec<Observation> = self

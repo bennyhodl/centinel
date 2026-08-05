@@ -48,7 +48,7 @@ pub use extract::{ExtractArgs, ExtractReport, ExtractSample, Unreadable, extract
 pub use ingest::{IngestArgs, IngestOutcome, IngestReport, ingest};
 pub use list::{ListArgs, ListReport, Problem, SourceSummary, list};
 pub use run::{RunArgs, RunReport, SourceRun, Stage, StageRun, StageStatus, run};
-pub use search::{SearchArgs, SearchReport, SearchResult, search};
+pub use search::{AlsoAt, SearchArgs, SearchReport, SearchResult, search};
 pub use source::{
     AddArgs, AdoptArgs, ConfiguredSource, RemoveArgs as SourceRemoveArgs, SourceAction, SourceArgs,
     SourceReport, source,

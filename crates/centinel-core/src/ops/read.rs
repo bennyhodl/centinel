@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use crate::fetch::content_kind;
 use crate::ops::target::resolve;
 use crate::prelude::*;
-use crate::store::LogRecord;
 
 #[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ReadArgs {
@@ -52,6 +51,8 @@ pub struct ReadReport {
     pub kind: String,
     /// SHA-256 of the original bytes as served — the evidentiary anchor.
     pub blob_sha: String,
+    /// SHA-256 of the text itself. Also a valid target: `read` and `open` take it back.
+    pub derived_sha: String,
     pub observed_at: String,
     /// Which extraction pipeline produced this text.
     pub tool: String,
@@ -77,14 +78,8 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> anyhow::Result<ReadReport> {
 
     let derivation = ctx
         .store
-        .read_log(&source)
+        .latest_derivation(&source, &obs.blob_sha)
         .await?
-        .into_iter()
-        .filter_map(|r| match r {
-            LogRecord::Derivation(d) if d.from_sha == obs.blob_sha => Some(d),
-            _ => None,
-        })
-        .next_back()
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "no extracted text for {} — run `extract` first",
@@ -116,6 +111,7 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> anyhow::Result<ReadReport> {
         source: source.to_string(),
         kind,
         blob_sha: obs.blob_sha.to_string(),
+        derived_sha: derivation.to_sha.to_string(),
         observed_at: obs.at.to_string(),
         tool: format!("{} {}", derivation.tool, derivation.version),
         text,
@@ -159,7 +155,11 @@ impl Render for ReadReport {
             let note = format!(
                 "{} other {} matched; this is the first",
                 self.other_matches.len(),
-                if self.other_matches.len() == 1 { "address" } else { "addresses" },
+                if self.other_matches.len() == 1 {
+                    "address"
+                } else {
+                    "addresses"
+                },
             );
             p.marked(Mark::Warn, p.paint(&note, Ink::Dim))?;
         }
@@ -184,5 +184,205 @@ impl Render for ReadReport {
             p.line(p.paint(&next, Ink::Cyan))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::Derivation;
+    use crate::ops::target;
+    use crate::store::{LogRecord, Store};
+
+    const TEXT: &str = "# Agenda\n\nItem one. Item two. Item three.";
+
+    /// A store holding one PDF and its extracted text.
+    async fn corpus(dir: &std::path::Path) -> Ctx {
+        let store = Store::open(dir.join("store")).await.unwrap();
+        let id = SourceId::new("tampa").unwrap();
+
+        let obs = store
+            .record_observation(
+                &Resource::new(id.clone(), "https://tampa.gov/agenda.pdf"),
+                b"%PDF-1.7 pretend",
+                jiff::Timestamp::now(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+        let to_sha = store.put_blob(TEXT.as_bytes()).await.unwrap();
+        store
+            .append(
+                &id,
+                &LogRecord::Derivation(Derivation {
+                    from_sha: obs.blob_sha,
+                    to_sha,
+                    tool: "pdf-inspector".into(),
+                    version: "0.1".into(),
+                    model_tier: None,
+                    at: jiff::Timestamp::now(),
+                    anchors: Vec::new(),
+                }),
+            )
+            .await
+            .unwrap();
+
+        Ctx::new(store)
+    }
+
+    fn args(target: &str) -> ReadArgs {
+        ReadArgs {
+            target: target.into(),
+            max_chars: 20_000,
+            offset: 0,
+            source: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn reading_returns_the_text_and_the_kind_of_the_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = corpus(dir.path()).await;
+
+        let r = read(&ctx, args("agenda.pdf")).await.unwrap();
+        assert_eq!(r.text, TEXT);
+        assert_eq!(
+            r.kind, "pdf",
+            "the caller wants to know it is reading a PDF"
+        );
+        assert_eq!(r.tool, "pdf-inspector 0.1");
+        assert!(!r.truncated);
+    }
+
+    /// Both hashes the report carries are targets `read` itself accepts.
+    #[tokio::test]
+    async fn every_hash_read_reports_can_be_typed_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = corpus(dir.path()).await;
+        let first = read(&ctx, args("agenda.pdf")).await.unwrap();
+
+        assert_ne!(first.blob_sha, first.derived_sha);
+        for printed in [&first.blob_sha, &first.derived_sha] {
+            let again = read(&ctx, args(&printed[..12])).await.unwrap();
+            assert_eq!(again.text, TEXT, "`{printed}` did not come back");
+        }
+
+        // And the same hashes resolve for `open`, which shares the resolver.
+        assert!(
+            target::resolve(&ctx, &first.derived_sha[..12], None)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn paging_reports_where_it_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = corpus(dir.path()).await;
+
+        let head = read(
+            &ctx,
+            ReadArgs {
+                max_chars: 8,
+                ..args("agenda.pdf")
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(head.chars, 8);
+        assert_eq!(head.total_chars, TEXT.chars().count());
+        assert!(head.truncated);
+
+        let tail = read(
+            &ctx,
+            ReadArgs {
+                offset: 8,
+                max_chars: 0,
+                ..args("agenda.pdf")
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!tail.truncated);
+        assert_eq!(format!("{}{}", head.text, tail.text), TEXT);
+    }
+
+    #[tokio::test]
+    async fn a_document_with_no_extraction_says_which_command_makes_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).await.unwrap();
+        store
+            .record_observation(
+                &Resource::new(SourceId::new("tampa").unwrap(), "https://tampa.gov/x.pdf"),
+                b"%PDF-1.7 pretend",
+                jiff::Timestamp::now(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+        let err = read(&Ctx::new(store), args("x.pdf"))
+            .await
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("extract"), "{err}");
+    }
+
+    // ── rendering ──────────────────────────────────────────────────────────────
+
+    fn render_to_string(report: &ReadReport) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut p = Painter::new(&mut buf, false, 100);
+            report.render(&mut p).unwrap();
+        }
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn report() -> ReadReport {
+        ReadReport {
+            url: "https://tampa.gov/agenda.pdf".into(),
+            source: "tampa".into(),
+            kind: "pdf".into(),
+            blob_sha: "3f8a1c9d0b7e".repeat(6)[..64].to_string(),
+            derived_sha: "9b2e4a1f0c33".repeat(6)[..64].to_string(),
+            observed_at: "2026-08-04T10:00:00Z".into(),
+            tool: "pdf-inspector 0.1".into(),
+            text: TEXT.into(),
+            chars: 8,
+            total_chars: 41,
+            offset: 0,
+            truncated: true,
+            other_matches: Vec::new(),
+        }
+    }
+
+    /// The header leads with the handle, and the footer says how to get the rest.
+    #[test]
+    fn the_header_leads_with_a_hash_that_resolves() {
+        let out = render_to_string(&report());
+        assert!(out.contains("3f8a1c9d0b7e"), "{out}");
+        assert!(out.contains("pdf-inspector 0.1"), "{out}");
+        assert!(out.contains("--offset 8"), "{out}");
+    }
+
+    /// A complete document needs no paging instructions.
+    #[test]
+    fn an_untruncated_read_offers_no_paging() {
+        let mut r = report();
+        r.truncated = false;
+        assert!(!render_to_string(&r).contains("--offset"));
+    }
+
+    #[test]
+    fn the_report_round_trips_through_json() {
+        let r = report();
+        let json = serde_json::to_value(&r).unwrap();
+        let back: ReadReport = serde_json::from_value(json).unwrap();
+        assert_eq!(back.blob_sha, r.blob_sha);
+        assert_eq!(back.derived_sha, r.derived_sha);
+        assert_eq!(back.total_chars, 41);
     }
 }
