@@ -69,16 +69,28 @@ A search result must be citable back to a specific page of a specific document f
 
 ### 3.1 Required external binaries
 
-| Binary | For | Contract |
-|---|---|---|
-| `poppler` (`pdftoppm`) | rasterising scanned pages | pinned minimum version |
-| `tesseract` | OCR | pinned minimum version |
-| `yt-dlp` | YouTube acquisition | pinned minimum version |
-| `ffmpeg` | decoding audio to 16 kHz mono PCM | pinned minimum version |
+| Binary | For | Contract | Called today |
+|---|---|---|---|
+| `yt-dlp` | YouTube acquisition | pinned minimum version | **yes** |
+| `ffmpeg` | decoding audio to 16 kHz mono PCM | pinned minimum version | **yes** |
+| `poppler` (`pdftoppm`) | rasterising scanned pages | pinned minimum version | no — ticket #12 |
+| `tesseract` | OCR | pinned minimum version | no — ticket #12 |
 
-These are **one-shot subprocesses, not services**. All are **required**.
+These are **one-shot subprocesses, not services**.
+
+The last column is load-bearing for `doctor`. `extract` counts the pages that would need OCR and stops there; neither poppler nor tesseract has a call site. Reporting them as *required* meant a machine able to do everything this code does was told it was **not ready** — and a readiness check that is wrong in the pessimistic direction is not the safe kind of wrong, it is the kind people learn to ignore. They are reported as `planned` until the pipeline that needs them exists.
 
 A fifth subprocess, `centinel-whisper`, is **ours** — built from this workspace, not installed. See §3.6.
+
+Every one of them is started through `centinel_core::tool`, which is the only place in the codebase that runs an external program. Three properties hold for all of them, and none held before that module existed:
+
+- **A child dies with its caller.** `kill_on_drop`, so a cancelled run — Ctrl-C, a lost `select!` race — takes its children with it instead of orphaning an `ffmpeg` and a whisper worker holding a multi-gigabyte model.
+- **A child has a deadline**, per call rather than global: a `--version` probe gets seconds, a 63 MB audio download gets half an hour. Exceeding it kills the child.
+- **A child never reads our stdin.** An inherited terminal lets a subprocess swallow keystrokes or block on a prompt nobody can see.
+
+For a *stream* the guard is **inactivity**, not total time: a transcription still reporting progress after four hours is working, not stuck. The whisper worker's stderr is therefore both its diagnostics and its heartbeat, and silence past `STALL_TIMEOUT` is what identifies a wedged worker. Model downloads already draw the same distinction — they set a read timeout and deliberately no total-request timeout, because a slow gigabyte is not a stalled one.
+
+The one exception is the application `open` launches, which inherits the terminal and gets no deadline — it may be a person's editor. The interface says so.
 
 `centinel doctor` verifies presence **and pinned minimum version**, and runs before any command. A too-old `tesseract` fails at boot naming the required version — not on page 200 of a crawl. This matters most for `yt-dlp`, which warns at 90 days stale and shipped 26 releases in 2025 in emergency clusters.
 
@@ -148,9 +160,10 @@ Both hops stream; a 3-hour meeting is ~691 MB of PCM and is never materialised.
 
 ```
 Source  (trait — acquisition varies, nothing downstream does)
-  ├─ CrawledSite     discover: sitemap + links   id: URL          signal: content hash    (computed)
-  ├─ ApiClient       discover: paged query       id: vendor GUID  signal: LastModifiedUtc (asserted)
-  └─ YouTubeChannel  discover: playlist          id: video id     signal: metadata revision
+  ├─ SiteSource      enumerate: sitemap          id: URL          signal: content hash    (computed)
+  ├─ ChannelSource   enumerate: playlist         id: video id     signal: metadata revision
+  └─ ApiClient       enumerate: paged query      id: vendor GUID  signal: LastModifiedUtc (asserted)
+                     — not implemented; the shape the first two were built to leave room for
 
 DiscoveryRun    full snapshot of the Resource set a run observed
 Resource        (source, natural_key) — an ADDRESS
@@ -158,12 +171,19 @@ ResourceStatus  Live | Gone | Blocked | Error, + since, consecutive_failures, la
 Observation     one successful fetch — ALWAYS backed by a Blob
 Blob            content-addressed bytes
 Derivation      Blob → Blob edge, carrying tool + version + model tier + anchors
+Underivable     a derivation attempted that produced nothing — tool + version + reason
 ChangeEvent     materialized index, rebuildable from Observations
 ```
 
 ### 4.1 `Source` is a trait, not an entity with a `kind`
 
-Three implementations differ in `discover`, `fetch`, and `change_signal`. Everything downstream is one shared model. **Variation is quarantined at the acquisition edge**, which is the only place it genuinely exists.
+Implementations differ in `enumerate`, `acquire`, and `change_signal`. Everything downstream is one shared model. **Variation is quarantined at the acquisition edge**, which is the only place it genuinely exists.
+
+The shared half is `centinel_core::acquire`: one loop that computes the work list from the log, turns refusals into `ResourceStatus`, and keeps the counters — for any Source, whatever its kind. `centinel_core::sources::from_config` is the only code that decides which adapter a `[[source]]` block gets. Consequently there is no `youtube` verb: `discover` and `collect` name what happens, not how.
+
+**`acquire` yields many artifacts, not one blob.** The first shape of this trait was `fetch(&Resource) -> Fetched` — one address, one blob — and nothing could implement it. A video is one address holding up to three artifacts (§4.2), and whether the third is fetched depends on whether the second came back. The kinds went around the trait rather than through it, and their shared machinery got written twice. Returning a list of `(Resource, bytes)` is what makes both kinds expressible through one interface.
+
+**Resumption varies, by exactly one method.** `Source::marker` names the address whose presence proves a Resource was acquired: the page itself for a crawled site, the *metadata* sub-resource for a video. Keying on anything else would re-fetch a whole catalogue every run, because captions and audio may legitimately never exist.
 
 ### 4.2 A Resource is an *address*, not a thing in the world
 
@@ -179,11 +199,15 @@ The January 14 council meeting reachable as a Granicus RSS item, a 5.98 MB HTML 
 - **Anchors vary within the Derivation**, not across entities: `(page, bbox, charspan)` for PDFs, time ranges for audio, char spans for HTML.
 - **Sitemap** is a `DiscoveryRun` snapshot.
 
-### 4.4 An Observation always has bytes
+### 4.4 An Observation always has bytes, and so does a Derivation
 
 Failed fetches do not append rows. **`ResourceStatus` carries liveness instead** — failures mutate per-Resource state in place.
 
 This closes a hole successes-only alone would leave: a URL still listed in the sitemap but now 404ing, and — the dangerous one — **a CloudFront/Akamai WAF starting to 403 you**, which would otherwise be indistinguishable from "the site didn't change." Measured live on `phila.gov` and `sec.gov`; a real risk, not hypothetical.
+
+**The same rule binds the derivation side, and needs the same escape.** A `Derivation` is a `Blob → Blob` edge, so it also always has bytes — which leaves no way to record *"this was attempted and produced nothing"*. That gap is not cosmetic: every stage computes its work list by subtraction, and the extract predicate can only be "a Derivation exists", which is never true for an audio file. So every recording in a corpus was read, hashed and re-attempted on every run, forever, to reach the same conclusion.
+
+**`Underivable`** closes it: `from_sha`, `tool`, `version`, `reason`, `at`. Carrying the tool and version is what keeps the verdict honest — it records that **one pipeline at one version** made nothing of these bytes, which is permanent for that version and no claim at all about the next. Bumping the version is how a better extractor gets another go, by exactly the argument §4.6 makes for re-derivation.
 
 ### 4.5 `ChangeEvent` is a rebuildable index
 

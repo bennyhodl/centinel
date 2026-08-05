@@ -29,21 +29,33 @@
 //! [`centinel-whisper`]: https://github.com/bennyhodl/centinel
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 
 use crate::models::{self, ModelSpec};
 use crate::op::Progress;
+use crate::tool::{Pipes, Tool};
 
 /// The worker binary's name, and the `$CENTINEL_WHISPER_BIN` override.
 pub const WORKER: &str = "centinel-whisper";
 pub const ENV_WORKER: &str = "CENTINEL_WHISPER_BIN";
 
+/// The program that decodes audio into the PCM the worker reads.
+pub const DECODER: &str = "ffmpeg";
+
 /// Whisper's fixed input rate. Resampling happens once, in ffmpeg.
 pub const SAMPLE_RATE: u32 = 16_000;
+
+/// How long the worker may say nothing before it is treated as wedged.
+///
+/// The guard is **inactivity**, not total time. A three-hour meeting on a laptop is hours
+/// of legitimate work, so a wall-clock deadline would either cut off real transcriptions
+/// or be so large it guarded nothing. The worker runs with `--progress` and reports on
+/// stderr, so silence is the signal — and this is sized to sit above a cold load of a
+/// multi-gigabyte model, which is the longest quiet stretch a healthy run has.
+pub const STALL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// One span of speech.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -244,10 +256,15 @@ fn which(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Resolved weights plus the worker that will use them.
+/// Resolved weights plus the two programs that will use them.
 #[derive(Debug)]
 pub struct Transcriber {
     worker: PathBuf,
+    /// The decoder, so a test can put something predictable in ffmpeg's place.
+    decoder: PathBuf,
+    /// How long the worker may say nothing. A field rather than a constant so the guard
+    /// itself can be tested without a ten-minute test.
+    stall_timeout: Duration,
     model: PathBuf,
     vad_model: Option<PathBuf>,
     pub spec: &'static ModelSpec,
@@ -267,29 +284,62 @@ impl Transcriber {
         variant: Option<&str>,
         language: Option<String>,
     ) -> anyhow::Result<Self> {
-        let spec = models::require(model_id)?;
-        anyhow::ensure!(
-            spec.role == models::ModelRole::Transcription,
-            "`{model_id}` is a {} model, not a transcriber",
-            spec.role
-        );
-
-        let (model, variant) = installed_file(spec, variant, root)?;
+        let found = models::resolve(model_id, models::ModelRole::Transcription, variant, root)?;
 
         // Any installed VAD, since the registry pins one version at a time.
         let vad_model = models::REGISTRY
             .iter()
             .filter(|s| s.role == models::ModelRole::VoiceActivity)
-            .find_map(|s| installed_file(s, None, root).ok().map(|(p, _)| p));
+            .find_map(|s| {
+                models::resolve(s.id, models::ModelRole::VoiceActivity, None, root)
+                    .ok()
+                    .map(|i| i.path)
+            });
 
         Ok(Self {
             worker: worker_path()?,
-            model,
+            decoder: PathBuf::from(DECODER),
+            stall_timeout: STALL_TIMEOUT,
+            model: found.path,
             vad_model,
-            spec,
-            variant,
+            spec: found.spec,
+            variant: found.variant,
             language,
         })
+    }
+
+    /// Builds a transcriber from explicit program paths, with no model registry lookup.
+    ///
+    /// The seam that makes [`Self::transcribe`] reachable from a test. That function is a
+    /// hundred lines of process choreography — two children, a pipe between them, a
+    /// progress stream and five separate failure paths — and none of it could be
+    /// exercised, because the only way to build a `Transcriber` demanded several
+    /// gigabytes of installed weights and a compiled worker binary.
+    ///
+    /// Also the honest answer for an unusual install, which is why `worker_path` already
+    /// reads `$CENTINEL_WHISPER_BIN` for the same reason.
+    pub fn with_binaries(
+        worker: impl Into<PathBuf>,
+        decoder: impl Into<PathBuf>,
+        model: impl Into<PathBuf>,
+        spec: &'static ModelSpec,
+    ) -> Self {
+        Self {
+            worker: worker.into(),
+            decoder: decoder.into(),
+            stall_timeout: STALL_TIMEOUT,
+            model: model.into(),
+            vad_model: None,
+            spec,
+            variant: "test".to_string(),
+            language: None,
+        }
+    }
+
+    /// How long the worker may say nothing before it is treated as wedged.
+    pub fn with_stall_timeout(mut self, stall_timeout: Duration) -> Self {
+        self.stall_timeout = stall_timeout;
+        self
     }
 
     /// True when a VAD was found. A caller should refuse or warn — see the module docs.
@@ -314,15 +364,10 @@ impl Transcriber {
         audio: &Path,
         progress: &Progress,
     ) -> anyhow::Result<Transcript> {
-        let mut ffmpeg = Command::new("ffmpeg")
-            .args([
-                // Never let ffmpeg consume our stdin; it inherits a terminal otherwise
-                // and can swallow keystrokes or block.
-                "-nostdin",
-                "-loglevel",
-                "error",
-                "-i",
-            ])
+        // `-nostdin` is belt and braces: `Tool` denies stdin to every child it starts,
+        // and ffmpeg that reads an inherited terminal swallows keystrokes.
+        let mut ffmpeg = Tool::new(&self.decoder)
+            .args(["-nostdin", "-loglevel", "error", "-i"])
             .arg(audio)
             .args([
                 "-f",
@@ -335,31 +380,20 @@ impl Transcriber {
                 "1",
                 "-",
             ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                anyhow::anyhow!("cannot run ffmpeg ({e}) — it decodes audio for transcription")
-            })?;
+            .spawn(Pipes::read())
+            .map_err(|e| anyhow::anyhow!("{e} — it decodes audio for transcription"))?;
 
-        let mut worker = Command::new(&self.worker);
-        worker
+        let mut worker = Tool::new(&self.worker)
             .arg("--model")
             .arg(&self.model)
-            .arg("--progress")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .arg("--progress");
         if let Some(vad) = &self.vad_model {
-            worker.arg("--vad-model").arg(vad);
+            worker = worker.arg("--vad-model").arg(vad);
         }
         if let Some(lang) = &self.language {
-            worker.arg("--language").arg(lang);
+            worker = worker.arg("--language").arg(lang);
         }
-        let mut worker = worker
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("cannot run {}: {e}", self.worker.display()))?;
+        let mut worker = worker.spawn(Pipes::duplex())?;
 
         // Pump ffmpeg's PCM into the worker. Both ends are children of this process, so
         // nothing buffers the full ~691 MB of a 3-hour meeting.
@@ -384,11 +418,29 @@ impl Transcriber {
                 "(no vad)"
             }
         );
+        // The same stream is the diagnostics *and* the heartbeat. Any line at all means
+        // the worker is alive; silence past `STALL_TIMEOUT` means it is not, and `stall`
+        // is the only thing this task sends — a normal end of stderr never fires it.
         let progress = progress.clone();
+        let stall_timeout = self.stall_timeout;
+        let (stall, stalled) = tokio::sync::oneshot::channel();
         let diagnostics = tokio::spawn(async move {
             let mut lines = BufReader::new(worker_err).lines();
             let mut kept = Vec::new();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut stall = Some(stall);
+            loop {
+                let line = match tokio::time::timeout(stall_timeout, lines.next_line()).await {
+                    Ok(Ok(Some(line))) => line,
+                    // Stderr closed, or the read failed. Either way the worker is done
+                    // talking, and how it exited is the exit status's business.
+                    Ok(_) => break,
+                    Err(_) => {
+                        if let Some(stall) = stall.take() {
+                            let _ = stall.send(());
+                        }
+                        break;
+                    }
+                };
                 if let Some(pct) = line.strip_prefix("progress ")
                     && let Ok(pct) = pct.trim().parse::<u64>()
                 {
@@ -403,7 +455,36 @@ impl Transcriber {
             kept
         });
 
-        let output = worker.wait_with_output().await?;
+        // Kept as a `Child` rather than consumed by `wait_with_output`, so there is still
+        // something to kill if it wedges.
+        let mut worker_out = worker.stdout.take().expect("worker stdout was piped");
+        let collected = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            tokio::io::copy(&mut worker_out, &mut buf)
+                .await
+                .map(|_| buf)
+        });
+
+        let status = tokio::select! {
+            status = worker.wait() => status?,
+            // `Ok(())` and not `_`: the diagnostics task drops this sender when stderr
+            // closes normally, which resolves the receiver as `Err`. Matching that too
+            // would call every successful transcription a hang.
+            Ok(()) = stalled => {
+                // Dropping `worker` would kill it anyway — `Tool` sets `kill_on_drop` —
+                // but an explicit kill means the process is gone before this returns
+                // rather than whenever the runtime gets round to the drop.
+                let _ = worker.kill().await;
+                anyhow::bail!(
+                    "{WORKER} produced no output for {:?} and was stopped. It was \
+                     transcribing {}. A wedged worker usually means a corrupt model file \
+                     — `centinel models verify` checks them.",
+                    self.stall_timeout,
+                    audio.display(),
+                );
+            }
+        };
+        let stdout = collected.await??;
         let stderr_lines = diagnostics.await.unwrap_or_default();
         let copied = pump.await?;
 
@@ -412,7 +493,8 @@ impl Transcriber {
         let ff = ffmpeg.wait_with_output().await?;
         if !ff.status.success() {
             anyhow::bail!(
-                "ffmpeg could not decode {}: {}",
+                "{} could not decode {}: {}",
+                self.decoder.display(),
                 audio.display(),
                 String::from_utf8_lossy(&ff.stderr).trim()
             );
@@ -420,59 +502,21 @@ impl Transcriber {
         copied.map_err(|e| anyhow::anyhow!("piping audio to {WORKER}: {e}"))?;
 
         anyhow::ensure!(
-            output.status.success(),
-            "{WORKER} failed ({}): {}",
-            output.status,
+            status.success(),
+            "{WORKER} failed ({status}): {}",
             stderr_lines.join("; ")
         );
 
-        serde_json::from_slice(&output.stdout).map_err(|e| {
+        serde_json::from_slice(&stdout).map_err(|e| {
             anyhow::anyhow!(
                 "{WORKER} returned output that is not a transcript ({e}): {}",
-                String::from_utf8_lossy(&output.stdout)
+                String::from_utf8_lossy(&stdout)
                     .chars()
                     .take(200)
                     .collect::<String>()
             )
         })
     }
-}
-
-/// The on-disk path of an installed variant, preferring the default.
-fn installed_file(
-    spec: &'static ModelSpec,
-    variant: Option<&str>,
-    root: &Path,
-) -> anyhow::Result<(PathBuf, String)> {
-    let status = models::status(spec, root);
-    let chosen = match variant {
-        Some(name) => status
-            .variants
-            .iter()
-            .find(|v| v.variant == name)
-            .filter(|v| v.installed)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "`{}` variant `{name}` is not installed — `centinel models pull {} --variant {name}`",
-                    spec.id,
-                    spec.id
-                )
-            })?,
-        None => status.active().ok_or_else(|| {
-            anyhow::anyhow!(
-                "`{}` is not installed — `centinel models pull {}`",
-                spec.id,
-                spec.id
-            )
-        })?,
-    };
-
-    let file = spec
-        .variant(Some(&chosen.variant))?
-        .files
-        .first()
-        .expect("every variant has a file");
-    Ok((spec.dir(root).join(file.path), chosen.variant.clone()))
 }
 
 #[cfg(test)]
@@ -583,6 +627,221 @@ mod tests {
                 end_ms: 4_275_000
             }
         );
+    }
+
+    // ── the process pipeline ───────────────────────────────────────────────────
+    //
+    // Both ends are stand-in scripts. What is under test is the choreography — two
+    // children, a pipe between them, a progress stream, a stall guard and five failure
+    // paths — not whisper.cpp, which has its own tests and its own repository.
+    //
+    // None of this was reachable before: the only way to build a `Transcriber` demanded
+    // several gigabytes of installed weights and a compiled worker binary, so a hundred
+    // lines of the riskiest code in the crate had no test at all.
+
+    #[cfg(unix)]
+    mod pipeline {
+        use super::*;
+        use std::path::Path;
+
+        /// A transcript the worker script can print, and this test can recognise.
+        const TRANSCRIPT: &str = r#"{"whisper_version":"test","language":"en","vad":false,
+            "sample_count":16000,"duration_ms":1000,
+            "segments":[{"start_ms":0,"end_ms":1000,
+            "text":"the council meeting will come to order","no_speech_prob":0.0}]}"#;
+
+        fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+
+        /// A decoder that ignores ffmpeg's arguments and emits some bytes.
+        fn decoder(dir: &Path, body: &str) -> PathBuf {
+            script(dir, "decoder", body)
+        }
+
+        fn transcriber(worker: PathBuf, decoder: PathBuf) -> Transcriber {
+            Transcriber::with_binaries(
+                worker,
+                decoder,
+                "/dev/null",
+                models::require("whisper-large-v3-turbo").unwrap(),
+            )
+        }
+
+        #[tokio::test]
+        async fn audio_reaches_the_worker_and_a_transcript_comes_back() {
+            let dir = tempfile::tempdir().unwrap();
+            let dec = decoder(dir.path(), "printf 'pretend-pcm-bytes'");
+            // Proves the pipe carried the decoder's bytes: the worker refuses if the
+            // audio it was fed is not what the decoder produced.
+            let worker = script(
+                dir.path(),
+                "worker",
+                &format!(
+                    "audio=$(cat)\n\
+                     [ \"$audio\" = 'pretend-pcm-bytes' ] || {{ echo \"got: $audio\" >&2; exit 9; }}\n\
+                     echo 'progress 50' >&2\n\
+                     echo 'progress 100' >&2\n\
+                     cat <<'EOF'\n{TRANSCRIPT}\nEOF"
+                ),
+            );
+
+            let got = transcriber(worker, dec)
+                .transcribe(Path::new("/dev/null"), &Progress::none())
+                .await
+                .unwrap();
+
+            assert_eq!(got.segments.len(), 1);
+            assert_eq!(
+                got.segments[0].text,
+                "the council meeting will come to order"
+            );
+            assert!(!got.vad);
+        }
+
+        /// A worker that fails must surface what it said, not a generic exit code.
+        #[tokio::test]
+        async fn a_failing_worker_reports_its_own_diagnostics() {
+            let dir = tempfile::tempdir().unwrap();
+            let dec = decoder(dir.path(), "printf 'x'");
+            let worker = script(
+                dir.path(),
+                "worker",
+                "cat > /dev/null\necho 'failed to load model: bad magic' >&2\nexit 4",
+            );
+
+            let err = transcriber(worker, dec)
+                .transcribe(Path::new("/dev/null"), &Progress::none())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("bad magic"), "{err}");
+            assert!(err.contains(WORKER), "{err}");
+        }
+
+        /// A worker starved of audio only ever reports "no audio on stdin", so the
+        /// decoder's own failure is the more useful message when both ends fail.
+        #[tokio::test]
+        async fn a_failing_decoder_beats_the_worker_it_starved() {
+            let dir = tempfile::tempdir().unwrap();
+            let dec = decoder(
+                dir.path(),
+                "echo 'Invalid data found when processing input' >&2\nexit 1",
+            );
+            let worker = script(
+                dir.path(),
+                "worker",
+                "cat > /dev/null\necho 'no audio on stdin' >&2\nexit 1",
+            );
+
+            let err = transcriber(worker, dec)
+                .transcribe(Path::new("/tmp/not-audio"), &Progress::none())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("could not decode"), "{err}");
+            assert!(err.contains("Invalid data"), "{err}");
+        }
+
+        /// The hazard this whole change is about: a wedged worker used to block the
+        /// caller for as long as the machine stayed up.
+        #[tokio::test]
+        async fn a_worker_that_goes_quiet_is_stopped_and_says_why() {
+            let dir = tempfile::tempdir().unwrap();
+            let dec = decoder(dir.path(), "printf 'x'");
+            let worker = script(dir.path(), "worker", "cat > /dev/null\nsleep 60");
+
+            let started = std::time::Instant::now();
+            let err = transcriber(worker, dec)
+                .with_stall_timeout(Duration::from_millis(400))
+                .transcribe(Path::new("/dev/null"), &Progress::none())
+                .await
+                .unwrap_err()
+                .to_string();
+
+            assert!(err.contains("produced no output"), "{err}");
+            assert!(err.contains("models verify"), "the fix is named: {err}");
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the stall guard never fired: {:?}",
+                started.elapsed()
+            );
+        }
+
+        /// Progress is life. A worker that is slow but talking must not be killed.
+        #[tokio::test]
+        async fn a_slow_worker_that_keeps_talking_is_left_alone() {
+            let dir = tempfile::tempdir().unwrap();
+            let dec = decoder(dir.path(), "printf 'x'");
+            // The first line comes before `cat`, so the guard is measuring gaps between
+            // progress reports rather than how long this machine takes to start a shell.
+            let worker = script(
+                dir.path(),
+                "worker",
+                &format!(
+                    "echo 'loading model' >&2\n\
+                     cat > /dev/null\n\
+                     i=0\n\
+                     while [ $i -lt 20 ]; do echo \"progress $i\" >&2; sleep 0.15; i=$((i+1)); done\n\
+                     cat <<'EOF'\n{TRANSCRIPT}\nEOF"
+                ),
+            );
+
+            // Three seconds of work under a two-second guard. That is only survivable
+            // because every line resets the timer — which is the claim. The guard is well
+            // above this machine's worst measured process-start latency under a parallel
+            // test run, so what fails here is the reset, not the scheduler.
+            let started = std::time::Instant::now();
+            let got = transcriber(worker, dec)
+                .with_stall_timeout(Duration::from_secs(2))
+                .transcribe(Path::new("/dev/null"), &Progress::none())
+                .await
+                .unwrap();
+
+            assert_eq!(got.segments.len(), 1);
+            assert!(
+                started.elapsed() > Duration::from_millis(2_500),
+                "the worker finished too fast to have out-lived the guard: {:?}",
+                started.elapsed()
+            );
+        }
+
+        #[tokio::test]
+        async fn output_that_is_not_a_transcript_is_quoted_back() {
+            let dir = tempfile::tempdir().unwrap();
+            let dec = decoder(dir.path(), "printf 'x'");
+            let worker = script(
+                dir.path(),
+                "worker",
+                "cat > /dev/null\necho 'Segmentation fault'",
+            );
+
+            let err = transcriber(worker, dec)
+                .transcribe(Path::new("/dev/null"), &Progress::none())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("not a transcript"), "{err}");
+            assert!(err.contains("Segmentation fault"), "{err}");
+        }
+
+        #[tokio::test]
+        async fn a_missing_decoder_names_what_it_was_for() {
+            let dir = tempfile::tempdir().unwrap();
+            let worker = script(dir.path(), "worker", "cat > /dev/null");
+
+            let err = transcriber(worker, PathBuf::from("centinel-no-such-decoder"))
+                .transcribe(Path::new("/dev/null"), &Progress::none())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("not installed"), "{err}");
+            assert!(err.contains("decodes audio"), "{err}");
+        }
     }
 
     #[test]

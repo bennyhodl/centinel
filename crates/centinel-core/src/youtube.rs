@@ -39,9 +39,10 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
+use crate::tool::Tool;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 
 use crate::domain::Liveness;
 
@@ -51,6 +52,55 @@ pub const YT_DLP: &str = "yt-dlp";
 /// surprising. Surfaced by [`YtDlp::version`] so a failing run can say *"and your
 /// yt-dlp is old"* instead of leaving the operator to guess.
 pub const STALE_AFTER_DAYS: i64 = 90;
+
+/// How many days old a `yt-dlp` release is, from its `YYYY.MM.DD` version string.
+///
+/// `None` when the string is not a release date — a git build, or a fork that versions
+/// itself some other way. Silence is the right answer there: refusing to guess beats
+/// telling somebody their working install is 20,000 days stale.
+///
+/// Takes `now` rather than reading the clock, so the threshold this feeds is testable
+/// without waiting ninety days for it.
+pub fn staleness_days(version: &str, now: jiff::Timestamp) -> Option<i64> {
+    let mut parts = version.trim().split('.');
+    let year: i16 = parts.next()?.parse().ok()?;
+    let month: i8 = parts.next()?.parse().ok()?;
+    let day: i8 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let released = jiff::civil::date(year, month, day);
+    let today = now.to_zoned(jiff::tz::TimeZone::UTC).date();
+    let span = today
+        .since(jiff::civil::DateDifference::new(released).largest(jiff::Unit::Day))
+        .ok()?;
+    Some(span.get_days() as i64)
+}
+
+// ── deadlines ─────────────────────────────────────────────────────────────────
+//
+// One per call rather than one for the module, because these differ by three orders of
+// magnitude. Every one of them is a ceiling on a *hang*, not a budget for normal work:
+// yt-dlp waiting on a prompt, or on a socket that stopped delivering, used to block the
+// caller for as long as the machine stayed up.
+
+/// `yt-dlp --version`. It reads a string it already has.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A channel listing. Paged, and a council channel is over a thousand videos.
+const ENUMERATE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// One video's `-J` document. A single request that returns a few hundred kilobytes.
+const METADATA_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// One caption track. Small, but yt-dlp probes the format list first.
+const CAPTIONS_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// One audio stream — ~63 MB for a three-hour meeting, over a link that may be slow.
+/// Generous on purpose: cutting off a download that is still moving would be a worse
+/// failure than the hang this guards against.
+const AUDIO_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// The canonical address of a video. Used as a [`crate::domain::Resource`] natural key,
 /// so it is worth having exactly one spelling of it.
@@ -203,19 +253,12 @@ pub fn channel_tabs(url: &str) -> Vec<String> {
 }
 
 /// A yt-dlp invocation that failed, already classified.
-#[derive(Clone, Debug)]
-pub struct YtFailure {
-    pub state: Liveness,
-    pub detail: String,
-}
-
-impl std::fmt::Display for YtFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", self.detail, self.state)
-    }
-}
-
-impl std::error::Error for YtFailure {}
+///
+/// The name is kept for the call sites; the type is [`crate::domain::Refusal`], which is
+/// what an HTTP failure is too. A 403 from a WAF and a bot-wall refusal from YouTube are
+/// the same fact about an address, and having two names for it is what kept the two
+/// acquisition paths from sharing a loop.
+pub use crate::domain::Refusal as YtFailure;
 
 /// Reads yt-dlp's stderr and decides what it means for the record.
 ///
@@ -296,23 +339,23 @@ impl YtDlp {
         }
     }
 
-    fn command(&self) -> Command {
-        let mut cmd = Command::new(&self.binary);
+    /// The base invocation, with a deadline the caller is expected to replace.
+    fn tool(&self) -> Tool {
         // `--no-update` suppresses the staleness banner on every call; the check belongs
         // in `doctor`, once, not in the middle of a thousand-video crawl.
         // `--ignore-config` keeps a user's `~/.config/yt-dlp/config` from silently
         // changing output formats out from under the parser.
-        cmd.args(["--no-update", "--ignore-config", "--no-warnings"]);
-        cmd.args(&self.extra_args);
-        cmd
+        Tool::new(&self.binary)
+            .args(["--no-update", "--ignore-config", "--no-warnings"])
+            .args(&self.extra_args)
     }
 
     pub async fn version(&self) -> anyhow::Result<String> {
-        let out = Command::new(&self.binary)
+        let out = Tool::new(&self.binary)
             .arg("--version")
+            .timeout(VERSION_TIMEOUT)
             .output()
-            .await
-            .map_err(|e| anyhow::anyhow!("cannot run {}: {e}", self.binary))?;
+            .await?;
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
@@ -394,17 +437,11 @@ impl YtDlp {
         url: &str,
         limit: Option<usize>,
     ) -> Result<serde_json::Value, YtFailure> {
-        let mut cmd = self.command();
-        cmd.args(["--flat-playlist", "-J"]);
+        let mut tool = self.tool().args(["--flat-playlist", "-J"]);
         if let Some(n) = limit {
-            cmd.args(["--playlist-end", &n.to_string()]);
+            tool = tool.args(["--playlist-end", &n.to_string()]);
         }
-        cmd.arg(url);
-
-        let out = cmd.output().await.map_err(|e| YtFailure {
-            state: Liveness::Error,
-            detail: format!("cannot run {}: {e}", self.binary),
-        })?;
+        let out = tool.arg(url).timeout(ENUMERATE_TIMEOUT).output().await?;
 
         if !out.status.success() {
             return Err(classify(&String::from_utf8_lossy(&out.stderr)));
@@ -418,13 +455,13 @@ impl YtDlp {
 
     /// The full `-J` metadata document for one video.
     pub async fn video_metadata(&self, video_id: &str) -> Result<Vec<u8>, YtFailure> {
-        let mut cmd = self.command();
-        cmd.args(["-J", "--skip-download"]).arg(watch_url(video_id));
-
-        let out = cmd.output().await.map_err(|e| YtFailure {
-            state: Liveness::Error,
-            detail: format!("cannot run {}: {e}", self.binary),
-        })?;
+        let out = self
+            .tool()
+            .args(["-J", "--skip-download"])
+            .arg(watch_url(video_id))
+            .timeout(METADATA_TIMEOUT)
+            .output()
+            .await?;
 
         if !out.status.success() {
             return Err(classify(&String::from_utf8_lossy(&out.stderr)));
@@ -446,27 +483,26 @@ impl YtDlp {
         lang: &str,
         work_dir: &Path,
     ) -> Result<Option<Vec<u8>>, YtFailure> {
-        let mut cmd = self.command();
-        cmd.args([
-            // Manual tracks are strictly better where they exist — real punctuation and
-            // reliable proper nouns, which is what a civic index is built around. Asking
-            // for both lets yt-dlp prefer the manual one.
-            "--write-subs",
-            "--write-auto-subs",
-            "--sub-langs",
-            lang,
-            "--sub-format",
-            "json3",
-            "--skip-download",
-            "-o",
-        ])
-        .arg(work_dir.join("cap"))
-        .arg(watch_url(video_id));
-
-        let out = cmd.output().await.map_err(|e| YtFailure {
-            state: Liveness::Error,
-            detail: format!("cannot run {}: {e}", self.binary),
-        })?;
+        let out = self
+            .tool()
+            .args([
+                // Manual tracks are strictly better where they exist — real punctuation
+                // and reliable proper nouns, which is what a civic index is built around.
+                // Asking for both lets yt-dlp prefer the manual one.
+                "--write-subs",
+                "--write-auto-subs",
+                "--sub-langs",
+                lang,
+                "--sub-format",
+                "json3",
+                "--skip-download",
+                "-o",
+            ])
+            .arg(work_dir.join("cap"))
+            .arg(watch_url(video_id))
+            .timeout(CAPTIONS_TIMEOUT)
+            .output()
+            .await?;
 
         if !out.status.success() {
             return Err(classify(&String::from_utf8_lossy(&out.stderr)));
@@ -483,22 +519,21 @@ impl YtDlp {
     /// throw three quarters of them away. The fallbacks matter because 139 is not offered
     /// on every video.
     pub async fn audio(&self, video_id: &str, work_dir: &Path) -> Result<Vec<u8>, YtFailure> {
-        let mut cmd = self.command();
-        cmd.args([
-            "-f",
-            "139/bestaudio[abr<60]/bestaudio",
-            // Write straight to the final name: this file is read once and turned into a
-            // content-addressed blob, so a `.part` dance buys nothing.
-            "--no-part",
-            "-o",
-        ])
-        .arg(work_dir.join("audio.%(ext)s"))
-        .arg(watch_url(video_id));
-
-        let out = cmd.output().await.map_err(|e| YtFailure {
-            state: Liveness::Error,
-            detail: format!("cannot run {}: {e}", self.binary),
-        })?;
+        let out = self
+            .tool()
+            .args([
+                "-f",
+                "139/bestaudio[abr<60]/bestaudio",
+                // Write straight to the final name: this file is read once and turned
+                // into a content-addressed blob, so a `.part` dance buys nothing.
+                "--no-part",
+                "-o",
+            ])
+            .arg(work_dir.join("audio.%(ext)s"))
+            .arg(watch_url(video_id))
+            .timeout(AUDIO_TIMEOUT)
+            .output()
+            .await?;
 
         if !out.status.success() {
             return Err(classify(&String::from_utf8_lossy(&out.stderr)));
@@ -829,5 +864,50 @@ mod tests {
     #[test]
     fn a_document_with_no_entries_is_an_empty_channel_not_a_parse_error() {
         assert!(parse_listing(&serde_json::json!({})).videos.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod staleness_tests {
+    use super::*;
+
+    fn at(s: &str) -> jiff::Timestamp {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_release_date_becomes_an_age_in_days() {
+        let now = at("2026-08-05T00:00:00Z");
+        assert_eq!(staleness_days("2026.08.05", now), Some(0));
+        assert_eq!(staleness_days("2026.07.04", now), Some(32));
+        assert_eq!(staleness_days("2026.01.15", now), Some(202));
+    }
+
+    /// The threshold this exists to feed. yt-dlp warns at 90 days, and past it breakage
+    /// is expected rather than surprising.
+    #[test]
+    fn the_ninety_day_line_falls_where_yt_dlp_puts_it() {
+        let now = at("2026-08-05T00:00:00Z");
+        assert!(staleness_days("2026.05.07", now).unwrap() as i64 == 90);
+        assert!(staleness_days("2026.05.08", now).unwrap() < STALE_AFTER_DAYS);
+        assert!(staleness_days("2026.05.06", now).unwrap() > STALE_AFTER_DAYS);
+    }
+
+    /// A git build or a fork versions itself some other way. Refusing to guess beats
+    /// telling somebody their working install is twenty thousand days old.
+    #[test]
+    fn anything_that_is_not_a_release_date_says_nothing() {
+        let now = at("2026-08-05T00:00:00Z");
+        assert_eq!(staleness_days("2026.07.04.dev0", now), None);
+        assert_eq!(staleness_days("nightly", now), None);
+        assert_eq!(staleness_days("2026.07", now), None);
+        assert_eq!(staleness_days("", now), None);
+    }
+
+    /// A clock behind the release, which happens on a machine with a wrong date.
+    #[test]
+    fn a_release_in_the_future_is_not_stale() {
+        let now = at("2026-01-01T00:00:00Z");
+        assert!(staleness_days("2026.07.04", now).unwrap() < 0);
     }
 }

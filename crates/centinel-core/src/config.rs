@@ -166,7 +166,8 @@ pub struct SourceConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub yt_dlp_args: Vec<String>,
 
-    /// Fetch audio only for videos YouTube never captioned. See `youtube fetch`.
+    /// Fetch audio only for videos YouTube never captioned. Defaults on for a channel;
+    /// see `centinel collect --help`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_if_no_captions: Option<bool>,
 
@@ -175,13 +176,39 @@ pub struct SourceConfig {
     pub lang: Option<String>,
 }
 
-/// How a source is acquired — the one axis on which the two Source kinds differ.
+/// How a source is acquired — the one axis on which the Source kinds differ.
+///
+/// The **only** enum in the codebase that names the kinds. Matching on it belongs here
+/// and in [`crate::sources::from_config`], which turns one into a live
+/// [`crate::domain::Source`]; anywhere else, ask the Source. That rule is what makes a
+/// third kind a new file rather than a hunt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Acquisition<'a> {
     /// Sitemap walk, then HTTP GETs.
     Site(&'a str),
     /// Playlist listing, then `yt-dlp`.
     Channel(&'a str),
+}
+
+impl Acquisition<'_> {
+    /// The label this reads as, without building anything that could touch a network.
+    ///
+    /// Present so `source list` can name twenty sources without constructing twenty HTTP
+    /// clients to ask each one what it is.
+    pub fn kind(&self) -> crate::domain::SourceKind {
+        use crate::domain::SourceKind;
+        match self {
+            Self::Site(_) => SourceKind::Site,
+            Self::Channel(_) => SourceKind::Channel,
+        }
+    }
+
+    /// The address, whichever key carried it.
+    pub fn target(&self) -> &str {
+        match self {
+            Self::Site(url) | Self::Channel(url) => url,
+        }
+    }
 }
 
 impl SourceConfig {
@@ -259,7 +286,10 @@ impl SourceConfig {
             s.push_str(&format!("matches = {}\n", quote_list(&self.matches)));
         }
         if !self.yt_dlp_args.is_empty() {
-            s.push_str(&format!("yt_dlp_args = {}\n", quote_list(&self.yt_dlp_args)));
+            s.push_str(&format!(
+                "yt_dlp_args = {}\n",
+                quote_list(&self.yt_dlp_args)
+            ));
         }
         s
     }
@@ -595,7 +625,8 @@ fn write_atomically(path: &Path, text: &str) -> anyhow::Result<()> {
     }
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, text).map_err(|e| anyhow::anyhow!("writing {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| anyhow::anyhow!("replacing {}: {e}", path.display()))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| anyhow::anyhow!("replacing {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -873,7 +904,11 @@ mod tests {
     fn appending_to_a_missing_file_creates_one_from_the_example() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("centinel.toml");
-        append_source(&path, &SourceConfig::channel("council", "https://youtube.com/@x")).unwrap();
+        append_source(
+            &path,
+            &SourceConfig::channel("council", "https://youtube.com/@x"),
+        )
+        .unwrap();
 
         let c = Config::from_file(&path).unwrap();
         assert_eq!(c.sources.len(), 1);

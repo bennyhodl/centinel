@@ -85,8 +85,9 @@ pub async fn index(ctx: &Ctx, args: IndexArgs, progress: &Progress) -> anyhow::R
         None => ctx.store.sources().await?,
     };
 
-    let db_path = ctx.store.root().join("centinel.db");
+    let db_path = ctx.store.index_path();
     let mut index = Index::open(&db_path)?;
+
     if args.rebuild {
         match &args.source {
             Some(_) => {
@@ -97,6 +98,9 @@ pub async fn index(ctx: &Ctx, args: IndexArgs, progress: &Progress) -> anyhow::R
             None => index.clear()?,
         }
     }
+    // After any clearing, not before: what licenses a change of geometry is that no
+    // chunk built at the old one survives, and only the clearing decides that.
+    settle_geometry(&index, &args)?;
 
     let config = ChunkConfig {
         target_chars: args.target_chars,
@@ -205,6 +209,65 @@ pub async fn index(ctx: &Ctx, args: IndexArgs, progress: &Progress) -> anyhow::R
     Ok(report)
 }
 
+/// Refuses a change of chunk geometry that would leave two sets of chunks side by side.
+///
+/// A `chunk_hash` is the hash of the chunk's **text**, and the geometry decides the text.
+/// Re-chunking at a different size therefore produces an entirely different set of
+/// hashes: the old chunks stay in the index, the new ones join them, and `embed` — whose
+/// work list is "indexed hashes minus cached hashes" — re-embeds the whole corpus while
+/// the old vectors sit in an append-only cache file that nothing will ever read again.
+///
+/// None of that fails. It is hours of GPU time and a doubled index, and the only sign is
+/// a number the operator was not watching. So it is refused, and the refusal names the
+/// flag that makes it legal.
+/// Called **after** any `--rebuild` clearing, because the question is whether a chunk
+/// built at the old geometry survives — not which flag was passed. A `--rebuild --source`
+/// that happens to empty the index licenses a change for the same reason a full one does,
+/// and one that leaves another source's chunks behind does not.
+fn settle_geometry(index: &Index, args: &IndexArgs) -> anyhow::Result<()> {
+    let asked = (args.target_chars, args.overlap_chars);
+
+    match index.geometry()? {
+        Some(recorded) if recorded == asked => {}
+        // Nothing left to mix with.
+        _ if index.stats()?.chunks == 0 => index.set_geometry(asked.0, asked.1)?,
+
+        Some(recorded) => anyhow::bail!(
+            "this index was built at target_chars={}, overlap_chars={}; this run asks for \
+             {}, {}. Chunk geometry decides the chunk text, and the text is what a \
+             chunk_hash hashes — so the old chunks would stay beside the new ones and \
+             every vector in the cache would be orphaned. Re-run with `--rebuild` to \
+             replace the index, or drop the flags to keep it.",
+            recorded.0,
+            recorded.1,
+            asked.0,
+            asked.1,
+        ),
+
+        // No recorded geometry and chunks already present: an index from before this was
+        // written. Its chunks can only be assumed to use the defaults, so that is the
+        // one thing this may adopt without being told.
+        None => {
+            anyhow::ensure!(
+                asked
+                    == (
+                        crate::chunk::DEFAULT_TARGET_CHARS,
+                        crate::chunk::DEFAULT_OVERLAP_CHARS
+                    ),
+                "this index records no chunk geometry, so its existing chunks can only be \
+                 assumed to use the defaults ({}, {}). Re-run with `--rebuild` to build it \
+                 at {}, {} instead.",
+                crate::chunk::DEFAULT_TARGET_CHARS,
+                crate::chunk::DEFAULT_OVERLAP_CHARS,
+                asked.0,
+                asked.1,
+            );
+            index.set_geometry(asked.0, asked.1)?;
+        }
+    }
+    Ok(())
+}
+
 /// First markdown heading, used as a document title.
 fn first_heading(text: &str) -> Option<String> {
     text.lines()
@@ -257,6 +320,263 @@ impl Render for IndexReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk::{DEFAULT_OVERLAP_CHARS, DEFAULT_TARGET_CHARS, chunk_markdown};
+    use crate::index::Placement;
+
+    fn geometry(target: usize, overlap: usize) -> IndexArgs {
+        IndexArgs {
+            target_chars: target,
+            overlap_chars: overlap,
+            ..Default::default()
+        }
+    }
+
+    /// An index holding one document's chunks at the default geometry.
+    fn populated() -> Index {
+        let mut index = Index::in_memory().unwrap();
+        let text = "# Agenda\n\n".to_string() + &"The council discussed the matter. ".repeat(80);
+        for chunk in chunk_markdown(&text, &ChunkConfig::default()) {
+            index
+                .insert(
+                    &chunk,
+                    &Placement {
+                        source: "tampa".into(),
+                        resource: "https://tampa.gov/a".into(),
+                        blob_sha: "aa".repeat(32),
+                        derived_sha: "bb".repeat(32),
+                        ordinal: chunk.ordinal,
+                        heading: chunk.heading.clone(),
+                        char_start: chunk.char_start,
+                        char_end: chunk.char_end,
+                        observed_at: "2026-08-03T00:00:00Z".into(),
+                        tool: "htmd 0.5".into(),
+                        title: None,
+                    },
+                )
+                .unwrap();
+        }
+        assert!(index.stats().unwrap().chunks > 1);
+        index
+    }
+
+    /// The same, under two sources, so clearing one leaves the other's chunks.
+    fn two_sources() -> Index {
+        let mut index = populated();
+        let text = "# Minutes\n\n".to_string() + &"The board approved the item. ".repeat(80);
+        for chunk in chunk_markdown(&text, &ChunkConfig::default()) {
+            index
+                .insert(
+                    &chunk,
+                    &Placement {
+                        source: "pinellas".into(),
+                        resource: "https://pinellas.gov/m".into(),
+                        blob_sha: "cc".repeat(32),
+                        derived_sha: "dd".repeat(32),
+                        ordinal: chunk.ordinal,
+                        heading: chunk.heading.clone(),
+                        char_start: chunk.char_start,
+                        char_end: chunk.char_end,
+                        observed_at: "2026-08-03T00:00:00Z".into(),
+                        tool: "htmd 0.5".into(),
+                        title: None,
+                    },
+                )
+                .unwrap();
+        }
+        index
+    }
+
+    #[test]
+    fn an_empty_index_adopts_whatever_geometry_it_is_given() {
+        let index = Index::in_memory().unwrap();
+        settle_geometry(&index, &geometry(800, 100)).unwrap();
+        assert_eq!(index.geometry().unwrap(), Some((800, 100)));
+    }
+
+    #[test]
+    fn the_same_geometry_twice_is_not_a_change() {
+        let index = populated();
+        settle_geometry(
+            &index,
+            &geometry(DEFAULT_TARGET_CHARS, DEFAULT_OVERLAP_CHARS),
+        )
+        .unwrap();
+        settle_geometry(
+            &index,
+            &geometry(DEFAULT_TARGET_CHARS, DEFAULT_OVERLAP_CHARS),
+        )
+        .unwrap();
+    }
+
+    /// The silent bill this guard exists to refuse: different geometry means different
+    /// chunk text, different hashes, two sets of chunks and a whole corpus re-embedded.
+    #[test]
+    fn changing_the_geometry_under_a_populated_index_is_refused() {
+        let index = populated();
+        settle_geometry(
+            &index,
+            &geometry(DEFAULT_TARGET_CHARS, DEFAULT_OVERLAP_CHARS),
+        )
+        .unwrap();
+
+        let err = settle_geometry(&index, &geometry(800, 100))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--rebuild"), "{err}");
+        assert!(err.contains("orphaned"), "the cost is stated: {err}");
+        assert_eq!(
+            index.geometry().unwrap(),
+            Some((DEFAULT_TARGET_CHARS, DEFAULT_OVERLAP_CHARS)),
+            "a refused change must not be recorded"
+        );
+    }
+
+    /// A rebuild that empties the index licenses a change, because nothing built at the
+    /// old geometry survives to be mixed with.
+    #[test]
+    fn clearing_the_index_licenses_a_change_of_geometry() {
+        let mut index = populated();
+        settle_geometry(
+            &index,
+            &geometry(DEFAULT_TARGET_CHARS, DEFAULT_OVERLAP_CHARS),
+        )
+        .unwrap();
+
+        index.clear().unwrap();
+        settle_geometry(&index, &geometry(800, 100)).unwrap();
+        assert_eq!(index.geometry().unwrap(), Some((800, 100)));
+    }
+
+    /// `--rebuild --source tampa` that leaves another source's chunks behind does not.
+    /// The flag is not what decides this; the surviving chunks are.
+    #[test]
+    fn a_scoped_rebuild_that_leaves_chunks_behind_does_not() {
+        let mut index = two_sources();
+        settle_geometry(
+            &index,
+            &geometry(DEFAULT_TARGET_CHARS, DEFAULT_OVERLAP_CHARS),
+        )
+        .unwrap();
+
+        index.clear_source("tampa").unwrap();
+        assert!(
+            index.stats().unwrap().chunks > 0,
+            "pinellas is still in there"
+        );
+
+        let err = settle_geometry(&index, &geometry(800, 100))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--rebuild"), "{err}");
+    }
+
+    /// An index written before the geometry was recorded. Its chunks can only be assumed
+    /// to use the defaults, so that is the only thing it may silently adopt.
+    #[test]
+    fn an_index_with_no_recorded_geometry_may_only_assume_the_defaults() {
+        let index = populated();
+        assert_eq!(index.geometry().unwrap(), None);
+
+        let err = settle_geometry(&index, &geometry(800, 100))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("records no chunk geometry"), "{err}");
+
+        settle_geometry(
+            &index,
+            &geometry(DEFAULT_TARGET_CHARS, DEFAULT_OVERLAP_CHARS),
+        )
+        .unwrap();
+        assert_eq!(
+            index.geometry().unwrap(),
+            Some((DEFAULT_TARGET_CHARS, DEFAULT_OVERLAP_CHARS))
+        );
+    }
+
+    // ── re-extraction ──────────────────────────────────────────────────────────
+
+    /// A store holding one page and `n` successive extractions of it, each different.
+    async fn store_with_extractions(texts: &[&str]) -> (tempfile::TempDir, Ctx) {
+        use crate::domain::Derivation;
+        use crate::store::{LogRecord, Store};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).await.unwrap();
+        let id = SourceId::new("tampa").unwrap();
+
+        let obs = store
+            .record_observation(
+                &Resource::new(id.clone(), "https://tampa.gov/agenda"),
+                b"<html>the original bytes</html>",
+                jiff::Timestamp::now(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+        for (i, text) in texts.iter().enumerate() {
+            let to_sha = store.put_blob(text.as_bytes()).await.unwrap();
+            store
+                .append(
+                    &id,
+                    &LogRecord::Derivation(Derivation {
+                        from_sha: obs.blob_sha.clone(),
+                        to_sha,
+                        tool: "htmd".into(),
+                        version: format!("0.{i}"),
+                        model_tier: None,
+                        at: jiff::Timestamp::now(),
+                        anchors: Vec::new(),
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+        (dir, Ctx::new(store))
+    }
+
+    fn body(word: &str) -> String {
+        format!(
+            "# Agenda\n\n{}",
+            format!("The council discussed the {word}. ").repeat(80)
+        )
+    }
+
+    /// The defect `run --refresh` now avoids. Re-extracting produces a *new* derived
+    /// blob, so its chunks are added — and nothing removes the previous extraction's, so
+    /// search answers from both.
+    #[tokio::test]
+    async fn re_extraction_leaves_the_old_chunks_unless_the_index_is_rebuilt() {
+        let (_dir, ctx) = store_with_extractions(&[&body("budget"), &body("zoning")]).await;
+
+        let added = index(&ctx, IndexArgs::default(), &Progress::none())
+            .await
+            .unwrap();
+        assert_eq!(added.derivations, 2);
+        let both = added.total_chunks;
+        assert!(both > 2, "{both} chunks");
+
+        // Both extractions are in there, which is the corpus answering twice.
+        let idx = Index::open(ctx.store.index_path()).unwrap();
+        assert!(!idx.search("budget", 5, None).unwrap().is_empty());
+        assert!(!idx.search("zoning", 5, None).unwrap().is_empty());
+
+        // What `run --refresh` now asks for.
+        let rebuilt = index(
+            &ctx,
+            IndexArgs {
+                rebuild: true,
+                ..Default::default()
+            },
+            &Progress::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rebuilt.total_chunks, both,
+            "a rebuild replaces the index rather than adding to it"
+        );
+    }
 
     #[test]
     fn title_comes_from_the_first_heading() {

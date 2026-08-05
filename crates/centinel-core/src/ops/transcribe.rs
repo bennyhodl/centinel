@@ -23,13 +23,11 @@
 //! same audio through `whisper-tiny` and `whisper-large-v3-turbo` yields materially
 //! different text, and without the tier a re-run would look like the recording changed.
 
-use std::collections::HashSet;
-
 use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::fetch::content_kind;
+use crate::fetch::{SNIFF_BYTES, content_kind};
 use crate::prelude::*;
 use crate::store::LogRecord;
 use crate::transcribe::{Transcriber, WORKER};
@@ -181,20 +179,17 @@ pub async fn transcribe(
     let mut todo: Vec<(SourceId, Resource, Observation)> = Vec::new();
 
     for source in &sources {
-        let log = ctx.store.read_log(source).await?;
-        let transcribed: HashSet<_> = log
-            .iter()
-            .filter_map(|r| match r {
-                // Keyed by source blob and tool: a text derivation of the *metadata* for
-                // the same video must not be mistaken for a transcript of its audio.
-                LogRecord::Derivation(d) if d.tool == TOOL => Some(d.from_sha.clone()),
-                _ => None,
-            })
-            .collect();
+        let replay = ctx.store.replay(source).await?;
+        // Keyed by tool: a text derivation of a video's *metadata* must not be mistaken
+        // for a transcript of its audio.
+        let transcribed = replay.derived_by(TOOL);
 
-        for (resource, obs) in ctx.store.latest_observations(source).await? {
-            // Cheap check first: only read bytes for blobs that could plausibly be audio.
-            let head = ctx.store.get_blob(&obs.blob_sha).await?;
+        for (resource, obs) in replay.latest_observations() {
+            // The head, and only the head. This asks "is this audio?" of every blob in
+            // the corpus, and `get_blob` answers it by reading the whole file and hashing
+            // it — so building a work list over a store of PDFs used to read and hash
+            // every PDF in it.
+            let head = ctx.store.blob_head(&obs.blob_sha, SNIFF_BYTES).await?;
             if content_kind(&obs.meta, &head) != "audio" {
                 continue;
             }
@@ -237,10 +232,22 @@ pub async fn transcribe(
     // non-vocal — a transcript produced without VAD is a different artifact, not a
     // slightly worse one.
     if !transcriber.has_vad() && !args.allow_no_vad {
+        // The command comes from `models::resolve`, so it names the VAD the registry
+        // actually pins rather than the one that was current when this was written.
+        let fix = crate::models::REGISTRY
+            .iter()
+            .find(|s| s.role == crate::models::ModelRole::VoiceActivity)
+            .and_then(|s| {
+                crate::models::resolve(s.id, crate::models::ModelRole::VoiceActivity, None, &root)
+                    .err()
+                    .and_then(|e| e.fix().map(str::to_string))
+            })
+            .unwrap_or_else(|| "centinel models pull".to_string());
+
         anyhow::bail!(
             "no VAD weights installed. Whisper hallucinates over the dead air a council \
              recording is full of, so transcription without VAD is refused by default.\n  \
-             fix:      centinel models pull silero-vad\n  \
+             fix:      {fix}\n  \
              override: --allow-no-vad (recorded on every derivation)"
         );
     }

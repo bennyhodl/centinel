@@ -15,6 +15,25 @@
 //!
 //! Blobs are **pooled across Sources** — the same PDF on two `.gov` sites stores once.
 //! Logs and trees are **per-Source**, so a single city's corpus stays separable.
+//!
+//! ## The layout is named here and nowhere else
+//!
+//! The tree above used to be a description of what callers happened to agree on. Six
+//! other files joined their own paths onto the root — `centinel.db` in three of them,
+//! only one of which checked whether the file existed — so a change to this layout would
+//! have been a silent divergence rather than a compile error.
+//!
+//! ## The read side is one pass, and says so
+//!
+//! Everything derived from a Source's log — liveness, the latest Observation per
+//! Resource, what has been derived from what — comes out of [`Replay`], which reads and
+//! parses the log **once**. The convenience methods on [`Store`] are each one pass of
+//! their own, which is fine for one question and wrong for three.
+//!
+//! Three was the normal case. `resolve` walked every log twice per source, `extract`,
+//! `list` and `transcribe` twice each, and no call site could see that it was paying for
+//! more than one: reading a single page out of a five-source store cost eleven full log
+//! reads before anything opened.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,7 +45,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::domain::{
     BlobSha, Derivation, DiscoveryRun, Fingerprint, Liveness, Observation, Resource,
-    ResourceStatus, SourceId,
+    ResourceStatus, SourceId, Underivable,
 };
 
 /// One line of a `log/<source>/YYYY-MM.jsonl` file.
@@ -40,6 +59,9 @@ pub enum LogRecord {
     DiscoveryRun(DiscoveryRun),
     Status(ResourceStatus),
     Derivation(Derivation),
+    /// A derivation that was attempted and produced nothing. Kept because the alternative
+    /// is attempting it again on every run for the life of the corpus.
+    Underivable(Underivable),
 }
 
 impl LogRecord {
@@ -49,6 +71,7 @@ impl LogRecord {
             Self::DiscoveryRun(d) => d.at,
             Self::Status(s) => s.last_checked,
             Self::Derivation(d) => d.at,
+            Self::Underivable(u) => u.at,
         }
     }
 }
@@ -72,6 +95,9 @@ pub enum StoreError {
         source: serde_json::Error,
     },
 
+    #[error("no index at {} — run `centinel index` first", path.display())]
+    NoIndex { path: PathBuf },
+
     #[error("io error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -81,6 +107,9 @@ pub enum StoreError {
 }
 
 type Result<T> = std::result::Result<T, StoreError>;
+
+/// The SQLite file, named once.
+pub const INDEX_FILE: &str = "centinel.db";
 
 fn io_at(path: impl Into<PathBuf>) -> impl FnOnce(std::io::Error) -> StoreError {
     let path = path.into();
@@ -106,8 +135,103 @@ impl Store {
         Ok(Self { root })
     }
 
+    /// A handle on a store that already exists, creating nothing.
+    ///
+    /// For readers, and synchronous — [`Self::open`] creates the tree and so has to be
+    /// awaited, which put the layout out of reach of anything not already in an async
+    /// context. That is one of the reasons callers went around this module and spelled
+    /// the paths out themselves.
+    pub fn at(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    // ---- the layout ------------------------------------------------------------------
+    //
+    // Every path under the root is named here and nowhere else. It was named in six other
+    // files, which meant the tree in this module's header was a description of what
+    // callers happened to agree on rather than a thing anything enforced — and only one
+    // of the three callers that opened `centinel.db` checked whether it existed.
+
+    /// `blobs/` — the content-addressed pool.
+    pub fn blobs_dir(&self) -> PathBuf {
+        self.root.join("blobs")
+    }
+
+    /// `current/` — the URL-mirroring tree. Derived, and safe to delete.
+    pub fn current_dir(&self) -> PathBuf {
+        self.root.join("current")
+    }
+
+    /// `cache/embeddings/` — durable vectors, keyed by chunk hash.
+    pub fn vector_cache_dir(&self) -> PathBuf {
+        self.root.join("cache").join("embeddings")
+    }
+
+    /// `centinel.db` — the SQLite metadata and FTS5 index. Derived, and rebuildable.
+    pub fn index_path(&self) -> PathBuf {
+        self.root.join(INDEX_FILE)
+    }
+
+    /// The index path, or an error naming the command that builds one.
+    ///
+    /// For readers. `index` itself wants [`Self::index_path`], because creating the file
+    /// is its job.
+    pub fn require_index(&self) -> Result<PathBuf> {
+        let path = self.index_path();
+        if !path.exists() {
+            return Err(StoreError::NoIndex { path });
+        }
+        Ok(path)
+    }
+
+    /// Counts blobs in the pool.
+    ///
+    /// Knows that a `.<sha>.tmp` file is a write in flight rather than a blob, because
+    /// [`Self::put_blob`] is what creates them. `doctor` used to re-derive that rule from
+    /// the other side of the module, which meant a change to the write convention would
+    /// have silently mis-counted rather than failed.
+    pub async fn count_blobs(&self) -> Result<u64> {
+        let blobs = self.blobs_dir();
+        let mut count = 0u64;
+
+        let mut lvl1 = match tokio::fs::read_dir(&blobs).await {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => {
+                return Err(StoreError::Io {
+                    path: blobs,
+                    source: e,
+                });
+            }
+        };
+        while let Some(a) = lvl1.next_entry().await.map_err(io_at(&blobs))? {
+            if !a.file_type().await.map_err(io_at(a.path()))?.is_dir() {
+                continue;
+            }
+            let mut lvl2 = tokio::fs::read_dir(a.path())
+                .await
+                .map_err(io_at(a.path()))?;
+            while let Some(b) = lvl2.next_entry().await.map_err(io_at(a.path()))? {
+                if !b.file_type().await.map_err(io_at(b.path()))?.is_dir() {
+                    continue;
+                }
+                let mut lvl3 = tokio::fs::read_dir(b.path())
+                    .await
+                    .map_err(io_at(b.path()))?;
+                while let Some(f) = lvl3.next_entry().await.map_err(io_at(b.path()))? {
+                    if f.file_type().await.map_err(io_at(f.path()))?.is_file()
+                        && !f.file_name().to_string_lossy().starts_with('.')
+                    {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        Ok(count)
     }
 
     // ---- blobs: the content-addressed pool -------------------------------------------
@@ -180,6 +304,42 @@ impl Store {
             });
         }
         Ok(bytes)
+    }
+
+    /// Reads at most `limit` bytes from the front of a blob, **without** verifying it.
+    ///
+    /// For classification, which needs a few hundred bytes and reads every blob in the
+    /// corpus to build a work list. [`Self::get_blob`] cannot serve that: it reads the
+    /// whole file and hashes it, so asking "is this audio?" about a store of PDFs meant
+    /// reading and hashing every PDF — gigabytes of work to answer a question the first
+    /// four kilobytes settle.
+    ///
+    /// The absent verification is the trade and it is stated here rather than assumed: a
+    /// partial read cannot be checked against a whole-file digest. Anything that will be
+    /// *shown to a person* or written back into the record must go through `get_blob`.
+    pub async fn blob_head(&self, sha: &BlobSha, limit: usize) -> Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+
+        let p = self.blob_path(sha);
+        let mut file = match tokio::fs::File::open(&p).await {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StoreError::BlobNotFound(sha.clone()));
+            }
+            Err(e) => return Err(StoreError::Io { path: p, source: e }),
+        };
+
+        let mut buf = vec![0u8; limit];
+        let mut read = 0usize;
+        while read < limit {
+            let n = file.read(&mut buf[read..]).await.map_err(io_at(&p))?;
+            if n == 0 {
+                break;
+            }
+            read += n;
+        }
+        buf.truncate(read);
+        Ok(buf)
     }
 
     // ---- log: append-only truth ------------------------------------------------------
@@ -290,62 +450,56 @@ impl Store {
 
     // ---- derived views ---------------------------------------------------------------
 
-    /// Replays the log into current per-Resource liveness (§4.4).
+    /// Replays a Source's whole log into memory, once.
     ///
-    /// Derived, never stored as truth — which is why a corrupted view costs a replay
-    /// rather than an investigation.
-    pub async fn statuses(&self, source: &SourceId) -> Result<BTreeMap<Resource, ResourceStatus>> {
-        let mut map: BTreeMap<Resource, ResourceStatus> = BTreeMap::new();
-
-        for rec in self.read_log(source).await? {
-            match rec {
-                // A successful Observation implies Live, even with no Status record.
-                LogRecord::Observation(o) => {
-                    map.entry(o.resource.clone())
-                        .and_modify(|s| s.apply(Liveness::Live, o.at, None))
-                        .or_insert_with(|| ResourceStatus::new_live(o.resource.clone(), o.at));
-                }
-                LogRecord::Status(s) => {
-                    map.insert(s.resource.clone(), s);
-                }
-                LogRecord::DiscoveryRun(_) | LogRecord::Derivation(_) => {}
-            }
-        }
-        Ok(map)
+    /// **The read side of this module.** Every question below — what is live, what was
+    /// last observed, what has been derived from what — is answered from one pass, and
+    /// the convenience methods that follow are each one pass of their own.
+    ///
+    /// That distinction is the whole point. Answering three questions about a source used
+    /// to mean reading and parsing its log three times, and no call site could see that
+    /// it was doing so: `resolve` walked every log twice per source, `extract`, `list`
+    /// and `transcribe` twice each. Reading a single page out of a five-source store cost
+    /// eleven full log reads.
+    pub async fn replay(&self, source: &SourceId) -> Result<Replay> {
+        Ok(Replay {
+            source: source.clone(),
+            records: self.read_log(source).await?,
+        })
     }
 
-    /// The most recent Observation per Resource, by log order.
+    /// Replays a Source's liveness. One pass — see [`Self::replay`] to ask more than one
+    /// question for the price of one.
+    pub async fn statuses(&self, source: &SourceId) -> Result<BTreeMap<Resource, ResourceStatus>> {
+        Ok(self.replay(source).await?.statuses())
+    }
+
+    /// The most recent Observation per Resource. One pass.
     pub async fn latest_observations(
         &self,
         source: &SourceId,
     ) -> Result<BTreeMap<Resource, Observation>> {
-        let mut map: BTreeMap<Resource, Observation> = BTreeMap::new();
-        for rec in self.read_log(source).await? {
-            if let LogRecord::Observation(o) = rec {
-                match map.get(&o.resource) {
-                    Some(prev) if prev.at > o.at => {}
-                    _ => {
-                        map.insert(o.resource.clone(), o);
-                    }
-                }
-            }
-        }
-        Ok(map)
+        Ok(self.replay(source).await?.latest_observations())
     }
 
-    /// The full Observation history of one Resource, oldest first.
+    /// The newest Derivation taking `from` as its input. One pass.
+    pub async fn latest_derivation(
+        &self,
+        source: &SourceId,
+        from: &BlobSha,
+    ) -> Result<Option<Derivation>> {
+        Ok(self.replay(source).await?.latest_derivation(from).cloned())
+    }
+
+    /// The full Observation history of one Resource, oldest first. One pass.
     pub async fn history(&self, resource: &Resource) -> Result<Vec<Observation>> {
-        let mut out: Vec<Observation> = self
-            .read_log(&resource.source)
+        Ok(self
+            .replay(&resource.source)
             .await?
+            .history(resource)
             .into_iter()
-            .filter_map(|r| match r {
-                LogRecord::Observation(o) if &o.resource == resource => Some(o),
-                _ => None,
-            })
-            .collect();
-        out.sort_by_key(|o| o.at);
-        Ok(out)
+            .cloned()
+            .collect())
     }
 
     /// Records an Observation: blob into the pool, line into the log.
@@ -400,10 +554,443 @@ impl Store {
     }
 }
 
+/// One Source's log, read once and answerable many times.
+///
+/// Holds the records; every method here is an in-memory scan over them, which is free
+/// beside the disk read and the JSON parse that produced them. Nothing is cached or
+/// invalidated, because a `Replay` is a **snapshot**: it answers what the log said when
+/// it was read, and a caller that needs to see an append it just made takes a new one.
+#[derive(Clone, Debug)]
+pub struct Replay {
+    source: SourceId,
+    records: Vec<LogRecord>,
+}
+
+impl Replay {
+    pub fn source(&self) -> &SourceId {
+        &self.source
+    }
+
+    /// Every record, in log order. The escape hatch for a question this type does not
+    /// yet answer — and the signal that it should learn to.
+    pub fn records(&self) -> &[LogRecord] {
+        &self.records
+    }
+
+    /// True when this Source has no log at all. Distinct from "collected nothing".
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    /// Current per-Resource liveness (§4.4).
+    ///
+    /// Derived, never stored as truth — which is why a corrupted view costs a replay
+    /// rather than an investigation.
+    pub fn statuses(&self) -> BTreeMap<Resource, ResourceStatus> {
+        let mut map: BTreeMap<Resource, ResourceStatus> = BTreeMap::new();
+        for rec in &self.records {
+            match rec {
+                // A successful Observation implies Live, even with no Status record.
+                LogRecord::Observation(o) => {
+                    map.entry(o.resource.clone())
+                        .and_modify(|s| s.apply(Liveness::Live, o.at, None))
+                        .or_insert_with(|| ResourceStatus::new_live(o.resource.clone(), o.at));
+                }
+                LogRecord::Status(s) => {
+                    map.insert(s.resource.clone(), s.clone());
+                }
+                LogRecord::DiscoveryRun(_)
+                | LogRecord::Derivation(_)
+                | LogRecord::Underivable(_) => {}
+            }
+        }
+        map
+    }
+
+    /// The most recent Observation per Resource, by timestamp then log order.
+    pub fn latest_observations(&self) -> BTreeMap<Resource, Observation> {
+        let mut map: BTreeMap<Resource, Observation> = BTreeMap::new();
+        for rec in &self.records {
+            if let LogRecord::Observation(o) = rec {
+                match map.get(&o.resource) {
+                    Some(prev) if prev.at > o.at => {}
+                    _ => {
+                        map.insert(o.resource.clone(), o.clone());
+                    }
+                }
+            }
+        }
+        map
+    }
+
+    /// Every address this Source has ever successfully fetched.
+    ///
+    /// The resume question, and cheaper than [`Self::latest_observations`] when only
+    /// membership is wanted.
+    pub fn observed(&self) -> std::collections::HashSet<&str> {
+        self.records
+            .iter()
+            .filter_map(|r| match r {
+                LogRecord::Observation(o) => Some(o.resource.natural_key.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The newest snapshot of what this Source declares it has.
+    pub fn latest_discovery(&self) -> Option<&DiscoveryRun> {
+        self.records
+            .iter()
+            .filter_map(|r| match r {
+                LogRecord::DiscoveryRun(d) => Some(d),
+                _ => None,
+            })
+            .next_back()
+    }
+
+    /// How this Source was most recently enumerated — `sitemap`, `playlist` — or empty.
+    ///
+    /// The provenance §4.3 records, and the discriminator that recovers a Source's kind
+    /// from the store alone.
+    pub fn discovery_method(&self) -> &str {
+        self.latest_discovery()
+            .map(|d| d.method.as_str())
+            .unwrap_or_default()
+    }
+
+    /// The newest Derivation taking `from` as its input.
+    ///
+    /// Newest wins because a re-extraction with a better tool supersedes an older one,
+    /// and the Derivation carries the tool and version that say which is which (§4.6).
+    pub fn latest_derivation(&self, from: &BlobSha) -> Option<&Derivation> {
+        self.derivations().rfind(|d| &d.from_sha == from)
+    }
+
+    pub fn derivations(&self) -> impl DoubleEndedIterator<Item = &Derivation> {
+        self.records.iter().filter_map(|r| match r {
+            LogRecord::Derivation(d) => Some(d),
+            _ => None,
+        })
+    }
+
+    /// Blobs this tool has already derived something from.
+    ///
+    /// Keyed by tool because a text derivation of a video's *metadata* must not be
+    /// mistaken for a transcript of its audio.
+    pub fn derived_by(&self, tool: &str) -> std::collections::HashSet<&BlobSha> {
+        self.derivations()
+            .filter(|d| d.tool == tool)
+            .map(|d| &d.from_sha)
+            .collect()
+    }
+
+    /// Blobs this pipeline at this version already gave up on.
+    ///
+    /// Keyed by version as well as tool, so bumping the version re-attempts everything a
+    /// previous one could not read, and nothing else.
+    pub fn underivable_by(&self, tool: &str, version: &str) -> std::collections::HashSet<&BlobSha> {
+        self.records
+            .iter()
+            .filter_map(|r| match r {
+                LogRecord::Underivable(u) if u.tool == tool && u.version == version => {
+                    Some(&u.from_sha)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every derived blob, mapped back to the blob it came from.
+    ///
+    /// The reverse of [`Self::latest_derivation`], and what lets a hash printed for an
+    /// extraction be typed back in. A derived blob is not an Observation — no server ever
+    /// served it — so nothing that looked only at Observations could resolve one.
+    pub fn derived_from(&self) -> BTreeMap<&BlobSha, &BlobSha> {
+        self.derivations()
+            .map(|d| (&d.to_sha, &d.from_sha))
+            .collect()
+    }
+
+    /// The full Observation history of one Resource, oldest first.
+    pub fn history(&self, resource: &Resource) -> Vec<&Observation> {
+        let mut out: Vec<&Observation> = self
+            .records
+            .iter()
+            .filter_map(|r| match r {
+                LogRecord::Observation(o) if &o.resource == resource => Some(o),
+                _ => None,
+            })
+            .collect();
+        out.sort_by_key(|o| o.at);
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::Liveness;
+
+    // ── the read side ──────────────────────────────────────────────────────────
+
+    /// One source holding a page, its extraction, a refusal and a snapshot.
+    async fn corpus(dir: &std::path::Path) -> (Store, SourceId, BlobSha, BlobSha) {
+        let store = Store::open(dir).await.unwrap();
+        let id = SourceId::new("tampa").unwrap();
+        let page = Resource::new(id.clone(), "https://tampa.gov/agenda.pdf");
+        let gone = Resource::new(id.clone(), "https://tampa.gov/removed.pdf");
+
+        store
+            .append(
+                &id,
+                &LogRecord::DiscoveryRun(DiscoveryRun {
+                    source: id.clone(),
+                    at: ts("2026-01-01T00:00:00Z"),
+                    resources: vec![page.clone(), gone.clone()],
+                    method: "sitemap".into(),
+                }),
+            )
+            .await
+            .unwrap();
+
+        let obs = store
+            .record_observation(&page, b"%PDF-1.7 one", ts("2026-01-02T00:00:00Z"), meta())
+            .await
+            .unwrap();
+
+        let text = store.put_blob(b"# Agenda").await.unwrap();
+        store
+            .append(
+                &id,
+                &LogRecord::Derivation(Derivation {
+                    from_sha: obs.blob_sha.clone(),
+                    to_sha: text.clone(),
+                    tool: "pdf-inspector".into(),
+                    version: "0.1".into(),
+                    model_tier: None,
+                    at: ts("2026-01-03T00:00:00Z"),
+                    anchors: Vec::new(),
+                }),
+            )
+            .await
+            .unwrap();
+
+        let mut status = ResourceStatus::new_live(gone, ts("2026-01-02T00:00:00Z"));
+        status.apply(
+            Liveness::Gone,
+            ts("2026-01-04T00:00:00Z"),
+            Some("HTTP 404".into()),
+        );
+        store.append(&id, &LogRecord::Status(status)).await.unwrap();
+
+        (store, id, obs.blob_sha, text)
+    }
+
+    fn meta() -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
+
+    /// The point of the type: every view below used to cost its own disk read and JSON
+    /// parse, and no call site could see that it was paying for several.
+    #[tokio::test]
+    async fn one_replay_answers_every_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, original, derived) = corpus(dir.path()).await;
+        let replay = store.replay(&id).await.unwrap();
+
+        assert!(!replay.is_empty());
+        assert_eq!(replay.discovery_method(), "sitemap");
+        assert_eq!(replay.latest_discovery().unwrap().resources.len(), 2);
+        assert_eq!(replay.latest_observations().len(), 1);
+        assert_eq!(replay.observed().len(), 1);
+
+        let statuses = replay.statuses();
+        assert_eq!(statuses.len(), 2, "one observed, one refused");
+        assert!(statuses.values().any(|s| s.state == Liveness::Gone));
+
+        assert_eq!(replay.latest_derivation(&original).unwrap().to_sha, derived);
+        assert_eq!(replay.derived_from()[&derived], &original);
+        assert!(replay.derived_by("pdf-inspector").contains(&original));
+    }
+
+    /// A `Replay` answers what the log said when it was read. Nothing invalidates it,
+    /// so a caller that appends and expects to see the append must take a fresh one.
+    #[tokio::test]
+    async fn a_replay_is_a_snapshot_not_a_live_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, _, _) = corpus(dir.path()).await;
+        let before = store.replay(&id).await.unwrap();
+
+        store
+            .record_observation(
+                &Resource::new(id.clone(), "https://tampa.gov/new.pdf"),
+                b"%PDF-1.7 two",
+                ts("2026-02-01T00:00:00Z"),
+                meta(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(before.latest_observations().len(), 1, "the snapshot held");
+        assert_eq!(
+            store.replay(&id).await.unwrap().latest_observations().len(),
+            2
+        );
+    }
+
+    /// A text derivation of a video's *metadata* must not read as a transcript of its
+    /// audio, which is why the skip key is the tool and not just the blob.
+    #[tokio::test]
+    async fn derivations_are_keyed_by_the_tool_that_made_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, original, _) = corpus(dir.path()).await;
+        let replay = store.replay(&id).await.unwrap();
+
+        assert!(replay.derived_by("pdf-inspector").contains(&original));
+        assert!(replay.derived_by("whisper-rs").is_empty());
+    }
+
+    /// Newest wins: a re-extraction with a better tool supersedes an older one.
+    #[tokio::test]
+    async fn the_newest_derivation_of_a_blob_is_the_one_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, original, first) = corpus(dir.path()).await;
+
+        let better = store.put_blob(b"# Agenda\n\nwith tables").await.unwrap();
+        store
+            .append(
+                &id,
+                &LogRecord::Derivation(Derivation {
+                    from_sha: original.clone(),
+                    to_sha: better.clone(),
+                    tool: "pdf-inspector".into(),
+                    version: "0.2".into(),
+                    model_tier: None,
+                    at: ts("2026-03-01T00:00:00Z"),
+                    anchors: Vec::new(),
+                }),
+            )
+            .await
+            .unwrap();
+
+        let replay = store.replay(&id).await.unwrap();
+        let latest = replay.latest_derivation(&original).unwrap();
+        assert_eq!(latest.to_sha, better);
+        assert_eq!(latest.version, "0.2");
+        // Both are still addressable — the record is append-only.
+        assert_eq!(replay.derived_from().len(), 2);
+        assert!(replay.derived_from().contains_key(&first));
+    }
+
+    #[tokio::test]
+    async fn a_source_with_no_log_replays_to_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let replay = store
+            .replay(&SourceId::new("nobody").unwrap())
+            .await
+            .unwrap();
+
+        assert!(replay.is_empty());
+        assert_eq!(replay.discovery_method(), "");
+        assert!(replay.latest_discovery().is_none());
+        assert!(replay.statuses().is_empty());
+    }
+
+    // ── blobs ──────────────────────────────────────────────────────────────────
+
+    /// The read that makes classification cheap. `get_blob` reads the whole file and
+    /// hashes it, so asking "is this audio?" of a corpus of PDFs used to read every one.
+    #[tokio::test]
+    async fn a_head_read_stops_at_the_length_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let big = vec![b'x'; 100_000];
+        let sha = store.put_blob(&big).await.unwrap();
+
+        assert_eq!(store.blob_head(&sha, 16).await.unwrap().len(), 16);
+        assert_eq!(store.blob_head(&sha, 100_000).await.unwrap().len(), 100_000);
+        // Asking for more than there is returns what there is, not an error.
+        assert_eq!(store.blob_head(&sha, 200_000).await.unwrap().len(), 100_000);
+        assert_eq!(store.blob_head(&sha, 4).await.unwrap(), b"xxxx");
+    }
+
+    #[tokio::test]
+    async fn a_head_read_of_a_missing_blob_says_which_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let absent = BlobSha::from_bytes(b"never stored");
+
+        let err = store.blob_head(&absent, 16).await.unwrap_err();
+        assert!(matches!(err, StoreError::BlobNotFound(_)), "{err}");
+    }
+
+    /// `put_blob` writes `.<sha>.tmp` and renames. The counter has to know that, and
+    /// `doctor` used to re-derive the rule from the other side of the module.
+    #[tokio::test]
+    async fn counting_blobs_ignores_a_write_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        assert_eq!(store.count_blobs().await.unwrap(), 0);
+
+        let sha = store.put_blob(b"a real blob").await.unwrap();
+        assert_eq!(store.count_blobs().await.unwrap(), 1);
+
+        // A torn write, left exactly where `put_blob` would leave one.
+        let pool = store.blob_path_of(&sha);
+        let tmp = pool
+            .parent()
+            .unwrap()
+            .join(format!(".{}.tmp", BlobSha::from_bytes(b"half-written")));
+        tokio::fs::write(&tmp, b"half").await.unwrap();
+
+        assert_eq!(
+            store.count_blobs().await.unwrap(),
+            1,
+            "a write in flight is not a blob"
+        );
+    }
+
+    /// SPEC §5 names every one of these paths, and this module is now the only place
+    /// that spells them. A caller that re-derived one — and six did — could drift from
+    /// the layout without anything failing.
+    #[tokio::test]
+    async fn the_layout_is_the_one_spec_5_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path()).await.unwrap();
+
+        assert!(s.blobs_dir().ends_with("blobs"));
+        assert!(s.current_dir().ends_with("current"));
+        assert!(s.vector_cache_dir().ends_with("cache/embeddings"));
+        assert!(s.index_path().ends_with("centinel.db"));
+        assert!(
+            s.blob_path_of(&BlobSha::from_bytes(b"x"))
+                .starts_with(s.blobs_dir())
+        );
+    }
+
+    /// A reader gets a handle without the tree being created underneath it.
+    #[test]
+    fn a_read_only_handle_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("absent");
+        let s = Store::at(&root);
+        assert_eq!(s.index_path(), root.join("centinel.db"));
+        assert!(!root.exists(), "`at` must not create anything");
+    }
+
+    /// Readers get a path or an instruction, never a missing-file error from SQLite.
+    #[tokio::test]
+    async fn asking_for_a_missing_index_names_the_command_that_builds_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path()).await.unwrap();
+
+        let err = s.require_index().map(|_| ()).unwrap_err().to_string();
+        assert!(err.contains("centinel index"), "{err}");
+
+        std::fs::write(s.index_path(), b"").unwrap();
+        assert!(s.require_index().is_ok());
+    }
 
     async fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();

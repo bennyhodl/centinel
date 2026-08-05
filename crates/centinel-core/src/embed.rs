@@ -24,7 +24,7 @@
 //! error anywhere. Hence [`tests::the_recipe_separates_a_relevant_document_from_an_irrelevant_one`],
 //! which asserts on semantics rather than on shapes.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 
 use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
@@ -97,46 +97,26 @@ impl Embedder {
     /// makes fetching an explicit operator action, so that a scheduled run can fail on a
     /// missing model but never decide to pull gigabytes on its own.
     pub fn load(root: &Path, model_id: &str, variant: Option<&str>) -> anyhow::Result<Self> {
-        let spec = models::require(model_id)?;
-        anyhow::ensure!(
-            spec.role == ModelRole::Embedding,
-            "`{model_id}` is a {} model, not an embedder",
-            spec.role
-        );
-        let variant = spec.variant(variant)?;
-        let path = Self::weights_path(root, spec, variant.name)?;
+        // Through `models::resolve`, which checks each file against its *pinned size*.
+        // This used to test `path.is_file()`, so a truncated download read as installed
+        // here and as missing to `doctor`, and the load failed somewhere inside
+        // llama.cpp rather than naming the model to pull.
+        let found = models::resolve(model_id, ModelRole::Embedding, variant, root)?;
 
         let params = LlamaModelParams::default().with_n_gpu_layers(GPU_LAYERS);
-        let model = LlamaModel::load_from_file(backend()?, &path, &params)
-            .map_err(|e| anyhow::anyhow!("loading {}: {e}", path.display()))?;
+        let model = LlamaModel::load_from_file(backend()?, &found.path, &params)
+            .map_err(|e| anyhow::anyhow!("loading {}: {e}", found.path.display()))?;
 
         Ok(Self {
             model,
-            spec,
-            variant: variant.name,
+            spec: found.spec,
+            variant: found
+                .spec
+                .variant(Some(&found.variant))
+                .expect("a resolved variant is a spec variant")
+                .name,
             context_tokens: DEFAULT_CONTEXT_TOKENS,
         })
-    }
-
-    /// Locates a variant's single GGUF file, with an actionable error when it is absent.
-    fn weights_path(
-        root: &Path,
-        spec: &'static ModelSpec,
-        variant: &str,
-    ) -> anyhow::Result<PathBuf> {
-        let v = spec.variant(Some(variant))?;
-        let file = v
-            .files
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("{}/{variant} declares no files", spec.id))?;
-        let path = spec.dir(root).join(file.path);
-        anyhow::ensure!(
-            path.is_file(),
-            "weights missing: {}\n  run `centinel models pull {} --variant {variant}`",
-            path.display(),
-            spec.id
-        );
-        Ok(path)
     }
 
     pub fn model_id(&self) -> &'static str {

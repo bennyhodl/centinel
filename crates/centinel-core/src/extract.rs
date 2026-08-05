@@ -55,6 +55,22 @@ pub struct Extraction {
     pub notes: Vec<String>,
 }
 
+/// The extraction pipeline's own name, for recording that it could make nothing of a
+/// blob.
+///
+/// The individual tools name themselves on a successful [`crate::domain::Derivation`];
+/// a failure belongs to the dispatcher that chose between them, because the reason is
+/// almost always that no tool was chosen at all.
+pub const PIPELINE: &str = "centinel-extract";
+
+/// Bumped when the pipeline learns to read a kind it previously could not.
+///
+/// Recorded on every [`crate::domain::Underivable`], and therefore the switch that makes
+/// a corpus re-attempt blobs an earlier version gave up on. Deliberately not the crate
+/// version: a patch release that changes nothing about extraction should not re-read
+/// every audio file in the archive.
+pub const PIPELINE_VERSION: &str = "1";
+
 /// What extraction produced.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]

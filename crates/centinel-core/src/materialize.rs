@@ -153,15 +153,18 @@ pub fn relative_path(url: &str, kind: &str, head: &[u8]) -> PathBuf {
     path
 }
 
-/// Where a document lands under the store root.
+/// Where a document lands, given the `current/` tree it lands in.
+///
+/// Takes the tree rather than the store root, so the one place that knows `current/` is
+/// spelled `current/` stays [`Store::current_dir`].
 pub fn target_path(
-    root: &Path,
+    current: &Path,
     source: &SourceId,
     url: &str,
     kind: &str,
     head: &[u8],
 ) -> PathBuf {
-    root.join("current")
+    current
         .join(source.as_str())
         .join(relative_path(url, kind, head))
 }
@@ -179,7 +182,13 @@ pub async fn materialize(
     kind: &str,
 ) -> anyhow::Result<PathBuf> {
     let src = store.blob_path_of(blob_sha);
-    let dest = target_path(store.root(), source, url, kind, &head_of(&src).await?);
+    let dest = target_path(
+        &store.current_dir(),
+        source,
+        url,
+        kind,
+        &head_of(&src).await?,
+    );
 
     if tokio::fs::try_exists(&dest).await? {
         return Ok(dest);
@@ -356,7 +365,10 @@ mod tests {
     #[test]
     fn a_caption_track_is_named_as_the_json_it_is() {
         assert_eq!(
-            p("https://www.youtube.com/watch?v=VPMDoKtJQG8#captions.json3", "captions"),
+            p(
+                "https://www.youtube.com/watch?v=VPMDoKtJQG8#captions.json3",
+                "captions"
+            ),
             "www.youtube.com/watch~92aa30ca.json"
         );
     }

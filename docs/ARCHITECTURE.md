@@ -67,9 +67,10 @@ The `Blocked` variant is load-bearing. A CloudFront/Akamai 403 would otherwise b
 
 ```
 Source  (trait — acquisition varies, nothing downstream does)
-  ├─ CrawledSite     discover: sitemap + links   id: URL          signal: content hash    (computed)
-  ├─ ApiClient       discover: paged query       id: vendor GUID  signal: LastModifiedUtc (asserted)
-  └─ YouTubeChannel  discover: playlist          id: video id     signal: metadata revision
+  ├─ SiteSource      enumerate: sitemap          id: URL          signal: content hash    (computed)
+  ├─ ChannelSource   enumerate: playlist         id: video id     signal: metadata revision
+  └─ ApiClient       enumerate: paged query      id: vendor GUID  signal: LastModifiedUtc (asserted)
+                     — not implemented; the shape the first two left room for
 
 DiscoveryRun    full snapshot of the Resource set a run observed
 Resource        (source, natural_key) — an ADDRESS
@@ -77,14 +78,21 @@ ResourceStatus  Live | Gone | Blocked | Error, + since, consecutive_failures, la
 Observation     one successful fetch — ALWAYS backed by a Blob
 Blob            content-addressed bytes
 Derivation      Blob → Blob edge, carrying tool + version + model tier + anchors
+Underivable     a derivation attempted that produced nothing — tool + version + reason
 ChangeEvent     materialized index, rebuildable from Observations
 ```
 
 Two ideas carry most of the weight:
 
-**`Source` is a trait, not an entity with a `kind` field.** The three implementations differ in `discover`, `fetch` and `change_signal`. Everything downstream is one shared model, so variation stays quarantined at the acquisition edge — the only place it genuinely exists.
+**`Source` is a trait, not an entity with a `kind` field.** Implementations differ in `enumerate`, `acquire` and `change_signal`. Everything downstream is one shared model, so variation stays quarantined at the acquisition edge — the only place it genuinely exists.
+
+The half that does *not* vary lives in `acquire`: one loop that derives the work list from the log, turns refusals into `ResourceStatus`, and keeps the counters, for any Source. `sources::from_config` is the only code that picks an adapter. So `discover` and `collect` are single verbs that name what happens rather than how — there is no `centinel youtube`, and adding a third kind adds no verb.
+
+`acquire` returns a **list** of artifacts rather than one blob, because a video is one address holding metadata, captions and audio, each with its own history. An earlier `fetch(&Resource) -> Fetched` had no possible implementation for that, which is why the kinds routed around the trait instead of through it.
 
 **A Resource is an *address*, not a thing in the world.** The January 14 council meeting reachable as a Granicus RSS item, an HTML page, a Legistar Matter and a YouTube video is **four Resources**, and the model makes no claim they are the same thing. Identity resolution across access paths is fuzzy, and a wrong merge silently corrupts the record. Four honest rows beat one confident wrong one.
+
+An **Observation always has bytes, and so does a Derivation.** Failures on the acquisition side become `ResourceStatus`; failures on the derivation side become `Underivable`. Without the second, "nothing can extract this" is unrecordable, and since every stage computes its work list by subtraction, an audio file gets read and re-attempted on every run for the life of the corpus.
 
 `Document`, `Transcript` and `Sitemap` are **not entities**. Derived artifacts are Blobs linked by a `Derivation` carrying tool, version and model tier — so "the source changed" stays mechanically distinguishable from "tesseract was upgraded". A sitemap is a `DiscoveryRun` snapshot.
 
@@ -289,12 +297,12 @@ not count as changed.
 
 ## Requirements
 
-Rust 1.85+. Centinel shells out to standalone binaries rather than running a second language runtime:
+Rust 1.85+. Centinel shells out to standalone binaries rather than running a second language runtime. Every call goes through `tool`, the module that owns child processes: each child is killed when its caller is dropped, carries a deadline sized for what it is doing, and never inherits our stdin. `open`'s launcher is the stated exception — it may be somebody's editor, so it takes the terminal and waits.
 
 | Binary | Needed for | Required |
 |---|---|---|
-| `pdftoppm` (poppler) | rasterising PDF pages for OCR — Rust cannot do this natively | yes |
-| `tesseract` | OCR | yes |
+| `pdftoppm` (poppler) | rasterising PDF pages for OCR — Rust cannot do this natively | not yet — nothing calls it |
+| `tesseract` | OCR | not yet — nothing calls it |
 | `yt-dlp` | YouTube acquisition | yes |
 | `ffmpeg` | audio extraction | no |
 
