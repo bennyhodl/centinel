@@ -294,7 +294,7 @@ not count as changed.
 
 ## Requirements
 
-Rust 1.85+. Centinel shells out to standalone binaries rather than running a second language runtime:
+Rust 1.85+. Centinel shells out to standalone binaries rather than running a second language runtime. Every call goes through `tool`, the module that owns child processes: each child is killed when its caller is dropped, carries a deadline sized for what it is doing, and never inherits our stdin. `open`'s launcher is the stated exception — it may be somebody's editor, so it takes the terminal and waits.
 
 | Binary | Needed for | Required |
 |---|---|---|

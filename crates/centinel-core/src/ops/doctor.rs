@@ -19,7 +19,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::models::{self, Gate, ModelRole};
+use std::time::Duration;
+
 use crate::prelude::*;
+use crate::tool::Tool;
 
 /// A subprocess dependency Centinel shells out to.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -319,10 +322,18 @@ async fn probe(name: &str, required: bool, purpose: &str) -> Binary {
     }
 }
 
+/// A probe's deadline.
+///
+/// `doctor` exists to answer "is this machine ready" quickly. A binary that cannot say
+/// its own name in ten seconds is a finding in itself, and hanging here would stall the
+/// one command someone runs *because* something is already wrong.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
 async fn which(name: &str) -> Option<String> {
-    let out = tokio::process::Command::new("sh")
+    let out = Tool::new("sh")
         .arg("-c")
         .arg(format!("command -v {name}"))
+        .timeout(PROBE_TIMEOUT)
         .output()
         .await
         .ok()?;
@@ -335,21 +346,19 @@ async fn which(name: &str) -> Option<String> {
 
 async fn version_of(name: &str) -> Option<String> {
     // poppler's tools print their version to stderr under `-v`; most others use
-    // `--version` on stdout. Try both rather than special-casing per tool.
+    // `--version` on stdout. Try both rather than special-casing per tool — and let
+    // `Output::first_line` be the one place that knows they disagree about the stream.
     for arg in ["--version", "-v"] {
-        let Ok(out) = tokio::process::Command::new(name).arg(arg).output().await else {
+        let Ok(out) = Tool::new(name)
+            .arg(arg)
+            .timeout(PROBE_TIMEOUT)
+            .output()
+            .await
+        else {
             continue;
         };
-        let merged = if out.stdout.is_empty() {
-            &out.stderr
-        } else {
-            &out.stdout
-        };
-        if let Some(line) = String::from_utf8_lossy(merged).lines().next() {
-            let line = line.trim();
-            if !line.is_empty() {
-                return Some(line.to_string());
-            }
+        if let Some(line) = out.first_line() {
+            return Some(line);
         }
     }
     None
@@ -418,12 +427,7 @@ impl Render for DoctorReport {
 
         p.section("binaries")?;
         p.nest(|p| {
-            let mut table = Table::bare(&[
-                Align::Left,
-                Align::Left,
-                Align::Left,
-                Align::Left,
-            ]);
+            let mut table = Table::bare(&[Align::Left, Align::Left, Align::Left, Align::Left]);
             for bin in &self.binaries {
                 let found = bin.found();
                 // An absent *optional* binary degrades rather than breaks, so it is amber.

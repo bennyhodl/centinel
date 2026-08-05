@@ -80,6 +80,16 @@ These are **one-shot subprocesses, not services**. All are **required**.
 
 A fifth subprocess, `centinel-whisper`, is **ours** — built from this workspace, not installed. See §3.6.
 
+Every one of them is started through `centinel_core::tool`, which is the only place in the codebase that runs an external program. Three properties hold for all of them, and none held before that module existed:
+
+- **A child dies with its caller.** `kill_on_drop`, so a cancelled run — Ctrl-C, a lost `select!` race — takes its children with it instead of orphaning an `ffmpeg` and a whisper worker holding a multi-gigabyte model.
+- **A child has a deadline**, per call rather than global: a `--version` probe gets seconds, a 63 MB audio download gets half an hour. Exceeding it kills the child.
+- **A child never reads our stdin.** An inherited terminal lets a subprocess swallow keystrokes or block on a prompt nobody can see.
+
+For a *stream* the guard is **inactivity**, not total time: a transcription still reporting progress after four hours is working, not stuck. The whisper worker's stderr is therefore both its diagnostics and its heartbeat, and silence past `STALL_TIMEOUT` is what identifies a wedged worker. Model downloads already draw the same distinction — they set a read timeout and deliberately no total-request timeout, because a slow gigabyte is not a stalled one.
+
+The one exception is the application `open` launches, which inherits the terminal and gets no deadline — it may be a person's editor. The interface says so.
+
 `centinel doctor` verifies presence **and pinned minimum version**, and runs before any command. A too-old `tesseract` fails at boot naming the required version — not on page 200 of a crawl. This matters most for `yt-dlp`, which warns at 90 days stale and shipped 26 releases in 2025 in emergency clusters.
 
 ### 3.2 Model weights

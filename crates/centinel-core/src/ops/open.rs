@@ -23,6 +23,7 @@ use crate::fetch::content_kind;
 use crate::materialize::materialize;
 use crate::ops::target::resolve;
 use crate::prelude::*;
+use crate::tool::Tool;
 
 #[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct OpenArgs {
@@ -177,7 +178,7 @@ pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
             .with
             .clone()
             .unwrap_or_else(|| config.open.opener_for(&kind).to_string());
-        Some(launch(&opener, &path)?)
+        Some(launch(&opener, &path).await?)
     };
 
     Ok(OpenReport {
@@ -200,7 +201,7 @@ pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
 /// - `"system"` — hand it to the OS default handler
 /// - anything containing `{path}` — a command template
 /// - anything else — an application name
-fn launch(opener: &str, path: &std::path::Path) -> anyhow::Result<String> {
+async fn launch(opener: &str, path: &std::path::Path) -> anyhow::Result<String> {
     let p = path.to_string_lossy().to_string();
 
     let (program, argv) = if opener == SYSTEM_DEFAULT || opener.is_empty() {
@@ -223,19 +224,18 @@ fn launch(opener: &str, path: &std::path::Path) -> anyhow::Result<String> {
         (opener.to_string(), vec![p.clone()])
     };
 
-    let status = std::process::Command::new(&program)
-        .args(&argv)
-        .status()
-        .map_err(|e| anyhow::anyhow!("could not run `{program}`: {e}"))?;
+    // `interactive` rather than `output`: the opener may be a person's editor, so it
+    // inherits the terminal and gets no deadline. It is still `tokio::process` and still
+    // awaited — the previous version blocked a runtime thread for as long as the
+    // application stayed open.
+    let tool = Tool::new(&program).args(&argv);
+    let status = tool.interactive().await?;
     anyhow::ensure!(
         status.success(),
         "`{program}` exited with {status}; is the application installed?"
     );
 
-    Ok(std::iter::once(program)
-        .chain(argv)
-        .collect::<Vec<_>>()
-        .join(" "))
+    Ok(tool.display())
 }
 
 fn system_opener() -> &'static str {

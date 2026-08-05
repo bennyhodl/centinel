@@ -42,6 +42,7 @@ pub mod policy;
 pub mod render;
 pub mod sources;
 pub mod store;
+pub mod tool;
 pub mod transcribe;
 pub mod vectors;
 pub mod youtube;

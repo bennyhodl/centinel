@@ -64,6 +64,29 @@ character span. A chunk can have several, because identical text appears under s
 addresses; each placement is a separate document with its own bytes, so each carries its
 own handle.
 
+## External programs
+
+**Tool** — one invocation of an external program: `yt-dlp`, `ffmpeg`, the whisper worker,
+whichever application opens a PDF. The only way this codebase starts a child process.
+*Why it matters:* every child it starts dies with its caller, carries a deadline, and
+never reads our stdin. Seven call sites used to make those choices separately, and all
+seven made none of them.
+
+**Deadline vs stall timeout** — a deadline bounds *total* time and suits a call with a
+known shape: a version probe, a metadata fetch. A stall timeout bounds *silence*, and is
+the only workable guard on a job whose honest duration is hours. A transcription still
+reporting progress after four hours is working; one that has said nothing for ten minutes
+is wedged.
+
+**Heartbeat** — output that proves a child is alive. The whisper worker's stderr is both
+its diagnostics and its heartbeat, which is why the stall timer resets on *any* line
+rather than only on a progress report.
+
+**Refusal vs transport fault** — `yt-dlp` reporting "video unavailable" is evidence about
+the video. A missing binary, or a hang that had to be killed, is evidence about this
+machine and says nothing about the video. Recording the second as `Gone` would mark a live
+recording deleted, which is the mistake **Blocked** (below) exists to prevent one level up.
+
 ## The record
 
 **Resource** — an *address*, not a thing in the world. The same meeting reachable four ways
