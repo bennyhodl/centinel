@@ -11,9 +11,11 @@ mod mcp;
 mod progress;
 
 use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use centinel_core::config::{self, Config};
 use centinel_core::op::{self, Ctx, Group, Progress};
 use centinel_core::render::{DEFAULT_WIDTH, Painter};
 use centinel_core::store::Store;
@@ -24,14 +26,12 @@ use clap::{Arg, ArgAction, Command};
 /// They take no [`op::OpDef`] because they are not one definition serving three surfaces
 /// — they *are* two of the surfaces.
 const SERVER_COMMANDS: [(&str, &str); 2] = [
-    ("serve", "Run the HTTP server (ops as routes, plus MCP over HTTP)"),
+    (
+        "serve",
+        "Run the HTTP server (ops as routes, plus MCP over HTTP)",
+    ),
     ("mcp", "Run an MCP server over stdio"),
 ];
-
-/// Store root, relative to the working directory unless `--root`/`CENTINEL_ROOT` says
-/// otherwise. A local default keeps the corpus next to the work, matching SPEC §5.4's
-/// "`rsync`-able and complete on its own".
-const DEFAULT_ROOT: &str = ".centinel";
 
 fn build_cli() -> Command {
     let mut cmd = Command::new("centinel")
@@ -42,13 +42,14 @@ fn build_cli() -> Command {
              Files on disk are the source of truth; every index is derived and rebuildable.",
         )
         .arg(
+            // No `default_value`: absent has to be distinguishable from typed, because
+            // the config file answers in between. See [`resolve_root`].
             Arg::new("root")
                 .long("root")
                 .global(true)
                 .env("CENTINEL_ROOT")
-                .default_value(DEFAULT_ROOT)
                 .value_name("DIR")
-                .help("Store root"),
+                .help("Store root [default: `root` in centinel.toml, else ~/.centinel]"),
         )
         .arg(
             Arg::new("verbose")
@@ -182,10 +183,6 @@ fn command_overview() -> String {
 async fn main() -> Result<()> {
     let matches = build_cli().get_matches();
 
-    let root = matches
-        .get_one::<String>("root")
-        .expect("root has a default")
-        .clone();
     let (name, sub) = matches
         .subcommand()
         .expect("subcommand_required guarantees one");
@@ -199,9 +196,10 @@ async fn main() -> Result<()> {
         matches.get_flag("no-color-env"),
     );
 
+    let root = resolve_root(&matches)?;
     let store = Store::open(&root)
         .await
-        .with_context(|| format!("opening store at {root}"))?;
+        .with_context(|| format!("opening store at {}", root.display()))?;
     let ctx = Arc::new(Ctx::new(store));
 
     match name {
@@ -214,6 +212,47 @@ async fn main() -> Result<()> {
         }
         "mcp" => mcp::serve(ctx).await,
         op_name => run_op(ctx, op_name, sub, Output::detect(sub)).await,
+    }
+}
+
+/// The store root in effect, nearest answer first.
+///
+/// 1. `--root`, or `$CENTINEL_ROOT` — clap reads the variable into the same argument, so
+///    both arrive here as a path somebody typed;
+/// 2. `root` in the config file — the standing preference;
+/// 3. `~/.centinel` — see [`config::default_root`].
+///
+/// The config consulted is whichever one this invocation named, so `centinel run --config
+/// other.toml` collects that file's sources into that file's store. Reading the sources
+/// from one config and the root from another would put a corpus somewhere nothing else
+/// would look for it.
+///
+/// A config that does not parse is an error here rather than a fall back to the default:
+/// the alternative is collecting into the wrong store and saying nothing about why.
+fn resolve_root(matches: &clap::ArgMatches) -> Result<PathBuf> {
+    if let Some(typed) = matches.get_one::<String>("root") {
+        return Ok(config::expand_tilde(typed));
+    }
+    let config = match explicit_config(matches) {
+        Some(path) => Config::from_file(Path::new(path))?,
+        None => Config::load()?,
+    };
+    Ok(config.store_root())
+}
+
+/// A `--config` typed anywhere in the subcommand chain.
+///
+/// Walked rather than read off one level, because `--config` is an op's own argument and
+/// an op can nest: it sits on `run`, but on `source `**`list`** — one deeper. Reading only
+/// the first level found it for `run` and silently missed it for every `source` action,
+/// which is the whole of the bug this walk exists for.
+fn explicit_config(matches: &clap::ArgMatches) -> Option<&String> {
+    let mut level = matches;
+    loop {
+        if let Ok(found @ Some(_)) = level.try_get_one::<String>("config") {
+            return found;
+        }
+        level = level.subcommand()?.1;
     }
 }
 
@@ -334,6 +373,50 @@ mod tests {
         // clap panics on malformed definitions; this is how a bad `#[op]` argument
         // struct gets caught by `cargo test` rather than by a user.
         build_cli().debug_assert();
+    }
+
+    /// `--root` must stay *absent* when nobody typed it. A clap default would satisfy
+    /// [`resolve_root`]'s first branch on every invocation, so `root` in the config file
+    /// would be read, parsed, and never used.
+    #[test]
+    fn root_is_absent_unless_something_names_it() {
+        // clap folds `$CENTINEL_ROOT` into this argument, so the variable being set in
+        // the test environment is indistinguishable from `--root` and would fail here.
+        if std::env::var_os("CENTINEL_ROOT").is_some() {
+            return;
+        }
+        let m = build_cli()
+            .try_get_matches_from(["centinel", "doctor"])
+            .unwrap();
+        assert_eq!(m.get_one::<String>("root"), None);
+
+        let m = build_cli()
+            .try_get_matches_from(["centinel", "doctor", "--root", "/srv/corpus"])
+            .unwrap();
+        assert_eq!(
+            m.get_one::<String>("root").map(String::as_str),
+            Some("/srv/corpus")
+        );
+    }
+
+    /// The nesting `--config` actually has: on `run` at one level, on `source list` at
+    /// two. Reading a fixed level found one and silently missed the other, which put the
+    /// store somewhere the named config never asked for.
+    #[test]
+    fn a_config_typed_at_any_depth_is_found() {
+        let at = |argv: &[&str]| {
+            let matches = build_cli().try_get_matches_from(argv).unwrap();
+            explicit_config(&matches).cloned()
+        };
+        assert_eq!(
+            at(&["centinel", "run", "--config", "a.toml"]).as_deref(),
+            Some("a.toml")
+        );
+        assert_eq!(
+            at(&["centinel", "source", "list", "--config", "b.toml"]).as_deref(),
+            Some("b.toml")
+        );
+        assert_eq!(at(&["centinel", "doctor"]), None);
     }
 
     #[test]

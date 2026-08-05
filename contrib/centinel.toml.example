@@ -4,6 +4,10 @@
 # one corpus-wide embed. Every stage skips work it has already done, so running it twice
 # is cheap and running it from cron is the intended use.
 
+# Where the store lives. Defaults to ~/.centinel, so every run collects into one corpus
+# whatever directory it was started from. `--root` and $CENTINEL_ROOT override it.
+#   root = "~/.centinel"
+
 [defaults]
 # Requests per second, per host. Deliberately slow.
 rps = 1.0

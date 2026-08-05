@@ -28,9 +28,13 @@ fn main() -> anyhow::Result<()> {
     let query = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "drinking water sampling results".to_string());
-    let root = std::path::PathBuf::from(
-        std::env::var("CENTINEL_ROOT").unwrap_or_else(|_| ".centinel".into()),
-    );
+    // The same answer the binary would give: the environment, else the config, else
+    // `~/.centinel`. Spelling a default here would point the example at a store the CLI
+    // that filled it does not use.
+    let root = match std::env::var("CENTINEL_ROOT") {
+        Ok(explicit) => centinel_core::config::expand_tilde(&explicit),
+        Err(_) => centinel_core::config::Config::load()?.store_root(),
+    };
 
     let model = "qwen3-embedding-4b";
     let dims = models::require(model)?.dims.unwrap() as usize;

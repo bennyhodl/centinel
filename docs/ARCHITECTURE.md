@@ -16,7 +16,8 @@ crates/
 docs/
   SPEC.md           the settled specification — read this first
   research/         ~3,850 lines, ~450 primary-source citations
-centinel.toml       what to collect
+centinel.toml       what to collect, and where to keep it
+~/.centinel/        the store, by default
 ```
 
 ## Files are the only truth
@@ -36,6 +37,22 @@ Every index is derived and rebuildable:
 Delete everything derived and you lose minutes, not evidence. The corpus is `rsync`-able and complete on its own.
 
 Blobs are **pooled across sources** — the same PDF on two `.gov` sites stores once. Logs and trees are **per-source**, so a single city's corpus stays separable for handoff.
+
+### Where `<root>` is
+
+`~/.centinel`, unless something says otherwise. Nearest answer wins:
+
+| | |
+|---|---|
+| `--root DIR`, or `$CENTINEL_ROOT` | somebody typed a path — an instruction |
+| `root = "~/corpora/tampa"` in `centinel.toml` | the standing preference; `~/` is expanded |
+| `~/.centinel` | the default |
+
+In `$HOME` because a store is a corpus you keep, not an artefact of the directory you were standing in. A working-directory default gave every shell its own `.centinel` — each one a separate blob pool, log and index, none of them answering a search against the others, and none of it visible until the corpus turned up empty from one directory up.
+
+The config file is found the same way, nearest first: `$CENTINEL_CONFIG`, then `./centinel.toml`, then `~/.centinel/centinel.toml`, then `~/.config/centinel/config.toml`. A per-project `centinel.toml` still wins, so a checkout travels with its own sources. `centinel source add` writes to whichever of those was found, and to `~/.centinel/centinel.toml` when none was — beside the store the same command collects into.
+
+`centinel doctor` prints both: the root it opened, and the config file that named it.
 
 ### Two hashes, because they answer different questions
 

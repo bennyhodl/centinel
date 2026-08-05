@@ -72,6 +72,14 @@ the append takes a new one.
 nowhere else. A path spelled out by a caller is a second, unenforced copy of this file's
 header.
 
+**Store root** — *which* store, and the one question `store` does not answer: it is
+handed a root. `config` decides it, from `--root`/`$CENTINEL_ROOT`, then `root` in the
+config file, then `~/.centinel`. *Why it matters:* the root is the identity of the
+corpus, and it defaulted to `.centinel` in the **working directory** — so `centinel run`
+from two directories built two corpora that shared no blobs, answered no search against
+each other, and looked identical from the inside. A default in `$HOME` is what makes "the
+store" a thing there is one of.
+
 **Head read vs whole read** — `get_blob` reads the whole file and verifies it against its
 address, because this is an evidentiary archive. `blob_head` reads the first few kilobytes
 and verifies nothing, because a partial read cannot be checked against a whole-file digest.

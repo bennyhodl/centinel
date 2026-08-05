@@ -10,6 +10,10 @@
 //! store is `rsync`-able and meant to be handed to other people (SPEC §5.4); baking one
 //! operator's choice of PDF reader into it would travel badly.
 //!
+//! This module is also where the store root is decided, which is the one thing config
+//! says about the store rather than about the machine or the corpus. See [`default_root`]
+//! for why the answer is in `$HOME` and not in the working directory.
+//!
 //! Sources are the interesting case, because they arguably *are* corpus. They live here
 //! anyway: a source is a statement of **intent to collect**, and intent is not something
 //! a recipient of your blobs should silently inherit. Handing someone the store gives
@@ -35,6 +39,61 @@ pub const SYSTEM_DEFAULT: &str = "system";
 /// The config file created when none exists.
 pub const DEFAULT_FILENAME: &str = "centinel.toml";
 
+/// The store directory, relative to `$HOME` unless something names another root.
+pub const DEFAULT_DIRNAME: &str = ".centinel";
+
+/// `$HOME`, or `None` where there is none to have.
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Expands a leading `~/`, and nothing else.
+///
+/// A shell expands `~` before the process sees it; a path read out of a TOML file never
+/// went through one, and `root = "~/corpora"` would otherwise create a directory called
+/// `~`. `~user` is deliberately not handled — resolving another account's home means
+/// reading the password database, and it is not a thing anyone writes here.
+pub fn expand_tilde(path: &str) -> PathBuf {
+    let Some(home) = home() else {
+        return PathBuf::from(path);
+    };
+    match path.strip_prefix('~') {
+        Some("") => home,
+        Some(rest) => match rest.strip_prefix('/') {
+            Some(rest) => home.join(rest),
+            // `~foo` is a literal directory name, not a home to expand.
+            None => PathBuf::from(path),
+        },
+        None => PathBuf::from(path),
+    }
+}
+
+/// The store root when nothing names one: `~/.centinel`.
+///
+/// In `$HOME` rather than the working directory, because a store is a corpus you keep,
+/// not an artefact of the directory you happened to be standing in. A working-directory
+/// default put a separate `.centinel` under every shell that ever ran the binary — each
+/// one its own blob pool, its own log and its own index, none of them answering a search
+/// against the others, and all of them invisible until somebody noticed the corpus was
+/// empty from one directory up.
+///
+/// Falls back to a relative `.centinel` only where there is no home to put it in.
+pub fn default_root() -> PathBuf {
+    match home() {
+        Some(home) => home.join(DEFAULT_DIRNAME),
+        None => PathBuf::from(DEFAULT_DIRNAME),
+    }
+}
+
+/// Where a config file is written when none exists: `~/.centinel/centinel.toml`.
+///
+/// Beside the *default* store, not beside the configured one. The config is what says
+/// where the store is, so looking for it under a root it has not been read to name yet
+/// is circular.
+pub fn default_config_path() -> PathBuf {
+    default_root().join(DEFAULT_FILENAME)
+}
+
 /// Unknown keys are rejected rather than ignored.
 ///
 /// The alternative is worse than it sounds for a config-driven tool: `[[sources]]` with
@@ -44,6 +103,14 @@ pub const DEFAULT_FILENAME: &str = "centinel.toml";
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Where the store lives. `~/` is expanded; a relative path is relative to the
+    /// working directory. Absent means [`default_root`].
+    ///
+    /// Declared first because TOML puts every top-level key above the first table, so
+    /// this is where a reader will look for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+
     #[serde(default)]
     pub open: OpenConfig,
 
@@ -324,7 +391,8 @@ impl Config {
     /// Precedence, nearest first:
     /// 1. `$CENTINEL_CONFIG`
     /// 2. `./centinel.toml` — per-project
-    /// 3. `~/.config/centinel/config.toml` — per-user
+    /// 3. `~/.centinel/centinel.toml` — beside the default store
+    /// 4. `~/.config/centinel/config.toml` — per-user
     pub fn load() -> anyhow::Result<Self> {
         match Self::locate() {
             Some(path) => Self::from_file(&path),
@@ -381,15 +449,31 @@ impl Config {
         Self::search_paths().into_iter().find(|p| p.is_file())
     }
 
-    /// Where a config file would be *written*: the one in effect, else `./centinel.toml`.
+    /// The store root this config asks for, else [`default_root`].
     ///
-    /// Not `~/.config`: a store defaults to `.centinel` in the working directory, so the
-    /// sources feeding it belong beside it and travel with the project.
+    /// The last word on the subject unless `--root` or `$CENTINEL_ROOT` was given, both
+    /// of which the caller applies ahead of this — someone typing a path is an
+    /// instruction, and a config file is a standing preference.
+    pub fn store_root(&self) -> PathBuf {
+        self.root
+            .as_deref()
+            .map(expand_tilde)
+            .unwrap_or_else(default_root)
+    }
+
+    /// Where a config file would be *written*: the one in effect, else
+    /// [`default_config_path`].
+    ///
+    /// Beside the default store rather than in the working directory, because
+    /// `centinel source add` typed from anywhere has to reach the config that feeds the
+    /// store the same command collects into. A working-directory default wrote a file
+    /// the next run — from one directory up — could not find, and reported "no sources
+    /// configured" at somebody looking straight at the block they had just added.
     pub fn write_path() -> PathBuf {
         Self::locate().unwrap_or_else(|| {
             std::env::var("CENTINEL_CONFIG")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from(DEFAULT_FILENAME))
+                .unwrap_or_else(|_| default_config_path())
         })
     }
 
@@ -400,13 +484,11 @@ impl Config {
             paths.push(PathBuf::from(explicit));
         }
         paths.push(PathBuf::from(DEFAULT_FILENAME));
-        if let Some(home) = std::env::var_os("HOME") {
-            paths.push(
-                PathBuf::from(home)
-                    .join(".config")
-                    .join("centinel")
-                    .join("config.toml"),
-            );
+        if let Some(home) = home() {
+            // Beside the default store, so the corpus and the statement of what feeds it
+            // sit in one directory.
+            paths.push(home.join(DEFAULT_DIRNAME).join(DEFAULT_FILENAME));
+            paths.push(home.join(".config").join("centinel").join("config.toml"));
         }
         paths
     }
@@ -465,6 +547,10 @@ pub const EXAMPLE: &str = r#"# Centinel configuration.
 # `centinel run` walks every [[source]] below: discover, collect, extract, index, then
 # one corpus-wide embed. Every stage skips work it has already done, so running it twice
 # is cheap and running it from cron is the intended use.
+
+# Where the store lives. Defaults to ~/.centinel, so every run collects into one corpus
+# whatever directory it was started from. `--root` and $CENTINEL_ROOT override it.
+#   root = "~/.centinel"
 
 [defaults]
 # Requests per second, per host. Deliberately slow.
@@ -718,6 +804,9 @@ mod tests {
         // Every source in it is commented out — it is a template, not a corpus.
         assert!(c.sources.is_empty());
         assert_eq!(c.defaults.rps, 1.0);
+        // And so is `root`: a starter file must not pin the store somewhere the default
+        // would not have put it.
+        assert!(c.root.is_none());
     }
 
     #[test]
@@ -728,7 +817,73 @@ mod tests {
                 .iter()
                 .position(|p| p.to_string_lossy().contains(needle))
         };
-        assert!(idx("centinel.toml").unwrap() < idx(".config").unwrap());
+        // The per-project file, then the one beside the default store, then `~/.config`.
+        assert_eq!(idx("centinel.toml"), Some(0));
+        assert!(
+            idx(".centinel").unwrap() < idx(".config").unwrap(),
+            "{paths:?}"
+        );
+    }
+
+    // ── the store root ────────────────────────────────────────────────────────
+
+    /// The whole point of the change: a store belongs to the person, not to whichever
+    /// directory the binary was started from.
+    #[test]
+    fn the_default_root_is_under_home() {
+        let home = home().expect("tests run with a home");
+        assert_eq!(default_root(), home.join(".centinel"));
+        assert_eq!(default_config_path(), home.join(".centinel/centinel.toml"));
+        assert_eq!(Config::default().store_root(), home.join(".centinel"));
+    }
+
+    #[test]
+    fn the_config_names_the_root_and_tildes_are_expanded() {
+        let home = home().expect("tests run with a home");
+        assert_eq!(
+            parse("root = \"~/corpora/tampa\"\n").store_root(),
+            home.join("corpora/tampa")
+        );
+        assert_eq!(
+            parse("root = \"/mnt/big/centinel\"\n").store_root(),
+            PathBuf::from("/mnt/big/centinel")
+        );
+        // A relative root stays relative — someone who wrote one meant it.
+        assert_eq!(
+            parse("root = \".centinel\"\n").store_root(),
+            PathBuf::from(".centinel")
+        );
+    }
+
+    /// Only a leading `~` that is the whole segment. `~snapshots` is a directory name.
+    #[test]
+    fn tilde_expansion_stops_at_the_first_segment() {
+        let home = home().expect("tests run with a home");
+        assert_eq!(expand_tilde("~"), home);
+        assert_eq!(expand_tilde("~/"), home);
+        assert_eq!(expand_tilde("~snapshots"), PathBuf::from("~snapshots"));
+        assert_eq!(expand_tilde("a/~/b"), PathBuf::from("a/~/b"));
+    }
+
+    /// `root` sits beside the tables it does not belong to, so it has to survive both a
+    /// file that has them and one that does not.
+    #[test]
+    fn root_coexists_with_the_rest_of_the_file() {
+        let c = parse(
+            r#"
+            root = "/srv/corpus"
+
+            [defaults]
+            rps = 0.5
+
+            [[source]]
+            id = "tampa"
+            site = "https://www.tampa.gov"
+        "#,
+        );
+        assert_eq!(c.store_root(), PathBuf::from("/srv/corpus"));
+        assert_eq!(c.defaults.rps, 0.5);
+        assert_eq!(c.sources.len(), 1);
     }
 
     /// A config file predating `[[source]]` must keep working untouched.

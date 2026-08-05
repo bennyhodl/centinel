@@ -135,6 +135,17 @@ pub struct GateStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DoctorReport {
     pub store_root: PathBuf,
+    /// The config file in effect, or `None` when none was found and defaults are in use.
+    ///
+    /// Reported because the config is what names the store root, so "which store am I
+    /// looking at" and "which file decided that" are one question. A run collecting into
+    /// a root nobody expected is otherwise silent — the store is simply empty, and
+    /// nothing on screen says which of four paths was read to get there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<PathBuf>,
+    /// Where a config file is looked for, nearest first. Shown only when none was found.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_searched: Vec<PathBuf>,
     /// Blobs in the pool. Counted by walking `blobs/`, so this is O(corpus) — fine at
     /// spine scale, and a reason to move it behind a flag before the corpus is large.
     pub blob_count: u64,
@@ -218,8 +229,16 @@ pub async fn doctor(ctx: &Ctx, args: DoctorArgs) -> anyhow::Result<DoctorReport>
         ctx.store.count_blobs().await?
     };
 
+    let config = crate::config::Config::locate();
+    let config_searched = match config {
+        Some(_) => Vec::new(),
+        None => crate::config::Config::search_paths(),
+    };
+
     Ok(DoctorReport {
         store_root: ctx.store.root().to_path_buf(),
+        config,
+        config_searched,
         blob_count,
         sources,
         binaries,
@@ -468,6 +487,23 @@ impl Render for DoctorReport {
             render::plural(self.sources.len(), "source", "sources"),
         );
         p.line(format!("{verdict}  {}", p.paint(&corpus, Ink::Dim)))?;
+
+        // Directly under the root, because it is the line that explains it. When no file
+        // was found the search list goes in its place: "which four paths did you look
+        // in" is the only useful next question, and answering it here saves a trip to
+        // the documentation.
+        let provenance = match &self.config {
+            Some(path) => format!("config {}", path.display()),
+            None => format!(
+                "no config file — looked in {}",
+                self.config_searched
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        p.line(p.paint(&provenance, Ink::Dim))?;
 
         p.section("binaries")?;
         p.nest(|p| {
@@ -723,6 +759,8 @@ mod tests {
 
         let report = DoctorReport {
             store_root: "/tmp/store".into(),
+            config: Some("/tmp/centinel.toml".into()),
+            config_searched: vec![],
             blob_count: 0,
             sources: vec![],
             binaries: vec![bin],
@@ -741,6 +779,39 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("ready"), "{out}");
         assert!(out.contains("days ago"), "the warning is shown: {out}");
+        assert!(out.contains("/tmp/centinel.toml"), "{out}");
+    }
+
+    /// With no config file, the search list stands in for it. A bare "no config file"
+    /// leaves the one actionable fact — *which paths* — off the screen, which is how
+    /// somebody ends up with a config the binary was never going to read.
+    #[test]
+    fn a_missing_config_names_where_it_was_looked_for() {
+        let report = DoctorReport {
+            store_root: "/tmp/store".into(),
+            config: None,
+            config_searched: vec![
+                "centinel.toml".into(),
+                "/home/x/.centinel/centinel.toml".into(),
+            ],
+            blob_count: 0,
+            sources: vec![],
+            binaries: vec![],
+            models_dir: "/tmp/models".into(),
+            models: vec![],
+            gates: vec![],
+            binaries_ready: true,
+            models_ready: true,
+            ready: true,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut p = Painter::new(&mut buf, false, 100);
+            report.render(&mut p).unwrap();
+        }
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("no config file"), "{out}");
+        assert!(out.contains("/home/x/.centinel/centinel.toml"), "{out}");
     }
     use crate::models::ModelSpec;
 
