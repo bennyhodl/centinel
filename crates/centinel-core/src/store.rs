@@ -45,7 +45,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::domain::{
     BlobSha, Derivation, DiscoveryRun, Fingerprint, Liveness, Observation, Resource,
-    ResourceStatus, SourceId,
+    ResourceStatus, SourceId, Underivable,
 };
 
 /// One line of a `log/<source>/YYYY-MM.jsonl` file.
@@ -59,6 +59,9 @@ pub enum LogRecord {
     DiscoveryRun(DiscoveryRun),
     Status(ResourceStatus),
     Derivation(Derivation),
+    /// A derivation that was attempted and produced nothing. Kept because the alternative
+    /// is attempting it again on every run for the life of the corpus.
+    Underivable(Underivable),
 }
 
 impl LogRecord {
@@ -68,6 +71,7 @@ impl LogRecord {
             Self::DiscoveryRun(d) => d.at,
             Self::Status(s) => s.last_checked,
             Self::Derivation(d) => d.at,
+            Self::Underivable(u) => u.at,
         }
     }
 }
@@ -595,7 +599,9 @@ impl Replay {
                 LogRecord::Status(s) => {
                     map.insert(s.resource.clone(), s.clone());
                 }
-                LogRecord::DiscoveryRun(_) | LogRecord::Derivation(_) => {}
+                LogRecord::DiscoveryRun(_)
+                | LogRecord::Derivation(_)
+                | LogRecord::Underivable(_) => {}
             }
         }
         map
@@ -675,6 +681,22 @@ impl Replay {
         self.derivations()
             .filter(|d| d.tool == tool)
             .map(|d| &d.from_sha)
+            .collect()
+    }
+
+    /// Blobs this pipeline at this version already gave up on.
+    ///
+    /// Keyed by version as well as tool, so bumping the version re-attempts everything a
+    /// previous one could not read, and nothing else.
+    pub fn underivable_by(&self, tool: &str, version: &str) -> std::collections::HashSet<&BlobSha> {
+        self.records
+            .iter()
+            .filter_map(|r| match r {
+                LogRecord::Underivable(u) if u.tool == tool && u.version == version => {
+                    Some(&u.from_sha)
+                }
+                _ => None,
+            })
             .collect()
     }
 

@@ -68,6 +68,37 @@ and verifies nothing, because a partial read cannot be checked against a whole-f
 Classification uses the second; anything shown to a person or written back into the record
 uses the first.
 
+## What still needs doing
+
+Every stage computes its own work list as a **subtraction**, and none of them keeps a
+checkpoint. That is what makes the pipeline resumable — and it means each stage's skip
+predicate has to be exactly right, because a wrong one either redoes work forever or skips
+work that was never done.
+
+| Stage | What it subtracts | Where the answer lives |
+|---|---|---|
+| collect | observed markers from the latest DiscoveryRun | the log |
+| extract | blobs with a Derivation **or an Underivable** from the latest Observations | the log |
+| transcribe | blobs derived by the transcriber from the audio blobs | the log |
+| index | derived blobs already chunked in | `centinel.db` |
+| embed | cached chunk hashes from indexed chunk hashes | the vector cache |
+
+**Underivable** — a derivation that was attempted and produced nothing. The peer of
+`ResourceStatus` on the derivation side, and it exists for the same reason: a `Derivation`
+always has bytes, so "we tried and there was nothing to get" needs its own record. Without
+it the extract predicate could only ever be "a Derivation exists", which is never true for
+an audio file — so every one of them was read, hashed and re-attempted on every run.
+
+**Pipeline version** — carried on every Underivable. A verdict belongs to one pipeline at
+one version and says nothing about the next; bumping it is how a better extractor gets
+another go at what an older one gave up on.
+
+**Chunk geometry** — the target and overlap sizes chunking uses. Load-bearing far outside
+chunking, because a `chunk_hash` hashes the chunk's *text* and the geometry decides the
+text. Changing it produces a wholly different set of hashes, so the old chunks stay in the
+index and every vector in the cache is orphaned. The index records the geometry its hashes
+were built with, and refuses a change that is not a rebuild.
+
 ## Retrieval
 
 **Handle** — a hash that identifies one blob *and* that the tool will accept back. The

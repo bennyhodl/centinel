@@ -676,6 +676,12 @@ async fn run_derivation(
                     ctx,
                     IndexArgs {
                         source: target,
+                        // A re-extraction produces a *new* derived blob, so its chunks are
+                        // added — and the previous extraction's chunks stay, because
+                        // nothing removes them. Search then returns both, which is the
+                        // corpus quietly answering twice. `--refresh` clears the scope it
+                        // is refreshing.
+                        rebuild: args.refresh,
                         ..Default::default()
                     },
                     progress,

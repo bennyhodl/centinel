@@ -169,6 +169,7 @@ ResourceStatus  Live | Gone | Blocked | Error, + since, consecutive_failures, la
 Observation     one successful fetch — ALWAYS backed by a Blob
 Blob            content-addressed bytes
 Derivation      Blob → Blob edge, carrying tool + version + model tier + anchors
+Underivable     a derivation attempted that produced nothing — tool + version + reason
 ChangeEvent     materialized index, rebuildable from Observations
 ```
 
@@ -196,11 +197,15 @@ The January 14 council meeting reachable as a Granicus RSS item, a 5.98 MB HTML 
 - **Anchors vary within the Derivation**, not across entities: `(page, bbox, charspan)` for PDFs, time ranges for audio, char spans for HTML.
 - **Sitemap** is a `DiscoveryRun` snapshot.
 
-### 4.4 An Observation always has bytes
+### 4.4 An Observation always has bytes, and so does a Derivation
 
 Failed fetches do not append rows. **`ResourceStatus` carries liveness instead** — failures mutate per-Resource state in place.
 
 This closes a hole successes-only alone would leave: a URL still listed in the sitemap but now 404ing, and — the dangerous one — **a CloudFront/Akamai WAF starting to 403 you**, which would otherwise be indistinguishable from "the site didn't change." Measured live on `phila.gov` and `sec.gov`; a real risk, not hypothetical.
+
+**The same rule binds the derivation side, and needs the same escape.** A `Derivation` is a `Blob → Blob` edge, so it also always has bytes — which leaves no way to record *"this was attempted and produced nothing"*. That gap is not cosmetic: every stage computes its work list by subtraction, and the extract predicate can only be "a Derivation exists", which is never true for an audio file. So every recording in a corpus was read, hashed and re-attempted on every run, forever, to reach the same conclusion.
+
+**`Underivable`** closes it: `from_sha`, `tool`, `version`, `reason`, `at`. Carrying the tool and version is what keeps the verdict honest — it records that **one pipeline at one version** made nothing of these bytes, which is permanent for that version and no claim at all about the next. Bumping the version is how a better extractor gets another go, by exactly the argument §4.6 makes for re-derivation.
 
 ### 4.5 `ChangeEvent` is a rebuildable index
 

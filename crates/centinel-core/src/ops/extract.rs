@@ -10,8 +10,9 @@ use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::extract::{Extracted, extract as extract_bytes};
-use crate::fetch::content_kind;
+use crate::domain::Underivable;
+use crate::extract::{self, Extracted, extract as extract_bytes};
+use crate::fetch::{SNIFF_BYTES, content_kind};
 use crate::prelude::*;
 use crate::store::LogRecord;
 
@@ -88,6 +89,12 @@ pub struct ExtractReport {
     pub observations: usize,
     /// Skipped because a derivation already existed.
     pub already_derived: usize,
+    /// Skipped because this pipeline version already found nothing to extract here.
+    ///
+    /// Counted apart from `unextractable` so a second run reads as quiet: the same audio
+    /// file is not news twice.
+    #[serde(default)]
+    pub already_unextractable: usize,
     pub attempted: usize,
     pub extracted: usize,
     /// Extracted, but some pages are scans needing OCR we cannot perform.
@@ -119,6 +126,7 @@ pub async fn extract(
         sources: sources.iter().map(|s| s.to_string()).collect(),
         observations: 0,
         already_derived: 0,
+        already_unextractable: 0,
         attempted: 0,
         extracted: 0,
         needs_ocr: 0,
@@ -139,6 +147,11 @@ pub async fn extract(
         // after extraction and cannot be part of a skip key. `--refresh` is the
         // deliberate escape hatch after a tool upgrade.
         let derived: HashSet<_> = replay.derivations().map(|d| &d.from_sha).collect();
+        // The other half of "already done". A blob nothing can extract never gains a
+        // Derivation, so without this it is read, hashed and re-attempted on every run
+        // for the life of the corpus — which for a channel means re-reading every audio
+        // file twice a day to reach the same conclusion.
+        let given_up = replay.underivable_by(extract::PIPELINE, extract::PIPELINE_VERSION);
 
         let latest = replay.latest_observations();
         report.observations += latest.len();
@@ -154,19 +167,30 @@ pub async fn extract(
                 report.already_derived += 1;
                 continue;
             }
+            if !args.refresh && given_up.contains(&obs.blob_sha) {
+                report.already_unextractable += 1;
+                continue;
+            }
 
             if i % 25 == 0 {
                 progress.step(format!("{} extracted", report.extracted), i as u64, total);
             }
 
-            let bytes = ctx.store.get_blob(&obs.blob_sha).await?;
-            let kind = content_kind(&obs.meta, &bytes);
+            // The head decides the kind, and the kind decides whether the rest is worth
+            // reading. `get_blob` reads the whole file and verifies it, which is the
+            // right thing to do before extracting and the wrong thing to do before
+            // finding out there is nothing to extract.
+            let head = ctx.store.blob_head(&obs.blob_sha, SNIFF_BYTES).await?;
+            let kind = content_kind(&obs.meta, &head).to_string();
             if let Some(want) = &args.kind
-                && want != kind
+                && want != &kind
             {
                 continue;
             }
             report.attempted += 1;
+
+            let bytes = ctx.store.get_blob(&obs.blob_sha).await?;
+            let kind = kind.as_str();
             *report.by_kind.entry(kind.to_string()).or_default() += 1;
 
             // The Source's own title, where it has one. A YouTube recording's title is
@@ -189,6 +213,21 @@ pub async fn extract(
                             reason: reason.clone(),
                         });
                     }
+                    // Written down, so the next run skips it instead of learning the same
+                    // thing again. Carries the pipeline version, so a later one that can
+                    // read this kind is not bound by this verdict.
+                    ctx.store
+                        .append(
+                            source,
+                            &LogRecord::Underivable(Underivable {
+                                from_sha: obs.blob_sha.clone(),
+                                tool: extract::PIPELINE.to_string(),
+                                version: extract::PIPELINE_VERSION.to_string(),
+                                reason: reason.clone(),
+                                at: Timestamp::now(),
+                            }),
+                        )
+                        .await?;
                     continue;
                 }
                 Extracted::Partial {
@@ -273,6 +312,7 @@ impl Render for ExtractReport {
             p.figures(&[
                 (self.observations as u64, "observations"),
                 (self.already_derived as u64, "already derived"),
+                (self.already_unextractable as u64, "already unextractable"),
                 (self.attempted as u64, "attempted"),
                 (self.extracted as u64, "extracted"),
                 (self.needs_ocr as u64, "need OCR"),
@@ -346,5 +386,123 @@ impl Render for ExtractSample {
         );
         p.line(format!("{head}  {aside}"))?;
         p.nest(|p| p.wrapped(&render::one_line(&self.preview), Ink::Dim))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Store;
+
+    /// Ogg magic bytes. `content_kind` sniffs these, so this classifies as audio and no
+    /// extractor claims it — which is the case this module used to re-learn every run.
+    const AUDIO: &[u8] = b"OggS\x00\x02 pretend this is a three hour meeting";
+
+    async fn store_with(bytes: &[u8], key: &str) -> (tempfile::TempDir, Ctx) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).await.unwrap();
+        store
+            .record_observation(
+                &Resource::new(SourceId::new("tampa").unwrap(), key),
+                bytes,
+                jiff::Timestamp::now(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        (dir, Ctx::new(store))
+    }
+
+    fn args() -> ExtractArgs {
+        ExtractArgs {
+            source: None,
+            limit: None,
+            refresh: false,
+            kind: None,
+            sample: 5,
+        }
+    }
+
+    /// The defect: nothing recorded that a blob had been given up on, so the next run
+    /// read it, hashed it and reached the same conclusion — forever, twice a day.
+    #[tokio::test]
+    async fn a_blob_nothing_can_extract_is_attempted_once() {
+        let (_d, ctx) = store_with(AUDIO, "https://y.test/watch?v=a#audio").await;
+
+        let first = extract(&ctx, args(), &Progress::none()).await.unwrap();
+        assert_eq!(first.attempted, 1);
+        assert_eq!(first.unextractable, 1);
+        assert_eq!(first.already_unextractable, 0);
+        assert_eq!(first.unreadable.len(), 1, "and it is reported once");
+
+        let again = extract(&ctx, args(), &Progress::none()).await.unwrap();
+        assert_eq!(again.attempted, 0, "the second run must not try again");
+        assert_eq!(again.unextractable, 0);
+        assert_eq!(again.already_unextractable, 1);
+        assert!(again.unreadable.is_empty(), "not news twice");
+    }
+
+    /// The verdict belongs to one pipeline version, and `--refresh` is the way to ignore
+    /// it without waiting for a new one.
+    #[tokio::test]
+    async fn refresh_reopens_a_question_a_previous_run_closed() {
+        let (_d, ctx) = store_with(AUDIO, "https://y.test/watch?v=a#audio").await;
+        extract(&ctx, args(), &Progress::none()).await.unwrap();
+
+        let forced = extract(
+            &ctx,
+            ExtractArgs {
+                refresh: true,
+                ..args()
+            },
+            &Progress::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(forced.attempted, 1);
+        assert_eq!(forced.already_unextractable, 0);
+    }
+
+    /// The record names the pipeline and its version, so a later one is not bound by it.
+    #[tokio::test]
+    async fn the_verdict_is_recorded_against_the_pipeline_that_reached_it() {
+        let (_d, ctx) = store_with(AUDIO, "https://y.test/watch?v=a#audio").await;
+        extract(&ctx, args(), &Progress::none()).await.unwrap();
+
+        let replay = ctx
+            .store
+            .replay(&SourceId::new("tampa").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            replay
+                .underivable_by(extract::PIPELINE, extract::PIPELINE_VERSION)
+                .len(),
+            1
+        );
+        assert!(
+            replay.underivable_by(extract::PIPELINE, "99").is_empty(),
+            "a later pipeline version gets its own go"
+        );
+    }
+
+    /// An extractable document still extracts, and is skipped by its Derivation rather
+    /// than by a verdict.
+    #[tokio::test]
+    async fn an_extractable_document_is_derived_and_then_skipped() {
+        let (_d, ctx) = store_with(
+            b"<html><body><h1>Agenda</h1><p>Item one.</p></body></html>",
+            "https://tampa.gov/a",
+        )
+        .await;
+
+        let first = extract(&ctx, args(), &Progress::none()).await.unwrap();
+        assert_eq!(first.extracted, 1);
+        assert_eq!(first.unextractable, 0);
+
+        let again = extract(&ctx, args(), &Progress::none()).await.unwrap();
+        assert_eq!(again.already_derived, 1);
+        assert_eq!(again.already_unextractable, 0);
+        assert_eq!(again.attempted, 0);
     }
 }

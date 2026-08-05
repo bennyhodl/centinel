@@ -78,6 +78,7 @@ ResourceStatus  Live | Gone | Blocked | Error, + since, consecutive_failures, la
 Observation     one successful fetch — ALWAYS backed by a Blob
 Blob            content-addressed bytes
 Derivation      Blob → Blob edge, carrying tool + version + model tier + anchors
+Underivable     a derivation attempted that produced nothing — tool + version + reason
 ChangeEvent     materialized index, rebuildable from Observations
 ```
 
@@ -90,6 +91,8 @@ The half that does *not* vary lives in `acquire`: one loop that derives the work
 `acquire` returns a **list** of artifacts rather than one blob, because a video is one address holding metadata, captions and audio, each with its own history. An earlier `fetch(&Resource) -> Fetched` had no possible implementation for that, which is why the kinds routed around the trait instead of through it.
 
 **A Resource is an *address*, not a thing in the world.** The January 14 council meeting reachable as a Granicus RSS item, an HTML page, a Legistar Matter and a YouTube video is **four Resources**, and the model makes no claim they are the same thing. Identity resolution across access paths is fuzzy, and a wrong merge silently corrupts the record. Four honest rows beat one confident wrong one.
+
+An **Observation always has bytes, and so does a Derivation.** Failures on the acquisition side become `ResourceStatus`; failures on the derivation side become `Underivable`. Without the second, "nothing can extract this" is unrecordable, and since every stage computes its work list by subtraction, an audio file gets read and re-attempted on every run for the life of the corpus.
 
 `Document`, `Transcript` and `Sitemap` are **not entities**. Derived artifacts are Blobs linked by a `Derivation` carrying tool, version and model tier — so "the source changed" stays mechanically distinguishable from "tesseract was upgraded". A sitemap is a `DiscoveryRun` snapshot.
 

@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::chunk::Chunk;
@@ -66,6 +66,11 @@ pub struct IndexStats {
 const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
+
+CREATE TABLE IF NOT EXISTS meta (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS chunk (
     id          INTEGER PRIMARY KEY,
@@ -171,6 +176,42 @@ impl Index {
     }
 
     /// True when this derived blob has already been chunked into the index.
+    /// The chunk geometry this index's hashes were built with, if it has been recorded.
+    ///
+    /// A `chunk_hash` is the hash of the chunk's *text*, and the text is decided by the
+    /// geometry — so re-chunking at a different size produces a wholly different set of
+    /// hashes. Nothing in the index or the vector cache can tell the two sets apart, and
+    /// both are append-only, so mixing them leaves the old chunks in place and re-embeds
+    /// the entire corpus. Recording the geometry is what makes that a question the
+    /// caller gets asked instead of a bill they get later.
+    pub fn geometry(&self) -> anyhow::Result<Option<(usize, usize)>> {
+        let read = |key: &str| -> anyhow::Result<Option<usize>> {
+            let v: Option<String> = self
+                .conn
+                .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+                .optional()?;
+            Ok(v.and_then(|v| v.parse().ok()))
+        };
+        Ok(match (read("target_chars")?, read("overlap_chars")?) {
+            (Some(t), Some(o)) => Some((t, o)),
+            _ => None,
+        })
+    }
+
+    pub fn set_geometry(&self, target_chars: usize, overlap_chars: usize) -> anyhow::Result<()> {
+        for (key, value) in [
+            ("target_chars", target_chars),
+            ("overlap_chars", overlap_chars),
+        ] {
+            self.conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value.to_string()],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn has_derived(&self, derived_sha: &str) -> anyhow::Result<bool> {
         let n: i64 = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM placement WHERE derived_sha = ?1)",

@@ -351,6 +351,32 @@ pub struct Derivation {
     pub anchors: Vec<Anchor>,
 }
 
+/// A derivation that was **attempted and produced nothing**.
+///
+/// The peer of [`ResourceStatus`] on the derivation side, and it exists for the same
+/// reason. A [`Derivation`] is a `Blob → Blob` edge and therefore always has bytes,
+/// exactly as an [`Observation`] always does (§4.4) — so "we tried, and there was nothing
+/// to get" has nowhere to live unless something like this holds it.
+///
+/// Without it, the skip predicate for extraction can only ever be *"a Derivation exists"*,
+/// which is never true for a blob nothing can extract. So every audio file in a corpus was
+/// read, hashed and re-attempted on every single run, forever, to reach the same
+/// conclusion.
+///
+/// `tool` and `version` are carried for the same reason a Derivation carries them (§4.6):
+/// this records that **one pipeline at one version** made nothing of these bytes, which
+/// is a permanent fact about that version and no claim at all about the next one. Bumping
+/// the version is how a better extractor gets another go.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Underivable {
+    pub from_sha: BlobSha,
+    pub tool: String,
+    pub version: String,
+    /// Why, in the pipeline's own words — `no extractor for kind audio`.
+    pub reason: String,
+    pub at: Timestamp,
+}
+
 /// What changed between two Observations of the same Resource.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
