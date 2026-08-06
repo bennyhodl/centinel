@@ -31,10 +31,22 @@ while its job was done twice by hand.
 **Artifact** (`Acquired`) — one thing retrieved, at its own address. A page is one; a
 video is up to three. Each becomes its own Observation with its own history.
 
+**Enclosure** — a document a page carries at its own address rather than contains: the PDF
+a CMS renders in a viewer, an RFQ's attached drawings. Found in the page's HTML, fetched
+during `acquire`, and stored as its own Artifact with its own Observation and history.
+*Why it matters:* without it the page is a wrapper that enters the corpus looking collected
+and carrying nothing — on `tampa.gov`, 915 of 1005 pages whose extracted text was a date
+and a print notice, with the proclamation itself at an address nothing had fetched. **One
+level, same host.** The page's own HTML is scanned and what comes back is not, because a
+second level makes acquisition a recursive crawler with no snapshot to bound it — and that
+is `enumerate`'s job, which is where a *complete* address set comes from.
+
 **Marker** — the address whose presence in the log proves a Resource was acquired. The
 page itself for a site; the *metadata* sub-resource for a video. The single line on which
 resumption varies. *Why it matters:* keying resumption on captions would re-fetch a whole
-catalogue every run, because ~7% of a real council channel has none and never will.
+catalogue every run, because ~7% of a real council channel has none and never will. An
+enclosure is the same case one level down: a page whose attachment 404s is still a page we
+have, and keying on the attachment would re-fetch the page forever.
 
 **Refusal** — an acquisition that failed, carrying a `Liveness` rather than an error type.
 Because the caller's job is to record *what kind* of failure this was, not to propagate
@@ -96,7 +108,7 @@ work that was never done.
 | Stage | What it subtracts | Where the answer lives |
 |---|---|---|
 | collect | observed markers from the latest DiscoveryRun | the log |
-| extract | blobs with a Derivation **or an Underivable** from the latest Observations | the log |
+| extract | blobs with a Derivation **of bytes**, or an Underivable, from the latest Observations | the log |
 | transcribe | blobs derived by the transcriber from the audio blobs | the log |
 | index | **placements** already written, per address | `centinel.db` |
 | embed | cached chunk hashes from indexed chunk hashes | the vector cache |
@@ -107,15 +119,41 @@ always has bytes, so "we tried and there was nothing to get" needs its own recor
 it the extract predicate could only ever be "a Derivation exists", which is never true for
 an audio file — so every one of them was read, hashed and re-attempted on every run.
 
+**Derivation of nothing** — the empty blob recorded as derived text, which is the above
+invariant broken rather than a thing that exists. It matters because of *which* record it
+is: the version switch below is carried on the Underivable, so a verdict mis-filed as a
+Derivation is beyond the reach of the one mechanism for revisiting it, and `--refresh` over
+the whole corpus is the only way back. So the empty blob is excluded from the extract
+predicate — an append-only log cannot un-write the 490 a past run already recorded — and no
+bytes is turned into an Underivable at the **write site**, not in the reader that happened
+to get it wrong, because every reader can get it wrong the same way.
+
 **Pipeline version** — carried on every Underivable. A verdict belongs to one pipeline at
 one version and says nothing about the next; bumping it is how a better extractor gets
 another go at what an older one gave up on.
+
+**Primary and fallback reader** — two tools for one kind, tried in order, and the record
+names whichever one spoke. `pdf-inspector` is primary because it produces markdown, and
+headings become the chunk heading path; `pdftotext` is the fallback because flat text beats
+none. *Why it matters:* a page flagged `pages_needing_ocr` is a claim about what the reader
+could **decode**, not about what the page **holds**, and reading the first as the second
+wrote off 168 of 490 PDFs that had a text layer all along — an executive order, signed
+minutes, a 315,000-character action plan. A fallback is not a second guess at the same
+question; it is the admission that the first tool's silence was never evidence.
 
 **Chunk geometry** — the target and overlap sizes chunking uses. Load-bearing far outside
 chunking, because a `chunk_hash` hashes the chunk's *text* and the geometry decides the
 text. Changing it produces a wholly different set of hashes, so the old chunks stay in the
 index and every vector in the cache is orphaned. The index records the geometry its hashes
 were built with, and refuses a change that is not a rebuild.
+
+**Write batch** — the rows `index` commits as a unit, and it is **one document**, because
+that is the unit the row above subtracts. A batch is chosen by the skip predicate, not by
+what makes the writer fastest: widen it to span documents and a crash mid-batch leaves
+placements for a document the predicate will nonetheless call done — a page collected,
+extracted, and absent from every search, which is the defect the *per address* in that row
+already exists to prevent. Narrow is merely slow: a commit is a WAL checkpoint and an FTS5
+flush, and one per row paid both 450,000 times on a corpus of this size.
 
 ## The run report
 

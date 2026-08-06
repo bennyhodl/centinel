@@ -274,13 +274,16 @@ pub async fn collect(
     // ---- acquire -------------------------------------------------------------------
     let total = todo.len() as u64;
     for (i, resource) in todo.iter().enumerate() {
-        if i % 25 == 0 || i + 1 == todo.len() {
-            progress.step(
-                format!("{} stored, {} failed", report.stored, report.failed),
-                i as u64,
-                total,
-            );
-        }
+        // Every resource, not every twenty-fifth. The throttle was harmless when the bar
+        // was the only output; beside a request log that moves on every fetch it made the
+        // bar visibly disagree with the tally under it — 25/500 sitting still while the
+        // line beneath counted past a hundred requests. `indicatif` rate-limits its own
+        // redraws, so the cost of an event the renderer discards is a channel send.
+        progress.step(
+            format!("{} stored, {} failed", report.stored, report.failed),
+            i as u64,
+            total,
+        );
 
         let at = Timestamp::now();
         report.attempted += 1;

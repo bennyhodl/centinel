@@ -77,6 +77,21 @@ impl BlobSha {
         }
         Ok(Self(hex.to_ascii_lowercase()))
     }
+
+    /// Whether these are the bytes of nothing at all.
+    ///
+    /// A [`Derivation`] always has bytes — "we tried and there was nothing to get" is an
+    /// [`Underivable`], which is a different record for a reason. So this address appearing
+    /// as a Derivation's `to_sha` is not a derivation; it is a verdict filed under the
+    /// wrong name, and every predicate that reads "a Derivation exists" has to say so.
+    ///
+    /// A constant would be a second copy of `sha2`'s answer, so it is computed once from
+    /// the same function everything else uses.
+    pub fn is_of_nothing(&self) -> bool {
+        static NOTHING: std::sync::LazyLock<BlobSha> =
+            std::sync::LazyLock::new(|| BlobSha::from_bytes(&[]));
+        self == &*NOTHING
+    }
 }
 
 impl fmt::Display for BlobSha {

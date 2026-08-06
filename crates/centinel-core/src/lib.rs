@@ -31,6 +31,7 @@ pub mod config;
 pub mod discovery;
 pub mod domain;
 pub mod embed;
+pub mod enclosure;
 pub mod extract;
 pub mod fetch;
 pub mod index;

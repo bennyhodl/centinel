@@ -194,6 +194,15 @@ pub async fn doctor(ctx: &Ctx, args: DoctorArgs) -> anyhow::Result<DoctorReport>
             "will OCR scanned documents — ticket #12",
         )
         .await,
+        // Optional, not planned: `extract` calls this one. Without it a PDF whose text
+        // layer `pdf-inspector` cannot decode yields nothing instead of its text — a
+        // degraded stage, which is exactly what Optional means.
+        probe(
+            "pdftotext",
+            Need::Optional,
+            "second reader for PDFs the primary makes nothing of",
+        )
+        .await,
         probe("yt-dlp", Need::Required, "YouTube acquisition").await,
         probe(
             "ffmpeg",

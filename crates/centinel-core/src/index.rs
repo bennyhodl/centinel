@@ -226,44 +226,29 @@ impl Index {
         Ok(())
     }
 
-    /// Inserts a chunk and one placement.
+    /// Opens a write batch: one transaction covering however many rows the caller adds.
     ///
-    /// The chunk body is written once; a repeat of the same text from another page adds
-    /// only a placement row.
-    pub fn insert(&mut self, chunk: &Chunk, placement: &Placement) -> anyhow::Result<()> {
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT INTO chunk (chunk_hash, text, chars) VALUES (?1, ?2, ?3)
-             ON CONFLICT(chunk_hash) DO NOTHING",
-            params![
-                chunk.chunk_hash,
-                chunk.text,
-                chunk.text.chars().count() as i64
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO placement
-               (chunk_hash, source, resource, blob_sha, derived_sha, ordinal,
-                heading, char_start, char_end, observed_at, tool, title)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
-             ON CONFLICT(chunk_hash, source, resource, derived_sha, ordinal) DO NOTHING",
-            params![
-                chunk.chunk_hash,
-                placement.source,
-                placement.resource,
-                placement.blob_sha,
-                placement.derived_sha,
-                chunk.ordinal as i64,
-                chunk.heading,
-                chunk.char_start as i64,
-                chunk.char_end as i64,
-                placement.observed_at,
-                placement.tool,
-                placement.title,
-            ],
-        )?;
-        tx.commit()?;
-        Ok(())
+    /// **The unit of batching is the caller's unit of resumption.** A commit here is a WAL
+    /// checkpoint and an FTS5 index flush, and FTS5 is built to accumulate rows and flush
+    /// in bulk — so committing once per row does not merely pay the commit cost 450,000
+    /// times, it defeats the design of the thing being written to. A document's worth of
+    /// rows in one transaction is safe because [`Self::has_placement`] subtracts placements
+    /// *per address*: a batch lost to a crash is a document the next run simply redoes.
+    pub fn batch(&mut self) -> anyhow::Result<Batch<'_>> {
+        Ok(Batch {
+            tx: self.conn.transaction()?,
+        })
+    }
+
+    /// Inserts a chunk and one placement, in a transaction of its own.
+    ///
+    /// Convenience over [`Self::batch`] for a caller with one row to write. Anything
+    /// writing a whole document should open a batch instead — see its note.
+    pub fn insert(&mut self, chunk: &Chunk, placement: &Placement) -> anyhow::Result<bool> {
+        let mut batch = self.batch()?;
+        let body_is_new = batch.insert(chunk, placement)?;
+        batch.commit()?;
+        Ok(body_is_new)
     }
 
     /// The chunk geometry this index's hashes were built with, if it has been recorded.
@@ -477,6 +462,71 @@ impl Index {
     }
 }
 
+/// Rows on their way into the index, under one transaction. Dropped without
+/// [`Self::commit`], it rolls back — which is `rusqlite`'s default and the one we want.
+pub struct Batch<'a> {
+    tx: rusqlite::Transaction<'a>,
+}
+
+impl Batch<'_> {
+    /// Adds a chunk and one placement. Answers whether the chunk *body* was new.
+    ///
+    /// The body is written once; a repeat of the same text from another page adds only a
+    /// placement row. The return value is what `ON CONFLICT DO NOTHING` already knows —
+    /// one row changed means the body had not been seen before. Reporting it is not a
+    /// convenience: the caller's alternative is counting the table before and after, and
+    /// [`Index::stats`] is three full scans, which per chunk makes indexing quadratic in
+    /// the size of the corpus.
+    ///
+    /// `prepare_cached` because these two statements are the hottest SQL in the codebase
+    /// and `Connection::execute` re-parses its SQL on every call. The cache lives on the
+    /// connection, so it outlives any one batch.
+    pub fn insert(&mut self, chunk: &Chunk, placement: &Placement) -> anyhow::Result<bool> {
+        let body_is_new = self
+            .tx
+            .prepare_cached(
+                "INSERT INTO chunk (chunk_hash, text, chars) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(chunk_hash) DO NOTHING",
+            )?
+            .execute(params![
+                chunk.chunk_hash,
+                chunk.text,
+                chunk.text.chars().count() as i64
+            ])?
+            == 1;
+
+        self.tx
+            .prepare_cached(
+                "INSERT INTO placement
+                   (chunk_hash, source, resource, blob_sha, derived_sha, ordinal,
+                    heading, char_start, char_end, observed_at, tool, title)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+                 ON CONFLICT(chunk_hash, source, resource, derived_sha, ordinal) DO NOTHING",
+            )?
+            .execute(params![
+                chunk.chunk_hash,
+                placement.source,
+                placement.resource,
+                placement.blob_sha,
+                placement.derived_sha,
+                chunk.ordinal as i64,
+                chunk.heading,
+                chunk.char_start as i64,
+                chunk.char_end as i64,
+                placement.observed_at,
+                placement.tool,
+                placement.title,
+            ])?;
+
+        Ok(body_is_new)
+    }
+
+    pub fn commit(self) -> anyhow::Result<()> {
+        self.tx.commit()?;
+        Ok(())
+    }
+}
+
 /// Turns user input into a safe FTS5 MATCH expression.
 ///
 /// Every term is double-quoted. FTS5's query language treats `-`, `*`, `:`, `^`, `(`,
@@ -590,6 +640,87 @@ mod tests {
         let hits = idx.search("public records law", 10, None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].placements.len(), 2, "both pages must be citable");
+    }
+
+    /// The signal the report's `chunks written` / `chunks deduplicated` split is built on.
+    ///
+    /// Asserted on `insert`'s own answer rather than through the report, because the
+    /// alternative way to learn this — counting the table before and after — is what made
+    /// indexing quadratic, and a test that goes through `stats` would keep passing if the
+    /// return value were wired up wrongly.
+    #[test]
+    fn insert_says_whether_the_chunk_body_was_new() {
+        let mut idx = Index::in_memory().unwrap();
+        let chunks = chunk_markdown(
+            "# Notice\n\nReproduced without charge under the public records law.",
+            &ChunkConfig::default(),
+        );
+        let c = &chunks[0];
+
+        assert!(
+            idx.insert(c, &placement("tampa", "page-one", &"1".repeat(64)))
+                .unwrap(),
+            "the first sight of a body is new"
+        );
+        assert!(
+            !idx.insert(c, &placement("tampa", "page-two", &"2".repeat(64)))
+                .unwrap(),
+            "the same text under a second address adds a placement, not a body"
+        );
+        assert!(
+            !idx.insert(c, &placement("tampa", "page-one", &"1".repeat(64)))
+                .unwrap(),
+            "and re-inserting the very same placement adds nothing at all"
+        );
+
+        let stats = idx.stats().unwrap();
+        assert_eq!(stats.chunks, 1);
+        assert_eq!(stats.placements, 2, "the repeat placement was ignored");
+    }
+
+    /// The batch boundary is only safe if an abandoned batch leaves *nothing* behind: a
+    /// half-written document that the resume predicate then called done would be a page
+    /// collected, extracted, and absent from every search.
+    #[test]
+    fn a_batch_dropped_without_committing_writes_nothing() {
+        let mut idx = Index::in_memory().unwrap();
+        let chunks = chunk_markdown(
+            "# Minutes\n\nThe board approved the stormwater assessment.",
+            &ChunkConfig::default(),
+        );
+
+        {
+            let mut batch = idx.batch().unwrap();
+            for c in &chunks {
+                batch
+                    .insert(c, &placement("tampa", "abandoned", &"1".repeat(64)))
+                    .unwrap();
+            }
+            // No `commit`, so the guard rolls back as it goes out of scope.
+        }
+
+        let stats = idx.stats().unwrap();
+        assert_eq!(stats.chunks, 0, "no body survived");
+        assert_eq!(stats.placements, 0, "and no placement claims it is indexed");
+        assert!(
+            !idx.has_placement("tampa", "abandoned", &"1".repeat(64))
+                .unwrap(),
+            "so the next run still counts the document as outstanding"
+        );
+
+        // And the same batch's work, committed, does land — the rollback above is the
+        // guard doing its job, not the inserts silently failing.
+        let mut batch = idx.batch().unwrap();
+        for c in &chunks {
+            batch
+                .insert(c, &placement("tampa", "kept", &"1".repeat(64)))
+                .unwrap();
+        }
+        batch.commit().unwrap();
+        assert!(
+            idx.has_placement("tampa", "kept", &"1".repeat(64)).unwrap(),
+            "a committed batch is durable"
+        );
     }
 
     #[test]
