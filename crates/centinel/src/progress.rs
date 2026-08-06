@@ -36,9 +36,18 @@
 //! 200    94.15 KiB    0.9s   https://www.tampa.gov/proclamation/irish-heritage-month
 //! 200     1.19 MiB    1.8s ↳ …s/proclamation/2022/20220301_Irish_Heritage_Month.pdf
 //! 404           —     0.1s ↳ …ww.tampa.gov/sites/default/files/rfq/missing-exhibit.pdf
-//!   ⠋ collect · tampa ━━━━━━━━━━━━━━━━╾───────────  7,236/11,473
-//!     ok 9,922 · failed 1 · 2,686 docs · 2.85 GiB · 1.0/s · eta 1h 36m
+//!   ⠋ 7,236 stored, 41 failed    ━━━━━━━━━━━━━━━╾────  7,236/11,473
+//!     9,923 requests · 9,882 ok · 41 failed · 2,686 docs · 2.85 GiB · 1.0/s · eta 1h 36m
 //! ```
+//!
+//! The bar is a **fixed** 28 columns, not `wide_bar`. Stretched to the terminal it put the
+//! two lines on wildly different scales, and the tally read as a caption to something the
+//! width of the screen.
+//!
+//! The two lines count different things, so both name their unit. The bar counts
+//! *resources* and the tally counts *requests* — a page enclosing three documents is one
+//! of the first and four of the second. Unlabelled, `12 failed` above `41 failed` reads as
+//! the display arguing with itself.
 //!
 //! The footer is a second line of the stage's own bar rather than a bar of its own, so a
 //! `println` can never land between the two and split them.
@@ -70,6 +79,9 @@ const URL_WIDTH: usize = 64;
 
 /// How much of a long label to keep. Wide enough for `qwen3-embedding-0.6b tokenizer.json`.
 const LABEL_WIDTH: usize = 42;
+
+/// The stage label's fixed width. Wide enough for `11,473 stored, 1,204 failed`.
+const STAGE_LABEL_WIDTH: usize = 28;
 
 /// Drains progress events until the sender is dropped.
 ///
@@ -150,12 +162,19 @@ impl Tally {
     }
 
     /// The pinned line under the bar.
+    ///
+    /// Leads with the request count, and every figure is `number noun`. The bar above
+    /// counts *resources* and says `13 stored, 12 failed`; this counts **requests**, and a
+    /// page that encloses three documents is one of the first and four of the second. Read
+    /// as a pair without units, `12 failed` over `41 failed` looks like the display
+    /// contradicting itself rather than two honest counts of different things.
     fn footer(&self, done: u64, total: u64) -> String {
         let mut parts = vec![
-            format!("{GREEN}ok {}{RESET}", count(self.ok)),
+            format!("{}{} requests{}", DIM, count(self.requests()), RESET),
+            format!("{GREEN}{} ok{RESET}", count(self.ok)),
             match self.failed {
-                0 => format!("{DIM}failed 0{RESET}"),
-                n => format!("{RED}failed {}{RESET}", count(n)),
+                0 => format!("{DIM}0 failed{RESET}"),
+                n => format!("{RED}{} failed{RESET}", count(n)),
             },
             format!("{DIM}{} docs{RESET}", count(self.enclosed)),
             format!("{DIM}{}{RESET}", HumanBytes(self.bytes)),
@@ -279,6 +298,11 @@ async fn render_bars(mut rx: UnboundedReceiver<ProgressEvent>) {
         bar.set_position(done);
         bar.set_prefix(if is_total {
             "total".to_string()
+        } else if id == IMPLICIT_TRACK {
+            // Padded to a fixed width. A stage label grows as its counts do — `9 stored,
+            // 0 failed` becomes `1,204 stored, 87 failed` — and an unpadded prefix slid
+            // the bar rightwards under the reader's eye for the whole run.
+            pad(&event.message, STAGE_LABEL_WIDTH)
         } else {
             truncate(&event.message, LABEL_WIDTH)
         });
@@ -347,8 +371,11 @@ fn style_for(unit: Unit, is_total: bool, footer: bool) -> ProgressStyle {
         (Unit::Bytes, true, _) => {
             "  {prefix:.dim} {wide_bar:.green/dim} {bytes:>10}/{total_bytes:<10} eta {eta:>4}"
         }
+        // A fixed bar, not `wide_bar`. The stage bar sits directly above a tally line, and
+        // a bar stretched to the terminal put the two on wildly different scales — the
+        // footer read as a caption to something the width of the screen.
         (Unit::Count, _, true) => {
-            "  {spinner:.cyan} {prefix:.bold} {wide_bar:.cyan/blue} {pos:>7}/{len:<7}\n{msg}"
+            "  {spinner:.cyan} {prefix:.bold} {bar:28.cyan/blue} {pos:>7}/{len:<7}\n{msg}"
         }
         (Unit::Count, _, false) => {
             "  {spinner:.cyan} {prefix:.bold} {wide_bar:.cyan/blue} {pos:>7}/{len:<7}"
@@ -357,6 +384,17 @@ fn style_for(unit: Unit, is_total: bool, footer: bool) -> ProgressStyle {
     ProgressStyle::with_template(template)
         .expect("templates are literals, checked by the tests below")
         .progress_chars("━━╾")
+}
+
+/// Exactly `width` printed columns: truncated if long, space-padded if short.
+///
+/// So the bar that follows it starts at the same column on every redraw.
+fn pad(text: &str, width: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    match chars.len() >= width {
+        true => chars[..width].iter().collect(),
+        false => format!("{text}{}", " ".repeat(width - chars.len())),
+    }
 }
 
 /// Keeps the tail of an over-long label — the filename is what distinguishes it.
@@ -490,10 +528,56 @@ mod tests {
         tally.record(&outcome(Some(404), 0, true));
 
         let footer = tally.footer(3, 10);
-        assert!(footer.contains("ok 3"), "{footer}");
-        assert!(footer.contains("failed 1"), "{footer}");
+        assert!(footer.contains("3 ok"), "{footer}");
+        assert!(footer.contains("1 failed"), "{footer}");
         assert!(footer.contains("1 docs"), "{footer}");
         assert_eq!(tally.requests(), 4);
+    }
+
+    /// The bar counts resources and the footer counts requests, and a page that encloses
+    /// three documents is one of the first and four of the second. Without the unit, the
+    /// bar's `12 failed` beside the footer's `41 failed` reads as a display arguing with
+    /// itself.
+    #[test]
+    fn the_footer_says_what_it_is_counting() {
+        let mut tally = Tally::default();
+        tally.record(&outcome(Some(200), 10, false));
+        tally.record(&outcome(Some(404), 0, true));
+
+        let footer = tally.footer(1, 10);
+        assert!(
+            footer.contains("2 requests"),
+            "the denominator is named: {footer}"
+        );
+    }
+
+    /// The stage bar sits above the tally, so it must not stretch to the terminal, and its
+    /// label must not slide the bar sideways as the counts grow.
+    #[test]
+    fn the_stage_label_is_a_fixed_width() {
+        assert_eq!(pad("9 stored, 0 failed", 28).chars().count(), 28);
+        assert_eq!(pad("11,473 stored, 1,204 failed", 28).chars().count(), 28);
+        assert_eq!(pad("", 28).chars().count(), 28);
+        assert_eq!(
+            pad("a much longer label than fits here", 28)
+                .chars()
+                .count(),
+            28
+        );
+        // Multi-byte must not be sliced through a codepoint.
+        assert_eq!(pad("café-café-café-café-café-café", 10).chars().count(), 10);
+    }
+
+    #[test]
+    fn the_stage_bar_does_not_stretch_to_the_terminal() {
+        // `wide_bar` fills whatever the terminal is; `bar:28` does not.
+        let template =
+            "  {spinner:.cyan} {prefix:.bold} {bar:28.cyan/blue} {pos:>7}/{len:<7}\n{msg}";
+        assert!(
+            !template.contains("wide_bar"),
+            "the stage bar is fixed width"
+        );
+        let _ = style_for(Unit::Count, false, true);
     }
 
     /// The estimate that made the bar honest. Two pages done of ten, and every page so
