@@ -108,7 +108,7 @@ work that was never done.
 | Stage | What it subtracts | Where the answer lives |
 |---|---|---|
 | collect | observed markers from the latest DiscoveryRun | the log |
-| extract | blobs with a Derivation **or an Underivable** from the latest Observations | the log |
+| extract | blobs with a Derivation **of bytes**, or an Underivable, from the latest Observations | the log |
 | transcribe | blobs derived by the transcriber from the audio blobs | the log |
 | index | **placements** already written, per address | `centinel.db` |
 | embed | cached chunk hashes from indexed chunk hashes | the vector cache |
@@ -119,23 +119,18 @@ always has bytes, so "we tried and there was nothing to get" needs its own recor
 it the extract predicate could only ever be "a Derivation exists", which is never true for
 an audio file — so every one of them was read, hashed and re-attempted on every run.
 
+**Derivation of nothing** — the empty blob recorded as derived text, which is the above
+invariant broken rather than a thing that exists. It matters because of *which* record it
+is: the version switch below is carried on the Underivable, so a verdict mis-filed as a
+Derivation is beyond the reach of the one mechanism for revisiting it, and `--refresh` over
+the whole corpus is the only way back. So the empty blob is excluded from the extract
+predicate — an append-only log cannot un-write the 490 a past run already recorded — and no
+bytes is turned into an Underivable at the **write site**, not in the reader that happened
+to get it wrong, because every reader can get it wrong the same way.
+
 **Pipeline version** — carried on every Underivable. A verdict belongs to one pipeline at
 one version and says nothing about the next; bumping it is how a better extractor gets
 another go at what an older one gave up on.
-
-**Chunk geometry** — the target and overlap sizes chunking uses. Load-bearing far outside
-chunking, because a `chunk_hash` hashes the chunk's *text* and the geometry decides the
-text. Changing it produces a wholly different set of hashes, so the old chunks stay in the
-index and every vector in the cache is orphaned. The index records the geometry its hashes
-were built with, and refuses a change that is not a rebuild.
-
-**Write batch** — the rows `index` commits as a unit, and it is **one document**, because
-that is the unit the row above subtracts. A batch is chosen by the skip predicate, not by
-what makes the writer fastest: widen it to span documents and a crash mid-batch leaves
-placements for a document the predicate will nonetheless call done — a page collected,
-extracted, and absent from every search, which is the defect the *per address* in that row
-already exists to prevent. Narrow is merely slow: a commit is a WAL checkpoint and an FTS5
-flush, and one per row paid both 450,000 times on a corpus of this size.
 
 ## The run report
 
