@@ -310,9 +310,20 @@ async fn render_bars(mut rx: UnboundedReceiver<ProgressEvent>) {
         if let Some(outcome) = &event.request {
             tally.record(outcome);
             let _ = multi.println(request_line(outcome, terminal_width()));
-            if let (Some(bar), Some(footer)) = (bars.get(IMPLICIT_TRACK), &footer) {
-                let line = tally.footer(bar.position(), bar.length().unwrap_or(0));
-                footer.set_message(truncate_end(&line, terminal_width()));
+            if let Some(bar) = bars.get(IMPLICIT_TRACK) {
+                // Created on the first request, not with the bar. `extract`, `index` and
+                // `embed` make no requests, and a tally reading `0 requests · 0 ok · 0 B`
+                // under all three would be furniture that never says anything.
+                let line = footer.get_or_insert_with(|| {
+                    let line = multi.insert_after(bar, ProgressBar::new(0));
+                    line.set_style(
+                        ProgressStyle::with_template("{msg}")
+                            .expect("a bare message always parses"),
+                    );
+                    line
+                });
+                let text = tally.footer(bar.position(), bar.length().unwrap_or(0));
+                line.set_message(truncate_end(&text, terminal_width()));
             }
             continue;
         }
@@ -342,17 +353,6 @@ async fn render_bars(mut rx: UnboundedReceiver<ProgressEvent>) {
                 bar
             })
             .clone();
-
-        // The tally goes directly under the stage bar, once there is a stage bar to sit
-        // under. A `ProgressBar` is a handle to shared state, so cloning is a refcount.
-        if id == IMPLICIT_TRACK && footer.is_none() {
-            let line = multi.insert_after(&bar, ProgressBar::new(0));
-            line.set_style(
-                ProgressStyle::with_template("{msg}").expect("a bare message always parses"),
-            );
-            line.set_message(truncate_end(&tally.footer(done, total), terminal_width()));
-            footer = Some(line);
-        }
 
         // Set rather than increment: events are throttled and lossy by design, so an
         // absolute position is the only one that survives a dropped update.
@@ -782,6 +782,25 @@ mod tests {
             short_duration(Duration::from_secs(2 * 3600 + 41 * 60)),
             "2h 41m"
         );
+    }
+
+    /// A stage that makes no requests grows no tally. `extract`, `index` and `embed` all
+    /// have a bar and no HTTP, and `0 requests · 0 ok · 0 B` under each is furniture.
+    #[tokio::test]
+    async fn a_stage_with_no_requests_shows_no_tally() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = tokio::spawn(render_bars(rx));
+        for done in 1..=3u64 {
+            tx.send(ProgressEvent {
+                message: format!("{done} extracted"),
+                done: Some(done),
+                total: Some(3),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        drop(tx);
+        handle.await.expect("a bar without a tally must not panic");
     }
 
     /// The whole point of C: the log scrolls and the footer stays. Both renderers have to
