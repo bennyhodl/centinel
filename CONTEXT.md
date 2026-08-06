@@ -129,6 +129,14 @@ text. Changing it produces a wholly different set of hashes, so the old chunks s
 index and every vector in the cache is orphaned. The index records the geometry its hashes
 were built with, and refuses a change that is not a rebuild.
 
+**Write batch** — the rows `index` commits as a unit, and it is **one document**, because
+that is the unit the row above subtracts. A batch is chosen by the skip predicate, not by
+what makes the writer fastest: widen it to span documents and a crash mid-batch leaves
+placements for a document the predicate will nonetheless call done — a page collected,
+extracted, and absent from every search, which is the defect the *per address* in that row
+already exists to prevent. Narrow is merely slow: a commit is a WAL checkpoint and an FTS5
+flush, and one per row paid both 450,000 times on a corpus of this size.
+
 ## The run report
 
 **Tally** — the numbers one stage produced, folded across however many calls it took. Two
