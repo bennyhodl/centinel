@@ -49,10 +49,21 @@
 //! of the first and four of the second. Unlabelled, `12 failed` above `41 failed` reads as
 //! the display arguing with itself.
 //!
-//! The footer is a second line of the stage's own bar rather than a bar of its own, so a
-//! `println` can never land between the two and split them.
+//! ## Every line fits, and every bar is one row
 //!
-//! Everything in it is derived here from the request stream, including the estimate —
+//! `MultiProgress` redraws by counting rows and moving the cursor up that many. Two things
+//! break the count, and both did: a template containing a `\n`, which makes one bar occupy
+//! two rows, and a printed line the terminal wrapped, which is a row it never knew it drew.
+//! Either one and every redraw afterwards lands a column further across — the display walks
+//! diagonally down the screen, which is what switching away from the terminal and back
+//! reliably produced.
+//!
+//! So the tally is its own single-row bar rather than a second line of the stage's, and
+//! every line is cut to the terminal's width before it is printed. `MultiProgress` keeps
+//! its bars in one block at the bottom and prints above it, so the two cannot be separated
+//! anyway.
+//!
+//! Everything in the tally is derived here from the request stream, including the estimate —
 //! which counts the documents the remaining pages will *also* pull, because a corpus
 //! where a third of pages enclose a PDF makes a page-only estimate run 30% short.
 
@@ -74,8 +85,10 @@ const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 const CYAN: &str = "\x1b[36m";
 
-/// How much of a URL to keep in a request line. The tail is the identifying part.
-const URL_WIDTH: usize = 64;
+/// The least address a request line will show, however narrow the terminal. Below this the
+/// line stops being worth printing, and a line that is slightly too long for a very narrow
+/// terminal is a better outcome than one carrying no address at all.
+const MIN_URL_WIDTH: usize = 24;
 
 /// How much of a long label to keep. Wide enough for `qwen3-embedding-0.6b tokenizer.json`.
 const LABEL_WIDTH: usize = 42;
@@ -213,11 +226,11 @@ fn short_duration(d: std::time::Duration) -> String {
     }
 }
 
-/// One request, as a line in the scrolling log.
+/// One request, as a line in the scrolling log, fitted to `width` printed columns.
 ///
-/// Fixed columns so the eye can run down them: when, what came back, how big, how long,
-/// where. The status is the only coloured field — it is the one being scanned for.
-fn request_line(r: &RequestOutcome) -> String {
+/// Fixed columns so the eye can run down them: what came back, how big, how long, where.
+/// The status is the only coloured field — it is the one being scanned for.
+fn request_line(r: &RequestOutcome, width: usize) -> String {
     let status = match (r.status, r.succeeded()) {
         (Some(s), true) => format!("{GREEN}{s}{RESET}"),
         // A 429 is the host asking for room, not a broken address, and reads differently.
@@ -240,31 +253,66 @@ fn request_line(r: &RequestOutcome) -> String {
         true => format!("{CYAN}↳{RESET}"),
         false => " ".to_string(),
     };
-    let detail = match &r.detail {
-        Some(d) if r.status.is_none() => format!("  {DIM}{d}{RESET}"),
+    // Everything to the left of the address, in printed columns:
+    //   status 3 · gap 2 · size 11 · gap 2 · time 6 · gap 1 · mark 1 · gap 1
+    const FIXED: usize = 27;
+
+    // The address takes whatever is left, and the reason it is computed rather than a
+    // constant is the whole bug: a line wider than the terminal wraps, `indicatif` counts
+    // it as one row when it drew two, and every redraw after that moves the cursor to the
+    // wrong place. What it looks like is the display walking diagonally down the screen.
+    let mut detail = match &r.detail {
+        Some(d) if r.status.is_none() => format!("  {d}"),
         _ => String::new(),
     };
+    // The address is the thing being read; the detail yields to it when both cannot fit.
+    if width < FIXED + detail.chars().count() + MIN_URL_WIDTH {
+        detail.clear();
+    }
+    // No floor. A minimum that the terminal is narrower than would put the wrap straight
+    // back, and a short address beats a broken display.
+    let room = width.saturating_sub(FIXED + detail.chars().count());
 
+    let dim_detail = match detail.is_empty() {
+        true => String::new(),
+        false => format!("{DIM}{detail}{RESET}"),
+    };
     format!(
-        "{status}  {size}  {DIM}{:>5.1}s{RESET} {mark} {DIM}{}{RESET}{detail}",
+        "{status}  {size}  {DIM}{:>5.1}s{RESET} {mark} {DIM}{}{RESET}{dim_detail}",
         r.millis as f64 / 1000.0,
-        truncate(&r.url, URL_WIDTH),
+        truncate(&r.url, room),
     )
+}
+
+/// Columns of stderr, or a conservative guess when it is not a terminal.
+fn terminal_width() -> usize {
+    console::Term::stderr()
+        .size_checked()
+        .map(|(_, cols)| cols as usize)
+        // One column spare. Printing *to* the last one leaves the cursor in a state some
+        // terminals resolve by wrapping anyway, which is the failure being avoided.
+        .map_or(100, |cols| cols.saturating_sub(1).max(40))
 }
 
 async fn render_bars(mut rx: UnboundedReceiver<ProgressEvent>) {
     let multi = MultiProgress::new();
     let mut bars: HashMap<String, ProgressBar> = HashMap::new();
     let mut tally = Tally::default();
+    // The tally, as its own single-line bar rather than a second line of the stage's.
+    // `MultiProgress` keeps its bars in one block at the bottom and prints above it, so
+    // nothing can land between the two — and every bar staying one row is what keeps its
+    // cursor arithmetic right.
+    let mut footer: Option<ProgressBar> = None;
 
     while let Some(event) = rx.recv().await {
         // A request scrolls above the bars and updates the tally beneath them. This is
         // the whole shape: history you can read, orientation you can trust, one screen.
         if let Some(outcome) = &event.request {
             tally.record(outcome);
-            let _ = multi.println(request_line(outcome));
-            if let Some(bar) = bars.get(IMPLICIT_TRACK) {
-                bar.set_message(tally.footer(bar.position(), bar.length().unwrap_or(0)));
+            let _ = multi.println(request_line(outcome, terminal_width()));
+            if let (Some(bar), Some(footer)) = (bars.get(IMPLICIT_TRACK), &footer) {
+                let line = tally.footer(bar.position(), bar.length().unwrap_or(0));
+                footer.set_message(truncate_end(&line, terminal_width()));
             }
             continue;
         }
@@ -278,19 +326,33 @@ async fn render_bars(mut rx: UnboundedReceiver<ProgressEvent>) {
         let done = event.done.unwrap_or(0);
         let is_total = id == TOTAL_TRACK;
 
-        let bar = bars.entry(id.to_string()).or_insert_with(|| {
-            // The aggregate sits at the *bottom*, under whatever it is summing — the
-            // order `cargo` has trained people to read. It is created lazily like any
-            // other bar, so pushing every other track above it keeps that order stable
-            // no matter which bar happened to appear first.
-            let bar = if is_total {
-                multi.add(ProgressBar::new(total))
-            } else {
-                multi.insert(0, ProgressBar::new(total))
-            };
-            bar.set_style(style_for(event.unit, is_total, id == IMPLICIT_TRACK));
-            bar
-        });
+        let bar = bars
+            .entry(id.to_string())
+            .or_insert_with(|| {
+                // The aggregate sits at the *bottom*, under whatever it is summing — the
+                // order `cargo` has trained people to read. It is created lazily like any
+                // other bar, so pushing every other track above it keeps that order stable
+                // no matter which bar happened to appear first.
+                let bar = if is_total {
+                    multi.add(ProgressBar::new(total))
+                } else {
+                    multi.insert(0, ProgressBar::new(total))
+                };
+                bar.set_style(style_for(event.unit, is_total));
+                bar
+            })
+            .clone();
+
+        // The tally goes directly under the stage bar, once there is a stage bar to sit
+        // under. A `ProgressBar` is a handle to shared state, so cloning is a refcount.
+        if id == IMPLICIT_TRACK && footer.is_none() {
+            let line = multi.insert_after(&bar, ProgressBar::new(0));
+            line.set_style(
+                ProgressStyle::with_template("{msg}").expect("a bare message always parses"),
+            );
+            line.set_message(truncate_end(&tally.footer(done, total), terminal_width()));
+            footer = Some(line);
+        }
 
         // Set rather than increment: events are throttled and lossy by design, so an
         // absolute position is the only one that survives a dropped update.
@@ -306,10 +368,8 @@ async fn render_bars(mut rx: UnboundedReceiver<ProgressEvent>) {
         } else {
             truncate(&event.message, LABEL_WIDTH)
         });
-        // The footer belongs to the one bar that counts a whole stage. A per-file byte
-        // track already says everything about itself.
-        if id == IMPLICIT_TRACK {
-            bar.set_message(tally.footer(done, total));
+        if let (true, Some(line)) = (id == IMPLICIT_TRACK, &footer) {
+            line.set_message(truncate_end(&tally.footer(done, total), terminal_width()));
         }
 
         // A finished *named* track becomes a static line, so a ten-file pull does not
@@ -357,29 +417,25 @@ async fn render_lines(mut rx: UnboundedReceiver<ProgressEvent>) {
     }
 }
 
-/// The bar, and for the stage track the tally line pinned beneath it.
+/// Every template is **one line**.
 ///
-/// The footer is a second line of the *same* bar rather than a bar of its own, so the two
-/// can never be separated by a `println` landing between them — which is exactly what
-/// happens on a run emitting a line per request.
-fn style_for(unit: Unit, is_total: bool, footer: bool) -> ProgressStyle {
-    let template = match (unit, is_total, footer) {
-        (Unit::Bytes, false, _) => {
+/// A `\n` in a template makes one bar occupy two terminal rows, and `MultiProgress`
+/// redraws by counting rows and moving the cursor up. Get that count wrong once — a
+/// two-row bar, or a line that wrapped — and every redraw after it lands a column further
+/// across, which is the display walking diagonally down the screen.
+fn style_for(unit: Unit, is_total: bool) -> ProgressStyle {
+    let template = match (unit, is_total) {
+        (Unit::Bytes, false) => {
             "  {spinner:.cyan} {prefix:.bold} {wide_bar:.cyan/blue} \
              {bytes:>10}/{total_bytes:<10} {binary_bytes_per_sec:>11} eta {eta:>4}"
         }
-        (Unit::Bytes, true, _) => {
+        (Unit::Bytes, true) => {
             "  {prefix:.dim} {wide_bar:.green/dim} {bytes:>10}/{total_bytes:<10} eta {eta:>4}"
         }
         // A fixed bar, not `wide_bar`. The stage bar sits directly above a tally line, and
         // a bar stretched to the terminal put the two on wildly different scales — the
-        // footer read as a caption to something the width of the screen.
-        (Unit::Count, _, true) => {
-            "  {spinner:.cyan} {prefix:.bold} {bar:28.cyan/blue} {pos:>7}/{len:<7}\n{msg}"
-        }
-        (Unit::Count, _, false) => {
-            "  {spinner:.cyan} {prefix:.bold} {wide_bar:.cyan/blue} {pos:>7}/{len:<7}"
-        }
+        // tally read as a caption to something the width of the screen.
+        (Unit::Count, _) => "  {spinner:.cyan} {prefix:.bold} {bar:28.cyan/blue} {pos:>7}/{len:<7}",
     };
     ProgressStyle::with_template(template)
         .expect("templates are literals, checked by the tests below")
@@ -397,11 +453,47 @@ fn pad(text: &str, width: usize) -> String {
     }
 }
 
+/// Cuts a line to `width` printed columns, counting only what is actually drawn.
+///
+/// The tally is built from coloured fragments, and an SGR escape occupies bytes and no
+/// columns — so cutting it by length would take a chunk out of the visible text and, worse,
+/// could sever an escape and leave the rest of the terminal coloured.
+fn truncate_end(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut drawn = 0usize;
+    let mut chars = text.chars();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            out.push(c);
+            for c in chars.by_ref() {
+                out.push(c);
+                if c == 'm' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if drawn == width {
+            // Whatever was open stays open only as far as here.
+            out.push_str(RESET);
+            break;
+        }
+        out.push(c);
+        drawn += 1;
+    }
+    out
+}
+
 /// Keeps the tail of an over-long label — the filename is what distinguishes it.
 fn truncate(text: &str, width: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= width {
         return text.to_string();
+    }
+    // A very narrow terminal leaves no room for the ellipsis, let alone anything after it.
+    if width <= 1 {
+        return "…".repeat(width);
     }
     format!(
         "…{}",
@@ -414,6 +506,25 @@ fn truncate(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a terminal actually draws: the line with its SGR escapes removed.
+    fn strip(line: &str) -> String {
+        let mut out = String::new();
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\x1b' => {
+                    for c in chars.by_ref() {
+                        if c == 'm' {
+                            break;
+                        }
+                    }
+                }
+                c => out.push(c),
+            }
+        }
+        out
+    }
 
     fn outcome(status: Option<u16>, bytes: u64, enclosed: bool) -> RequestOutcome {
         RequestOutcome {
@@ -433,9 +544,7 @@ mod tests {
         // display mid-download. Cheaper to find here.
         for unit in [Unit::Bytes, Unit::Count] {
             for is_total in [true, false] {
-                for footer in [true, false] {
-                    let _ = style_for(unit, is_total, footer);
-                }
+                let _ = style_for(unit, is_total);
             }
         }
     }
@@ -444,7 +553,7 @@ mod tests {
 
     #[test]
     fn a_request_line_leads_with_what_came_back() {
-        let line = request_line(&outcome(Some(200), 1_200_000, false));
+        let line = request_line(&outcome(Some(200), 1_200_000, false), 100);
         assert!(line.contains("200"), "{line}");
         assert!(line.contains("1.14 MiB"), "the size is readable: {line}");
         assert!(line.contains("0.9s"), "and how long it took: {line}");
@@ -455,11 +564,11 @@ mod tests {
     /// hide the difference between a broken link and a broken network.
     #[test]
     fn a_refusal_without_a_status_says_why() {
-        let line = request_line(&outcome(None, 0, false));
+        let line = request_line(&outcome(None, 0, false), 100);
         assert!(line.contains("connection timed out"), "{line}");
         assert!(!line.contains("404"));
 
-        let answered = request_line(&outcome(Some(404), 0, false));
+        let answered = request_line(&outcome(Some(404), 0, false), 100);
         assert!(answered.contains("404"), "{answered}");
         assert!(
             !answered.contains("timed out"),
@@ -472,49 +581,90 @@ mod tests {
     /// the right of the size wandered.
     #[test]
     fn the_columns_line_up_whatever_the_size() {
-        let visible = |r: &RequestOutcome| {
-            let line = request_line(r);
-            // Strip SGR sequences: it is the printed width that has to match.
-            let mut out = String::new();
-            let mut chars = line.chars();
-            while let Some(c) = chars.next() {
-                match c {
-                    '\x1b' => {
-                        for c in chars.by_ref() {
-                            if c == 'm' {
-                                break;
-                            }
-                        }
-                    }
-                    c => out.push(c),
-                }
-            }
+        let short = |status, bytes| RequestOutcome {
+            url: "https://tampa.gov/a".into(),
+            status,
+            bytes,
+            millis: 900,
+            kind: None,
+            detail: None,
+            enclosed: false,
+        };
+        let starts_at = |r: &RequestOutcome| {
+            let line = strip(&request_line(r, 100));
             // Characters, not bytes: an em-dash is one printed column and three bytes,
             // so a byte offset would report the columns as ragged when they are straight.
-            let at = out.find("http").expect("every line names an address");
-            out[..at].chars().count()
+            let at = line
+                .find("http")
+                .expect("this url is short enough to survive");
+            line[..at].chars().count()
         };
 
-        let widths: Vec<_> = [
-            outcome(Some(200), 96_409, false),    // 94.15 KiB
-            outcome(Some(200), 1_248_112, false), // 1.19 MiB
-            outcome(Some(404), 0, false),         // —
-            outcome(None, 0, false),              // no status at all
+        let columns: Vec<_> = [
+            short(Some(200), 96_409),    // 94.15 KiB
+            short(Some(200), 1_248_112), // 1.19 MiB
+            short(Some(404), 0),         // —
+            short(None, 0),              // no status at all
         ]
         .iter()
-        .map(visible)
+        .map(starts_at)
         .collect();
 
         assert!(
-            widths.windows(2).all(|w| w[0] == w[1]),
-            "the url starts at a different column each time: {widths:?}"
+            columns.windows(2).all(|w| w[0] == w[1]),
+            "the url starts at a different column each time: {columns:?}"
         );
+    }
+
+    /// The fault behind the staircase. `MultiProgress` redraws by counting rows and moving
+    /// the cursor up, so a line the terminal wrapped is a row it does not know it drew —
+    /// and every redraw after it lands further across the screen.
+    #[test]
+    fn no_line_is_ever_wider_than_the_terminal() {
+        let long = RequestOutcome {
+            url: "https://www.tampa.gov/sites/default/files/document/2026/sw_franchise_fee_\
+                  remittance_form_7-31-2025_potential-customers-07-14-2025.pdf"
+                .into(),
+            status: None,
+            bytes: 0,
+            millis: 1_300,
+            kind: None,
+            detail: Some("connection timed out after 30s".into()),
+            enclosed: true,
+        };
+
+        for width in [40usize, 60, 80, 100, 120, 200] {
+            let printed = strip(&request_line(&long, width)).chars().count();
+            assert!(
+                printed <= width,
+                "a {printed}-column line in a {width}-column terminal wraps"
+            );
+        }
+    }
+
+    /// And the tally is built from coloured fragments, so cutting it by length would take
+    /// a bite out of the visible text — or sever an escape and colour the rest of the
+    /// terminal.
+    #[test]
+    fn the_tally_is_cut_by_printed_width_not_by_length() {
+        let mut tally = Tally::default();
+        for _ in 0..1_000 {
+            tally.record(&outcome(Some(200), 1_000_000, false));
+        }
+        let line = tally.footer(10, 100);
+        assert!(strip(&line).chars().count() > 40, "worth truncating");
+
+        for width in [20usize, 40, 60] {
+            let cut = truncate_end(&line, width);
+            assert!(strip(&cut).chars().count() <= width, "{width}: {cut:?}");
+            assert!(cut.ends_with(RESET), "colour must not leak past the cut");
+        }
     }
 
     #[test]
     fn an_enclosed_document_is_marked_apart_from_a_declared_page() {
-        assert!(request_line(&outcome(Some(200), 10, true)).contains('↳'));
-        assert!(!request_line(&outcome(Some(200), 10, false)).contains('↳'));
+        assert!(request_line(&outcome(Some(200), 10, true), 100).contains('↳'));
+        assert!(!request_line(&outcome(Some(200), 10, false), 100).contains('↳'));
     }
 
     // ── the footer ─────────────────────────────────────────────────────────────
@@ -577,7 +727,7 @@ mod tests {
             !template.contains("wide_bar"),
             "the stage bar is fixed width"
         );
-        let _ = style_for(Unit::Count, false, true);
+        let _ = style_for(Unit::Count, false);
     }
 
     /// The estimate that made the bar honest. Two pages done of ten, and every page so
