@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::Underivable;
 use crate::extract::{self, Extracted, extract as extract_bytes};
 use crate::fetch::{SNIFF_BYTES, content_kind};
+use crate::op::{ItemOutcome, Verdict};
 use crate::prelude::*;
 use crate::store::LogRecord;
 
@@ -172,9 +173,11 @@ pub async fn extract(
                 continue;
             }
 
-            if i % 25 == 0 {
-                progress.step(format!("{} extracted", report.extracted), i as u64, total);
-            }
+            // Every item, not every twenty-fifth: the bar sits directly above a tally that
+            // moves on each one, and the two drifting apart is what made the collect
+            // display look broken.
+            progress.step(format!("{} extracted", report.extracted), i as u64, total);
+            let started = std::time::Instant::now();
 
             // The head decides the kind, and the kind decides whether the rest is worth
             // reading. `get_blob` reads the whole file and verifies it, which is the
@@ -203,9 +206,29 @@ pub async fn extract(
                 obs.meta.get("title").map(String::as_str),
             );
 
+            let item = |verdict, produced, detail| ItemOutcome {
+                address: resource.natural_key.clone(),
+                // The content kind, because it is what decides which reader ran and
+                // therefore what a surprising result is a surprise *about*.
+                tag: kind.to_string(),
+                verdict,
+                noun: "documents".into(),
+                bytes: bytes.len() as u64,
+                produced,
+                millis: started.elapsed().as_millis() as u64,
+                detail,
+                nested: false,
+            };
+
             match &outcome {
                 Extracted::Unextractable { reason } => {
                     report.unextractable += 1;
+                    // Nothing to read is a fact about the format, not a fault in the run:
+                    // a `.dwg` has no text and never will.
+                    // `Some(0)` rather than `None`: it produced nothing, which is a
+                    // measurement. `None` means the stage does not measure output at all,
+                    // and mixing the two inside one stage breaks the column.
+                    progress.item(item(Verdict::Missing, Some(0), Some(reason.clone())));
                     if report.unreadable.len() < 20 {
                         report.unreadable.push(Unreadable {
                             url: resource.natural_key.clone(),
@@ -231,12 +254,30 @@ pub async fn extract(
                     continue;
                 }
                 Extracted::Partial {
-                    pages_needing_ocr, ..
+                    extraction,
+                    pages_needing_ocr,
                 } => {
                     report.needs_ocr += 1;
                     report.ocr_pages_pending += pages_needing_ocr.len();
+                    // Text came out, and some of the document is images nothing can read
+                    // until OCR exists. Worth a line that reads differently.
+                    progress.item(item(
+                        Verdict::Warn,
+                        Some(extraction.text.chars().count() as u64),
+                        Some(format!(
+                            "{} page{} need OCR",
+                            pages_needing_ocr.len(),
+                            if pages_needing_ocr.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        )),
+                    ));
                 }
-                Extracted::Text(_) => {}
+                Extracted::Text(e) => {
+                    progress.item(item(Verdict::Ok, Some(e.text.chars().count() as u64), None))
+                }
             }
 
             let (tool, version) = outcome.tool().expect("non-unextractable has a tool");

@@ -17,7 +17,7 @@
 //!
 //! | Event | Meaning | Rendering |
 //! |---|---|---|
-//! | `request` | one HTTP request | a line above the bars, and a tick of the footer |
+//! | `item` | one finished unit of work | a line above the bars, and a tick of the tally |
 //! | no `id` | a log line | printed above the bars |
 //! | `id` + `total` | a track | one bar per `id` |
 //! | `id`, `done == total` | that track finished | bar cleared, a `✓` line printed |
@@ -29,16 +29,32 @@
 //!
 //! A crawl paced at one request per second is asleep almost all of the time, and a run
 //! that printed only a counter was indistinguishable from one that had hung — two hours
-//! of a live 11,473-page collect looking like a crash. So requests scroll past as history
-//! while a tally stays pinned underneath them:
+//! of a live 11,473-page collect looking like a crash. So finished items scroll past as
+//! history while a tally stays pinned underneath them:
 //!
 //! ```text
-//! 200    94.15 KiB    0.9s   https://www.tampa.gov/proclamation/irish-heritage-month
-//! 200     1.19 MiB    1.8s ↳ …s/proclamation/2022/20220301_Irish_Heritage_Month.pdf
-//! 404           —     0.1s ↳ …ww.tampa.gov/sites/default/files/rfq/missing-exhibit.pdf
-//!   ⠋ 7,236 stored, 41 failed    ━━━━━━━━━━━━━━━╾────  7,236/11,473
-//!     9,923 requests · 9,882 ok · 41 failed · 2,686 docs · 2.85 GiB · 1.0/s · eta 1h 36m
+//!  200    94.15 KiB    0.9s   https://www.tampa.gov/proclamation/irish-heritage-month
+//!  200     1.19 MiB    1.8s ↳ …s/proclamation/2022/20220301_Irish_Heritage_Month.pdf
+//!  404           —     0.1s ↳ …ww.tampa.gov/sites/default/files/rfq/missing-exhibit.pdf
+//!    ⠋ 7,236 stored, 41 failed    ━━━━━━━━━━━━━━━╾────  7,236/11,473
+//!      9,923 requests · 9,882 ok · 41 failed · 2,686 docs · 2.85 GiB · 1.0/s · eta 1h 36m
 //! ```
+//!
+//! **One renderer, every stage.** An [`ItemOutcome`] is stage-agnostic, so `extract` gets
+//! the same display for free — a content kind in the tag column instead of a status, and
+//! the characters it produced where `collect` has nothing to say:
+//!
+//! ```text
+//!  pdf     1.19 MiB  → 4,201 ch    0.3s   …/proclamation/2022/20220301_Irish.pdf
+//! html    94.15 KiB    → 842 ch    0.1s   …/proclamation/irish-heritage-month
+//!  pdf     2.83 MiB  → 1,204 ch    1.8s   …/recycling-brochure.pdf  12 pages need OCR
+//! othe     3.91 MiB       →   —    0.0s   …/site-plan.dwg  no extractor for `other`
+//!    ⠋ 9,600 extracted           ━━━━━━━━━━━━━━━━━━━╾──  9,780/16,908
+//!      9,780 documents · 9,600 ok · 180 failed · 9.83 GiB · 30.6/s · eta 3m
+//! ```
+//!
+//! The stage names its own unit — `requests`, `documents` — rather than the renderer
+//! guessing a word that fits every stage badly.
 //!
 //! The bar is a **fixed** 28 columns, not `wide_bar`. Stretched to the terminal it put the
 //! two lines on wildly different scales, and the tally read as a caption to something the
@@ -71,7 +87,7 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::time::Instant;
 
-use centinel_core::op::{ProgressEvent, RequestOutcome, TOTAL_TRACK, Unit};
+use centinel_core::op::{ItemOutcome, ProgressEvent, TOTAL_TRACK, Unit, Verdict};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
@@ -95,6 +111,10 @@ const LABEL_WIDTH: usize = 42;
 
 /// The stage label's fixed width. Wide enough for `11,473 stored, 1,204 failed`.
 const STAGE_LABEL_WIDTH: usize = 28;
+
+/// The leftmost column. Four is an HTTP status with a column to spare, and enough for the
+/// content kinds `extract` puts there — `html`, `pdf`, `text`.
+const TAG_WIDTH: usize = 4;
 
 /// Drains progress events until the sender is dropped.
 ///
@@ -129,19 +149,25 @@ struct Tally {
     /// page", and not the same as the bar's position, which counts resources processed.
     pages: u64,
     started: Option<Instant>,
+    /// What this stage calls its items — `requests`, `documents`. Taken from the first one
+    /// rather than guessed, because "items" fits every stage and describes none.
+    noun: String,
 }
 
 impl Tally {
-    fn record(&mut self, r: &RequestOutcome) {
+    fn record(&mut self, r: &ItemOutcome) {
         self.started.get_or_insert_with(Instant::now);
         match r.succeeded() {
             true => self.ok += 1,
             false => self.failed += 1,
         }
         self.bytes += r.bytes;
-        match r.enclosed {
+        match r.nested {
             true => self.enclosed += 1,
             false => self.pages += 1,
+        }
+        if self.noun.is_empty() {
+            self.noun = r.noun.clone();
         }
     }
 
@@ -183,15 +209,19 @@ impl Tally {
     /// contradicting itself rather than two honest counts of different things.
     fn footer(&self, done: u64, total: u64) -> String {
         let mut parts = vec![
-            format!("{}{} requests{}", DIM, count(self.requests()), RESET),
+            format!("{}{} {}{}", DIM, count(self.requests()), self.noun, RESET),
             format!("{GREEN}{} ok{RESET}", count(self.ok)),
             match self.failed {
                 0 => format!("{DIM}0 failed{RESET}"),
                 n => format!("{RED}{} failed{RESET}", count(n)),
             },
-            format!("{DIM}{} docs{RESET}", count(self.enclosed)),
             format!("{DIM}{}{RESET}", HumanBytes(self.bytes)),
         ];
+        // Only where a stage has a second work-list. `extract` nests nothing, and `0 docs`
+        // under it would be a column that never says anything.
+        if self.enclosed > 0 {
+            parts.insert(3, format!("{DIM}{} docs{RESET}", count(self.enclosed)));
+        }
         if self.rate() > 0.0 {
             parts.push(format!("{DIM}{:.1}/s{RESET}", self.rate()));
         }
@@ -226,20 +256,23 @@ fn short_duration(d: std::time::Duration) -> String {
     }
 }
 
-/// One request, as a line in the scrolling log, fitted to `width` printed columns.
+/// One finished item, as a line in the scrolling log, fitted to `width` printed columns.
 ///
-/// Fixed columns so the eye can run down them: what came back, how big, how long, where.
-/// The status is the only coloured field — it is the one being scanned for.
-fn request_line(r: &RequestOutcome, width: usize) -> String {
-    let status = match (r.status, r.succeeded()) {
-        (Some(s), true) => format!("{GREEN}{s}{RESET}"),
-        // A 429 is the host asking for room, not a broken address, and reads differently.
-        (Some(s @ 429), _) => format!("{YELLOW}{s}{RESET}"),
-        (Some(s), false) if (400..500).contains(&s) => format!("{YELLOW}{s}{RESET}"),
-        (Some(s), false) => format!("{RED}{s}{RESET}"),
-        // No status at all: never reached the server.
-        (None, _) => format!("{RED} — {RESET}"),
+/// Fixed columns so the eye can run down them: how it went, how big, what came out, how
+/// long, what it was. The tag is the only coloured field — it is the one being scanned for.
+///
+/// One function for every stage. `collect` puts an HTTP status in the tag and `extract`
+/// puts a content kind, and neither needs the renderer to know which it is.
+fn request_line(r: &ItemOutcome, width: usize) -> String {
+    let ink = match r.verdict {
+        Verdict::Ok => GREEN,
+        // Both amber: a 429 and a dead attachment are things to notice, not to panic at.
+        Verdict::Warn | Verdict::Missing => YELLOW,
+        Verdict::Fail => RED,
     };
+    // Head, not tail. A tag is a word whose beginning identifies it — `other` cut to
+    // `…her` is unreadable where `othe` is not, which is the opposite of an address.
+    let tag = format!("{ink}{:>4}{RESET}", head(&r.tag, TAG_WIDTH));
 
     // Fixed width, and wide enough for `1023.99 KiB`. `HumanBytes` is variable-length, so
     // padding it is the only thing keeping the two columns to its right in a straight line
@@ -248,39 +281,48 @@ fn request_line(r: &RequestOutcome, width: usize) -> String {
         0 => format!("{DIM}{:>11}{RESET}", "—"),
         n => format!("{:>11}", HumanBytes(n).to_string()),
     };
-    // A document is marked, so the two work-lists are separable by eye as they scroll.
-    let mark = match r.enclosed {
+    // What came out, for a stage that makes something. Absent for one that does not, so a
+    // `collect` line spends no width on a column it would leave empty for a whole run.
+    let produced = match r.produced {
+        None => String::new(),
+        Some(0) => format!(" {DIM}{:>11}{RESET}", "→   —"),
+        Some(n) => format!(" {DIM}{:>11}{RESET}", format!("→ {} ch", count(n))),
+    };
+    // A nested item is marked, so the two work-lists are separable by eye as they scroll.
+    let mark = match r.nested {
         true => format!("{CYAN}↳{RESET}"),
         false => " ".to_string(),
     };
     // Everything to the left of the address, in printed columns:
-    //   status 3 · gap 2 · size 11 · gap 2 · time 6 · gap 1 · mark 1 · gap 1
-    const FIXED: usize = 27;
+    //   tag 4 · gap 2 · size 11 · [produced 12] · gap 2 · time 6 · gap 1 · mark 1 · gap 1
+    let fixed = 28 + if r.produced.is_some() { 12 } else { 0 };
 
     // The address takes whatever is left, and the reason it is computed rather than a
     // constant is the whole bug: a line wider than the terminal wraps, `indicatif` counts
     // it as one row when it drew two, and every redraw after that moves the cursor to the
     // wrong place. What it looks like is the display walking diagonally down the screen.
     let mut detail = match &r.detail {
-        Some(d) if r.status.is_none() => format!("  {d}"),
+        // A tag that already carries the reason does not need it spelled out again; `404`
+        // says everything `HTTP 404 Not Found` does.
+        Some(d) if !d.starts_with("HTTP ") => format!("  {d}"),
         _ => String::new(),
     };
     // The address is the thing being read; the detail yields to it when both cannot fit.
-    if width < FIXED + detail.chars().count() + MIN_URL_WIDTH {
+    if width < fixed + detail.chars().count() + MIN_URL_WIDTH {
         detail.clear();
     }
     // No floor. A minimum that the terminal is narrower than would put the wrap straight
     // back, and a short address beats a broken display.
-    let room = width.saturating_sub(FIXED + detail.chars().count());
+    let room = width.saturating_sub(fixed + detail.chars().count());
 
     let dim_detail = match detail.is_empty() {
         true => String::new(),
         false => format!("{DIM}{detail}{RESET}"),
     };
     format!(
-        "{status}  {size}  {DIM}{:>5.1}s{RESET} {mark} {DIM}{}{RESET}{dim_detail}",
+        "{tag}  {size}{produced}  {DIM}{:>5.1}s{RESET} {mark} {DIM}{}{RESET}{dim_detail}",
         r.millis as f64 / 1000.0,
-        truncate(&r.url, room),
+        truncate(&r.address, room),
     )
 }
 
@@ -307,7 +349,7 @@ async fn render_bars(mut rx: UnboundedReceiver<ProgressEvent>) {
     while let Some(event) = rx.recv().await {
         // A request scrolls above the bars and updates the tally beneath them. This is
         // the whole shape: history you can read, orientation you can trust, one screen.
-        if let Some(outcome) = &event.request {
+        if let Some(outcome) = &event.item {
             tally.record(outcome);
             let _ = multi.println(request_line(outcome, terminal_width()));
             if let Some(bar) = bars.get(IMPLICIT_TRACK) {
@@ -399,10 +441,13 @@ async fn render_lines(mut rx: UnboundedReceiver<ProgressEvent>) {
     while let Some(event) = rx.recv().await {
         // Plain, no escape codes and no columns to align — this is a log file, and the
         // thing reading it is `grep`.
-        if let Some(r) = &event.request {
-            let status = r.status.map(|s| s.to_string()).unwrap_or("---".into());
+        if let Some(r) = &event.item {
             let detail = r.detail.as_deref().unwrap_or("");
-            eprintln!("{status} {:>9} {}ms {} {detail}", r.bytes, r.millis, r.url);
+            let made = r.produced.map_or(String::new(), |n| format!(" {n}ch"));
+            eprintln!(
+                "{} {:>9}{made} {}ms {} {detail}",
+                r.tag, r.bytes, r.millis, r.address
+            );
             continue;
         }
         match (event.id.as_deref(), event.done, event.total) {
@@ -485,6 +530,12 @@ fn truncate_end(text: &str, width: usize) -> String {
     out
 }
 
+/// Keeps the *start* of an over-long token, with no ellipsis. For short labels whose
+/// first characters identify them.
+fn head(text: &str, width: usize) -> String {
+    text.chars().take(width).collect()
+}
+
 /// Keeps the tail of an over-long label — the filename is what distinguishes it.
 fn truncate(text: &str, width: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
@@ -526,15 +577,21 @@ mod tests {
         out
     }
 
-    fn outcome(status: Option<u16>, bytes: u64, enclosed: bool) -> RequestOutcome {
-        RequestOutcome {
-            url: "https://www.tampa.gov/proclamation/irish-american-heritage-month".into(),
-            status,
+    fn outcome(status: Option<u16>, bytes: u64, nested: bool) -> ItemOutcome {
+        ItemOutcome {
+            address: "https://www.tampa.gov/proclamation/irish-american-heritage-month".into(),
+            tag: status.map_or_else(|| "—".into(), |s| s.to_string()),
+            verdict: match status {
+                Some(s) if (200..300).contains(&s) => Verdict::Ok,
+                Some(_) => Verdict::Missing,
+                None => Verdict::Fail,
+            },
+            noun: "requests".into(),
             bytes,
+            produced: None,
             millis: 900,
-            kind: Some("html".into()),
             detail: status.is_none().then(|| "connection timed out".to_string()),
-            enclosed,
+            nested,
         }
     }
 
@@ -581,16 +638,22 @@ mod tests {
     /// the right of the size wandered.
     #[test]
     fn the_columns_line_up_whatever_the_size() {
-        let short = |status, bytes| RequestOutcome {
-            url: "https://tampa.gov/a".into(),
-            status,
+        let short = |status: Option<u16>, bytes| ItemOutcome {
+            address: "https://tampa.gov/a".into(),
+            tag: status.map_or_else(|| "—".into(), |s| s.to_string()),
+            verdict: match status {
+                Some(s) if (200..300).contains(&s) => Verdict::Ok,
+                Some(_) => Verdict::Missing,
+                None => Verdict::Fail,
+            },
+            noun: "requests".into(),
             bytes,
+            produced: None,
             millis: 900,
-            kind: None,
             detail: None,
-            enclosed: false,
+            nested: false,
         };
-        let starts_at = |r: &RequestOutcome| {
+        let starts_at = |r: &ItemOutcome| {
             let line = strip(&request_line(r, 100));
             // Characters, not bytes: an em-dash is one printed column and three bytes,
             // so a byte offset would report the columns as ragged when they are straight.
@@ -621,16 +684,18 @@ mod tests {
     /// and every redraw after it lands further across the screen.
     #[test]
     fn no_line_is_ever_wider_than_the_terminal() {
-        let long = RequestOutcome {
-            url: "https://www.tampa.gov/sites/default/files/document/2026/sw_franchise_fee_\
-                  remittance_form_7-31-2025_potential-customers-07-14-2025.pdf"
+        let long = ItemOutcome {
+            address: "https://www.tampa.gov/sites/default/files/document/2026/sw_franchise_fee_\
+                      remittance_form_7-31-2025_potential-customers-07-14-2025.pdf"
                 .into(),
-            status: None,
+            tag: "—".into(),
+            verdict: Verdict::Fail,
+            noun: "requests".into(),
             bytes: 0,
+            produced: Some(4_201),
             millis: 1_300,
-            kind: None,
             detail: Some("connection timed out after 30s".into()),
-            enclosed: true,
+            nested: true,
         };
 
         for width in [40usize, 60, 80, 100, 120, 200] {
@@ -699,6 +764,67 @@ mod tests {
             footer.contains("2 requests"),
             "the denominator is named: {footer}"
         );
+    }
+
+    /// One renderer, two stages. `extract` puts a content kind in the tag and reports what
+    /// came out; `collect` puts an HTTP status and reports nothing. Neither needs the
+    /// renderer to know which stage it is.
+    #[test]
+    fn an_extract_item_renders_through_the_same_line() {
+        let doc = ItemOutcome {
+            address: "https://www.tampa.gov/files/proclamation.pdf".into(),
+            tag: "pdf".into(),
+            verdict: Verdict::Ok,
+            noun: "documents".into(),
+            bytes: 1_248_112,
+            produced: Some(4_201),
+            millis: 340,
+            detail: None,
+            nested: false,
+        };
+        let line = strip(&request_line(&doc, 110));
+        assert!(line.contains("pdf"), "the tag is the content kind: {line}");
+        assert!(line.contains("1.19 MiB"), "{line}");
+        assert!(line.contains("4,201 ch"), "and what came out of it: {line}");
+    }
+
+    /// Within one stage every line must have the same columns. `extract` measures its
+    /// output, so an item that produced nothing says `0` rather than dropping the column
+    /// and taking every field to its right with it.
+    #[test]
+    fn a_stage_that_measures_output_keeps_the_column_when_there_is_none() {
+        let produced = |p| ItemOutcome {
+            address: "https://tampa.gov/a".into(),
+            tag: "pdf".into(),
+            verdict: Verdict::Ok,
+            noun: "documents".into(),
+            bytes: 1_000,
+            produced: p,
+            millis: 100,
+            detail: None,
+            nested: false,
+        };
+        let at = |r: &ItemOutcome| {
+            let line = strip(&request_line(r, 110));
+            line[..line.find("http").unwrap()].chars().count()
+        };
+        assert_eq!(
+            at(&produced(Some(4_201))),
+            at(&produced(Some(0))),
+            "nothing extracted must not shift the address"
+        );
+        assert!(
+            at(&produced(None)) < at(&produced(Some(0))),
+            "a stage that measures nothing spends no width on the column"
+        );
+    }
+
+    /// A tag is a word whose beginning identifies it, unlike an address.
+    #[test]
+    fn a_long_tag_keeps_its_head() {
+        assert_eq!(head("other", 4), "othe");
+        assert_eq!(head("pdf", 4), "pdf");
+        assert_eq!(head("", 4), "");
     }
 
     /// The stage bar sits above the tally, so it must not stretch to the terminal, and its
@@ -823,7 +949,7 @@ mod tests {
             for enclosed in [false, true] {
                 tx.send(ProgressEvent {
                     message: "u".into(),
-                    request: Some(outcome(Some(200), 4_096, enclosed)),
+                    item: Some(outcome(Some(200), 4_096, enclosed)),
                     ..Default::default()
                 })
                 .unwrap();

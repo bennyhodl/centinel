@@ -75,12 +75,47 @@ impl Unit {
 /// underscores keep it out of any namespace a real work item would use.
 pub const TOTAL_TRACK: &str = "__total__";
 
-/// One request an acquisition made, reported as fact rather than as a rendered line.
+/// How an item went.
+///
+/// Four rather than three, because "did it produce anything" and "how alarming is it" are
+/// different questions and a `.gov` corpus answers them differently all the time. A 404 on
+/// a migrated attachment produced nothing and is completely routine; a 500 produced
+/// nothing and is not. Collapsing the two either paints a screen red over dead links or
+/// hides a server falling over among them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    #[default]
+    Ok,
+    /// Produced something, with a caveat worth reading: a PDF that is half scans.
+    Warn,
+    /// Produced nothing, and that is a fact about the item — a 404, a format with no text
+    /// in it. Expected, and counted as a failure because nothing was stored.
+    Missing,
+    /// Produced nothing, and that is a fact about this run — a timeout, a 500, a parser
+    /// that gave up.
+    Fail,
+}
+
+impl Verdict {
+    /// Whether anything came of it. `Missing` and `Fail` differ in how they read, not in
+    /// what they produced.
+    pub fn produced_something(&self) -> bool {
+        matches!(self, Self::Ok | Self::Warn)
+    }
+}
+
+/// One unit of work a stage finished with, reported as fact rather than as a rendered line.
 ///
 /// A crawl at one request per second spends almost all of its time asleep in the pacer,
 /// and a run that prints only a counter is indistinguishable from a run that has hung.
 /// Two hours of that is the whole reason this type exists. What a person needs is the
-/// stream itself: what was asked for, what came back, how big it was, how long it took.
+/// stream itself: what was worked on, how it went, how big it was, how long it took.
+///
+/// **Stage-agnostic on purpose.** `collect` fetches an address and `extract` reads a blob,
+/// and at the level a person watches them they are the same event: one addressable thing,
+/// one verdict, some bytes, some time. One type means one renderer, and a third stage that
+/// wants a scrolling log writes no display code at all.
 ///
 /// Structured, and deliberately not a preformatted string. The op says what happened and
 /// each surface decides what it looks like — which is what lets one event become a
@@ -89,34 +124,40 @@ pub const TOTAL_TRACK: &str = "__total__";
 /// tallies — ok, failed, bytes, rate, an honest estimate of what is left — none of which
 /// can be recovered from text that has already been formatted.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RequestOutcome {
-    pub url: String,
-    /// `None` when the request never reached a status: DNS, TLS, a timeout, a killed
-    /// child process. Distinct from a 4xx, which is an answer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<u16>,
+pub struct ItemOutcome {
+    /// What was worked on: a URL, or the address bytes were read from.
+    pub address: String,
+    /// The short token in the leftmost column. An HTTP status for `collect`, a content
+    /// kind for `extract` — whatever that stage's reader scans down.
+    pub tag: String,
+    #[serde(default)]
+    pub verdict: Verdict,
+    /// What it counts as. `requests` for `collect`, `documents` for `extract`; the tally
+    /// says `9,923 requests` rather than guessing a word that fits every stage badly.
+    pub noun: String,
+    /// Bytes read.
     pub bytes: u64,
-    pub millis: u64,
-    /// What the address turned out to hold — `html`, `pdf`. Absent when nothing was
-    /// served to classify.
+    /// What came out, where a stage produces something measurable — characters of text.
+    /// `None` for a stage that only moves bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    /// Why it refused, when it did.
+    pub produced: Option<u64>,
+    pub millis: u64,
+    /// Why, when the verdict needs one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    /// A document found inside a page, rather than an address the snapshot declared.
+    /// A secondary item — a document found inside a page — rather than one the work list
+    /// declared.
     ///
     /// Counted apart because the two have different totals: the declared set is known
-    /// before the run starts and the enclosed set is only ever an estimate.
+    /// before the run starts and the nested set is only ever an estimate.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub enclosed: bool,
+    pub nested: bool,
 }
 
-impl RequestOutcome {
-    /// Whether this is one for the `ok` column. A 3xx never reaches here — the client
-    /// follows redirects — so anything with a status that is not 2xx is a refusal.
+impl ItemOutcome {
+    /// Whether this is one for the `ok` column.
     pub fn succeeded(&self) -> bool {
-        matches!(self.status, Some(s) if (200..300).contains(&s))
+        self.verdict.produced_something()
     }
 }
 
@@ -141,10 +182,10 @@ pub struct ProgressEvent {
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Unit::is_count")]
     pub unit: Unit,
-    /// Set when this event *is* a request. A renderer that does not know the field sees
-    /// the message and behaves exactly as it did before.
+    /// Set when this event *is* one finished item. A renderer that does not know the
+    /// field sees the message and behaves exactly as it did before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request: Option<RequestOutcome>,
+    pub item: Option<ItemOutcome>,
 }
 
 /// The sink an op reports progress into.
@@ -188,12 +229,12 @@ impl Progress {
         });
     }
 
-    /// Reports one request. Carries no `total`, so it is a line rather than a bar.
-    pub fn request(&self, outcome: RequestOutcome) {
+    /// Reports one finished item. Carries no `total`, so it is a line rather than a bar.
+    pub fn item(&self, outcome: ItemOutcome) {
         self.send(ProgressEvent {
             // A surface that renders only `message` still shows something useful.
-            message: outcome.url.clone(),
-            request: Some(outcome),
+            message: outcome.address.clone(),
+            item: Some(outcome),
             ..Default::default()
         });
     }

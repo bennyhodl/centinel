@@ -17,7 +17,7 @@ use crate::domain::{
 };
 use crate::enclosure;
 use crate::fetch::Fetcher;
-use crate::op::{Progress, RequestOutcome};
+use crate::op::{ItemOutcome, Progress, Verdict};
 use crate::policy::{HostPolicy, Pacer};
 
 pub struct SiteSource {
@@ -101,31 +101,46 @@ impl SiteSource {
         let result = self.fetcher.get(url).await;
         let millis = started.elapsed().as_millis() as u64;
 
-        progress.request(match &result {
-            Ok(fetched) => RequestOutcome {
-                url: url.to_string(),
-                status: fetched
+        progress.item(match &result {
+            Ok(fetched) => ItemOutcome {
+                address: url.to_string(),
+                tag: fetched
                     .meta
                     .get("http_status")
-                    .and_then(|s| s.parse().ok())
-                    .or(Some(200)),
+                    .cloned()
+                    .unwrap_or_else(|| "200".into()),
+                verdict: Verdict::Ok,
+                noun: "requests".into(),
                 bytes: fetched.bytes.len() as u64,
+                produced: None,
                 millis,
-                kind: Some(crate::fetch::content_kind(&fetched.meta, &fetched.bytes).to_string()),
                 detail: None,
-                enclosed,
+                nested: enclosed,
             },
-            Err(refusal) => RequestOutcome {
-                url: url.to_string(),
+            Err(refusal) => {
                 // `HTTP 404` is a status; a timeout or a DNS failure is not, and the two
                 // must not be shown as though they were the same kind of answer.
-                status: status_in(&refusal.detail),
-                bytes: 0,
-                millis,
-                kind: None,
-                detail: Some(refusal.detail.clone()),
-                enclosed,
-            },
+                let status = status_in(&refusal.detail);
+                ItemOutcome {
+                    address: url.to_string(),
+                    tag: status.map_or_else(|| "—".into(), |s| s.to_string()),
+                    // A 429 is the host asking for room, and a 4xx is an address that is
+                    // gone; neither is the run breaking. A 5xx or no answer at all is.
+                    verdict: match status {
+                        // Gone, and that is a fact about the address. Routine on a corpus
+                        // full of links to files migrated years ago.
+                        Some(s) if (400..500).contains(&s) && s != 429 => Verdict::Missing,
+                        // A 429, a 5xx, or no answer at all is about this run.
+                        _ => Verdict::Fail,
+                    },
+                    noun: "requests".into(),
+                    bytes: 0,
+                    produced: None,
+                    millis,
+                    detail: Some(refusal.detail.clone()),
+                    nested: enclosed,
+                }
+            }
         });
 
         result
