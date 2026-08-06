@@ -226,13 +226,19 @@ impl Index {
         Ok(())
     }
 
-    /// Inserts a chunk and one placement.
+    /// Inserts a chunk and one placement. Answers whether the chunk body was *new*.
     ///
     /// The chunk body is written once; a repeat of the same text from another page adds
     /// only a placement row.
-    pub fn insert(&mut self, chunk: &Chunk, placement: &Placement) -> anyhow::Result<()> {
+    ///
+    /// The return value is what `ON CONFLICT DO NOTHING` already knows — one row changed
+    /// means the body had not been seen. Reporting it here is not a convenience: the
+    /// caller's alternative is to count the table before and after, and [`Self::stats`] is
+    /// three full scans. Doing that per chunk makes indexing quadratic in the size of the
+    /// corpus.
+    pub fn insert(&mut self, chunk: &Chunk, placement: &Placement) -> anyhow::Result<bool> {
         let tx = self.conn.transaction()?;
-        tx.execute(
+        let body_is_new = tx.execute(
             "INSERT INTO chunk (chunk_hash, text, chars) VALUES (?1, ?2, ?3)
              ON CONFLICT(chunk_hash) DO NOTHING",
             params![
@@ -240,7 +246,7 @@ impl Index {
                 chunk.text,
                 chunk.text.chars().count() as i64
             ],
-        )?;
+        )? == 1;
         tx.execute(
             "INSERT INTO placement
                (chunk_hash, source, resource, blob_sha, derived_sha, ordinal,
@@ -263,7 +269,7 @@ impl Index {
             ],
         )?;
         tx.commit()?;
-        Ok(())
+        Ok(body_is_new)
     }
 
     /// The chunk geometry this index's hashes were built with, if it has been recorded.
@@ -590,6 +596,42 @@ mod tests {
         let hits = idx.search("public records law", 10, None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].placements.len(), 2, "both pages must be citable");
+    }
+
+    /// The signal the report's `chunks written` / `chunks deduplicated` split is built on.
+    ///
+    /// Asserted on `insert`'s own answer rather than through the report, because the
+    /// alternative way to learn this — counting the table before and after — is what made
+    /// indexing quadratic, and a test that goes through `stats` would keep passing if the
+    /// return value were wired up wrongly.
+    #[test]
+    fn insert_says_whether_the_chunk_body_was_new() {
+        let mut idx = Index::in_memory().unwrap();
+        let chunks = chunk_markdown(
+            "# Notice\n\nReproduced without charge under the public records law.",
+            &ChunkConfig::default(),
+        );
+        let c = &chunks[0];
+
+        assert!(
+            idx.insert(c, &placement("tampa", "page-one", &"1".repeat(64)))
+                .unwrap(),
+            "the first sight of a body is new"
+        );
+        assert!(
+            !idx.insert(c, &placement("tampa", "page-two", &"2".repeat(64)))
+                .unwrap(),
+            "the same text under a second address adds a placement, not a body"
+        );
+        assert!(
+            !idx.insert(c, &placement("tampa", "page-one", &"1".repeat(64)))
+                .unwrap(),
+            "and re-inserting the very same placement adds nothing at all"
+        );
+
+        let stats = idx.stats().unwrap();
+        assert_eq!(stats.chunks, 1);
+        assert_eq!(stats.placements, 2, "the repeat placement was ignored");
     }
 
     #[test]

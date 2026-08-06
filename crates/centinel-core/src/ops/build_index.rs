@@ -217,9 +217,12 @@ pub async fn index(ctx: &Ctx, args: IndexArgs, progress: &Progress) -> anyhow::R
             report.documents_indexed += 1;
 
             for chunk in &chunks {
-                let before = index.stats()?.chunks;
+                // Whether the *body* was new, which only the first placement of a shared
+                // chunk can report. Asking the index to count instead costs three full
+                // table scans per chunk, twice — see `Index::insert`.
+                let mut body_is_new = false;
                 for (resource, observed_at) in &pending {
-                    index.insert(
+                    body_is_new |= index.insert(
                         chunk,
                         &Placement {
                             source: source.to_string(),
@@ -236,10 +239,9 @@ pub async fn index(ctx: &Ctx, args: IndexArgs, progress: &Progress) -> anyhow::R
                         },
                     )?;
                 }
-                if index.stats()?.chunks == before {
-                    report.chunks_deduplicated += 1;
-                } else {
-                    report.chunks_written += 1;
+                match body_is_new {
+                    true => report.chunks_written += 1,
+                    false => report.chunks_deduplicated += 1,
                 }
             }
         }
