@@ -73,7 +73,10 @@ pub const PIPELINE: &str = "centinel-extract";
 ///
 /// `2` — `document` and `zip-container` became readable, so every Word file, deck and
 /// e-book an earlier run wrote off as unreadable is worth another attempt.
-pub const PIPELINE_VERSION: &str = "2";
+///
+/// `3` — a PDF that `pdf-inspector` makes nothing of is now offered to `pdftotext`, which
+/// reads a text layer the first reader misses on a third of them.
+pub const PIPELINE_VERSION: &str = "3";
 
 /// What extraction produced.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -368,6 +371,100 @@ fn extract_pdf(bytes: &[u8]) -> Extracted {
             pages_needing_ocr: result.pages_needing_ocr,
         }
     }
+}
+
+/// The name `pdftotext` records itself under. Poppler's version is asked for at runtime.
+pub const PDFTOTEXT: &str = "pdftotext";
+
+/// How long one PDF gets. A deadline, not a stall timeout: this call has a known shape,
+/// and the largest document in a real `.gov` corpus is under a hundred megabytes.
+const PDFTOTEXT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// A second reader for a PDF the first one made nothing of.
+///
+/// `pdf-inspector` returns no text, and flags every page for OCR, on documents that
+/// **do** carry a text layer: measured on the tampa corpus, 168 of the 490 PDFs it
+/// emptied are read by `pdftotext` — an executive order, signed board minutes, a
+/// 315,000-character area action plan. Flagging a page for OCR is a claim about what the
+/// reader could decode, not about what the page holds, and the two are not the same.
+///
+/// Only ever a *fallback*. `pdf-inspector` stays the primary because it produces markdown
+/// with headings, and headings are the chunk heading path; `pdftotext` produces flat text.
+/// A worse shape beats no text at all, and nothing else beats a better shape.
+///
+/// Takes a **path** rather than bytes because the caller already has the blob on disk at
+/// its content address, and handing a child process a path it can read is cheaper and
+/// simpler than a temporary file. `None` when poppler is absent, when it fails, or when it
+/// agrees there is nothing to read — all three leave the caller's verdict unchanged.
+pub async fn pdf_text_via_poppler(path: &std::path::Path) -> Option<Extraction> {
+    let out = crate::tool::Tool::new(PDFTOTEXT)
+        // `-q` so poppler's warnings about malformed xref tables stay out of the text;
+        // `-enc UTF-8` because the default is locale-dependent and this is an archive.
+        .args([
+            std::ffi::OsStr::new("-q"),
+            std::ffi::OsStr::new("-enc"),
+            std::ffi::OsStr::new("UTF-8"),
+            path.as_os_str(),
+            std::ffi::OsStr::new("-"),
+        ])
+        .timeout(PDFTOTEXT_DEADLINE)
+        .success()
+        .await;
+
+    let bytes = match out {
+        Ok(bytes) => bytes,
+        // Every failure here is the same decision for the caller — there is no text to be
+        // had from this reader — but they are very different facts, so they are logged
+        // apart. A missing binary is evidence about this machine; `doctor` reports it.
+        Err(e) => {
+            tracing::debug!(error = %e, path = %path.display(), "pdftotext produced nothing");
+            return None;
+        }
+    };
+
+    let text = String::from_utf8_lossy(&bytes).trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+
+    Some(Extraction {
+        text,
+        // Poppler carries no document title through `pdftotext`, and inventing one from
+        // the filename would put a guess where the record expects the document's own name.
+        title: None,
+        tool: PDFTOTEXT.into(),
+        version: poppler_version().await.unwrap_or_else(|| "unknown".into()),
+        notes: vec!["pdf-inspector found no text; read by poppler instead".into()],
+    })
+}
+
+/// Poppler's version, for the Derivation's record. Cached: it is one more child process
+/// per PDF otherwise, and the answer cannot change inside a run.
+async fn poppler_version() -> Option<String> {
+    static VERSION: tokio::sync::OnceCell<Option<String>> = tokio::sync::OnceCell::const_new();
+    VERSION
+        .get_or_init(|| async {
+            // `pdftotext -v` writes its banner to stderr and exits non-zero on some
+            // builds, so the output is taken as data rather than gated on success.
+            let out = crate::tool::Tool::new(PDFTOTEXT)
+                .arg("-v")
+                .timeout(std::time::Duration::from_secs(10))
+                .output()
+                .await
+                .ok()?;
+            let banner = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+            banner
+                .split_whitespace()
+                .skip_while(|w| !w.eq_ignore_ascii_case("version"))
+                .nth(1)
+                .map(str::to_string)
+        })
+        .await
+        .clone()
 }
 
 /// Word files, decks, OpenDocument, RTF and EPUB, through `anydoc`.

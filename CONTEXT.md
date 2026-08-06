@@ -132,6 +132,29 @@ to get it wrong, because every reader can get it wrong the same way.
 one version and says nothing about the next; bumping it is how a better extractor gets
 another go at what an older one gave up on.
 
+**Primary and fallback reader** — two tools for one kind, tried in order, and the record
+names whichever one spoke. `pdf-inspector` is primary because it produces markdown, and
+headings become the chunk heading path; `pdftotext` is the fallback because flat text beats
+none. *Why it matters:* a page flagged `pages_needing_ocr` is a claim about what the reader
+could **decode**, not about what the page **holds**, and reading the first as the second
+wrote off 168 of 490 PDFs that had a text layer all along — an executive order, signed
+minutes, a 315,000-character action plan. A fallback is not a second guess at the same
+question; it is the admission that the first tool's silence was never evidence.
+
+**Chunk geometry** — the target and overlap sizes chunking uses. Load-bearing far outside
+chunking, because a `chunk_hash` hashes the chunk's *text* and the geometry decides the
+text. Changing it produces a wholly different set of hashes, so the old chunks stay in the
+index and every vector in the cache is orphaned. The index records the geometry its hashes
+were built with, and refuses a change that is not a rebuild.
+
+**Write batch** — the rows `index` commits as a unit, and it is **one document**, because
+that is the unit the row above subtracts. A batch is chosen by the skip predicate, not by
+what makes the writer fastest: widen it to span documents and a crash mid-batch leaves
+placements for a document the predicate will nonetheless call done — a page collected,
+extracted, and absent from every search, which is the defect the *per address* in that row
+already exists to prevent. Narrow is merely slow: a commit is a WAL checkpoint and an FTS5
+flush, and one per row paid both 450,000 times on a corpus of this size.
+
 ## The run report
 
 **Tally** — the numbers one stage produced, folded across however many calls it took. Two

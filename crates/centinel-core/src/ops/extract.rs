@@ -98,6 +98,11 @@ pub struct ExtractReport {
     pub already_unextractable: usize,
     pub attempted: usize,
     pub extracted: usize,
+    /// The primary reader found no text and a fallback did. Worth its own figure: it is
+    /// the measure of how much the primary is missing, and the number to watch after any
+    /// change to it.
+    #[serde(default)]
+    pub recovered_by_fallback: usize,
     /// Extracted, but some pages are scans needing OCR we cannot perform.
     pub needs_ocr: usize,
     pub unextractable: usize,
@@ -130,6 +135,7 @@ pub async fn extract(
         already_unextractable: 0,
         attempted: 0,
         extracted: 0,
+        recovered_by_fallback: 0,
         needs_ocr: 0,
         unextractable: 0,
         chars_of_text: 0,
@@ -228,8 +234,22 @@ pub async fn extract(
             // the record is written: any extractor returning `Partial` with an empty
             // extraction is the same mistake, and there is now one place that catches it.
             if outcome.text().is_some_and(|t| t.trim().is_empty()) {
-                outcome = Extracted::Unextractable {
-                    reason: no_text_reason(&outcome),
+                // One more reader before giving up — see `pdf_text_via_poppler` for why a
+                // PDF specifically deserves it.
+                let recovered = match kind {
+                    "pdf" => {
+                        extract::pdf_text_via_poppler(&ctx.store.blob_path_of(&obs.blob_sha)).await
+                    }
+                    _ => None,
+                };
+                outcome = match recovered {
+                    Some(extraction) => {
+                        report.recovered_by_fallback += 1;
+                        Extracted::Text(extraction)
+                    }
+                    None => Extracted::Unextractable {
+                        reason: no_text_reason(&outcome),
+                    },
                 };
             }
             let outcome = outcome;
@@ -403,6 +423,7 @@ impl Render for ExtractReport {
                 (self.already_unextractable as u64, "already unextractable"),
                 (self.attempted as u64, "attempted"),
                 (self.extracted as u64, "extracted"),
+                (self.recovered_by_fallback as u64, "read by the fallback"),
                 (self.needs_ocr as u64, "need OCR"),
                 (self.unextractable as u64, "unextractable"),
             ])?;
