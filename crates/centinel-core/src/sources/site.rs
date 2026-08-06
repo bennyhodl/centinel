@@ -17,7 +17,7 @@ use crate::domain::{
 };
 use crate::enclosure;
 use crate::fetch::Fetcher;
-use crate::op::Progress;
+use crate::op::{Progress, RequestOutcome};
 use crate::policy::{HostPolicy, Pacer};
 
 pub struct SiteSource {
@@ -44,6 +44,20 @@ pub struct SiteSource {
 /// How many refused documents a report names before it stops listing them.
 const MAX_REMARKS: usize = 10;
 
+/// The status code out of a `Fetcher` refusal, when it carried one.
+///
+/// [`crate::fetch`] renders a non-success as `HTTP 404 Not Found`, so the code is
+/// recoverable — and worth recovering, because "the server answered 404" and "we never
+/// reached the server" are different facts that a bare message would show alike.
+fn status_in(detail: &str) -> Option<u16> {
+    detail
+        .strip_prefix("HTTP ")?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
 impl SiteSource {
     pub fn new(
         id: SourceId,
@@ -69,6 +83,52 @@ impl SiteSource {
         if partial.len() < MAX_REMARKS {
             partial.push(detail);
         }
+    }
+
+    /// Paces, fetches, and reports the outcome either way.
+    ///
+    /// The pacer wait is inside the timing on purpose. At one request per second the wait
+    /// *is* most of the elapsed time, and a duration that excluded it would show a run
+    /// sprinting while the operator watched it sit still for two hours.
+    async fn fetch_reporting(
+        &self,
+        url: &str,
+        enclosed: bool,
+        progress: &Progress,
+    ) -> Result<crate::domain::Fetched, Refusal> {
+        let started = std::time::Instant::now();
+        self.pacer_for(url).wait().await;
+        let result = self.fetcher.get(url).await;
+        let millis = started.elapsed().as_millis() as u64;
+
+        progress.request(match &result {
+            Ok(fetched) => RequestOutcome {
+                url: url.to_string(),
+                status: fetched
+                    .meta
+                    .get("http_status")
+                    .and_then(|s| s.parse().ok())
+                    .or(Some(200)),
+                bytes: fetched.bytes.len() as u64,
+                millis,
+                kind: Some(crate::fetch::content_kind(&fetched.meta, &fetched.bytes).to_string()),
+                detail: None,
+                enclosed,
+            },
+            Err(refusal) => RequestOutcome {
+                url: url.to_string(),
+                // `HTTP 404` is a status; a timeout or a DNS failure is not, and the two
+                // must not be shown as though they were the same kind of answer.
+                status: status_in(&refusal.detail),
+                bytes: 0,
+                millis,
+                kind: None,
+                detail: Some(refusal.detail.clone()),
+                enclosed,
+            },
+        });
+
+        result
     }
 
     /// The documents a fetched page encloses, and nothing for anything that is not a page.
@@ -197,8 +257,12 @@ impl Source for SiteSource {
         progress: &'a Progress,
     ) -> BoxFuture<'a, Result<Vec<Acquired>, Refusal>> {
         Box::pin(async move {
-            self.pacer_for(&resource.natural_key).wait().await;
-            let fetched = self.fetcher.get(&resource.natural_key).await?;
+            // Reported before it is returned, so a refused page is a line in the stream
+            // like any other rather than a gap the operator has to infer.
+            let page = self
+                .fetch_reporting(&resource.natural_key, false, progress)
+                .await;
+            let fetched = page?;
 
             // Where the bytes actually came from, so a document relative to a redirected
             // page resolves against the page it really is.
@@ -215,8 +279,7 @@ impl Source for SiteSource {
             }];
 
             for url in enclosed {
-                self.pacer_for(&url).wait().await;
-                match self.fetcher.get(&url).await {
+                match self.fetch_reporting(&url, true, progress).await {
                     Ok(document) => out.push(Acquired {
                         resource: Resource::new(self.id.clone(), url),
                         fetched: document,
@@ -225,10 +288,7 @@ impl Source for SiteSource {
                     // the page that named it. One site's broken attachment must not cancel
                     // the page it hangs off, for the same reason one source's WAF block
                     // does not cancel the nineteen behind it.
-                    Err(refusal) => {
-                        progress.say(format!("{url} — {}", refusal.detail));
-                        self.note_partial(format!("{url} — {}", refusal.detail));
-                    }
+                    Err(refusal) => self.note_partial(format!("{url} — {}", refusal.detail)),
                 }
             }
 

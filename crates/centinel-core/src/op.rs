@@ -75,6 +75,51 @@ impl Unit {
 /// underscores keep it out of any namespace a real work item would use.
 pub const TOTAL_TRACK: &str = "__total__";
 
+/// One request an acquisition made, reported as fact rather than as a rendered line.
+///
+/// A crawl at one request per second spends almost all of its time asleep in the pacer,
+/// and a run that prints only a counter is indistinguishable from a run that has hung.
+/// Two hours of that is the whole reason this type exists. What a person needs is the
+/// stream itself: what was asked for, what came back, how big it was, how long it took.
+///
+/// Structured, and deliberately not a preformatted string. The op says what happened and
+/// each surface decides what it looks like — which is what lets one event become a
+/// scrolling line on a terminal, an SSE frame over HTTP, and a row of `--json` without
+/// the op learning who is listening. It is also what lets the renderer *derive* the
+/// tallies — ok, failed, bytes, rate, an honest estimate of what is left — none of which
+/// can be recovered from text that has already been formatted.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestOutcome {
+    pub url: String,
+    /// `None` when the request never reached a status: DNS, TLS, a timeout, a killed
+    /// child process. Distinct from a 4xx, which is an answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    pub bytes: u64,
+    pub millis: u64,
+    /// What the address turned out to hold — `html`, `pdf`. Absent when nothing was
+    /// served to classify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Why it refused, when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// A document found inside a page, rather than an address the snapshot declared.
+    ///
+    /// Counted apart because the two have different totals: the declared set is known
+    /// before the run starts and the enclosed set is only ever an estimate.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enclosed: bool,
+}
+
+impl RequestOutcome {
+    /// Whether this is one for the `ok` column. A 3xx never reaches here — the client
+    /// follows redirects — so anything with a status that is not 2xx is a refusal.
+    pub fn succeeded(&self) -> bool {
+        matches!(self.status, Some(s) if (200..300).contains(&s))
+    }
+}
+
 /// A progress report from a long-running op.
 ///
 /// This is the shape all three surfaces render: a progress bar on the CLI, an SSE frame
@@ -96,6 +141,10 @@ pub struct ProgressEvent {
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Unit::is_count")]
     pub unit: Unit,
+    /// Set when this event *is* a request. A renderer that does not know the field sees
+    /// the message and behaves exactly as it did before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<RequestOutcome>,
 }
 
 /// The sink an op reports progress into.
@@ -139,6 +188,16 @@ impl Progress {
         });
     }
 
+    /// Reports one request. Carries no `total`, so it is a line rather than a bar.
+    pub fn request(&self, outcome: RequestOutcome) {
+        self.send(ProgressEvent {
+            // A surface that renders only `message` still shows something useful.
+            message: outcome.url.clone(),
+            request: Some(outcome),
+            ..Default::default()
+        });
+    }
+
     /// Convenience for counted work with a single implicit track.
     pub fn step(&self, message: impl Into<String>, done: u64, total: u64) {
         self.send(ProgressEvent {
@@ -167,6 +226,7 @@ impl Progress {
             total: Some(total),
             id: Some(id.into()),
             unit,
+            ..Default::default()
         });
     }
 }
@@ -316,10 +376,7 @@ pub mod __private {
     /// what guarantees a terminal and an HTTP caller are looking at the same report — a
     /// field that `skip_serializing_if` hides from the wire is equally invisible here,
     /// rather than appearing on one surface only.
-    pub fn render_as<O>(
-        value: &serde_json::Value,
-        p: &mut Painter<'_>,
-    ) -> anyhow::Result<()>
+    pub fn render_as<O>(value: &serde_json::Value, p: &mut Painter<'_>) -> anyhow::Result<()>
     where
         O: serde::de::DeserializeOwned + Render,
     {
@@ -419,6 +476,7 @@ mod tests {
             total: Some(2),
             id: Some("m/model.onnx".into()),
             unit: Unit::Bytes,
+            ..Default::default()
         };
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["unit"], "bytes");
@@ -478,7 +536,10 @@ mod render_path_tests {
     #[tokio::test]
     async fn a_report_can_be_rendered_from_its_own_serialized_form() {
         let out = render_op("list", serde_json::json!({"max_problems": 20})).await;
-        assert!(out.contains("No sources"), "unexpected empty-store render: {out:?}");
+        assert!(
+            out.contains("No sources"),
+            "unexpected empty-store render: {out:?}"
+        );
 
         // `doctor` is the one that actually broke: `GateStatus::missing` is skipped when
         // empty, so a machine with every model installed produced JSON that would not

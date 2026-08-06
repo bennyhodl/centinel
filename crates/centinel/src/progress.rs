@@ -17,17 +17,41 @@
 //!
 //! | Event | Meaning | Rendering |
 //! |---|---|---|
+//! | `request` | one HTTP request | a line above the bars, and a tick of the footer |
 //! | no `id` | a log line | printed above the bars |
 //! | `id` + `total` | a track | one bar per `id` |
 //! | `id`, `done == total` | that track finished | bar cleared, a `✓` line printed |
 //!
 //! `id` is what makes a multi-file download legible: the aggregate bar and the current
 //! file's bar are different tracks, so neither has to be inferred from message text.
+//!
+//! ## The log scrolls, the footer stays
+//!
+//! A crawl paced at one request per second is asleep almost all of the time, and a run
+//! that printed only a counter was indistinguishable from one that had hung — two hours
+//! of a live 11,473-page collect looking like a crash. So requests scroll past as history
+//! while a tally stays pinned underneath them:
+//!
+//! ```text
+//! 200    94.15 KiB    0.9s   https://www.tampa.gov/proclamation/irish-heritage-month
+//! 200     1.19 MiB    1.8s ↳ …s/proclamation/2022/20220301_Irish_Heritage_Month.pdf
+//! 404           —     0.1s ↳ …ww.tampa.gov/sites/default/files/rfq/missing-exhibit.pdf
+//!   ⠋ collect · tampa ━━━━━━━━━━━━━━━━╾───────────  7,236/11,473
+//!     ok 9,922 · failed 1 · 2,686 docs · 2.85 GiB · 1.0/s · eta 1h 36m
+//! ```
+//!
+//! The footer is a second line of the stage's own bar rather than a bar of its own, so a
+//! `println` can never land between the two and split them.
+//!
+//! Everything in it is derived here from the request stream, including the estimate —
+//! which counts the documents the remaining pages will *also* pull, because a corpus
+//! where a third of pages enclose a PDF makes a page-only estimate run 30% short.
 
 use std::collections::HashMap;
 use std::io::IsTerminal;
+use std::time::Instant;
 
-use centinel_core::op::{ProgressEvent, TOTAL_TRACK, Unit};
+use centinel_core::op::{ProgressEvent, RequestOutcome, TOTAL_TRACK, Unit};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
@@ -36,6 +60,13 @@ use tokio::task::JoinHandle;
 const GREEN_CHECK: &str = "\x1b[32m✓\x1b[0m";
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
+const GREEN: &str = "\x1b[32m";
+const YELLOW: &str = "\x1b[33m";
+const RED: &str = "\x1b[31m";
+const CYAN: &str = "\x1b[36m";
+
+/// How much of a URL to keep in a request line. The tail is the identifying part.
+const URL_WIDTH: usize = 64;
 
 /// How much of a long label to keep. Wide enough for `qwen3-embedding-0.6b tokenizer.json`.
 const LABEL_WIDTH: usize = 42;
@@ -56,11 +87,169 @@ pub fn spawn(rx: UnboundedReceiver<ProgressEvent>) -> JoinHandle<()> {
 /// bare counter; they deserve a bar, not a thousand log lines.
 const IMPLICIT_TRACK: &str = "";
 
+/// What the footer says, accumulated from the request stream.
+///
+/// Derived here rather than in the op, because these are questions about *rendering* a
+/// run — how fast, how much left — and the op that answers them is one that has learned
+/// what a terminal wants. It only ever needs the events it was already sending.
+#[derive(Debug, Default)]
+struct Tally {
+    ok: u64,
+    failed: u64,
+    bytes: u64,
+    /// Documents found inside pages. Counted apart from declared addresses because only
+    /// the declared set has a total known before the run starts.
+    enclosed: u64,
+    /// Successful fetches of a declared address — the denominator for "documents per
+    /// page", and not the same as the bar's position, which counts resources processed.
+    pages: u64,
+    started: Option<Instant>,
+}
+
+impl Tally {
+    fn record(&mut self, r: &RequestOutcome) {
+        self.started.get_or_insert_with(Instant::now);
+        match r.succeeded() {
+            true => self.ok += 1,
+            false => self.failed += 1,
+        }
+        self.bytes += r.bytes;
+        match r.enclosed {
+            true => self.enclosed += 1,
+            false => self.pages += 1,
+        }
+    }
+
+    fn requests(&self) -> u64 {
+        self.ok + self.failed
+    }
+
+    /// Requests per second over the whole run, which at a fixed pace is the number that
+    /// matters. An instantaneous rate would swing on one large PDF and tell nobody
+    /// anything.
+    fn rate(&self) -> f64 {
+        match self.started.map(|t| t.elapsed().as_secs_f64()) {
+            Some(secs) if secs > 0.5 => self.requests() as f64 / secs,
+            _ => 0.0,
+        }
+    }
+
+    /// How long is left, counting the documents the remaining pages will *also* pull.
+    ///
+    /// The bar alone would lie by however many enclosures a page averages — on a corpus
+    /// where a third of pages carry a PDF, an estimate that ignored them ran 30% short.
+    /// `None` until there is enough of a run to divide by.
+    fn eta(&self, done: u64, total: u64) -> Option<std::time::Duration> {
+        let rate = self.rate();
+        if rate <= 0.0 || total <= done || self.pages == 0 {
+            return None;
+        }
+        let per_page = 1.0 + (self.enclosed as f64 / self.pages as f64);
+        let remaining = (total - done) as f64 * per_page;
+        Some(std::time::Duration::from_secs_f64(remaining / rate))
+    }
+
+    /// The pinned line under the bar.
+    fn footer(&self, done: u64, total: u64) -> String {
+        let mut parts = vec![
+            format!("{GREEN}ok {}{RESET}", count(self.ok)),
+            match self.failed {
+                0 => format!("{DIM}failed 0{RESET}"),
+                n => format!("{RED}failed {}{RESET}", count(n)),
+            },
+            format!("{DIM}{} docs{RESET}", count(self.enclosed)),
+            format!("{DIM}{}{RESET}", HumanBytes(self.bytes)),
+        ];
+        if self.rate() > 0.0 {
+            parts.push(format!("{DIM}{:.1}/s{RESET}", self.rate()));
+        }
+        if let Some(eta) = self.eta(done, total) {
+            parts.push(format!("{CYAN}eta {}{RESET}", short_duration(eta)));
+        }
+        format!("    {}", parts.join(&format!("{DIM} · {RESET}")))
+    }
+}
+
+/// Thousands separators, because a six-figure request count is unreadable without them.
+fn count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `2h 41m`, `12m`, `48s` — two units at most, because a third is never the thing being
+/// decided on.
+fn short_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    match (secs / 3600, (secs % 3600) / 60, secs % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, _) => format!("{m}m"),
+        (h, m, _) => format!("{h}h {m:02}m"),
+    }
+}
+
+/// One request, as a line in the scrolling log.
+///
+/// Fixed columns so the eye can run down them: when, what came back, how big, how long,
+/// where. The status is the only coloured field — it is the one being scanned for.
+fn request_line(r: &RequestOutcome) -> String {
+    let status = match (r.status, r.succeeded()) {
+        (Some(s), true) => format!("{GREEN}{s}{RESET}"),
+        // A 429 is the host asking for room, not a broken address, and reads differently.
+        (Some(s @ 429), _) => format!("{YELLOW}{s}{RESET}"),
+        (Some(s), false) if (400..500).contains(&s) => format!("{YELLOW}{s}{RESET}"),
+        (Some(s), false) => format!("{RED}{s}{RESET}"),
+        // No status at all: never reached the server.
+        (None, _) => format!("{RED} — {RESET}"),
+    };
+
+    // Fixed width, and wide enough for `1023.99 KiB`. `HumanBytes` is variable-length, so
+    // padding it is the only thing keeping the two columns to its right in a straight line
+    // — which is the entire reason a scrolling log is readable at a glance.
+    let size = match r.bytes {
+        0 => format!("{DIM}{:>11}{RESET}", "—"),
+        n => format!("{:>11}", HumanBytes(n).to_string()),
+    };
+    // A document is marked, so the two work-lists are separable by eye as they scroll.
+    let mark = match r.enclosed {
+        true => format!("{CYAN}↳{RESET}"),
+        false => " ".to_string(),
+    };
+    let detail = match &r.detail {
+        Some(d) if r.status.is_none() => format!("  {DIM}{d}{RESET}"),
+        _ => String::new(),
+    };
+
+    format!(
+        "{status}  {size}  {DIM}{:>5.1}s{RESET} {mark} {DIM}{}{RESET}{detail}",
+        r.millis as f64 / 1000.0,
+        truncate(&r.url, URL_WIDTH),
+    )
+}
+
 async fn render_bars(mut rx: UnboundedReceiver<ProgressEvent>) {
     let multi = MultiProgress::new();
     let mut bars: HashMap<String, ProgressBar> = HashMap::new();
+    let mut tally = Tally::default();
 
     while let Some(event) = rx.recv().await {
+        // A request scrolls above the bars and updates the tally beneath them. This is
+        // the whole shape: history you can read, orientation you can trust, one screen.
+        if let Some(outcome) = &event.request {
+            tally.record(outcome);
+            let _ = multi.println(request_line(outcome));
+            if let Some(bar) = bars.get(IMPLICIT_TRACK) {
+                bar.set_message(tally.footer(bar.position(), bar.length().unwrap_or(0)));
+            }
+            continue;
+        }
+
         let Some(total) = event.total else {
             let _ = multi.println(format!("{DIM}·{RESET} {}", event.message));
             continue;
@@ -80,7 +269,7 @@ async fn render_bars(mut rx: UnboundedReceiver<ProgressEvent>) {
             } else {
                 multi.insert(0, ProgressBar::new(total))
             };
-            bar.set_style(style_for(event.unit, is_total));
+            bar.set_style(style_for(event.unit, is_total, id == IMPLICIT_TRACK));
             bar
         });
 
@@ -93,6 +282,11 @@ async fn render_bars(mut rx: UnboundedReceiver<ProgressEvent>) {
         } else {
             truncate(&event.message, LABEL_WIDTH)
         });
+        // The footer belongs to the one bar that counts a whole stage. A per-file byte
+        // track already says everything about itself.
+        if id == IMPLICIT_TRACK {
+            bar.set_message(tally.footer(done, total));
+        }
 
         // A finished *named* track becomes a static line, so a ten-file pull does not
         // grow ten live bars. The implicit track is one long counter with nothing after
@@ -119,6 +313,14 @@ async fn render_bars(mut rx: UnboundedReceiver<ProgressEvent>) {
 /// The pre-existing renderer: one line per event, no cursor tricks.
 async fn render_lines(mut rx: UnboundedReceiver<ProgressEvent>) {
     while let Some(event) = rx.recv().await {
+        // Plain, no escape codes and no columns to align — this is a log file, and the
+        // thing reading it is `grep`.
+        if let Some(r) = &event.request {
+            let status = r.status.map(|s| s.to_string()).unwrap_or("---".into());
+            let detail = r.detail.as_deref().unwrap_or("");
+            eprintln!("{status} {:>9} {}ms {} {detail}", r.bytes, r.millis, r.url);
+            continue;
+        }
         match (event.id.as_deref(), event.done, event.total) {
             // Tracked work is high-frequency; only its completion is worth a log line.
             (Some(_), Some(done), Some(total)) if done < total => {}
@@ -131,16 +333,24 @@ async fn render_lines(mut rx: UnboundedReceiver<ProgressEvent>) {
     }
 }
 
-fn style_for(unit: Unit, is_total: bool) -> ProgressStyle {
-    let template = match (unit, is_total) {
-        (Unit::Bytes, false) => {
+/// The bar, and for the stage track the tally line pinned beneath it.
+///
+/// The footer is a second line of the *same* bar rather than a bar of its own, so the two
+/// can never be separated by a `println` landing between them — which is exactly what
+/// happens on a run emitting a line per request.
+fn style_for(unit: Unit, is_total: bool, footer: bool) -> ProgressStyle {
+    let template = match (unit, is_total, footer) {
+        (Unit::Bytes, false, _) => {
             "  {spinner:.cyan} {prefix:.bold} {wide_bar:.cyan/blue} \
              {bytes:>10}/{total_bytes:<10} {binary_bytes_per_sec:>11} eta {eta:>4}"
         }
-        (Unit::Bytes, true) => {
+        (Unit::Bytes, true, _) => {
             "  {prefix:.dim} {wide_bar:.green/dim} {bytes:>10}/{total_bytes:<10} eta {eta:>4}"
         }
-        (Unit::Count, _) => {
+        (Unit::Count, _, true) => {
+            "  {spinner:.cyan} {prefix:.bold} {wide_bar:.cyan/blue} {pos:>7}/{len:<7}\n{msg}"
+        }
+        (Unit::Count, _, false) => {
             "  {spinner:.cyan} {prefix:.bold} {wide_bar:.cyan/blue} {pos:>7}/{len:<7}"
         }
     };
@@ -167,14 +377,206 @@ fn truncate(text: &str, width: usize) -> String {
 mod tests {
     use super::*;
 
+    fn outcome(status: Option<u16>, bytes: u64, enclosed: bool) -> RequestOutcome {
+        RequestOutcome {
+            url: "https://www.tampa.gov/proclamation/irish-american-heritage-month".into(),
+            status,
+            bytes,
+            millis: 900,
+            kind: Some("html".into()),
+            detail: status.is_none().then(|| "connection timed out".to_string()),
+            enclosed,
+        }
+    }
+
     #[test]
     fn every_style_template_parses() {
         // A bad template panics at render time, which on a terminal means a corrupted
         // display mid-download. Cheaper to find here.
         for unit in [Unit::Bytes, Unit::Count] {
             for is_total in [true, false] {
-                let _ = style_for(unit, is_total);
+                for footer in [true, false] {
+                    let _ = style_for(unit, is_total, footer);
+                }
             }
+        }
+    }
+
+    // ── the request stream ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_request_line_leads_with_what_came_back() {
+        let line = request_line(&outcome(Some(200), 1_200_000, false));
+        assert!(line.contains("200"), "{line}");
+        assert!(line.contains("1.14 MiB"), "the size is readable: {line}");
+        assert!(line.contains("0.9s"), "and how long it took: {line}");
+        assert!(line.contains("irish-american-heritage-month"), "{line}");
+    }
+
+    /// A 404 is an answer and a timeout is not, and a run that showed them alike would
+    /// hide the difference between a broken link and a broken network.
+    #[test]
+    fn a_refusal_without_a_status_says_why() {
+        let line = request_line(&outcome(None, 0, false));
+        assert!(line.contains("connection timed out"), "{line}");
+        assert!(!line.contains("404"));
+
+        let answered = request_line(&outcome(Some(404), 0, false));
+        assert!(answered.contains("404"), "{answered}");
+        assert!(
+            !answered.contains("timed out"),
+            "a status is the whole answer: {answered}"
+        );
+    }
+
+    /// A scrolling log is only readable if the columns are straight, and `HumanBytes` is
+    /// variable-length — `1.19 MiB` against `94.15 KiB`. Left unpadded, every column to
+    /// the right of the size wandered.
+    #[test]
+    fn the_columns_line_up_whatever_the_size() {
+        let visible = |r: &RequestOutcome| {
+            let line = request_line(r);
+            // Strip SGR sequences: it is the printed width that has to match.
+            let mut out = String::new();
+            let mut chars = line.chars();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\x1b' => {
+                        for c in chars.by_ref() {
+                            if c == 'm' {
+                                break;
+                            }
+                        }
+                    }
+                    c => out.push(c),
+                }
+            }
+            // Characters, not bytes: an em-dash is one printed column and three bytes,
+            // so a byte offset would report the columns as ragged when they are straight.
+            let at = out.find("http").expect("every line names an address");
+            out[..at].chars().count()
+        };
+
+        let widths: Vec<_> = [
+            outcome(Some(200), 96_409, false),    // 94.15 KiB
+            outcome(Some(200), 1_248_112, false), // 1.19 MiB
+            outcome(Some(404), 0, false),         // —
+            outcome(None, 0, false),              // no status at all
+        ]
+        .iter()
+        .map(visible)
+        .collect();
+
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "the url starts at a different column each time: {widths:?}"
+        );
+    }
+
+    #[test]
+    fn an_enclosed_document_is_marked_apart_from_a_declared_page() {
+        assert!(request_line(&outcome(Some(200), 10, true)).contains('↳'));
+        assert!(!request_line(&outcome(Some(200), 10, false)).contains('↳'));
+    }
+
+    // ── the footer ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_footer_counts_what_the_stream_said() {
+        let mut tally = Tally::default();
+        for _ in 0..3 {
+            tally.record(&outcome(Some(200), 1_000, false));
+        }
+        tally.record(&outcome(Some(404), 0, true));
+
+        let footer = tally.footer(3, 10);
+        assert!(footer.contains("ok 3"), "{footer}");
+        assert!(footer.contains("failed 1"), "{footer}");
+        assert!(footer.contains("1 docs"), "{footer}");
+        assert_eq!(tally.requests(), 4);
+    }
+
+    /// The estimate that made the bar honest. Two pages done of ten, and every page so
+    /// far pulled one document — so eight pages left is sixteen requests, not eight.
+    #[test]
+    fn the_estimate_counts_the_documents_the_remaining_pages_will_pull() {
+        let mut tally = Tally {
+            started: Some(Instant::now() - std::time::Duration::from_secs(4)),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            tally.record(&outcome(Some(200), 0, false));
+            tally.record(&outcome(Some(200), 0, true));
+        }
+
+        let eta = tally.eta(2, 10).expect("four requests in four seconds");
+        // 8 pages × 2 requests each ÷ ~1/s. Loose bounds: the point is that it is not 8s.
+        assert!(
+            eta.as_secs() >= 12,
+            "documents must be counted in: {}s",
+            eta.as_secs()
+        );
+    }
+
+    #[test]
+    fn an_estimate_needs_a_run_to_estimate_from() {
+        let tally = Tally::default();
+        assert!(tally.eta(0, 100).is_none(), "nothing has happened yet");
+
+        let mut finished = Tally {
+            started: Some(Instant::now() - std::time::Duration::from_secs(4)),
+            ..Default::default()
+        };
+        finished.record(&outcome(Some(200), 0, false));
+        assert!(finished.eta(10, 10).is_none(), "there is nothing left");
+    }
+
+    #[test]
+    fn large_counts_stay_readable() {
+        assert_eq!(count(0), "0");
+        assert_eq!(count(999), "999");
+        assert_eq!(count(1_000), "1,000");
+        assert_eq!(count(11_473), "11,473");
+    }
+
+    #[test]
+    fn a_duration_says_two_units_at_most() {
+        use std::time::Duration;
+        assert_eq!(short_duration(Duration::from_secs(48)), "48s");
+        assert_eq!(short_duration(Duration::from_secs(12 * 60)), "12m");
+        assert_eq!(
+            short_duration(Duration::from_secs(2 * 3600 + 41 * 60)),
+            "2h 41m"
+        );
+    }
+
+    /// The whole point of C: the log scrolls and the footer stays. Both renderers have to
+    /// survive a request event, and neither may hang on one.
+    #[tokio::test]
+    async fn both_renderers_accept_a_request_event() {
+        for render in [0, 1] {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let handle = match render {
+                0 => tokio::spawn(render_bars(rx)),
+                _ => tokio::spawn(render_lines(rx)),
+            };
+            tx.send(ProgressEvent {
+                message: "collected 1".into(),
+                done: Some(1),
+                total: Some(2),
+                ..Default::default()
+            })
+            .unwrap();
+            for enclosed in [false, true] {
+                tx.send(ProgressEvent {
+                    message: "u".into(),
+                    request: Some(outcome(Some(200), 4_096, enclosed)),
+                    ..Default::default()
+                })
+                .unwrap();
+            }
+            drop(tx);
+            handle.await.expect("a request event must not panic");
         }
     }
 
@@ -245,6 +647,7 @@ mod tests {
                 total: Some(1024),
                 id: Some("m:model.onnx".into()),
                 unit: Unit::Bytes,
+                ..Default::default()
             })
             .unwrap();
         }
