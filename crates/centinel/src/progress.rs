@@ -88,18 +88,24 @@ use std::io::IsTerminal;
 use std::time::Instant;
 
 use centinel_core::op::{ItemOutcome, ProgressEvent, TOTAL_TRACK, Unit, Verdict};
+use centinel_core::render::{Ink, count, truncate_start};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 
 /// Only emitted when stderr is a terminal, so escape codes can never reach a pipe.
-const GREEN_CHECK: &str = "\x1b[32m✓\x1b[0m";
-const DIM: &str = "\x1b[2m";
-const RESET: &str = "\x1b[0m";
-const GREEN: &str = "\x1b[32m";
-const YELLOW: &str = "\x1b[33m";
-const RED: &str = "\x1b[31m";
-const CYAN: &str = "\x1b[36m";
+///
+/// Built from [`Ink`]'s table rather than written out again. These were seven literal
+/// escapes in this file and the same seven in `render`, in another crate, where nothing
+/// would ever have caught them drifting.
+const DIM: &str = Ink::Dim.codes().0;
+const RESET: &str = Ink::Dim.codes().1;
+const GREEN: &str = Ink::Green.codes().0;
+const YELLOW: &str = Ink::Yellow.codes().0;
+const RED: &str = Ink::Red.codes().0;
+const CYAN: &str = Ink::Cyan.codes().0;
+/// The one glyph, kept beside the inks that colour it.
+const CHECK: &str = "✓";
 
 /// The least address a request line will show, however narrow the terminal. Below this the
 /// line stops being worth printing, and a line that is slightly too long for a very narrow
@@ -232,19 +238,6 @@ impl Tally {
     }
 }
 
-/// Thousands separators, because a six-figure request count is unreadable without them.
-fn count(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
 /// `2h 41m`, `12m`, `48s` — two units at most, because a third is never the thing being
 /// decided on.
 fn short_duration(d: std::time::Duration) -> String {
@@ -327,13 +320,23 @@ fn request_line(r: &ItemOutcome, width: usize) -> String {
 }
 
 /// Columns of stderr, or a conservative guess when it is not a terminal.
+///
+/// Read once. It was read on every progress event — twice for an item event, each time
+/// constructing a fresh `console::Term` and issuing a `TIOCGWINSZ` ioctl — which on the
+/// 11,473-page collect this module's docs describe is around 23,000 syscalls for a number
+/// that changes when somebody drags a window edge. A run whose terminal is resized keeps
+/// the width it started with until the next command, which is the trade being made.
 fn terminal_width() -> usize {
-    console::Term::stderr()
-        .size_checked()
-        .map(|(_, cols)| cols as usize)
-        // One column spare. Printing *to* the last one leaves the cursor in a state some
-        // terminals resolve by wrapping anyway, which is the failure being avoided.
-        .map_or(100, |cols| cols.saturating_sub(1).max(40))
+    static WIDTH: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *WIDTH.get_or_init(|| {
+        console::Term::stderr()
+            .size_checked()
+            .map(|(_, cols)| cols as usize)
+            // One column spare. Printing *to* the last one leaves the cursor in a state
+            // some terminals resolve by wrapping anyway, which is the failure being
+            // avoided.
+            .map_or(100, |cols| cols.saturating_sub(1).max(40))
+    })
 }
 
 async fn render_bars(mut rx: UnboundedReceiver<ProgressEvent>) {
@@ -424,7 +427,7 @@ async fn render_bars(mut rx: UnboundedReceiver<ProgressEvent>) {
                 Unit::Count => total.to_string(),
             };
             let _ = multi.println(format!(
-                "{GREEN_CHECK} {}  {DIM}{size}{RESET}",
+                "{GREEN}{CHECK}{RESET} {}  {DIM}{size}{RESET}",
                 truncate(&event.message, LABEL_WIDTH),
             ));
             bars.remove(id);
@@ -537,21 +540,17 @@ fn head(text: &str, width: usize) -> String {
 }
 
 /// Keeps the tail of an over-long label — the filename is what distinguishes it.
+///
+/// `render`'s version of this, which reports have always used, measures printed columns
+/// rather than counting `char`s — so a CJK title is cut where it actually reaches the edge
+/// of the terminal instead of half a screen early. This one counted characters, and the
+/// two sat in different crates saying the same thing differently.
 fn truncate(text: &str, width: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= width {
-        return text.to_string();
+    // A terminal with no room at all gets nothing, not a bare ellipsis.
+    match width {
+        0 => String::new(),
+        width => truncate_start(text, width),
     }
-    // A very narrow terminal leaves no room for the ellipsis, let alone anything after it.
-    if width <= 1 {
-        return "…".repeat(width);
-    }
-    format!(
-        "…{}",
-        chars[chars.len() - (width - 1)..]
-            .iter()
-            .collect::<String>()
-    )
 }
 
 #[cfg(test)]
@@ -893,10 +892,10 @@ mod tests {
 
     #[test]
     fn large_counts_stay_readable() {
-        assert_eq!(count(0), "0");
-        assert_eq!(count(999), "999");
-        assert_eq!(count(1_000), "1,000");
-        assert_eq!(count(11_473), "11,473");
+        assert_eq!(count(0u64), "0");
+        assert_eq!(count(999u64), "999");
+        assert_eq!(count(1_000u64), "1,000");
+        assert_eq!(count(11_473u64), "11,473");
     }
 
     #[test]
