@@ -27,7 +27,7 @@ use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::fetch::{SNIFF_BYTES, content_kind};
+use crate::content::{ContentKind, SNIFF_BYTES};
 use crate::prelude::*;
 use crate::store::LogRecord;
 use crate::transcribe::{Transcriber, WORKER};
@@ -191,7 +191,7 @@ pub async fn transcribe(
             // it — so building a work list over a store of PDFs used to read and hash
             // every PDF in it.
             let head = ctx.store.blob_head(&obs.blob_sha, SNIFF_BYTES).await?;
-            if content_kind(&obs.meta, &head) != "audio" {
+            if ContentKind::classify(&obs.meta, &head) != ContentKind::Audio {
                 continue;
             }
             report.audio_found += 1;

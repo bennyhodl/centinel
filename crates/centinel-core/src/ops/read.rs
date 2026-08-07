@@ -9,7 +9,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::fetch::content_kind;
+use crate::content::ContentKind;
 use crate::ops::target::resolve;
 use crate::prelude::*;
 
@@ -104,7 +104,7 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> anyhow::Result<ReadReport> {
     // The original bytes decide the kind — the text is markdown either way, and the
     // caller wants to know it is reading a PDF.
     let original = ctx.store.get_blob(&obs.blob_sha).await?;
-    let kind = content_kind(&obs.meta, &original).to_string();
+    let kind = ContentKind::classify(&obs.meta, &original).to_string();
 
     Ok(ReadReport {
         url: resource.natural_key,

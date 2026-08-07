@@ -41,13 +41,7 @@
 
 use std::collections::BTreeSet;
 
-/// Extensions worth their own blob.
-///
-/// The set [`crate::extract`] already has a reader for, and no wider: fetching bytes no
-/// stage can turn into text spends a request to store something nothing will search.
-const DOCUMENT_EXTENSIONS: &[&str] = &[
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "rtf", "odt", "ods", "odp", "epub", "csv",
-];
+use crate::content::ContentKind;
 
 /// How many documents one page may contribute, before the rest are dropped and counted.
 ///
@@ -113,13 +107,18 @@ fn resolve(base: &url::Url, candidate: &str) -> Option<String> {
 }
 
 /// Whether a URL path ends in an extension we have a reader for.
+///
+/// The set is read off [`ContentKind::ENCLOSABLE`] rather than retyped here. Fetching
+/// bytes no stage can turn into text spends a request to store something nothing will
+/// search — and a list kept beside the table it must agree with drifts from it silently,
+/// in the direction of a document at the end of a link that is never fetched at all.
 fn is_document(path: &str) -> bool {
     let last = path.rsplit('/').next().unwrap_or(path);
     let Some((_, ext)) = last.rsplit_once('.') else {
         return false;
     };
     let ext = ext.to_ascii_lowercase();
-    DOCUMENT_EXTENSIONS.contains(&ext.as_str())
+    ContentKind::enclosable_extensions().any(|e| e == ext)
 }
 
 /// `<embed src>`, `<object data>`, `<iframe src>`, `<a href>`.

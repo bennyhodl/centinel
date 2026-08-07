@@ -569,7 +569,7 @@ async fn poppler_version() -> Option<String> {
 /// two tools in the record's sense — they are one tool given different bytes. The format
 /// goes in the notes, which is where a reader who needs it can find it.
 ///
-/// **The format is decided here rather than by [`crate::fetch::content_kind`], and it has
+/// **The format is decided here rather than by [`ContentKind::classify`], and it has
 /// to be.** Telling a `.docx` from a `.pptx` means reading the ZIP central directory,
 /// which sits at the *end* of the file; classification holds a 4 KB head and cannot see
 /// it. Extraction holds the whole verified blob, so this is the first point at which the
@@ -912,8 +912,8 @@ mod tests {
         let bytes = docx(&paragraph("Notice of public hearing on the FY2027 budget."));
 
         assert_eq!(
-            crate::fetch::content_kind(&BTreeMap::new(), &bytes),
-            "zip-container",
+            crate::content::ContentKind::classify(&BTreeMap::new(), &bytes),
+            crate::content::ContentKind::ZipContainer,
             "the head cannot tell a .docx from any other zip, and must not pretend to"
         );
 
@@ -1067,12 +1067,12 @@ mod tests {
         let mut meta = BTreeMap::new();
         meta.insert("content-type".to_string(), "application/json".to_string());
         assert_eq!(
-            crate::fetch::content_kind(&meta, &caption_track()),
-            "captions"
+            crate::content::ContentKind::classify(&meta, &caption_track()),
+            crate::content::ContentKind::Captions
         );
         assert_eq!(
-            crate::fetch::content_kind(&meta, br#"{"id":"abc","title":"a video"}"#),
-            "json"
+            crate::content::ContentKind::classify(&meta, br#"{"id":"abc","title":"a video"}"#),
+            crate::content::ContentKind::Json
         );
     }
 }
