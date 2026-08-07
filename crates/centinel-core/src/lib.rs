@@ -39,6 +39,7 @@ pub mod embed;
 pub mod enclosure;
 pub mod extract;
 pub mod fetch;
+pub mod html;
 pub mod index;
 pub mod journal;
 pub mod materialize;

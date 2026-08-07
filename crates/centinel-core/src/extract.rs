@@ -369,58 +369,7 @@ fn with_title(title: Option<&str>, body: &str) -> String {
 /// match the `<h1>`; this runs where it could not, so it prefers the tag that never
 /// carries the suffix over guessing at a separator.
 fn html_title(html: &str) -> Option<String> {
-    og_title(html).or_else(|| tag_title(html)).and_then(|t| {
-        let t = unescape(t.trim());
-        (!t.is_empty()).then_some(t)
-    })
-}
-
-fn og_title(html: &str) -> Option<&str> {
-    let lower = html.to_ascii_lowercase();
-    let mut from = 0;
-    while let Some(open) = lower[from..].find("<meta").map(|i| i + from) {
-        let close = lower[open..].find('>').map(|i| i + open)?;
-        let tag = &html[open..close];
-        if lower[open..close].contains("\"og:title\"") || lower[open..close].contains("'og:title'")
-        {
-            if let Some(value) = attr(tag, "content") {
-                return Some(value);
-            }
-        }
-        from = close + 1;
-    }
-    None
-}
-
-fn tag_title(html: &str) -> Option<&str> {
-    let lower = html.to_ascii_lowercase();
-    let open = lower.find("<title")?;
-    let start = lower[open..].find('>').map(|i| open + i + 1)?;
-    let end = lower[start..].find("</title").map(|i| i + start)?;
-    Some(&html[start..end])
-}
-
-/// The value of `name="…"`, single- or double-quoted.
-fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
-    let lower = tag.to_ascii_lowercase();
-    let at = lower.find(name)?;
-    let rest = &tag[at + name.len()..];
-    let eq = rest.find('=')?;
-    let after = rest[eq + 1..].trim_start();
-    let quote = after.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-    let value = &after[1..];
-    value.find(quote).map(|end| &value[..end])
-}
-
-/// The five entities that appear in real titles. Anything rarer is left alone rather than
-/// half-decoded.
-fn unescape(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#039;", "'")
-        .replace("&apos;", "'")
+    crate::html::Scan::new(html).title()
 }
 
 fn extract_pdf(bytes: &[u8]) -> Extracted {

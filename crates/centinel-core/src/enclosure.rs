@@ -71,7 +71,10 @@ pub fn documents(html: &str, base: &str, limit: usize) -> Enclosures {
     let mut urls = Vec::new();
     let mut dropped = 0;
 
-    for candidate in tag_targets(html).into_iter().chain(script_targets(html)) {
+    // One lowercased copy of the page, asked both questions. They used to make one each.
+    let scan = crate::html::Scan::new(html);
+
+    for candidate in tag_targets(&scan).into_iter().chain(script_targets(&scan)) {
         let Some(absolute) = resolve(&base, &candidate) else {
             continue;
         };
@@ -89,7 +92,7 @@ pub fn documents(html: &str, base: &str, limit: usize) -> Enclosures {
 
 /// Absolute, same-host, and something we could read. `None` for anything else.
 fn resolve(base: &url::Url, candidate: &str) -> Option<String> {
-    let joined = base.join(&unescape(candidate)).ok()?;
+    let joined = base.join(&crate::html::unescape(candidate)).ok()?;
     if !matches!(joined.scheme(), "http" | "https") {
         return None;
     }
@@ -122,15 +125,15 @@ fn is_document(path: &str) -> bool {
 }
 
 /// `<embed src>`, `<object data>`, `<iframe src>`, `<a href>`.
-fn tag_targets(html: &str) -> Vec<String> {
+fn tag_targets(scan: &crate::html::Scan<'_>) -> Vec<String> {
     let mut out = Vec::new();
-    for (name, tag) in tags(html, &["embed", "object", "iframe", "a"]) {
-        let attribute = match name.as_str() {
+    for tag in scan.tags(&["embed", "object", "iframe", "a"]) {
+        let attribute = match tag.name {
             "object" => "data",
             "a" => "href",
             _ => "src",
         };
-        if let Some(value) = attr(&tag, attribute) {
+        if let Some(value) = tag.attr(attribute) {
             out.push(value.to_string());
         }
     }
@@ -138,112 +141,18 @@ fn tag_targets(html: &str) -> Vec<String> {
 }
 
 /// Quoted document URLs inside `<script>` blocks — the runtime viewer's configuration.
-fn script_targets(html: &str) -> Vec<String> {
-    let lower = html.to_ascii_lowercase();
+fn script_targets(scan: &crate::html::Scan<'_>) -> Vec<String> {
     let mut out = Vec::new();
-    let mut from = 0;
-
-    while let Some(open) = lower[from..].find("<script").map(|i| i + from) {
-        let Some(body_start) = lower[open..].find('>').map(|i| open + i + 1) else {
-            break;
-        };
-        let body_end = lower[body_start..]
-            .find("</script")
-            .map(|i| body_start + i)
-            .unwrap_or(html.len());
-
-        for quoted in quoted_strings(&html[body_start..body_end]) {
+    for body in scan.scripts() {
+        for quoted in crate::html::quoted_strings(body) {
             // Checked before resolving so a script full of ordinary strings costs a
             // suffix test rather than a URL parse each.
             if is_document(quoted.split(['#', '?']).next().unwrap_or(quoted)) {
                 out.push(quoted.to_string());
             }
         }
-        from = body_end;
     }
     out
-}
-
-/// Every single- or double-quoted run in a fragment of script.
-fn quoted_strings(script: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let bytes = script.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let quote = bytes[i];
-        if quote == b'"' || quote == b'\'' {
-            if let Some(end) = script[i + 1..].find(quote as char) {
-                out.push(&script[i + 1..i + 1 + end]);
-                i += end + 2;
-                continue;
-            }
-            break;
-        }
-        i += 1;
-    }
-    out
-}
-
-/// Every `<name …>` in `html` whose name is wanted, as `(name, whole tag)`.
-///
-/// A scan rather than a parse: this asks one question of the markup, and the answer does
-/// not change with a malformed table three elements up. `to_ascii_lowercase` keeps byte
-/// offsets aligned with the original, so the returned slices carry the real casing.
-fn tags(html: &str, want: &[&str]) -> Vec<(String, String)> {
-    let lower = html.to_ascii_lowercase();
-    let mut out = Vec::new();
-    let mut from = 0;
-
-    while let Some(open) = lower[from..].find('<').map(|i| i + from) {
-        let after = open + 1;
-        let name_end = lower[after..]
-            .find(|c: char| !c.is_ascii_alphanumeric())
-            .map(|i| after + i)
-            .unwrap_or(lower.len());
-        let Some(close) = lower[open..].find('>').map(|i| i + open) else {
-            break;
-        };
-        let name = &lower[after..name_end.min(close)];
-        if want.contains(&name) {
-            out.push((name.to_string(), html[open..close].to_string()));
-        }
-        from = close + 1;
-    }
-    out
-}
-
-/// The value of `name="…"`, single- or double-quoted.
-fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
-    let lower = tag.to_ascii_lowercase();
-    let mut from = 0;
-    while let Some(at) = lower[from..].find(name).map(|i| i + from) {
-        // A whole attribute, not a suffix of another: `data` must not match `formdata`.
-        let boundary = at == 0
-            || !lower.as_bytes()[at - 1].is_ascii_alphanumeric()
-                && lower.as_bytes()[at - 1] != b'-';
-        let rest = &tag[at + name.len()..];
-        if boundary && let Some(eq) = rest.find('=') {
-            let after = rest[eq + 1..].trim_start();
-            if let Some(quote) = after.chars().next().filter(|c| *c == '"' || *c == '\'') {
-                let value = &after[1..];
-                if let Some(end) = value.find(quote) {
-                    return Some(&value[..end]);
-                }
-            }
-        }
-        from = at + name.len();
-    }
-    None
-}
-
-/// The entities that appear in real URLs. `&amp;` is the one that matters — a query
-/// string in an attribute is escaped, and joining it unescaped yields a different address.
-fn unescape(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&#38;", "&")
-        .replace("&quot;", "\"")
-        .trim()
-        .to_string()
 }
 
 #[cfg(test)]
@@ -350,13 +259,25 @@ mod tests {
     }
 
     /// `data` must not match inside `formdata`, or a form would contribute an address.
+    ///
+    /// Asked through `documents` rather than of the scanner directly: the scanner is
+    /// shared now, and what this file is entitled to assert is what it does with one.
+    /// The scanner's own version of this guarantee lives in `html`.
     #[test]
     fn an_attribute_is_matched_whole() {
-        assert_eq!(
-            attr(r#"<object formdata="/x.pdf" data="/y.pdf""#, "data"),
-            Some("/y.pdf")
+        let found = documents(
+            r#"<object formdata="/wrong.pdf" data="/right.pdf"></object>"#,
+            "https://x.gov/page",
+            10,
         );
-        assert_eq!(attr(r#"<embed data-src="/x.pdf""#, "src"), None);
+        assert_eq!(found.urls, vec!["https://x.gov/right.pdf"]);
+
+        // And `data-src` is not `src`.
+        assert!(
+            documents(r#"<embed data-src="/x.pdf">"#, "https://x.gov/page", 10)
+                .urls
+                .is_empty()
+        );
     }
 
     #[test]
