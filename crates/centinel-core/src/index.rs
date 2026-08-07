@@ -13,7 +13,7 @@
 //! site's boilerplate from crowding the index, and it means the eventual embedding step
 //! embeds each distinct passage once rather than once per page.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -302,12 +302,14 @@ impl Index {
         resource: &str,
         derived_sha: &str,
     ) -> anyhow::Result<bool> {
-        let n: i64 = self.conn.query_row(
+        // `prepare_cached`, because this runs once per (derivation × address) on the
+        // indexing path — the same reason `Batch::insert` is cached. `query_row` compiles
+        // its SQL afresh every call, and this is the hottest statement `index` issues.
+        let mut stmt = self.conn.prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM placement
                            WHERE source = ?1 AND resource = ?2 AND derived_sha = ?3)",
-            params![source, resource, derived_sha],
-            |r| r.get(0),
         )?;
+        let n: i64 = stmt.query_row(params![source, resource, derived_sha], |r| r.get(0))?;
         Ok(n != 0)
     }
 
@@ -345,18 +347,24 @@ impl Index {
             ))
         })?;
 
-        let mut hits = Vec::new();
-        for row in rows {
-            let (chunk_hash, text, score) = row?;
-            let placements = self.placements_of(&chunk_hash)?;
-            hits.push(Hit {
+        let ranked = rows.collect::<Result<Vec<_>, _>>()?;
+
+        // Hydrated in one query rather than one per row. This loop used to call
+        // `placements_of` per hit, so a search at `ARM_DEPTH` fired a hundred round trips
+        // where the placements of all hundred chunks are a single `IN (…)` — the shape
+        // `in_source` next door has always used on the same table.
+        let hashes: Vec<String> = ranked.iter().map(|(h, _, _)| h.clone()).collect();
+        let mut placements = self.placements_ofs(&hashes)?;
+
+        Ok(ranked
+            .into_iter()
+            .map(|(chunk_hash, text, score)| Hit {
+                placements: placements.remove(&chunk_hash).unwrap_or_default(),
                 chunk_hash,
                 text,
                 score,
-                placements,
-            });
-        }
-        Ok(hits)
+            })
+            .collect())
     }
 
     /// Every chunk hash in the index.
@@ -377,14 +385,38 @@ impl Index {
     /// Batched deliberately — `embed` walks the corpus a batch at a time so that only a
     /// batch's worth of text is resident, however large the corpus.
     pub fn chunk_texts(&self, hashes: &[String]) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT text FROM chunk WHERE chunk_hash = ?1")?;
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One `IN (…)`, then reordered here — a statement per hash was the shape this
+        // batched signature existed to avoid, and `fuse` calls it with a single hash per
+        // vector-only survivor, which made it a round trip each.
+        let holes = std::iter::repeat_n("?", hashes.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT chunk_hash, text FROM chunk WHERE chunk_hash IN ({holes})");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            hashes.iter().map(|h| h as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+
+        let mut found: HashMap<String, String> = HashMap::new();
+        for row in rows {
+            let (hash, text) = row?;
+            found.insert(hash, text);
+        }
+        // In the order requested, and still an error rather than a gap: `embed` pairs
+        // these with the hashes it asked for, so a silent hole would attach a vector to
+        // the wrong chunk.
         hashes
             .iter()
             .map(|h| {
-                stmt.query_row([h], |r| r.get::<_, String>(0))
-                    .map_err(|e| anyhow::anyhow!("chunk {h} is not in the index: {e}"))
+                found
+                    .remove(h)
+                    .ok_or_else(|| anyhow::anyhow!("chunk {h} is not in the index"))
             })
             .collect()
     }
@@ -445,6 +477,59 @@ impl Index {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Where each of several chunks sits — the batched form of [`Self::placements_of`].
+    ///
+    /// One `IN (…)` instead of one round trip per chunk. Both retrieval arms reach
+    /// `ARM_DEPTH` deep, so the caller-per-hit version ran a hundred statements per query
+    /// on the way to a result that keeps forty of them. A chunk with no placements is
+    /// simply absent from the map, which is the same answer an empty `Vec` gave.
+    pub fn placements_ofs(
+        &self,
+        hashes: &[String],
+    ) -> anyhow::Result<HashMap<String, Vec<Placement>>> {
+        if hashes.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let holes = std::iter::repeat_n("?", hashes.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT chunk_hash, source, resource, blob_sha, derived_sha, ordinal, heading,
+                    char_start, char_end, observed_at, tool, title
+             FROM placement WHERE chunk_hash IN ({holes})
+             ORDER BY source, resource"
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            hashes.iter().map(|h| h as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                Placement {
+                    source: r.get(1)?,
+                    resource: r.get(2)?,
+                    blob_sha: r.get(3)?,
+                    derived_sha: r.get(4)?,
+                    ordinal: r.get::<_, i64>(5)? as usize,
+                    heading: r.get(6)?,
+                    char_start: r.get::<_, i64>(7)? as usize,
+                    char_end: r.get::<_, i64>(8)? as usize,
+                    observed_at: r.get(9)?,
+                    tool: r.get(10)?,
+                    title: r.get(11)?,
+                },
+            ))
+        })?;
+
+        let mut out: HashMap<String, Vec<Placement>> = HashMap::new();
+        for row in rows {
+            let (hash, placement) = row?;
+            out.entry(hash).or_default().push(placement);
+        }
+        Ok(out)
     }
 
     /// How many distinct chunks the index holds.
