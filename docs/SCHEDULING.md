@@ -199,10 +199,21 @@ skip    = ["discover", "collect"]
 | `catch_up` | Defaults true. §9.3. |
 | `sources`, `skip`, `limit`, `refresh` | **Verbatim `RunArgs`.** |
 
-The last row is the mechanism, not a coincidence: the schedule's argument type embeds
-`RunArgs` with `#[serde(flatten)]`. A flag added to `run` becomes schedulable the day it
-exists, and there is no second list of "which run options a schedule supports" to fall
-behind.
+The last row was going to be the mechanism: embed `RunArgs` with `#[serde(flatten)]` and a
+flag added to `run` is schedulable the day it exists, with no second list to fall behind.
+
+**It does not survive contact with serde, and the alternative is better anyway.**
+`deny_unknown_fields` cannot be applied to a struct containing a flattened field — the
+flattened half absorbs whatever it does not recognise. So a flattened schedule block would
+accept `soruces = ["tampa"]` silently, and produce a schedule that fires on time, collects
+nothing, and reports success forever. That is the same silence `[[sources]]` typed by
+reflex already produces, and the reason this file denies unknown keys at all; it is
+strictly worse at 3am than in a terminal.
+
+So the run options are **spelled out**, and the drift they invite is caught by a test
+rather than by a mechanism: `run_options_stay_in_step_with_run` serializes `RunArgs` and
+asserts every field is either expressible in a `[[schedule]]` block or named in a short
+exclusion list with its reason. A new `run` flag is then a failing test, not an omission.
 
 *Foot-gun, deliberately not forbidden:* `refresh = true` on a schedule re-fetches and
 re-derives the entire corpus at every fire. It is legal, because "the extractor got better,
@@ -334,11 +345,17 @@ two ugly cases get answered rather than discovered:
 
 | Case | Rule |
 |---|---|
-| A fire time that does not exist (02:30 on a spring-forward day) | Fires at the next instant that does exist. |
-| A fire time that happens twice (autumn fall-back) | Fires **once**. |
+| A fire time that does not exist (02:30 on a spring-forward day) | Shifted forward by the length of the gap, so it fires at 03:30. |
+| A fire time that happens twice (autumn fall-back) | Fires **once**, at the earlier of the two. |
 
 Getting these wrong is a missed day and a doubled day, once a year each, in the direction
 nobody is watching.
+
+The first rule is jiff's `compatible` disambiguation, which is also what Temporal and ICU
+do. "The first instant after the gap" was the original wording here and is worse: it
+collapses an 02:00 schedule and an 02:30 schedule onto the same minute, on the one morning
+of the year they would otherwise stay half an hour apart. A bespoke rule would also be a
+second answer to a question the ecosystem has already settled.
 
 ### 4.3 Jitter, because forks are the point
 
@@ -795,7 +812,7 @@ buy an import path.
 
 | | |
 |---|---|
-| **The cron parser** | jiff owns the zoned arithmetic either way. What is open is whether to adopt a crate (`cron`, `croner`, `saffron`) or hand-roll ~150 lines of 5-field parsing. Most cron crates are built on `chrono`, which is in the tree transitively but is not the workspace's time library — adopting one puts a second date library on a direct path. |
+| ~~The cron parser~~ | **Settled: hand-rolled**, in `centinel-core/src/schedule.rs`. Every candidate crate is built on `chrono`, which is in the tree transitively but is not the workspace's time library, and adopting one would have put a second date library on a direct path to buy the *easy* half. The hard half — stepping through local time across a DST boundary — is jiff's either way. The grammar is five fields and fits on a page, including the rule that day-of-month and day-of-week are ORed when both are restricted, which is the one place cron does not intersect and the one place a hand-rolled parser gets it wrong. |
 | **Whether `runs/` federates** | It is truth, and it sits beside `log/`, so FEDERATION §7's table has a new row to answer. The likely answer is **no**: the run journal is a record of what one machine did, not of what the world served, and a peer receiving a slice has no use for your 3am timings. But it is exactly the kind of row that gets answered by accident by an implementation that copies whole directories. |
 | **Resident memory when a run and a search overlap** | §5.3 separates the runtimes and lowers the scheduler's priority, which settles CPU. It settles nothing about RAM: a `search` loads the reranker and a query embedder while a run holds the embedding model, and `transcribe` holds a whisper model beside both. The floor machine of [#13](https://github.com/bennyhodl/centinel/issues/13) is where this stops being theoretical, and #13 is where it should be answered — the options (refuse a run below a free-memory threshold, unload between stages, serialise the two) are hardware-profile decisions, not scheduling ones. |
 | **The store lock's strength** | An advisory pid file is enough for two cooperating processes on one host. It is not enough for a store on a network filesystem, which is a configuration nothing else in Centinel supports yet either. |
