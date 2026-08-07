@@ -66,7 +66,7 @@ Local-only inference, files as the only truth, no second runtime, provenance not
 
 ### 2.2 The file tree is what makes this tractable
 
-`blobs/` and `log/` are truth; `current/`, `centinel.db` and the vector cache are derived and rebuildable (SPEC §5). **The thing to move is a file tree**, and every blob already carries a hash that names it. A transfer verifies itself for free against `blob_sha`, and a derived layer that fails to arrive is a rebuild rather than a loss.
+`blobs/` and `log/` are truth; `current/`, `centinel.db` and `vectors.lance/` are derived and rebuildable (SPEC §5). **The thing to move is a file tree**, and every blob already carries a hash that names it. A transfer verifies itself for free against `blob_sha`, and a derived layer that fails to arrive is a rebuild rather than a loss.
 
 ### 2.3 One process, one binary
 

@@ -10,7 +10,7 @@
 //! subtracts observed resources from the latest DiscoveryRun, `extract` skips blobs that
 //! already have a derivation, `index` skips derivations already chunked in, and `embed`
 //! subtracts cached chunk hashes from indexed ones. Each falls out of the append-only log
-//! or the content-addressed cache rather than from a checkpoint file (SPEC §5.2, §6.1).
+//! or the content-addressed vector table rather than from a checkpoint file (SPEC §6.1).
 //!
 //! So a second run does nothing, at every stage, for the same structural reason the first
 //! one was resumable. That is what makes this the cron command: twice a day costs one
@@ -493,8 +493,8 @@ pub async fn run(ctx: &Ctx, args: RunArgs, progress: &Progress) -> anyhow::Resul
     // ── derive, once ──────────────────────────────────────────────────────────
     //
     // Scoped to the named sources when the caller named some, and to the whole store
-    // otherwise. `embed` has no source axis at all — the vector cache is keyed by chunk
-    // hash, which is corpus-wide by construction (SPEC §5.2).
+    // otherwise. `embed` has no source axis at all — the vector table is keyed by chunk
+    // hash, which is corpus-wide by construction.
     let scope: Vec<String> = if args.sources.is_empty() {
         Vec::new()
     } else {
@@ -823,8 +823,8 @@ async fn run_derivation(
             if let Some(reason) = missing_model(model, crate::models::ModelRole::Embedding) {
                 return StageRun::skipped(stage, reason);
             }
-            // One call, whatever the scope: the vector cache is keyed by chunk hash, which
-            // is corpus-wide by construction (SPEC §5.2), so `embed` has no source axis.
+            // One call, whatever the scope: the vector table is keyed by chunk hash, which
+            // is corpus-wide by construction, so `embed` has no source axis.
             fold_targets(
                 stage,
                 vec![None],
@@ -843,7 +843,7 @@ async fn run_derivation(
                         r.embedded as u64,
                         &[
                             ("embedded", r.embedded as u64),
-                            ("already_cached", r.already_cached as u64),
+                            ("already_embedded", r.already_embedded as u64),
                             ("remaining", r.remaining as u64),
                         ],
                     ))

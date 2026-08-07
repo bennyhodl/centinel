@@ -233,9 +233,8 @@ The **policy** — re-extract, extract lazily, or accept a mixed corpus — belo
                                             {derivation, from_sha, to_sha, tool, version, tier}
 
   current/<source>/…             DERIVED  URL-mirroring tree for CLI work. Regenerable.
-  cache/embeddings/              DURABLE  Tier A — (chunk_hash, model_id, dims) → vector
-  centinel.db                    DERIVED  SQLite: metadata + FTS5
-  index/                         DERIVED  LanceDB: vectors + BM25 + rerank
+  centinel.db                    DERIVED  SQLite: metadata + FTS5      — the BM25 arm
+  vectors.lance/                 DERIVED  LanceDB: chunk_hash → vector — the vector arm
 ```
 
 ### 5.1 Two embedded stores, both derived
@@ -256,16 +255,26 @@ Choosing it would have made **embedding dimension a permanent architectural cons
 
 *Accepted cost:* two stores rather than one file. Both embedded, neither a service — §2.1 and §3.1 intact.
 
-### 5.2 The embedding cache is a durable Tier A artifact
+### 5.2 There is no embedding cache — `embed` writes to LanceDB
 
-Keyed `(chunk_hash, model_id, dims)`, beside the static files, **not inside any vector store**.
+**Reversed 2026-08-06.** This section previously specified a durable **Tier A** embedding cache: a flat, append-only file keyed `(chunk_hash, model_id, dims)`, beside the static files and **not inside any vector store**. Its argument was that this de-risked §5.1, because *"swapping vector backends is a re-import, not a re-embed."*
 
-| Tier | Rebuild cost | Portable across backends? |
-|---|---|---|
-| **A. Embedding cache** | Expensive — inference over the corpus | **Yes — it's just bytes** |
-| **B. Search index** | Cheap, minutes | No |
+**That argument does not survive measurement.** A `.lance` dataset is an ordinary directory — a manifest, a transaction log, and data files. `cp -R` copies it, the copy opens and queries, and a plain scan reads every vector back out. So:
 
-This de-risks §5.1: **swapping vector backends is a re-import, not a re-embed.** A corrupted index is `rm -rf` plus minutes. Adding a model is additive. The cache is also the natural unit to publish — *"Centinel embeddings for cityofX.gov"* lets others build on the crawl without repeating it.
+| the cache was said to buy | what is actually true |
+|---|---|
+| a backend swap is a re-import, not a re-embed | extracting vectors from Lance **is** the re-import — a table scan |
+| the corpus is publishable without repeating the crawl | publishing is a directory copy, and so is backup |
+| an interrupted run keeps what it wrote | Lance is ACID with a transaction log, which is **stronger** than truncating a torn record |
+| the resume predicate is cheap | reading hashes from a Lance column beats seeking past 4 GiB |
+
+What survived was one property — append-only bytes the query engine never rewrites — against the cost of a second write path, ~4 GiB of duplication, and **a pipeline stage with its own skip predicate**. §7's own table records that each stage's skip predicate has to be exactly right, and a wrong one is the defect that has cost this project the most. The property did not justify the stage.
+
+So: `embed` writes vectors where `search` reads them. One artifact, one write path, no stage.
+
+*Accepted cost:* the vectors now live only inside a store that rewrites itself — compaction, reindexing, version cleanup. Losing `vectors.lance/` costs a full re-embed, which on a 400,000-chunk corpus is roughly a day. **A backup is `cp -R`, and it is the operator's to take.**
+
+*Accepted cost:* models are no longer additive on disk. The cache keyed on `(model_id, dims)`, so several could coexist; one table records its model in schema metadata and **refuses a query vector from any other**. That matches §6.2, which already makes changing the embedder a full re-embed rather than a config edit — but a second model is now a second table someone has to build, not a file that appears beside the first.
 
 ### 5.3 Two hashes, because they answer different questions
 
@@ -416,7 +425,7 @@ Multiple hits from one document appear separately. Every hit is **independently 
 
 ### 6.7 Dimensions
 
-**Store full 1024-dim vectors in the Tier A cache; truncate at index time if ever needed.** Qwen3-Embedding is Matryoshka, so truncation is a *prefix slice* of a stored vector, not a re-embed — making dimension a **reversible index-time decision**. Truncated vectors remain in the same space, so cross-install comparability survives. *(Inferred.)*
+**Store vectors at full width; truncate at query time if ever needed.** Qwen3-Embedding is Matryoshka, so truncation is a *prefix slice* of a stored vector, not a re-embed — making dimension a **reversible index-time decision**. Truncated vectors remain in the same space, so cross-install comparability survives. *(Inferred.)*
 
 ---
 

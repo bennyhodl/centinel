@@ -50,6 +50,10 @@ tempfile = "3"
 # Local inference. Compiles llama.cpp from source, which is what puts a C++ build in
 # `cargo build` — the distribution question ticket #11 already tracks for whisper-rs.
 llama-cpp-2 = { version = "0.1.153", default-features = false, features = ["openmp"] }
+# ANN over the embedding cache (SPEC §5.1). Its default features are the S3, GCS, Azure
+# and OSS object stores — every one of them a network path out of a machine that §2.1
+# says nothing leaves. Local tables need none of them.
+lancedb = { version = "0.33.0", default-features = false }
 
 [features]
 default = []

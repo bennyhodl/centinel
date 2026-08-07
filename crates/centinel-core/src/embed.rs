@@ -58,7 +58,7 @@ const GPU_LAYERS: u32 = 1000;
 /// writes graph and buffer diagnostics straight to stderr — which would corrupt nothing
 /// under `centinel mcp` (that protocol owns stdout) but would bury every progress bar
 /// and every op's output under hundreds of lines. `--verbose` is the way to see it.
-fn backend() -> anyhow::Result<&'static LlamaBackend> {
+pub(crate) fn backend() -> anyhow::Result<&'static LlamaBackend> {
     static BACKEND: OnceLock<Result<LlamaBackend, String>> = OnceLock::new();
     BACKEND
         .get_or_init(|| {
