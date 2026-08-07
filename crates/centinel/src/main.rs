@@ -9,6 +9,7 @@ mod http;
 mod logging;
 mod mcp;
 mod progress;
+mod schedule;
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -130,6 +131,19 @@ fn build_cli() -> Command {
                     .long("bind")
                     .default_value("127.0.0.1:8787")
                     .value_name("ADDR"),
+            )
+            .arg(
+                // For a machine that serves a corpus somebody else collects.
+                Arg::new("no-schedule")
+                    .long("no-schedule")
+                    .action(ArgAction::SetTrue)
+                    .help("Serve the read API without firing any [[schedule]]"),
+            )
+            .arg(
+                Arg::new("config")
+                    .long("config")
+                    .value_name("FILE")
+                    .help("Config file the schedules are read from"),
             ),
     )
     .subcommand(Command::new("mcp").about(SERVER_COMMANDS[1].1).hide(true))
@@ -208,12 +222,109 @@ async fn main() -> Result<()> {
                 .get_one::<String>("bind")
                 .expect("bind has a default")
                 .clone();
-            http::serve(ctx, &bind).await
+            serve(ctx, &bind, sub).await
         }
         "mcp" => mcp::serve(ctx).await,
         op_name => run_op(ctx, op_name, sub, Output::detect(sub)).await,
     }
 }
+
+/// Serves the read API, and — unless told not to — fires the configured schedules.
+///
+/// The two are deliberately separate concerns sharing one process: the server *reports* on
+/// the record and never causes it to grow, while the scheduler executes instructions the
+/// operator wrote into `centinel.toml`. Nothing arriving on the socket can reach the
+/// second (`op::Reach`), which is the whole of `docs/SCHEDULING.md` §1.1.
+///
+/// **A broken schedule refuses to start the whole command.** A server that came up happily
+/// and collected nothing would say so nowhere, and the operator would find out weeks later
+/// from an empty search result. This is loud at the one moment it is cheap.
+async fn serve(ctx: Arc<Ctx>, bind: &str, matches: &clap::ArgMatches) -> Result<()> {
+    if matches.get_flag("no-schedule") {
+        tracing::info!("scheduler disabled by --no-schedule");
+        return http::serve(ctx, bind).await;
+    }
+
+    let config = matches.get_one::<String>("config").map(String::as_str);
+    let scheduler = schedule::Scheduler::new(Arc::clone(&ctx), config)?;
+    let count = scheduler.schedules().len();
+
+    let (reload_tx, reload_rx) = schedule::ReloadSignal::channel();
+    let (canceller, thread) = schedule::spawn(scheduler, reload_rx)?;
+
+    if count == 0 {
+        eprintln!("  no schedules configured — centinel schedule set");
+    } else {
+        eprintln!("  {count} schedule(s) armed — centinel schedules");
+    }
+    install_reload_handler(reload_tx);
+
+    let served = http::serve_until(ctx, bind, terminate()).await;
+
+    // The socket is closed, so the in-flight run is asked to stop at its next item
+    // boundary and the scheduler is given time to write its `interrupted` record. Nothing
+    // is lost by stopping there: every stage computes its work list as a subtraction, so
+    // the next fire resumes from what the log says.
+    tracing::info!("stopping the scheduler");
+    canceller.cancel();
+    if let Err(e) = thread.join() {
+        tracing::warn!("the scheduler thread panicked: {e:?}");
+    }
+    served
+}
+
+/// Resolves on `SIGTERM` or `SIGINT`.
+///
+/// Both, because they arrive from different places and mean the same thing here: a
+/// container stopping and somebody pressing ctrl-C both want the run journal to end with a
+/// record rather than with a stale lock.
+#[cfg(unix)]
+async fn terminate() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "no SIGTERM handler; shutdown will not be graceful");
+            return std::future::pending().await;
+        }
+    };
+    tokio::select! {
+        _ = term.recv() => tracing::info!("SIGTERM"),
+        _ = tokio::signal::ctrl_c() => tracing::info!("interrupted"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn terminate() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+/// Re-reads the config on `SIGHUP`, so `schedule set` against a live server is not a
+/// restart.
+///
+/// A reload that does not validate keeps the running schedule (see `Scheduler::reload`): a
+/// restart is always correct and always sufficient, and a typo must not disarm a server
+/// that was collecting correctly.
+#[cfg(unix)]
+fn install_reload_handler(tx: tokio::sync::mpsc::Sender<()>) {
+    tokio::spawn(async move {
+        let mut hup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "SIGHUP reload unavailable; restart to pick up edits");
+                return;
+            }
+        };
+        while hup.recv().await.is_some() {
+            tracing::info!("SIGHUP: re-reading the config");
+            // A full queue means a reload is already pending, which is the same outcome.
+            let _ = tx.try_send(());
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn install_reload_handler(_tx: tokio::sync::mpsc::Sender<()>) {}
 
 /// The store root in effect, nearest answer first.
 ///

@@ -42,7 +42,27 @@ use centinel_core::op::{self, Ctx, Progress};
 use futures::stream::Stream;
 use serde_json::{Value, json};
 
+/// Serves until the process is asked to stop.
+///
+/// [`serve_until`] with a signal that never arrives — for a caller with nothing to wind
+/// down afterwards.
 pub async fn serve(ctx: Arc<Ctx>, bind: &str) -> Result<()> {
+    serve_until(ctx, bind, std::future::pending()).await
+}
+
+/// Serves until `shutdown` resolves, then stops accepting and returns.
+///
+/// The signal is a parameter rather than a `SIGTERM` handler installed here, because what
+/// happens *after* the socket closes is the caller's business: `main` uses the return to
+/// cancel an in-flight scheduled run at its next item boundary and let the scheduler write
+/// its `interrupted` record. Without a graceful return the process is simply killed, the
+/// journal keeps no record of the run that was in flight, and the only evidence is a stale
+/// `run.lock` for the next startup to reclaim.
+pub async fn serve_until(
+    ctx: Arc<Ctx>,
+    bind: &str,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     let app = router(ctx);
 
     let listener = tokio::net::TcpListener::bind(bind)
@@ -70,7 +90,9 @@ pub async fn serve(ctx: Arc<Ctx>, bind: &str) -> Result<()> {
     // are watching is on at all.
     tracing::info!(%addr, ops = op::remote_ops().len(), "http server listening");
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
 
     tracing::info!("http server stopped");
     Ok(())

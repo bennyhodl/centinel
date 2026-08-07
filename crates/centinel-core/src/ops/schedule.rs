@@ -191,12 +191,21 @@ async fn set(ctx: &Ctx, args: SetArgs) -> anyhow::Result<ScheduleReport> {
         .schedule(&id)
         .ok_or_else(|| anyhow::anyhow!("wrote {} but `{id}` is not in it", path.display()))?;
     let zone = saved.zone()?;
+    // With jitter, because that is when it will actually fire. A preview showing the
+    // nominal minute would disagree with `schedules` and with the journal, and the
+    // operator would be right to trust neither.
+    let jitter = jiff::Span::new().seconds(crate::schedule::jitter_offset(
+        &ctx.store.root().display().to_string(),
+        &saved.id,
+        saved.jitter_secs(),
+    ) as i64);
     let next = saved
         .cron()?
         .next_n(jiff::Timestamp::now(), &zone, 3)
         .into_iter()
         .map(|at| {
-            at.to_zoned(zone.clone())
+            (at + jitter)
+                .to_zoned(zone.clone())
                 .strftime("%a %e %b %H:%M %Z")
                 .to_string()
         })
