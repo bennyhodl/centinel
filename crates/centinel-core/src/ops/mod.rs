@@ -27,6 +27,8 @@ mod models;
 mod open;
 mod read;
 mod run;
+mod schedule;
+mod schedules;
 mod search;
 mod source;
 mod target;
@@ -48,6 +50,10 @@ pub use extract::{ExtractArgs, ExtractReport, ExtractSample, Unreadable, extract
 pub use ingest::{IngestArgs, IngestOutcome, IngestReport, ingest};
 pub use list::{ListArgs, ListReport, Problem, SourceSummary, list};
 pub use run::{RunArgs, RunReport, SourceRun, Stage, StageRun, StageStatus, run};
+pub use schedule::{RmArgs, ScheduleAction, ScheduleArgs, ScheduleReport, SetArgs, schedule};
+pub use schedules::{
+    HistoryArgs, HistoryReport, ScheduleStatus, SchedulesArgs, SchedulesReport, history, schedules,
+};
 pub use search::{AlsoAt, SearchArgs, SearchReport, SearchResult, search};
 pub use source::{
     AddArgs, AdoptArgs, ConfiguredSource, RemoveArgs as SourceRemoveArgs, SourceAction, SourceArgs,
