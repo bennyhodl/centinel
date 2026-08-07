@@ -191,6 +191,51 @@ pub fn content_kind(meta: &BTreeMap<String, String>, bytes: &[u8]) -> &'static s
     "other"
 }
 
+/// The `content-type` a server would have declared for a file with this name.
+///
+/// A file read off disk arrives with no headers, so [`content_kind`] has only magic bytes
+/// to go on — and for the formats whose first bytes are indistinguishable from plain text
+/// that is not enough. A `.csv` sniffs to `other` and no extractor claims it, even though
+/// the very same bytes are read fine the moment a server calls them `text/csv`. Left
+/// alone, a tool for checking what the pipeline does with a local file would report a
+/// failure that belongs to the file having no headers rather than to the pipeline.
+///
+/// Lives beside [`content_kind`] because it is the same table read backwards: an
+/// extension here that maps to a type `content_kind` does not recognise is a silent
+/// no-op, and the two drifting apart is only visible from one place if they are written
+/// in one place.
+///
+/// Deliberately **not** consulted for anything fetched. A server's own header is
+/// evidence; a filename is a guess, and a guess belongs only where there is nothing else.
+pub fn declared_type_for_path(path: &std::path::Path) -> Option<&'static str> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
+
+    Some(match ext.as_str() {
+        "html" | "htm" | "xhtml" => "text/html",
+        "pdf" => "application/pdf",
+        "txt" | "md" | "markdown" => "text/plain",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "csv" => "text/csv",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xls" => "application/vnd.ms-excel",
+        "ods" => "application/vnd.oasis.opendocument.spreadsheet",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "odt" => "application/vnd.oasis.opendocument.text",
+        "odp" => "application/vnd.oasis.opendocument.presentation",
+        "rtf" => "application/rtf",
+        "epub" => "application/epub+zip",
+        "mp3" | "m4a" | "wav" | "ogg" | "opus" | "webm" => "audio/mpeg",
+        _ => return None,
+    })
+}
+
 /// Container sniffing for the audio YouTube actually serves.
 ///
 /// Magic bytes rather than the declared type, because blobs are content-addressed and a
@@ -243,6 +288,80 @@ mod tests {
 
     fn meta(ct: &str) -> BTreeMap<String, String> {
         BTreeMap::from([("content-type".to_string(), ct.to_string())])
+    }
+
+    /// The drift guard the two tables exist to need.
+    ///
+    /// [`declared_type_for_path`] is only useful if every type it names is one
+    /// [`content_kind`] recognises; an extension mapped to a string the classifier has
+    /// never heard of is a silent no-op that looks like support.
+    #[test]
+    fn every_inferred_type_is_one_the_classifier_knows() {
+        for name in [
+            "a.html",
+            "a.htm",
+            "a.xhtml",
+            "a.pdf",
+            "a.txt",
+            "a.md",
+            "a.markdown",
+            "a.json",
+            "a.xml",
+            "a.csv",
+            "a.xlsx",
+            "a.xls",
+            "a.ods",
+            "a.doc",
+            "a.docx",
+            "a.ppt",
+            "a.pptx",
+            "a.odt",
+            "a.odp",
+            "a.rtf",
+            "a.epub",
+            "a.mp3",
+            "a.m4a",
+            "a.wav",
+            "a.ogg",
+            "a.opus",
+            "a.webm",
+        ] {
+            let declared = declared_type_for_path(std::path::Path::new(name))
+                .unwrap_or_else(|| panic!("{name} has no inferred type"));
+            assert_ne!(
+                content_kind(&meta(declared), b""),
+                "other",
+                "{name} infers `{declared}`, which the classifier does not recognise"
+            );
+        }
+    }
+
+    /// A `.csv` is the case this exists for: its first bytes are ordinary text, so magic
+    /// bytes alone reach `other` and no extractor claims it — while the identical bytes
+    /// are read fine the moment a server calls them `text/csv`.
+    #[test]
+    fn an_extension_answers_where_the_bytes_cannot() {
+        let bytes = b"district,population\nEast,41200\n";
+        assert_eq!(content_kind(&BTreeMap::new(), bytes), "other");
+
+        let declared = declared_type_for_path(std::path::Path::new("districts.csv")).unwrap();
+        assert_eq!(content_kind(&meta(declared), bytes), "csv");
+    }
+
+    /// Nothing to infer from is not the same as inferring nothing, and a caller has to be
+    /// able to tell — a file with no extension gets no header rather than a wrong one.
+    #[test]
+    fn an_unknown_extension_infers_nothing() {
+        assert_eq!(declared_type_for_path(std::path::Path::new("blob")), None);
+        assert_eq!(
+            declared_type_for_path(std::path::Path::new("archive.dwg")),
+            None
+        );
+        // Case is a filename's business, not a format's.
+        assert_eq!(
+            declared_type_for_path(std::path::Path::new("REPORT.PDF")),
+            Some("application/pdf")
+        );
     }
 
     #[test]

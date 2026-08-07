@@ -63,6 +63,15 @@ only ever answer what the first bytes prove: a `.docx` and a `.pptx` are both
 making it say `docx` — would put a guess in the record at the one point where nothing has
 read enough of the file to know, and every stage downstream would carry the guess.
 
+**Declared vs inferred type** — a `content-type` a server sent, against one read off a
+filename. Both feed `content_kind` and only the first is evidence. It matters because a
+file read off disk has no headers, and for the formats whose first bytes are ordinary text
+— `.csv`, `.json`, `.txt` — magic bytes alone reach `other` and no extractor claims them,
+so the same bytes a server calls `text/csv` become unreadable the moment they arrive as a
+path. So `check` infers one from the extension and says that it did: presenting a guess as
+a header would put a filename's opinion where the archive expects a server's. Nothing that
+was *fetched* ever consults it.
+
 **Note** — a line of provenance a Source wants shown, and how it should read. Lets a
 report print which sitemaps were walked or which channel tabs returned nothing without the
 renderer learning what a sitemap or a tab is. A new adapter explains itself through this
