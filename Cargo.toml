@@ -18,6 +18,20 @@ rust-version = "1.91"
 license = "MIT"
 repository = "https://github.com/bennyhodl/centinel"
 
+# `cargo install` builds this profile, so what is set here is what a person actually runs.
+#
+# Two things are deliberately absent. `panic = "abort"` would be wrong in a tool whose run
+# report distinguishes a stage that failed from a corpus that had nothing: a process that
+# aborts cannot unwind to record its Underivables, and work that was attempted and not
+# recorded is work every later run attempts again. `strip` would buy little on a binary
+# already dominated by two vendored C++ libraries, and it costs the function names in the
+# one backtrace somebody eventually sends us.
+[profile.release]
+# Thin rather than fat. The win is in this workspace's own whole-corpus loops — chunking,
+# hashing, the FTS5 write path — and fat LTO pays for that across arrow, datafusion and
+# lancedb, which is most of the link on a build people already complain about the length of.
+lto = "thin"
+
 [workspace.dependencies]
 centinel-core = { path = "crates/centinel-core" }
 centinel-macros = { path = "crates/centinel-macros" }
