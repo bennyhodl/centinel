@@ -166,8 +166,9 @@ async fn call_tool(ctx: &Arc<Ctx>, id: Value, params: Value) -> Value {
         return error_response(id, -32602, &format!("unknown tool: {name}"));
     };
     // Checked on call, not merely omitted from `tools/list` — a client may hold a stale
-    // list, or simply guess a name.
-    if !def.mcp || def.local_only {
+    // list, or simply guess a name. Hiding alone is not access control, and for a
+    // non-`Public` op the thing being refused is the authority to start a crawl.
+    if !def.mcp || !def.reach.is_remote() {
         tracing::warn!(tool = def.name, "tool refused: not exposed over MCP");
         return error_response(
             id,
@@ -295,7 +296,7 @@ mod tests {
             &ctx,
             json!({
                 "jsonrpc":"2.0","id":4,"method":"tools/call",
-                "params": {"name":"ingest","arguments":{"source":"Bad Source!","urls":[]}}
+                "params": {"name":"list","arguments":{"source":"Bad Source!"}}
             }),
         )
         .await
@@ -310,12 +311,16 @@ mod tests {
 
     /// `tools/list` omitting them is not enough — a client may hold a stale list or
     /// simply guess a name, so `tools/call` refuses them independently.
+    ///
+    /// Written over the whole registry rather than named ops, so the op somebody adds
+    /// next year is covered the day it is added. For an `Operator` op this is the check
+    /// that stops a model from deciding what the corpus contains.
     #[tokio::test]
-    async fn host_local_ops_are_refused_by_name() {
+    async fn ops_beyond_public_reach_are_refused_by_name() {
         let (_d, ctx) = ctx().await;
         let local: Vec<&str> = op::all()
             .into_iter()
-            .filter(|d| d.local_only)
+            .filter(|d| !d.reach.is_remote())
             .map(|d| d.name)
             .collect();
         assert!(!local.is_empty(), "the guard would pass vacuously");

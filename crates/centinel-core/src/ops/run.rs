@@ -387,8 +387,13 @@ impl RunReport {
 /// Reads `centinel.toml`, and for each `[[source]]` runs discover and collect, then runs
 /// extract, transcribe, index and embed once across the corpus. Every stage skips work
 /// it has already done, so running this on a schedule costs only what actually changed.
-#[op(long_running, group = "pipeline")]
-pub async fn run(ctx: &Ctx, args: RunArgs, progress: &Progress) -> anyhow::Result<RunReport> {
+#[op(long_running, reach = "operator", group = "pipeline")]
+pub async fn run(
+    ctx: &Ctx,
+    args: RunArgs,
+    progress: &Progress,
+    cancel: &Cancel,
+) -> anyhow::Result<RunReport> {
     let started = Instant::now();
 
     let (config, config_path) = match &args.config {
@@ -450,6 +455,10 @@ pub async fn run(ctx: &Ctx, args: RunArgs, progress: &Progress) -> anyhow::Resul
 
     // ── acquire, per source ───────────────────────────────────────────────────
     for source in &built {
+        // Between sources as well as inside them. A source whose stages all finished is
+        // wholly recorded, so this is the cleanest place a shutdown can land.
+        cancel.check()?;
+
         let source_started = Instant::now();
         let id = source.id().to_string();
 
@@ -474,7 +483,7 @@ pub async fn run(ctx: &Ctx, args: RunArgs, progress: &Progress) -> anyhow::Resul
                 // *previous* snapshot and report success. Better to say why it stopped.
                 StageRun::skipped(stage, "discover failed")
             } else {
-                run_acquisition(ctx, source.as_ref(), &args, stage, progress).await
+                run_acquisition(ctx, source.as_ref(), &args, stage, progress, cancel).await?
             };
             stages.push(outcome);
         }
@@ -502,6 +511,8 @@ pub async fn run(ctx: &Ctx, args: RunArgs, progress: &Progress) -> anyhow::Resul
     };
 
     for stage in derive_stages {
+        cancel.check()?;
+
         progress.track(TOTAL_TRACK, stage.name(), done, total, Unit::Count);
         progress.say(stage.name());
         done += 1;
@@ -511,7 +522,7 @@ pub async fn run(ctx: &Ctx, args: RunArgs, progress: &Progress) -> anyhow::Resul
         } else if args.dry_run {
             StageRun::skipped(stage, "--dry-run")
         } else {
-            run_derivation(ctx, &config, &args, stage, &scope, progress).await
+            run_derivation(ctx, &config, &args, stage, &scope, progress, cancel).await?
         };
         if stage == Stage::Embed {
             report.new_chunks += outcome.new;
@@ -531,6 +542,12 @@ pub async fn run(ctx: &Ctx, args: RunArgs, progress: &Progress) -> anyhow::Resul
 /// Errors are captured rather than propagated: one source's WAF block must not cancel the
 /// nineteen after it, and a run that collected most of a corpus should say so.
 ///
+/// **The one exception is a cancellation, which is returned as `Err`.** It is not a fault
+/// and must not be filed as one: captured like the rest it would record a shutdown as a
+/// failed collection, count against the schedule's `consecutive_failures`, and — because
+/// the loop below carries on to the next source — go on doing so once per source. `Err`
+/// here therefore means "the operator asked this to stop" and nothing else.
+///
 /// This used to be a 212-line `match (stage, acquisition)` with four arms, two of them
 /// re-discriminating a report variant that could not occur. Both halves of the variation
 /// now sit behind [`Source`], so what is left is the shaping — the stage's numbers turned
@@ -541,32 +558,45 @@ async fn run_acquisition(
     args: &RunArgs,
     stage: Stage,
     progress: &Progress,
-) -> StageRun {
+    cancel: &Cancel,
+) -> anyhow::Result<StageRun> {
     let t0 = Instant::now();
     let secs = || t0.elapsed().as_secs_f64();
+
+    /// Captures a stage failure, unless it is a shutdown.
+    fn shape(stage: Stage, error: anyhow::Error, secs: f64) -> anyhow::Result<StageRun> {
+        if crate::op::is_cancelled(&error) {
+            return Err(error);
+        }
+        Ok(StageRun::failed(stage, error, secs))
+    }
 
     match stage {
         Stage::Discover => {
             // No `limit` here: see `RunArgs::limit`. A truncated snapshot would read as a
             // source that shrank.
-            match acquire::discover(&ctx.store, source, &DiscoverOpts::default(), progress).await {
-                Ok(r) => StageRun::ran(
-                    stage,
-                    Tally::of(
-                        r.new as u64,
-                        &[("found", r.found as u64), ("new", r.new as u64)],
-                    )
-                    .and(r.figures),
-                    format!(
-                        "{} {} \u{00b7} {} new",
-                        render::count(r.found as u64),
-                        noun(r.found as u64, "address", "addresses"),
-                        render::count(r.new as u64)
+            Ok(
+                match acquire::discover(&ctx.store, source, &DiscoverOpts::default(), progress)
+                    .await
+                {
+                    Ok(r) => StageRun::ran(
+                        stage,
+                        Tally::of(
+                            r.new as u64,
+                            &[("found", r.found as u64), ("new", r.new as u64)],
+                        )
+                        .and(r.figures),
+                        format!(
+                            "{} {} \u{00b7} {} new",
+                            render::count(r.found as u64),
+                            noun(r.found as u64, "address", "addresses"),
+                            render::count(r.new as u64)
+                        ),
+                        secs(),
                     ),
-                    secs(),
-                ),
-                Err(e) => StageRun::failed(stage, e, secs()),
-            }
+                    Err(e) => return shape(stage, e, secs()),
+                },
+            )
         }
 
         Stage::Collect => {
@@ -574,54 +604,60 @@ async fn run_acquisition(
                 limit: args.limit,
                 refresh: args.refresh,
                 matches: Vec::new(),
+                // The finest boundary a run has. A paced crawl spends hours between
+                // addresses, so a shutdown that only checked between *stages* would
+                // wait out the whole source.
+                cancel: cancel.clone(),
                 ..Default::default()
             };
-            match acquire::collect(&ctx.store, source, &opts, progress).await {
-                Ok(r) => {
-                    let mut summary = format!(
-                        "{} acquired \u{00b7} {} changed \u{00b7} {}",
-                        render::count(r.stored as u64),
-                        render::count(r.changed as u64),
-                        render::bytes(r.bytes)
-                    );
-                    // A wall of refusals with nothing stored is indistinguishable from an
-                    // empty source in the counters alone.
-                    if r.blocked > 0 {
-                        summary.push_str(&format!(
-                            " \u{00b7} {} blocked",
-                            render::count(r.blocked as u64)
-                        ));
-                    }
-                    StageRun::ran(
-                        stage,
-                        Tally::of(
-                            r.stored as u64,
-                            &[
-                                ("stored", r.stored as u64),
-                                ("changed", r.changed as u64),
-                                ("already_had", r.already_had as u64),
-                                ("failed", r.failed as u64),
-                                ("blocked", r.blocked as u64),
-                                ("remaining", r.remaining as u64),
-                                ("bytes", r.bytes),
-                            ],
+            Ok(
+                match acquire::collect(&ctx.store, source, &opts, progress).await {
+                    Ok(r) => {
+                        let mut summary = format!(
+                            "{} acquired \u{00b7} {} changed \u{00b7} {}",
+                            render::count(r.stored as u64),
+                            render::count(r.changed as u64),
+                            render::bytes(r.bytes)
+                        );
+                        // A wall of refusals with nothing stored is indistinguishable from an
+                        // empty source in the counters alone.
+                        if r.blocked > 0 {
+                            summary.push_str(&format!(
+                                " \u{00b7} {} blocked",
+                                render::count(r.blocked as u64)
+                            ));
+                        }
+                        StageRun::ran(
+                            stage,
+                            Tally::of(
+                                r.stored as u64,
+                                &[
+                                    ("stored", r.stored as u64),
+                                    ("changed", r.changed as u64),
+                                    ("already_had", r.already_had as u64),
+                                    ("failed", r.failed as u64),
+                                    ("blocked", r.blocked as u64),
+                                    ("remaining", r.remaining as u64),
+                                    ("bytes", r.bytes),
+                                ],
+                            )
+                            .and(
+                                r.parts
+                                    .into_iter()
+                                    .map(|(k, v)| (format!("part_{k}"), v as u64))
+                                    .collect(),
+                            ),
+                            summary,
+                            secs(),
                         )
-                        .and(
-                            r.parts
-                                .into_iter()
-                                .map(|(k, v)| (format!("part_{k}"), v as u64))
-                                .collect(),
-                        ),
-                        summary,
-                        secs(),
-                    )
-                }
-                Err(e) => StageRun::failed(stage, e, secs()),
-            }
+                    }
+                    Err(e) => return shape(stage, e, secs()),
+                },
+            )
         }
 
         // `run` only ever calls this with the two acquisition stages.
-        stage => StageRun::skipped(stage, "not an acquisition stage"),
+        stage => Ok(StageRun::skipped(stage, "not an acquisition stage")),
     }
 }
 
@@ -635,12 +671,15 @@ async fn run_acquisition(
 /// `return` on the first error, so `--source a --source b --source c` with a broken `a`
 /// left `b` and `c` underived and reported only `a` — the mistake `run` already avoids one
 /// level up, where one site's WAF block does not cancel the nineteen after it.
+///
+/// A cancellation is the exception, for the reason [`run_acquisition`] gives: it abandons
+/// the remaining targets on purpose, and is returned rather than counted as a fault.
 async fn fold_targets<Fut>(
     stage: Stage,
     targets: Vec<Option<String>>,
     run_one: impl Fn(Option<String>) -> Fut,
     summarize: impl Fn(&Tally, f64) -> String,
-) -> StageRun
+) -> anyhow::Result<StageRun>
 where
     // Spelled out rather than `AsyncFn` because `run` is a `Send` op, and `AsyncFn` gives
     // no way to say its future is `Send` on this toolchain.
@@ -657,6 +696,7 @@ where
         let named = target.clone();
         match run_one(target).await {
             Ok(t) => tally.absorb(t),
+            Err(e) if crate::op::is_cancelled(&e) => return Err(e),
             Err(e) => errors.push(match named {
                 Some(id) => format!("{id}: {e}"),
                 None => e.to_string(),
@@ -665,12 +705,12 @@ where
     }
 
     let secs = t0.elapsed().as_secs_f64();
-    if errors.is_empty() {
+    Ok(if errors.is_empty() {
         let summary = summarize(&tally, secs);
         StageRun::ran(stage, tally, summary, secs)
     } else {
         StageRun::faulted(stage, tally, errors, attempted, secs)
-    }
+    })
 }
 
 /// Runs one corpus-wide derivation stage across `scope` (empty means every source).
@@ -684,7 +724,8 @@ async fn run_derivation(
     stage: Stage,
     scope: &[String],
     progress: &Progress,
-) -> StageRun {
+    cancel: &Cancel,
+) -> anyhow::Result<StageRun> {
     // One call per named source, or one unscoped call covering the store. Folding the
     // results keeps the report shape identical either way.
     let targets: Vec<Option<String>> = if scope.is_empty() {
@@ -708,6 +749,7 @@ async fn run_derivation(
                             ..Default::default()
                         },
                         progress,
+                        cancel,
                     )
                     .await?;
                     Ok(Tally::of(
@@ -735,7 +777,7 @@ async fn run_derivation(
         Stage::Transcribe => {
             let model = &config.defaults.transcribe_model;
             if let Some(reason) = missing_model(model, crate::models::ModelRole::Transcription) {
-                return StageRun::skipped(stage, reason);
+                return Ok(StageRun::skipped(stage, reason));
             }
             fold_targets(
                 stage,
@@ -752,6 +794,7 @@ async fn run_derivation(
                             ..Default::default()
                         },
                         progress,
+                        cancel,
                     )
                     .await?;
                     Ok(Tally::of(
@@ -793,6 +836,7 @@ async fn run_derivation(
                             ..Default::default()
                         },
                         progress,
+                        cancel,
                     )
                     .await?;
                     Ok(Tally::of(
@@ -821,7 +865,7 @@ async fn run_derivation(
         Stage::Embed => {
             let model = &config.defaults.embed_model;
             if let Some(reason) = missing_model(model, crate::models::ModelRole::Embedding) {
-                return StageRun::skipped(stage, reason);
+                return Ok(StageRun::skipped(stage, reason));
             }
             // One call, whatever the scope: the vector table is keyed by chunk hash, which
             // is corpus-wide by construction, so `embed` has no source axis.
@@ -837,6 +881,7 @@ async fn run_derivation(
                             ..Default::default()
                         },
                         progress,
+                        cancel,
                     )
                     .await?;
                     Ok(Tally::of(
@@ -862,7 +907,7 @@ async fn run_derivation(
         }
 
         // Acquisition stages never reach here.
-        stage => StageRun::skipped(stage, "not a derivation stage"),
+        stage => Ok(StageRun::skipped(stage, "not a derivation stage")),
     }
 }
 
@@ -1231,7 +1276,8 @@ mod tests {
             },
             |t, _| format!("{} documents", t.new),
         )
-        .await;
+        .await
+        .unwrap();
 
         assert_eq!(*seen.lock().unwrap(), ["a", "b", "c"]);
         assert!(run.is_failure());
@@ -1256,7 +1302,8 @@ mod tests {
                 },
                 |t, _| format!("{} documents", t.new),
             )
-            .await;
+            .await
+            .unwrap();
 
         assert!(!run.is_failure());
         assert_eq!(run.new, 2);
@@ -1283,7 +1330,8 @@ mod tests {
             },
             |t, _| format!("{} documents", t.new),
         )
-        .await;
+        .await
+        .unwrap();
 
         let out = render_to_string(&report(
             vec![source_run("tampa", vec![stage_ran(Stage::Collect, 0)])],
@@ -1302,7 +1350,8 @@ mod tests {
             |_| async move { Err::<Tally, _>(anyhow::anyhow!("no index")) },
             |t, _| format!("{} documents", t.new),
         )
-        .await;
+        .await
+        .unwrap();
 
         assert!(run.is_failure());
         assert_eq!(run.summary, "no index");

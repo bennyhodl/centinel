@@ -65,7 +65,7 @@ pub mod prelude {
         Enumeration, Fetched, Fingerprint, Liveness, ModelTier, Note, NoteMark, Observation,
         Refusal, Resource, ResourceStatus, Source, SourceId, SourceKind,
     };
-    pub use crate::op::{Ctx, Progress, ProgressEvent, Unit};
+    pub use crate::op::{Cancel, Ctx, Progress, ProgressEvent, Unit};
     pub use crate::policy::{HostPolicy, PolicyTable};
     pub use crate::render::{self, Align, Cell, Ink, Mark, Painter, Render, Table};
     pub use crate::store::{LogRecord, Store};

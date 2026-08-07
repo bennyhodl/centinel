@@ -170,21 +170,27 @@ pub enum SourceReport {
 }
 
 /// Add, list and remove the sources `centinel run` walks.
-#[op(long_running, group = "pipeline")]
+#[op(long_running, reach = "operator", group = "pipeline")]
 pub async fn source(
     ctx: &Ctx,
     args: SourceArgs,
     progress: &Progress,
+    cancel: &Cancel,
 ) -> anyhow::Result<SourceReport> {
     match args.action {
-        SourceAction::Add(a) => add(ctx, a, progress).await,
+        SourceAction::Add(a) => add(ctx, a, progress, cancel).await,
         SourceAction::List(a) => list(ctx, a).await,
         SourceAction::Adopt(a) => adopt(ctx, a).await,
         SourceAction::Remove(a) => remove(a),
     }
 }
 
-async fn add(ctx: &Ctx, args: AddArgs, progress: &Progress) -> anyhow::Result<SourceReport> {
+async fn add(
+    ctx: &Ctx,
+    args: AddArgs,
+    progress: &Progress,
+    cancel: &Cancel,
+) -> anyhow::Result<SourceReport> {
     let path = match &args.config {
         Some(p) => std::path::PathBuf::from(p),
         None => Config::write_path(),
@@ -244,6 +250,7 @@ async fn add(ctx: &Ctx, args: AddArgs, progress: &Progress) -> anyhow::Result<So
                 ..Default::default()
             },
             progress,
+            cancel,
         )
         .await?;
         Some(Box::new(report))
@@ -746,6 +753,7 @@ mod tests {
                 ..Default::default()
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap();
@@ -783,6 +791,7 @@ mod tests {
                 ..Default::default()
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap_err();
@@ -928,6 +937,7 @@ mod tests {
                 ..Default::default()
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap();

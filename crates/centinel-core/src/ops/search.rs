@@ -1074,9 +1074,14 @@ mod tests {
         }
 
         let ctx = Ctx::new(store.clone());
-        super::super::embed(&ctx, super::super::EmbedArgs::default(), &Progress::none())
-            .await
-            .unwrap();
+        super::super::embed(
+            &ctx,
+            super::super::EmbedArgs::default(),
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
 
         // No shared content word with the water passage — "drinking" and "sampling"
         // appear nowhere in it. BM25 alone cannot reach it.

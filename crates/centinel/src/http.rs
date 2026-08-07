@@ -180,13 +180,17 @@ async fn mcp_over_http(State(ctx): State<Arc<Ctx>>, Json(req): Json<Value>) -> R
     }
 }
 
-/// Resolves an op, refusing host-local ones.
+/// Resolves an op, refusing everything beyond [`op::Reach::Public`].
 ///
-/// A `local_only` op acts on the machine it runs on — launching a GUI, running a
-/// configured command. Reachable remotely it would be command execution against a
-/// server with no authentication, so it is invisible here rather than merely refused.
+/// Two kinds are refused here and they fail for different reasons. A `Host` op acts on
+/// the machine it runs on — launching a GUI, running a configured command — and remotely
+/// that is command execution against a server with no authentication. An `Operator` op
+/// *causes collection*, and this server may report on the record but never grow it: the
+/// authority to start a crawl comes from the operator's config file, not from a request.
+///
+/// Either way it is invisible here rather than merely refused.
 fn remote_op(name: &str) -> Option<&'static op::OpDef> {
-    op::find(name).filter(|d| !d.local_only)
+    op::find(name).filter(|d| d.reach.is_remote())
 }
 
 fn not_found(name: &str) -> Response {
@@ -249,19 +253,21 @@ mod tests {
         assert!(ops.iter().any(|o| o["name"] == "doctor"));
     }
 
-    /// Host-local ops act on the machine they run on: `open` launches a configured
-    /// command, `models` pulls gigabytes into a local cache. Over HTTP — which has no
+    /// `Host` ops act on the machine they run on: `open` launches a configured command,
+    /// `models` pulls gigabytes into a local cache. Over HTTP — which has no
     /// authentication — those are remote command execution and remote disk exhaustion.
+    /// `Operator` ops *cause collection*, which over the same surface is an unbounded
+    /// crawl against a city's web server, attributed to whoever runs this store.
     ///
-    /// Written over the whole registry rather than named ops, so a future `local_only`
+    /// Written over the whole registry rather than named ops, so a future non-`Public`
     /// op is covered the day it is added rather than the day someone remembers to.
     #[tokio::test]
-    async fn host_local_ops_are_neither_listed_nor_invokable() {
+    async fn ops_beyond_public_reach_are_neither_listed_nor_invokable() {
         let (_d, app) = app().await;
 
         let local: Vec<&str> = op::all()
             .into_iter()
-            .filter(|d| d.local_only)
+            .filter(|d| !d.reach.is_remote())
             .map(|d| d.name)
             .collect();
         assert!(!local.is_empty(), "the guard would pass vacuously");
@@ -325,14 +331,17 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// A bad argument is the caller's mistake, not a fault. Asked of a `Public` op —
+    /// which is now the only kind reachable here at all, so a writing op used as the
+    /// example would test the 404 above instead of the 400 this one is about.
     #[tokio::test]
     async fn bad_arguments_are_400_not_500() {
         let (_d, app) = app().await;
         let resp = app
             .oneshot(
-                Request::post("/ops/ingest")
+                Request::post("/ops/list")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"source":"NOT VALID","urls":[]}"#))
+                    .body(Body::from(r#"{"source":"NOT VALID"}"#))
                     .unwrap(),
             )
             .await

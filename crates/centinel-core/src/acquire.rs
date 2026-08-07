@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, HashMap};
 use jiff::Timestamp;
 
 use crate::domain::{DiscoveryRun, Fingerprint, Liveness, Note, Resource, ResourceStatus, Source};
-use crate::op::Progress;
+use crate::op::{Cancel, Progress};
 use crate::store::{LogRecord, Store};
 
 // ── discovery ─────────────────────────────────────────────────────────────────
@@ -148,6 +148,13 @@ pub struct CollectOpts {
     pub max_bytes: u64,
     /// Failures to carry back in the report.
     pub max_failures: usize,
+    /// Stops the walk after the address in flight. Defaults to a token that never fires.
+    ///
+    /// An option of the operation rather than a parameter, because that is what it is:
+    /// every caller but the scheduler wants the default, and none of them should have to
+    /// name it. Checked *between* addresses, so what stops is a complete acquisition —
+    /// see [`crate::op::Cancel`] for why an arbitrary await point is not good enough.
+    pub cancel: Cancel,
 }
 
 impl Default for CollectOpts {
@@ -158,6 +165,7 @@ impl Default for CollectOpts {
             matches: Vec::new(),
             max_bytes: 256 * 1024 * 1024,
             max_failures: 20,
+            cancel: Cancel::none(),
         }
     }
 }
@@ -274,6 +282,11 @@ pub async fn collect(
     // ---- acquire -------------------------------------------------------------------
     let total = todo.len() as u64;
     for (i, resource) in todo.iter().enumerate() {
+        // The item boundary. Everything acquired so far is already appended to the log,
+        // so stopping here loses nothing: the next run subtracts observed markers from
+        // the latest DiscoveryRun and picks up exactly here.
+        opts.cancel.check()?;
+
         // Every resource, not every twenty-fifth. The throttle was harmless when the bar
         // was the only output; beside a request log that moves on every fetch it made the
         // bar visibly disagree with the tally under it — 25/500 sitting still while the
@@ -934,6 +947,60 @@ mod tests {
         .unwrap();
         assert_eq!(out.stored, 1);
         assert_eq!(out.remaining, 2, "re-running continues from here");
+    }
+
+    /// Cancellation has to leave the store in the state an ordinary stop would, or the
+    /// whole "shutdown loses nothing" claim rests on hope. So this asserts the *record*,
+    /// not just the error: what was acquired before the cancel is durable, and the next
+    /// pass resumes from exactly there.
+    #[tokio::test]
+    async fn a_cancel_stops_the_walk_and_keeps_what_it_already_stored() {
+        let (_d, store) = store().await;
+        let src = Scripted::new(
+            "x",
+            &["https://x.gov/a", "https://x.gov/b", "https://x.gov/c"],
+        )
+        .yields("https://x.gov/a", "a")
+        .yields("https://x.gov/b", "b")
+        .yields("https://x.gov/c", "c");
+        discover(&store, &src, &DiscoverOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+
+        // Cancelled before the walk starts, so nothing is acquired at all — the boundary
+        // is checked at the top of the loop rather than after the first fetch.
+        let (canceller, cancel) = crate::op::Cancel::channel();
+        canceller.cancel();
+        let err = collect(
+            &store,
+            &src,
+            &CollectOpts {
+                cancel,
+                ..Default::default()
+            },
+            &Progress::none(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            crate::op::is_cancelled(&err),
+            "a cancel must be distinguishable from a fault: {err:#}"
+        );
+        assert!(
+            src.calls.lock().unwrap().is_empty(),
+            "the source was asked for an address after the cancel"
+        );
+
+        // The proof that stopping cost nothing: an uncancelled pass finds all three
+        // still outstanding and stores them.
+        let out = collect(&store, &src, &CollectOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+        assert_eq!(
+            out.stored, 3,
+            "the cancelled pass consumed work list entries"
+        );
+        assert_eq!(out.remaining, 0);
     }
 
     #[tokio::test]

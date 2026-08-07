@@ -181,11 +181,12 @@ pub struct CollectReport {
 }
 
 /// Acquire every address the latest discovery run found, skipping what is already stored.
-#[op(long_running, group = "stage")]
+#[op(long_running, reach = "operator", group = "stage")]
 pub async fn collect(
     ctx: &Ctx,
     args: CollectArgs,
     progress: &Progress,
+    cancel: &Cancel,
 ) -> anyhow::Result<CollectReport> {
     let (config, _) = super::load_config(args.config.as_deref())?;
 
@@ -210,6 +211,7 @@ pub async fn collect(
             matches: args.matches.clone(),
             max_bytes: args.max_mb.saturating_mul(1024 * 1024),
             max_failures: args.max_failures,
+            cancel: cancel.clone(),
         },
         progress,
     )

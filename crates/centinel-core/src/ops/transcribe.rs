@@ -146,11 +146,12 @@ pub struct TranscribeReport {
 }
 
 /// Transcribe collected audio with a local Whisper model.
-#[op(long_running, group = "stage")]
+#[op(long_running, reach = "operator", group = "stage")]
 pub async fn transcribe(
     ctx: &Ctx,
     args: TranscribeArgs,
     progress: &Progress,
+    cancel: &Cancel,
 ) -> anyhow::Result<TranscribeReport> {
     let sources = match &args.source {
         Some(s) => vec![SourceId::new(s.clone())?],
@@ -259,6 +260,9 @@ pub async fn transcribe(
     let total = todo.len() as u64;
 
     for (i, (source, resource, obs)) in todo.into_iter().enumerate() {
+        // The coarsest boundary in the pipeline — one recording can be four hours. The
+        // child process itself is what shutdown has to reach; see `Tool`.
+        cancel.check()?;
         progress.step(
             format!("{}/{} {}", i + 1, total, short(&resource.natural_key)),
             i as u64,
@@ -490,7 +494,9 @@ mod tests {
         )
         .await;
 
-        let report = transcribe(&ctx, args(), &Progress::none()).await.unwrap();
+        let report = transcribe(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
         assert_eq!(report.audio_found, 1, "the PDF must not be queued");
         assert_eq!(report.attempted, 1);
         assert_eq!(report.transcribed, 0, "a dry run transcribes nothing");
@@ -519,7 +525,9 @@ mod tests {
             .await
             .unwrap();
 
-        let report = transcribe(&ctx, args(), &Progress::none()).await.unwrap();
+        let report = transcribe(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
         assert_eq!(report.already_transcribed, 1);
         assert_eq!(report.attempted, 0);
 
@@ -531,6 +539,7 @@ mod tests {
                 ..args()
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap();
@@ -565,7 +574,9 @@ mod tests {
             .await
             .unwrap();
 
-        let report = transcribe(&ctx, args(), &Progress::none()).await.unwrap();
+        let report = transcribe(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
         assert_eq!(report.already_transcribed, 0);
         assert_eq!(report.attempted, 1);
     }
@@ -585,6 +596,7 @@ mod tests {
                 ..args()
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap_err()
@@ -613,6 +625,7 @@ mod tests {
                 ..args()
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap();

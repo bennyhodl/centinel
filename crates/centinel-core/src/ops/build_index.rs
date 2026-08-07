@@ -78,8 +78,13 @@ pub struct IndexReport {
 }
 
 /// Chunk extracted text into the search index.
-#[op(long_running, group = "stage")]
-pub async fn index(ctx: &Ctx, args: IndexArgs, progress: &Progress) -> anyhow::Result<IndexReport> {
+#[op(long_running, reach = "operator", group = "stage")]
+pub async fn index(
+    ctx: &Ctx,
+    args: IndexArgs,
+    progress: &Progress,
+    cancel: &Cancel,
+) -> anyhow::Result<IndexReport> {
     let sources = match &args.source {
         Some(s) => vec![SourceId::new(s.clone())?],
         None => ctx.store.sources().await?,
@@ -179,6 +184,9 @@ pub async fn index(ctx: &Ctx, args: IndexArgs, progress: &Progress) -> anyhow::R
 
         let total = derivations.len() as u64;
         for (i, d) in derivations.iter().enumerate() {
+            // The item boundary is one document, which is also the write batch — so what
+            // stops here is exactly what the resume predicate will call done.
+            cancel.check()?;
             if i % 25 == 0 {
                 progress.step(format!("{} chunks", report.chunks_written), i as u64, total);
             }
@@ -605,9 +613,14 @@ mod tests {
     async fn only_the_latest_extraction_of_a_blob_is_indexed() {
         let (_dir, ctx) = store_with_extractions(&[&body("budget"), &body("zoning")]).await;
 
-        let added = index(&ctx, IndexArgs::default(), &Progress::none())
-            .await
-            .unwrap();
+        let added = index(
+            &ctx,
+            IndexArgs::default(),
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             added.derivations, 1,
             "two extractions of one blob are one document"
@@ -629,9 +642,14 @@ mod tests {
     async fn a_rebuild_does_not_bring_back_a_superseded_extraction() {
         let (_dir, ctx) = store_with_extractions(&[&body("budget"), &body("zoning")]).await;
 
-        let first = index(&ctx, IndexArgs::default(), &Progress::none())
-            .await
-            .unwrap();
+        let first = index(
+            &ctx,
+            IndexArgs::default(),
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
         let rebuilt = index(
             &ctx,
             IndexArgs {
@@ -639,6 +657,7 @@ mod tests {
                 ..Default::default()
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap();
@@ -698,9 +717,14 @@ mod tests {
         }
 
         let ctx = Ctx::new(store);
-        let report = index(&ctx, IndexArgs::default(), &Progress::none())
-            .await
-            .unwrap();
+        let report = index(
+            &ctx,
+            IndexArgs::default(),
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
         assert_eq!(report.derivations, 2);
         assert_eq!(report.already_indexed, 0, "neither address was skipped");
 
@@ -717,9 +741,14 @@ mod tests {
 
         // And a second run has nothing left to do, so the widened key did not cost
         // resumption.
-        let again = index(&ctx, IndexArgs::default(), &Progress::none())
-            .await
-            .unwrap();
+        let again = index(
+            &ctx,
+            IndexArgs::default(),
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
         assert_eq!(again.documents_indexed, 0, "the second run redid work");
         assert_eq!(again.already_indexed, 2);
     }

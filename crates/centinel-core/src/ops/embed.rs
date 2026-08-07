@@ -123,8 +123,13 @@ pub struct EmbedReport {
 }
 
 /// Embed indexed chunks into the vector table.
-#[op(long_running, group = "stage")]
-pub async fn embed(ctx: &Ctx, args: EmbedArgs, progress: &Progress) -> anyhow::Result<EmbedReport> {
+#[op(long_running, reach = "operator", group = "stage")]
+pub async fn embed(
+    ctx: &Ctx,
+    args: EmbedArgs,
+    progress: &Progress,
+    cancel: &Cancel,
+) -> anyhow::Result<EmbedReport> {
     anyhow::ensure!(args.batch > 0, "--batch must be at least 1");
 
     let index = Index::open(ctx.store.require_index()?)?;
@@ -208,16 +213,17 @@ pub async fn embed(ctx: &Ctx, args: EmbedArgs, progress: &Progress) -> anyhow::R
     let (embedded, skipped) = {
         let batch_size = args.batch;
         let table = table.clone();
-        let progress = progress.clone();
-        // The table's API is async and the loop is not. A handle captured here lets the
-        // blocking thread drive an append to completion without a runtime of its own —
-        // safe precisely because a `spawn_blocking` thread is not a runtime worker, so
-        // parking it starves nothing.
-        let handle = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || {
-            run(embedder, index, table, todo, batch_size, progress, handle)
-        })
-        .await??
+        let host = Host {
+            progress: progress.clone(),
+            cancel: cancel.clone(),
+            // The table's API is async and the loop is not. A handle captured here lets
+            // the blocking thread drive an append to completion without a runtime of its
+            // own — safe precisely because a `spawn_blocking` thread is not a runtime
+            // worker, so parking it starves nothing.
+            handle: tokio::runtime::Handle::current(),
+        };
+        tokio::task::spawn_blocking(move || run(embedder, index, table, todo, batch_size, host))
+            .await??
     };
 
     let elapsed = started.elapsed().as_secs_f64();
@@ -231,6 +237,16 @@ pub async fn embed(ctx: &Ctx, args: EmbedArgs, progress: &Progress) -> anyhow::R
     })
 }
 
+/// What the blocking loop needs from the async world it was spawned out of.
+///
+/// One struct rather than three parameters because they are one thing: the loop runs on a
+/// thread with no runtime and no caller, and these are its three ways back to both.
+struct Host {
+    progress: Progress,
+    cancel: Cancel,
+    handle: tokio::runtime::Handle,
+}
+
 /// The blocking loop: batch → embed → append, until the work list is exhausted.
 fn run(
     embedder: Embedder,
@@ -238,9 +254,13 @@ fn run(
     table: VectorTable,
     todo: Vec<String>,
     batch_size: usize,
-    progress: Progress,
-    handle: tokio::runtime::Handle,
+    host: Host,
 ) -> anyhow::Result<(usize, Vec<Skipped>)> {
+    let Host {
+        progress,
+        cancel,
+        handle,
+    } = host;
     let total = todo.len() as u64;
     let started = Instant::now();
     let mut embedded = 0usize;
@@ -248,6 +268,12 @@ fn run(
     progress.step("embedding", 0, total);
 
     for window in todo.chunks(batch_size) {
+        // The item boundary is one batch, which is also what `table.append` commits.
+        // Chunk identity is the hash of its text, so what was stored stays stored and
+        // the next run subtracts it — stopping mid-corpus costs nothing but the batch
+        // that never started.
+        cancel.check()?;
+
         let texts = index.chunk_texts(window)?;
 
         match embedder.embed_documents(&texts) {
@@ -403,6 +429,7 @@ mod tests {
                 dry_run: true,
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap();
@@ -429,6 +456,7 @@ mod tests {
                 dry_run: true,
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await;
         assert!(report.is_ok(), "{:?}", report.err());
@@ -447,6 +475,7 @@ mod tests {
                 dry_run: false,
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap();
@@ -481,6 +510,7 @@ mod tests {
                 dry_run: true,
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap();
@@ -505,6 +535,7 @@ mod tests {
                 dry_run: true,
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap();
@@ -524,6 +555,7 @@ mod tests {
                 dry_run: true,
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap_err()
@@ -544,6 +576,7 @@ mod tests {
                 dry_run: true,
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap_err()
@@ -571,6 +604,7 @@ mod tests {
                 dry_run: true,
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap_err()

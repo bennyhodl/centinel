@@ -148,7 +148,7 @@ pub struct DiscoverReport {
 }
 
 /// Enumerate every address a source declares.
-#[op(long_running, group = "stage")]
+#[op(long_running, reach = "operator", group = "stage")]
 pub async fn discover(
     ctx: &Ctx,
     args: DiscoverArgs,

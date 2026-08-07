@@ -278,10 +278,7 @@ impl<'w> Painter<'w> {
         let mut table = Table::bare(&[Align::Right, Align::Left]);
         for (n, label) in rows {
             let ink = if *n == 0 { Ink::Dim } else { Ink::Bold };
-            table.push(vec![
-                Cell::new(count(*n), ink),
-                Cell::new(*label, Ink::Dim),
-            ]);
+            table.push(vec![Cell::new(count(*n), ink), Cell::new(*label, Ink::Dim)]);
         }
         self.table(&table)
     }
@@ -596,7 +593,10 @@ mod tests {
             p.marked(Mark::Ok, "live")?;
             p.marked(Mark::Bad, "gone")
         });
-        assert!(!out.contains('\x1b'), "escape codes leaked into a pipe: {out:?}");
+        assert!(
+            !out.contains('\x1b'),
+            "escape codes leaked into a pipe: {out:?}"
+        );
         assert!(out.contains('✓') && out.contains('✗'));
     }
 
@@ -613,7 +613,10 @@ mod tests {
         let build = |p: &mut Painter<'_>| {
             let mut t = Table::new(&[("name", Align::Left), ("size", Align::Right)]);
             t.push(vec![Cell::new("ffmpeg", Ink::Green), Cell::plain("12")]);
-            t.push(vec![Cell::new("a-much-longer-name", Ink::Red), Cell::plain("4")]);
+            t.push(vec![
+                Cell::new("a-much-longer-name", Ink::Red),
+                Cell::plain("4"),
+            ]);
             p.table(&t)
         };
         let plain = render_to_string(false, build);
@@ -689,7 +692,10 @@ mod tests {
 
     #[test]
     fn timestamps_lose_their_sub_second_noise() {
-        assert_eq!(short_time("2026-08-04T00:18:19.596195Z"), "2026-08-04 00:18");
+        assert_eq!(
+            short_time("2026-08-04T00:18:19.596195Z"),
+            "2026-08-04 00:18"
+        );
         // A date-only value must not be mangled into something wrong.
         assert_eq!(short_time("2026-08-04"), "2026-08-04");
     }

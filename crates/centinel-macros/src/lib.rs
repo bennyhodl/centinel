@@ -35,7 +35,7 @@ struct OpAttr {
     group: Option<(String, proc_macro2::Span)>,
     long_running: bool,
     mcp: Option<bool>,
-    local_only: bool,
+    reach: Option<(String, proc_macro2::Span)>,
 }
 
 /// Registers an async function as a Centinel op.
@@ -45,7 +45,11 @@ struct OpAttr {
 /// ```ignore
 /// async fn f(ctx: &Ctx, args: A) -> anyhow::Result<O>
 /// async fn f(ctx: &Ctx, args: A, progress: &Progress) -> anyhow::Result<O>
+/// async fn f(ctx: &Ctx, args: A, progress: &Progress, cancel: &Cancel) -> anyhow::Result<O>
 /// ```
+///
+/// The trailing parameters are positional and opt-in: an op that never runs long enough
+/// to be worth interrupting takes neither, and pays nothing for their existence.
 ///
 /// `A` must derive `clap::Args`, `serde::Serialize`, `serde::Deserialize` and
 /// `schemars::JsonSchema`. `O` must derive `serde::Serialize` and `serde::Deserialize`,
@@ -62,7 +66,8 @@ struct OpAttr {
 ///   `pipeline`, `stage`, `corpus` (the default) or `host`
 /// - `long_running` — hint that surfaces should stream progress
 /// - `mcp = false` — exclude from the MCP tool list while keeping CLI and HTTP
-/// - `local_only` — act on the host; exclude from **both** MCP and HTTP
+/// - `reach = "…"` — who may cause this op to run: `public` (the default), `operator`
+///   (the CLI and the scheduler, never HTTP or MCP), or `host` (the CLI alone)
 #[proc_macro_attribute]
 pub fn op(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut parsed = OpAttr::default();
@@ -80,11 +85,9 @@ pub fn op(attr: TokenStream, item: TokenStream) -> TokenStream {
                 Ok(v) => v.parse::<LitBool>()?.value(),
                 Err(_) => true,
             };
-        } else if meta.path.is_ident("local_only") {
-            parsed.local_only = match meta.value() {
-                Ok(v) => v.parse::<LitBool>()?.value(),
-                Err(_) => true,
-            };
+        } else if meta.path.is_ident("reach") {
+            let lit = meta.value()?.parse::<LitStr>()?;
+            parsed.reach = Some((lit.value(), lit.span()));
         } else if meta.path.is_ident("mcp") {
             parsed.mcp = Some(match meta.value() {
                 Ok(v) => v.parse::<LitBool>()?.value(),
@@ -93,7 +96,7 @@ pub fn op(attr: TokenStream, item: TokenStream) -> TokenStream {
         } else {
             return Err(meta.error(
                 "unknown `op` option; expected one of: name, about, group, long_running, mcp, \
-                 local_only",
+                 reach",
             ));
         }
         Ok(())
@@ -118,10 +121,11 @@ fn expand(attr: OpAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     }
 
     let arity = sig.inputs.len();
-    if arity != 2 && arity != 3 {
+    if !(2..=4).contains(&arity) {
         return Err(syn::Error::new(
             sig.inputs.span(),
-            "#[op] expects `(ctx: &Ctx, args: A)` or `(ctx: &Ctx, args: A, progress: &Progress)`",
+            "#[op] expects `(ctx: &Ctx, args: A)`, `(…, progress: &Progress)`, or \
+             `(…, progress: &Progress, cancel: &Cancel)`",
         ));
     }
 
@@ -151,25 +155,25 @@ fn expand(attr: OpAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
         .unwrap_or_else(|| name.clone());
     let long_running = attr.long_running;
     let mcp = attr.mcp.unwrap_or(true);
-    let local_only = attr.local_only;
+    let reach = reach_variant(attr.reach)?;
     let group = group_variant(attr.group)?;
 
     // A private module per op keeps four generated helpers out of the parent namespace
     // while still letting `use super::*` see the function and its argument type.
     let mod_ident = format_ident!("__centinel_op_{}", fn_ident);
 
-    let call = if arity == 3 {
-        quote! { super::#fn_ident(&__ctx, __args, &__progress).await? }
-    } else {
-        quote! { super::#fn_ident(&__ctx, __args).await? }
+    let call = match arity {
+        4 => quote! { super::#fn_ident(&__ctx, __args, &__progress, &__cancel).await? },
+        3 => quote! { super::#fn_ident(&__ctx, __args, &__progress).await? },
+        _ => quote! { super::#fn_ident(&__ctx, __args).await? },
     };
 
-    // `progress` is genuinely unused in the 2-arity case; bind it away at the call site
-    // rather than blanket-allowing unused variables in generated code.
-    let bind_progress = if arity == 3 {
-        quote! {}
-    } else {
-        quote! { let _ = &__progress; }
+    // The trailing parameters are genuinely unused at lower arities; bind them away at
+    // the call site rather than blanket-allowing unused variables in generated code.
+    let bind_unused = match arity {
+        4 => quote! {},
+        3 => quote! { let _ = &__cancel; },
+        _ => quote! { let _ = (&__progress, &__cancel); },
     };
 
     Ok(quote! {
@@ -207,12 +211,13 @@ fn expand(attr: OpAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                 __ctx: ::std::sync::Arc<__p::Ctx>,
                 __args_json: __p::serde_json::Value,
                 __progress: __p::Progress,
+                __cancel: __p::Cancel,
             ) -> __p::futures::future::BoxFuture<
                 'static,
                 __p::anyhow::Result<__p::serde_json::Value>,
             > {
                 ::std::boxed::Box::pin(async move {
-                    #bind_progress
+                    #bind_unused
                     let __args: #args_ty = __p::serde_json::from_value(__args_json)
                         .map_err(|e| __p::anyhow::anyhow!(
                             "invalid arguments for op `{}`: {}", #name, e
@@ -229,7 +234,7 @@ fn expand(attr: OpAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                     group: __p::Group::#group,
                     long_running: #long_running,
                     mcp: #mcp,
-                    local_only: #local_only,
+                    reach: __p::Reach::#reach,
                     augment_clap: __augment,
                     args_from_matches: __from_matches,
                     schema: __schema,
@@ -239,6 +244,33 @@ fn expand(attr: OpAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
     })
+}
+
+/// Maps `reach = "…"` to a `centinel_core::op::Reach` variant.
+///
+/// Resolved here rather than passed through as a string for the same reason as the group
+/// below, with much more riding on it: this is the field that decides whether an HTTP
+/// caller can start a crawl. A typo that fell through to a default would open the surface
+/// this type exists to close, so an unrecognised value is a compile error and the default
+/// is the closed one.
+fn reach_variant(reach: Option<(String, proc_macro2::Span)>) -> syn::Result<proc_macro2::Ident> {
+    let Some((name, span)) = reach else {
+        // An op that does not say is one that reads. Adding a *writing* op is the case
+        // that has to be deliberate, because it is the one that can be got wrong quietly.
+        return Ok(format_ident!("Public"));
+    };
+    let variant = match name.as_str() {
+        "public" => "Public",
+        "operator" => "Operator",
+        "host" => "Host",
+        other => {
+            return Err(syn::Error::new(
+                span,
+                format!("unknown op reach `{other}`; expected one of: public, operator, host"),
+            ));
+        }
+    };
+    Ok(format_ident!("{}", variant))
 }
 
 /// Maps `group = "…"` to a `centinel_core::op::Group` variant.
