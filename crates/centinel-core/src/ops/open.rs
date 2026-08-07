@@ -96,6 +96,7 @@ pub struct OpenReport {
 #[op(reach = "host", group = "corpus")]
 pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
     let found = resolve(ctx, &args.target, args.source.as_deref()).await?;
+    let replay = found.replay;
     let (source, resource, obs) = (found.source, found.resource, found.observation);
     let other_matches = found.other_matches;
 
@@ -133,9 +134,11 @@ pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
         let to_sha = match named {
             Some(sha) => sha,
             None => {
-                ctx.store
-                    .latest_derivation(&source, &obs.blob_sha)
-                    .await?
+                // From the log `resolve` already read, not a second pass over it. `read`
+                // has always done it this way; this call site did not, and paid for a
+                // whole extra replay of the same source on every `open`.
+                replay
+                    .latest_derivation(&obs.blob_sha)
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "no extracted text for {} — run `centinel extract` first, or \
@@ -144,6 +147,7 @@ pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
                         )
                     })?
                     .to_sha
+                    .clone()
             }
         };
         (to_sha, ContentKind::Markdown)

@@ -566,32 +566,16 @@ impl Store {
 
     /// Records an Observation: blob into the pool, line into the log.
     ///
-    /// Convenience wrapper that looks up the previous fingerprint first. **Scans the
-    /// whole log**, so it is fine for a handful of URLs and quadratic for a corpus —
-    /// bulk callers should preload with [`Self::latest_observations`] and use
-    /// [`Self::record_observation`] instead.
-    pub async fn observe(
-        &self,
-        resource: &Resource,
-        bytes: &[u8],
-        at: Timestamp,
-        meta: BTreeMap<String, String>,
-    ) -> Result<(Observation, Option<Fingerprint>)> {
-        let previous = self
-            .history(resource)
-            .await?
-            .last()
-            .map(|o| o.fingerprint.clone());
-        let obs = self.record_observation(resource, bytes, at, meta).await?;
-        Ok((obs, previous))
-    }
-
-    /// Records an Observation without consulting history.
+    /// **The only write path**, and it consults no history, because the convenient
+    /// alternative was a trap. There used to be an `observe` beside this that looked up
+    /// the previous fingerprint first — one line at the call site instead of a preload —
+    /// and its own doc said it *"scans the whole log, so it is fine for a handful of URLs
+    /// and quadratic for a corpus"*. `ingest` called it in a loop anyway, having already
+    /// preloaded the statuses it could have read the fingerprints from. A warning two of
+    /// three callers ignore is not a seam; the fast path has to be the only path.
     ///
-    /// The bulk path. Collecting 11,476 URLs through [`Self::observe`] would read the
-    /// log 11,476 times; preloading with [`Self::latest_observations`] and calling this
-    /// reads it once. Comparing fingerprints is then the caller's job — which it can do
-    /// from the preloaded map.
+    /// Comparing fingerprints is therefore the caller's job, which it can do from the map
+    /// [`Self::latest_observations`] hands back — one log read for the whole batch.
     pub async fn record_observation(
         &self,
         resource: &Resource,
@@ -1121,10 +1105,10 @@ mod tests {
         let src = SourceId::new("hillsboroughcounty").unwrap();
         let r = Resource::new(src.clone(), "https://x/1");
 
-        s.observe(&r, b"v1", ts("2026-01-15T00:00:00Z"), BTreeMap::new())
+        s.record_observation(&r, b"v1", ts("2026-01-15T00:00:00Z"), BTreeMap::new())
             .await
             .unwrap();
-        s.observe(&r, b"v2", ts("2026-02-15T00:00:00Z"), BTreeMap::new())
+        s.record_observation(&r, b"v2", ts("2026-02-15T00:00:00Z"), BTreeMap::new())
             .await
             .unwrap();
 
@@ -1147,24 +1131,39 @@ mod tests {
         let src = SourceId::new("x").unwrap();
         let r = Resource::new(src, "https://x/1");
 
-        let (_, prev) = s
-            .observe(&r, b"hello", ts("2026-01-01T00:00:00Z"), BTreeMap::new())
-            .await
-            .unwrap();
+        let (_, prev) = observe(&s, &r, b"hello", ts("2026-01-01T00:00:00Z")).await;
         assert!(prev.is_none(), "first observation has no predecessor");
 
         // Whitespace-only change: new blob, same fingerprint → not a ChangeEvent (§5.3).
-        let (obs2, prev2) = s
-            .observe(&r, b"hello  ", ts("2026-01-02T00:00:00Z"), BTreeMap::new())
-            .await
-            .unwrap();
+        let (obs2, prev2) = observe(&s, &r, b"hello  ", ts("2026-01-02T00:00:00Z")).await;
         assert_eq!(prev2.as_ref(), Some(&obs2.fingerprint));
 
-        let (obs3, prev3) = s
-            .observe(&r, b"goodbye", ts("2026-01-03T00:00:00Z"), BTreeMap::new())
+        let (obs3, prev3) = observe(&s, &r, b"goodbye", ts("2026-01-03T00:00:00Z")).await;
+        assert_ne!(prev3.as_ref(), Some(&obs3.fingerprint));
+    }
+
+    /// Recording an Observation *and* saying what the last one's fingerprint was.
+    ///
+    /// This is what `Store::observe` used to do, and it is here rather than there because
+    /// the two steps are the whole story: the second one reads the entire log. A test with
+    /// three URLs can afford that; `ingest` with a hundred could not, and called it anyway.
+    async fn observe(
+        s: &Store,
+        r: &Resource,
+        bytes: &[u8],
+        at: Timestamp,
+    ) -> (Observation, Option<Fingerprint>) {
+        let previous = s
+            .history(r)
+            .await
+            .unwrap()
+            .last()
+            .map(|o| o.fingerprint.clone());
+        let obs = s
+            .record_observation(r, bytes, at, BTreeMap::new())
             .await
             .unwrap();
-        assert_ne!(prev3.as_ref(), Some(&obs3.fingerprint));
+        (obs, previous)
     }
 
     #[tokio::test]
@@ -1173,7 +1172,7 @@ mod tests {
         let src = SourceId::new("phila").unwrap();
         let r = Resource::new(src.clone(), "https://phila.gov/x");
 
-        s.observe(&r, b"page", ts("2026-01-01T00:00:00Z"), BTreeMap::new())
+        s.record_observation(&r, b"page", ts("2026-01-01T00:00:00Z"), BTreeMap::new())
             .await
             .unwrap();
 
@@ -1190,7 +1189,7 @@ mod tests {
         assert_eq!(st[&r].consecutive_failures, 1);
 
         // A later success must clear the block.
-        s.observe(&r, b"page", ts("2026-01-03T00:00:00Z"), BTreeMap::new())
+        s.record_observation(&r, b"page", ts("2026-01-03T00:00:00Z"), BTreeMap::new())
             .await
             .unwrap();
         let st = s.statuses(&src).await.unwrap();
@@ -1215,8 +1214,8 @@ mod tests {
         let ra = Resource::new(a.clone(), "https://tampa.gov/doc.pdf");
         let rb = Resource::new(b.clone(), "https://hcfl.gov/doc.pdf");
 
-        let (oa, _) = s
-            .observe(
+        let oa = s
+            .record_observation(
                 &ra,
                 b"same pdf",
                 ts("2026-01-01T00:00:00Z"),
@@ -1224,8 +1223,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let (ob, _) = s
-            .observe(
+        let ob = s
+            .record_observation(
                 &rb,
                 b"same pdf",
                 ts("2026-01-01T00:00:00Z"),
