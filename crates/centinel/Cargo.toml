@@ -26,6 +26,11 @@ async-stream = "0.3"
 indicatif = "0.18"
 # Terminal size only. Already in the tree under indicatif, so this costs no new download.
 console = "0.16"
+# The `schedule set` wizard. Built on `console`, which indicatif already brought — the
+# better-known `inquire` sits on crossterm, and two terminal libraries deciding
+# independently about raw mode and cursor position, in a binary that also prints hours of
+# progress bars, is a class of bug nobody wants.
+dialoguer = { version = "0.12", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

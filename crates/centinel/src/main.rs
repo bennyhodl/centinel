@@ -10,6 +10,7 @@ mod logging;
 mod mcp;
 mod progress;
 mod schedule;
+mod wizard;
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -434,7 +435,14 @@ async fn run_op(
     output: Output,
 ) -> Result<()> {
     let def = op::find(name).with_context(|| format!("unknown op `{name}`"))?;
-    let args = (def.args_from_matches)(matches)?;
+    let mut args = (def.args_from_matches)(matches)?;
+
+    // The interactive layer sits *above* the op and fills in what was not typed. The op
+    // itself never prompts: one that did would block an MCP call until the client timed
+    // out and hang a script forever. See [`wizard`].
+    if wizard::should_prompt(name, &args) {
+        args = wizard::schedule_set(&ctx, args).await?;
+    }
 
     // Progress goes to stderr so stdout stays a clean JSON stream for piping. Which
     // renderer draws it — bars or lines — is [`progress`]'s decision, not this one's.
