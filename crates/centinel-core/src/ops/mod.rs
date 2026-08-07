@@ -16,6 +16,7 @@
 //! there is no `youtube` verb, and adding a third Source kind adds no verb either.
 
 mod build_index;
+mod check;
 mod collect;
 mod discover;
 mod doctor;
@@ -34,6 +35,7 @@ mod source;
 mod target;
 mod transcribe;
 
+pub use check::{CheckArgs, CheckReport, Checked, check};
 pub use models::{
     FetchedFile, FileCheck, ModelsAction, ModelsArgs, ModelsReport, Orphan, PruneArgs, PullArgs,
     RemoveArgs, VerifyArgs, models,

@@ -144,6 +144,101 @@ pub fn extract(kind: &str, bytes: &[u8], url: Option<&str>, title: Option<&str>)
     }
 }
 
+/// An extraction and how it was reached.
+///
+/// [`derive`]'s answer, kept apart from [`Extracted`] because "the fallback spoke" is a
+/// fact about the *run* rather than about the text — it belongs in a report, and never on
+/// the [`crate::domain::Derivation`], which already names whichever tool produced the
+/// bytes it carries.
+#[derive(Clone, Debug)]
+pub struct Derived {
+    pub outcome: Extracted,
+    /// The primary reader found no text and a fallback did. The measure of how much the
+    /// primary is missing, and the number to watch after any change to it.
+    pub recovered_by_fallback: bool,
+}
+
+/// The extraction the **record** takes, as against the one a reader produced.
+///
+/// [`extract`] answers "what did this reader make of these bytes". This answers the
+/// question the log asks, and the two differ in exactly one place: a reader that parsed
+/// cleanly and came back with nothing has produced a *verdict*, not a derivation. A PDF
+/// gets one more reader first — see [`pdf_text_via_poppler`] — and anything still empty
+/// becomes an [`Extracted::Unextractable`], so the answer lands where a pipeline-version
+/// bump can revisit it. A `Derivation` always has bytes.
+///
+/// *Why it is here and not in the op that writes the record:* it was in the op, which
+/// meant it was reachable only by a corpus-wide `extract`. Anything else deriving one
+/// document — `check` — would have re-implemented it, and a QA tool that runs a different
+/// extractor from the pipeline it is checking answers a question nobody asked.
+///
+/// Takes the blob's `path` as well as its bytes because the fallback is a child process
+/// that reads a file; the caller has the blob at its content address either way.
+pub async fn derive(
+    kind: &str,
+    bytes: &[u8],
+    path: &std::path::Path,
+    url: Option<&str>,
+    title: Option<&str>,
+) -> Derived {
+    let outcome = extract(kind, bytes, url, title);
+    if !outcome.text().is_some_and(|t| t.trim().is_empty()) {
+        return Derived {
+            outcome,
+            recovered_by_fallback: false,
+        };
+    }
+
+    match kind {
+        "pdf" => match pdf_text_via_poppler(path).await {
+            Some(extraction) => Derived {
+                outcome: Extracted::Text(extraction),
+                recovered_by_fallback: true,
+            },
+            None => Derived {
+                outcome: Extracted::Unextractable {
+                    reason: no_text_reason(&outcome),
+                },
+                recovered_by_fallback: false,
+            },
+        },
+        _ => Derived {
+            outcome: Extracted::Unextractable {
+                reason: no_text_reason(&outcome),
+            },
+            recovered_by_fallback: false,
+        },
+    }
+}
+
+/// Why an extraction that parsed cleanly still yielded nothing.
+///
+/// Carries the OCR page count into the [`crate::domain::Underivable`]'s reason, because
+/// that is now the only record of it: the verdict replaces the `Partial` that used to hold
+/// the list, and a future OCR pipeline should be able to see from the log which blobs are
+/// waiting for it.
+fn no_text_reason(outcome: &Extracted) -> String {
+    match outcome {
+        Extracted::Partial {
+            pages_needing_ocr, ..
+        } => format!(
+            "parsed but holds no readable text; {} page{} {} images no reader here can read",
+            pages_needing_ocr.len(),
+            if pages_needing_ocr.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if pages_needing_ocr.len() == 1 {
+                "is"
+            } else {
+                "are"
+            },
+        ),
+        _ => "parsed but holds no text".into(),
+    }
+}
+
 /// A YouTube `json3` caption track, rendered as timestamped markdown.
 ///
 /// Deliberately **not** the passthrough the `json` arm would apply. Indexing the raw

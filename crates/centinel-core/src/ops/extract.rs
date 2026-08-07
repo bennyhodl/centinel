@@ -11,7 +11,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::Underivable;
-use crate::extract::{self, Extracted, extract as extract_bytes};
+use crate::extract::{self, Extracted};
 use crate::fetch::{SNIFF_BYTES, content_kind};
 use crate::op::{ItemOutcome, Verdict};
 use crate::prelude::*;
@@ -216,46 +216,27 @@ pub async fn extract(
             let kind = kind.as_str();
             *report.by_kind.entry(kind.to_string()).or_default() += 1;
 
-            // The Source's own title, where it has one. A YouTube recording's title is
-            // never spoken aloud, so it reaches the text only from here — see
-            // `extract_captions`.
-            let mut outcome = extract_bytes(
+            // **A Derivation always has bytes**, and `derive` is where that invariant is
+            // enforced — an extractor that parsed the document and came back with nothing
+            // has produced a verdict, not a derivation. It lives in the library rather than
+            // here so that `check` runs the same extractor this does; see
+            // [`crate::extract::derive`].
+            //
+            // The Source's own title, where it has one, is passed in: a YouTube
+            // recording's title is never spoken aloud, so it reaches the text only from
+            // here — see `extract_captions`.
+            let derived = extract::derive(
                 kind,
                 &bytes,
+                &ctx.store.blob_path_of(&obs.blob_sha),
                 Some(&resource.natural_key),
                 obs.meta.get("title").map(String::as_str),
-            );
-
-            // **A Derivation always has bytes.** An extractor that parsed the document and
-            // came back with nothing has produced a verdict, not a derivation, and the two
-            // are separate records because only the verdict carries a pipeline version —
-            // the one thing that lets a better reader have another go. Writing the empty
-            // blob as a Derivation instead put 490 PDFs beyond the reach of a version bump,
-            // marked complete and absent from every search.
-            //
-            // Enforced here rather than in the arm that got it wrong, because this is where
-            // the record is written: any extractor returning `Partial` with an empty
-            // extraction is the same mistake, and there is now one place that catches it.
-            if outcome.text().is_some_and(|t| t.trim().is_empty()) {
-                // One more reader before giving up — see `pdf_text_via_poppler` for why a
-                // PDF specifically deserves it.
-                let recovered = match kind {
-                    "pdf" => {
-                        extract::pdf_text_via_poppler(&ctx.store.blob_path_of(&obs.blob_sha)).await
-                    }
-                    _ => None,
-                };
-                outcome = match recovered {
-                    Some(extraction) => {
-                        report.recovered_by_fallback += 1;
-                        Extracted::Text(extraction)
-                    }
-                    None => Extracted::Unextractable {
-                        reason: no_text_reason(&outcome),
-                    },
-                };
+            )
+            .await;
+            if derived.recovered_by_fallback {
+                report.recovered_by_fallback += 1;
             }
-            let outcome = outcome;
+            let outcome = derived.outcome;
 
             let item = |verdict, produced, detail| ItemOutcome {
                 address: resource.natural_key.clone(),
@@ -382,33 +363,6 @@ pub async fn extract(
 
     progress.say(format!("{} documents extracted", report.extracted));
     Ok(report)
-}
-
-/// Why an extraction that parsed cleanly still yielded nothing.
-///
-/// Carries the OCR page count into the [`Underivable`]'s reason, because that is now the
-/// only record of it: the verdict replaces the `Partial` that used to hold the list, and a
-/// future OCR pipeline should be able to see from the log which blobs are waiting for it.
-fn no_text_reason(outcome: &Extracted) -> String {
-    match outcome {
-        Extracted::Partial {
-            pages_needing_ocr, ..
-        } => format!(
-            "parsed but holds no readable text; {} page{} {} images no reader here can read",
-            pages_needing_ocr.len(),
-            if pages_needing_ocr.len() == 1 {
-                ""
-            } else {
-                "s"
-            },
-            if pages_needing_ocr.len() == 1 {
-                "is"
-            } else {
-                "are"
-            },
-        ),
-        _ => "parsed but holds no text".into(),
-    }
 }
 
 // -----------------------------------------------------------------------------------------

@@ -238,7 +238,11 @@ async fn launch(opener: &str, path: &std::path::Path) -> anyhow::Result<String> 
     Ok(tool.display())
 }
 
-fn system_opener() -> &'static str {
+/// The command this platform opens a file with.
+///
+/// `pub(crate)` so `check` suggests the same one rather than spelling a second opinion
+/// about what a Linux desktop uses.
+pub(crate) fn system_opener() -> &'static str {
     if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(target_os = "windows") {
