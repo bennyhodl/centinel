@@ -8,6 +8,15 @@ repository.workspace = true
 description = "Centinel: a data-collection toolkit for .gov web surfaces and YouTube channels."
 default-run = "centinel"
 
+[features]
+# Forwarded to centinel-core, which is where llama.cpp is linked. `centinel-whisper` already
+# mirrors these for whisper.cpp; this package did not, so `--features cuda` on it was a hard
+# error and the accelerator could only ever reach half the pipeline — a CUDA host
+# transcribing on the GPU and embedding a 400,000-chunk corpus on the CPU.
+cuda = ["centinel-core/cuda"]
+vulkan = ["centinel-core/vulkan"]
+rocm = ["centinel-core/rocm"]
+
 [dependencies]
 centinel-core.workspace = true
 
