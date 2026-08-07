@@ -46,6 +46,7 @@ pub mod ops;
 pub mod policy;
 pub mod render;
 pub mod rerank;
+pub mod schedule;
 pub mod sources;
 pub mod store;
 pub mod tool;

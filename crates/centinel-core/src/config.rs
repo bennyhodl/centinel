@@ -123,6 +123,16 @@ pub struct Config {
     /// correctly at each block, where the plural would not.
     #[serde(default, rename = "source")]
     pub sources: Vec<SourceConfig>,
+
+    /// The cadences `centinel serve` fires runs on, in file order.
+    ///
+    /// Beside the sources they name, and in the same file, because **this is where the
+    /// authority to collect comes from**. A scheduled run is not the server deciding to
+    /// crawl; it is this file, which only the operator can write, executed later. Nothing
+    /// arriving over HTTP or MCP can add a block here, which is the whole of the access
+    /// story in `docs/SCHEDULING.md` §1.1.
+    #[serde(default, rename = "schedule")]
+    pub schedules: Vec<ScheduleConfig>,
 }
 
 /// Which application opens which kind of document.
@@ -241,6 +251,89 @@ pub struct SourceConfig {
     /// Overrides [`Defaults::lang`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
+}
+
+/// One cadence, and the `run` it fires.
+///
+/// **A schedule is a saved `centinel run` invocation plus a cadence, and nothing more.**
+/// It introduces no pipeline semantics: it does not decide what to collect, does not diff
+/// anything, and keeps no state. Every stage already skips work it has done, so the
+/// scheduler's entire job is to call `run` at the right moments.
+///
+/// ## Why the run options are spelled out rather than flattened
+///
+/// `#[serde(flatten)]` of [`crate::ops::run::RunArgs`] would keep this in step with `run`
+/// automatically — and would silently disable `deny_unknown_fields`, which serde cannot
+/// apply to a struct containing a flattened field. That trade is wrong in this file. A
+/// `soruces = ["tampa"]` typo would then parse cleanly and produce a schedule that fires
+/// on time, collects nothing, and reports success forever — the same class of silence
+/// `[[sources]]` typed by reflex already produces, and the reason this module denies
+/// unknown keys at all.
+///
+/// The cost is a line here when `run` grows a flag. `run_options_stay_in_step_with_run`
+/// is the test that turns that into a failure rather than an omission.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleConfig {
+    /// Names this schedule in the journal, in reports, and on the command line.
+    pub id: String,
+
+    /// A 5-field cron expression, or a `@daily` shorthand.
+    pub cron: String,
+
+    /// IANA zone name — `America/New_York`, not `-05:00`.
+    ///
+    /// `.gov` publishing is a business-hours phenomenon in a specific city and an operator
+    /// reasons in local time. A **name** rather than an offset so the schedule keeps
+    /// meaning "3am there" across a DST boundary; absent, the host zone is used and
+    /// recorded, so a server that changes machines does not quietly shift its collection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tz: Option<String>,
+
+    /// How far after the nominal time this may fire. Defaults to five minutes.
+    ///
+    /// The licence is MIT and forks are the point — other cities run their own instance.
+    /// Twenty installs sharing a default `0 3 * * *`, against the handful of vendor
+    /// platforms `.gov` sites share, is a synchronised flood from a project whose stated
+    /// stance is politeness. The offset is deterministic per install, so the fire time
+    /// stays predictable to its own operator; see [`crate::schedule::jitter_offset`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter_secs: Option<u64>,
+
+    /// Skip this schedule without deleting the block. Defaults to enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+
+    /// Fire once on startup when the last attempt is older than one interval. Defaults on.
+    ///
+    /// **Once, never a backlog.** Six missed daily fires are one fire, because the
+    /// pipeline is a subtraction and not a queue of deltas: six catch-up runs would do the
+    /// same work once and then nothing five times, in a burst, against a city's server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catch_up: Option<bool>,
+
+    // ── the `run` invocation ──────────────────────────────────────────────────
+    /// Sources to run. Empty means every enabled source, exactly as a bare `run` does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
+
+    /// Stages to skip. `skip = ["embed"]` is the common one — collect often, embed at
+    /// night; the peer block that skips discover and collect does the derivation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip: Vec<String>,
+
+    /// Stop collection after this many addresses, per source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+
+    /// Redo work already done, at every fire.
+    ///
+    /// Legal, because "the extractor improved — re-read everything monthly" is a real
+    /// intent. It is also the single most expensive thing this file can express, so
+    /// `schedules` gives it its own column and the loader says so at startup. Refusing it
+    /// would push the operator into a shell script, where nothing renders it at all.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refresh: bool,
 }
 
 /// How a source is acquired — the one axis on which the Source kinds differ.
@@ -362,6 +455,124 @@ impl SourceConfig {
     }
 }
 
+/// The jitter every schedule gets unless it says otherwise. See [`ScheduleConfig::jitter_secs`].
+pub const DEFAULT_JITTER_SECS: u64 = 300;
+
+impl ScheduleConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    pub fn catches_up(&self) -> bool {
+        self.catch_up.unwrap_or(true)
+    }
+
+    pub fn jitter_secs(&self) -> u64 {
+        self.jitter_secs.unwrap_or(DEFAULT_JITTER_SECS)
+    }
+
+    /// The parsed cadence.
+    pub fn cron(&self) -> anyhow::Result<crate::schedule::Cron> {
+        crate::schedule::Cron::parse(&self.cron)
+            .map_err(|e| anyhow::anyhow!("schedule `{}`: {e}", self.id))
+    }
+
+    /// The zone this fires in, defaulting to the host's.
+    ///
+    /// A name that does not resolve is an error rather than a fallback to UTC: silently
+    /// collecting five hours from when the operator meant is worse than not starting.
+    pub fn zone(&self) -> anyhow::Result<jiff::tz::TimeZone> {
+        match &self.tz {
+            Some(name) => jiff::tz::TimeZone::get(name).map_err(|e| {
+                anyhow::anyhow!(
+                    "schedule `{}`: `{name}` is not an IANA time zone: {e}",
+                    self.id
+                )
+            }),
+            None => Ok(jiff::tz::TimeZone::system()),
+        }
+    }
+
+    /// The `run` invocation this schedule stands for.
+    pub fn run_args(&self) -> anyhow::Result<crate::ops::RunArgs> {
+        let mut skip = Vec::with_capacity(self.skip.len());
+        for name in &self.skip {
+            skip.push(parse_stage(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "schedule `{}`: `{name}` is not a stage; expected one of: {}",
+                    self.id,
+                    STAGE_NAMES.join(", ")
+                )
+            })?);
+        }
+        Ok(crate::ops::RunArgs {
+            sources: self.sources.clone(),
+            skip,
+            limit: self.limit,
+            refresh: self.refresh,
+            // Neither belongs to a cadence: a scheduled dry run would fire on time and do
+            // nothing forever, and the config path is the file this block was read from.
+            dry_run: false,
+            config: None,
+        })
+    }
+
+    /// The block `schedule set` writes.
+    pub fn to_toml_block(&self) -> String {
+        let mut s = String::from("[[schedule]]\n");
+        s.push_str(&format!("id = {}\n", quote(&self.id)));
+        s.push_str(&format!("cron = {}\n", quote(&self.cron)));
+        if let Some(tz) = &self.tz {
+            s.push_str(&format!("tz = {}\n", quote(tz)));
+        }
+        if !self.sources.is_empty() {
+            s.push_str(&format!("sources = {}\n", quote_list(&self.sources)));
+        }
+        if !self.skip.is_empty() {
+            s.push_str(&format!("skip = {}\n", quote_list(&self.skip)));
+        }
+        if let Some(limit) = self.limit {
+            s.push_str(&format!("limit = {limit}\n"));
+        }
+        if self.refresh {
+            s.push_str("refresh = true\n");
+        }
+        if let Some(jitter) = self.jitter_secs {
+            s.push_str(&format!("jitter_secs = {jitter}\n"));
+        }
+        if let Some(enabled) = self.enabled {
+            s.push_str(&format!("enabled = {enabled}\n"));
+        }
+        if let Some(catch_up) = self.catch_up {
+            s.push_str(&format!("catch_up = {catch_up}\n"));
+        }
+        s
+    }
+}
+
+/// The stage names a `skip` list may use, in pipeline order.
+pub const STAGE_NAMES: [&str; 6] = [
+    "discover",
+    "collect",
+    "extract",
+    "transcribe",
+    "index",
+    "embed",
+];
+
+fn parse_stage(name: &str) -> Option<crate::ops::Stage> {
+    use crate::ops::Stage;
+    Some(match name {
+        "discover" => Stage::Discover,
+        "collect" => Stage::Collect,
+        "extract" => Stage::Extract,
+        "transcribe" => Stage::Transcribe,
+        "index" => Stage::Index,
+        "embed" => Stage::Embed,
+        _ => return None,
+    })
+}
+
 /// A TOML basic string. Escapes what the grammar requires and nothing else.
 fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -441,7 +652,64 @@ impl Config {
             self.defaults.rps > 0.0,
             "defaults.rps must be greater than zero"
         );
+        self.validate_schedules()?;
         Ok(())
+    }
+
+    /// Checks every `[[schedule]]` block against this config.
+    ///
+    /// Separate from the rest of [`Config::validate`] so `serve` can name schedules as the
+    /// reason it refused to start, and so `schedules --check` can run exactly this.
+    ///
+    /// **Every failure here is fatal to `serve`.** A server that starts happily with a
+    /// broken schedule collects nothing and says so nowhere; the operator finds out weeks
+    /// later, from an empty search result. Refusing is loud at the one moment it is
+    /// cheap — while somebody is watching it start.
+    pub fn validate_schedules(&self) -> anyhow::Result<()> {
+        let mut seen = std::collections::BTreeSet::new();
+        for schedule in &self.schedules {
+            anyhow::ensure!(
+                !schedule.id.trim().is_empty(),
+                "a [[schedule]] block has no id; it is how the journal and every report \
+                 name this cadence"
+            );
+            if !seen.insert(schedule.id.as_str()) {
+                anyhow::bail!(
+                    "schedule `{}` is defined twice; ids name a cadence and must be unique",
+                    schedule.id
+                );
+            }
+
+            let cron = schedule.cron()?;
+            let zone = schedule.zone()?;
+            schedule.run_args()?;
+
+            // An expression that parses but never occurs — `0 0 30 2 *`, the 30th of
+            // February. Caught here rather than discovered by a schedule that has quietly
+            // never fired.
+            anyhow::ensure!(
+                cron.next_after(jiff::Timestamp::now(), &zone).is_some(),
+                "schedule `{}`: `{}` parses but never occurs",
+                schedule.id,
+                schedule.cron
+            );
+
+            // A source id that names nothing is the mistake this file invites most: the
+            // schedule fires on time, collects nothing, and reports success.
+            for id in &schedule.sources {
+                anyhow::ensure!(
+                    self.source(id).is_some(),
+                    "schedule `{}` names source `{id}`, which has no [[source]] block",
+                    schedule.id
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The `[[schedule]]` block with this id.
+    pub fn schedule(&self, id: &str) -> Option<&ScheduleConfig> {
+        self.schedules.iter().find(|s| s.id == id)
     }
 
     /// The config file in effect, or `None` when none exists and defaults are in use.
@@ -646,7 +914,7 @@ pub fn remove_source(path: &Path, id: &str) -> anyhow::Result<()> {
     );
 
     let lines: Vec<&str> = text.lines().collect();
-    let ranges = source_block_ranges(&lines);
+    let ranges = block_ranges(&lines, "[[source]]");
     let (start, end) = ranges
         .into_iter()
         .find(|(s, e)| block_declares(&lines[*s..*e], id))
@@ -684,6 +952,119 @@ pub fn remove_source(path: &Path, id: &str) -> anyhow::Result<()> {
 /// guess about the grammar; this re-parses the result and checks it against the answer
 /// computed from the *parsed* config, so a mis-split fails loudly with the file
 /// untouched instead of quietly dropping the block below it.
+/// Appends a `[[schedule]]` block, validated against the file it is joining.
+///
+/// Validated against the *whole* config rather than in isolation, because the mistakes
+/// this block invites are relational: a `sources` entry naming no `[[source]]`, and an id
+/// already taken. Both parse cleanly on their own and are silent until 3am.
+pub fn append_schedule(path: &Path, schedule: &ScheduleConfig) -> anyhow::Result<()> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => EXAMPLE.to_string(),
+        Err(e) => anyhow::bail!("reading {}: {e}", path.display()),
+    };
+
+    let before = Config::parse(&existing).map_err(|e| {
+        anyhow::anyhow!(
+            "{} does not parse, so it cannot be edited safely: {e}",
+            path.display()
+        )
+    })?;
+    if before.schedule(&schedule.id).is_some() {
+        anyhow::bail!(
+            "schedule `{}` is already in {}; edit it there or remove it first",
+            schedule.id,
+            path.display()
+        );
+    }
+
+    // Checked before writing, against the config as it will be.
+    let mut proposed = before.clone();
+    proposed.schedules.push(schedule.clone());
+    proposed.validate_schedules()?;
+
+    let mut text = existing;
+    if !text.is_empty() {
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push('\n');
+    }
+    text.push_str(&schedule.to_toml_block());
+
+    let mut expected: Vec<String> = before.schedules.iter().map(|s| s.id.clone()).collect();
+    expected.push(schedule.id.clone());
+    verify_schedule_edit(path, &text, &expected)?;
+    write_atomically(path, &text)
+}
+
+/// Removes the `[[schedule]]` block with this id.
+pub fn remove_schedule(path: &Path, id: &str) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+    let before = Config::parse(&text).map_err(|e| {
+        anyhow::anyhow!(
+            "{} does not parse, so it cannot be edited safely: {e}",
+            path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        before.schedule(id).is_some(),
+        "no schedule `{id}` in {}",
+        path.display()
+    );
+
+    let lines: Vec<&str> = text.lines().collect();
+    let (start, end) = block_ranges(&lines, "[[schedule]]")
+        .into_iter()
+        .find(|(s, e)| block_declares(&lines[*s..*e], id))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "schedule `{id}` parses out of {} but its `[[schedule]]` block could not \
+                 be located; edit the file by hand",
+                path.display()
+            )
+        })?;
+
+    let kept: Vec<&str> = lines[..start]
+        .iter()
+        .chain(lines[end..].iter())
+        .copied()
+        .collect();
+    let mut out = kept.join("\n");
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+
+    let expected: Vec<String> = before
+        .schedules
+        .iter()
+        .filter(|s| s.id != id)
+        .map(|s| s.id.clone())
+        .collect();
+    verify_schedule_edit(path, &out, &expected)?;
+    write_atomically(path, &out)
+}
+
+/// [`verify_edit`], for the schedule list.
+fn verify_schedule_edit(path: &Path, text: &str, expected: &[String]) -> anyhow::Result<()> {
+    let after = Config::parse(text).map_err(|e| {
+        anyhow::anyhow!(
+            "editing {} would have produced a file that does not parse ({e}); it was \
+             left unchanged",
+            path.display()
+        )
+    })?;
+    let got: Vec<String> = after.schedules.iter().map(|s| s.id.clone()).collect();
+    anyhow::ensure!(
+        got == expected,
+        "editing {} would have left schedules {got:?} rather than {expected:?}; it was \
+         left unchanged",
+        path.display()
+    );
+    Ok(())
+}
+
 fn verify_edit(path: &Path, text: &str, expected: &[String]) -> anyhow::Result<()> {
     let after = Config::parse(text).map_err(|e| {
         anyhow::anyhow!(
@@ -717,7 +1098,7 @@ fn write_atomically(path: &Path, text: &str) -> anyhow::Result<()> {
 }
 
 /// Line ranges `[start, end)` of each top-level `[[source]]` block.
-fn source_block_ranges(lines: &[&str]) -> Vec<(usize, usize)> {
+fn block_ranges(lines: &[&str], header: &str) -> Vec<(usize, usize)> {
     let is_header = |l: &str| {
         let t = l.trim_start();
         t.starts_with('[') && !t.starts_with('#')
@@ -725,7 +1106,7 @@ fn source_block_ranges(lines: &[&str]) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut i = 0;
     while i < lines.len() {
-        if lines[i].trim() == "[[source]]" {
+        if lines[i].trim() == header {
             let mut end = i + 1;
             while end < lines.len() && !is_header(lines[end]) {
                 end += 1;
@@ -740,12 +1121,16 @@ fn source_block_ranges(lines: &[&str]) -> Vec<(usize, usize)> {
 }
 
 /// Whether a block's lines declare this id, parsed as TOML rather than matched as text.
+///
+/// Asks both lists, because one function serves `[[source]]` and `[[schedule]]` and only
+/// one of them can be present in a single block's worth of lines.
 fn block_declares(block: &[&str], id: &str) -> bool {
     let text = block.join("\n");
-    toml::from_str::<Config>(&text)
-        .ok()
-        .and_then(|c| c.sources.first().map(|s| s.id == id))
-        .unwrap_or(false)
+    let Ok(parsed) = toml::from_str::<Config>(&text) else {
+        return false;
+    };
+    parsed.sources.first().is_some_and(|s| s.id == id)
+        || parsed.schedules.first().is_some_and(|s| s.id == id)
 }
 
 #[cfg(test)]
@@ -925,6 +1310,240 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("sources"), "{err}");
+    }
+
+    // ── schedules ─────────────────────────────────────────────────────────────
+
+    fn with_schedule(block: &str) -> Result<Config, anyhow::Error> {
+        let text = format!("[[source]]\nid = \"tampa\"\nsite = \"https://tampa.gov\"\n\n{block}");
+        let config = Config::parse(&text)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    #[test]
+    fn a_schedule_block_parses_into_a_run_invocation() {
+        let config = with_schedule(
+            "[[schedule]]\nid = \"tampa-daily\"\ncron = \"0 3 * * *\"\n\
+             tz = \"America/New_York\"\nsources = [\"tampa\"]\nskip = [\"embed\"]\n",
+        )
+        .unwrap();
+
+        let s = &config.schedules[0];
+        assert_eq!(s.id, "tampa-daily");
+        assert!(s.is_enabled(), "enabled defaults on");
+        assert!(s.catches_up(), "catch_up defaults on");
+        assert_eq!(s.jitter_secs(), DEFAULT_JITTER_SECS);
+
+        let args = s.run_args().unwrap();
+        assert_eq!(args.sources, ["tampa"]);
+        assert_eq!(args.skip, [crate::ops::Stage::Embed]);
+        assert!(
+            !args.dry_run,
+            "a scheduled dry run would fire and do nothing forever"
+        );
+    }
+
+    /// The reason this block spells the run options out instead of flattening `RunArgs`:
+    /// a flattened struct cannot deny unknown fields, and a schedule that silently drops
+    /// `soruces` fires on time, collects nothing, and reports success.
+    #[test]
+    fn a_misspelled_key_in_a_schedule_is_an_error_not_silence() {
+        let err =
+            with_schedule("[[schedule]]\nid = \"x\"\ncron = \"@daily\"\nsoruces = [\"tampa\"]\n")
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("soruces"), "{err}");
+    }
+
+    /// The guard that turns "a new `run` flag was not made schedulable" from an omission
+    /// into a failing test. Every field of `RunArgs` is either carried by a schedule or
+    /// listed here with a reason it cannot be.
+    #[test]
+    fn run_options_stay_in_step_with_run() {
+        let run = serde_json::to_value(crate::ops::RunArgs::default()).unwrap();
+        let schedule = serde_json::to_value(ScheduleConfig {
+            // Every optional field set, so serialization skips none of them.
+            limit: Some(1),
+            refresh: true,
+            sources: vec!["x".into()],
+            skip: vec!["embed".into()],
+            ..Default::default()
+        })
+        .unwrap();
+
+        // `dry_run` fires on time and does nothing; `config` is the file the block was
+        // read out of. Neither is a cadence's business.
+        const NOT_SCHEDULABLE: [&str; 2] = ["dry_run", "config"];
+
+        for key in run.as_object().unwrap().keys() {
+            if NOT_SCHEDULABLE.contains(&key.as_str()) {
+                continue;
+            }
+            assert!(
+                schedule.get(key).is_some(),
+                "`run` has `{key}` and a [[schedule]] block cannot express it — add the \
+                 field to ScheduleConfig, or add it to NOT_SCHEDULABLE with a reason"
+            );
+        }
+    }
+
+    #[test]
+    fn a_schedule_naming_a_source_that_does_not_exist_is_refused() {
+        let err =
+            with_schedule("[[schedule]]\nid = \"x\"\ncron = \"@daily\"\nsources = [\"orlando\"]\n")
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("orlando"), "{err}");
+        assert!(err.contains("[[source]]"), "{err}");
+    }
+
+    /// Syntactically valid, and it never happens. Caught at load rather than by a
+    /// schedule that has quietly never fired.
+    #[test]
+    fn a_cron_that_never_occurs_is_refused() {
+        let err = with_schedule("[[schedule]]\nid = \"x\"\ncron = \"0 0 30 2 *\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("never occurs"), "{err}");
+    }
+
+    #[test]
+    fn a_bad_cron_zone_or_stage_names_itself() {
+        let err = with_schedule("[[schedule]]\nid = \"x\"\ncron = \"nope\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cron"), "{err}");
+
+        let err =
+            with_schedule("[[schedule]]\nid = \"x\"\ncron = \"@daily\"\ntz = \"Mars/Olympus\"\n")
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("IANA"), "{err}");
+
+        let err =
+            with_schedule("[[schedule]]\nid = \"x\"\ncron = \"@daily\"\nskip = [\"embedd\"]\n")
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("embedd"), "{err}");
+        assert!(
+            err.contains("transcribe"),
+            "the error should list the real stages: {err}"
+        );
+    }
+
+    #[test]
+    fn two_schedules_cannot_share_an_id() {
+        let err = with_schedule(
+            "[[schedule]]\nid = \"x\"\ncron = \"@daily\"\n\n\
+             [[schedule]]\nid = \"x\"\ncron = \"@weekly\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("twice"), "{err}");
+    }
+
+    /// The round trip `schedule set` depends on: what it writes must read back as what
+    /// it was asked to write.
+    #[test]
+    fn a_written_block_parses_back_to_itself() {
+        let written = ScheduleConfig {
+            id: "tampa-daily".into(),
+            cron: "0 3 * * *".into(),
+            tz: Some("America/New_York".into()),
+            sources: vec!["tampa".into()],
+            skip: vec!["embed".into()],
+            limit: Some(500),
+            refresh: true,
+            jitter_secs: Some(0),
+            enabled: Some(false),
+            catch_up: Some(false),
+        };
+        // With the source it names, because `parse` validates and a schedule naming
+        // nothing is exactly what validation refuses.
+        let text = format!(
+            "[[source]]\nid = \"tampa\"\nsite = \"https://tampa.gov\"\n\n{}",
+            written.to_toml_block()
+        );
+        let back = Config::parse(&text).unwrap();
+        let got = &back.schedules[0];
+        assert_eq!(got.id, written.id);
+        assert_eq!(got.cron, written.cron);
+        assert_eq!(got.tz, written.tz);
+        assert_eq!(got.sources, written.sources);
+        assert_eq!(got.skip, written.skip);
+        assert_eq!(got.limit, written.limit);
+        assert!(got.refresh);
+        assert_eq!(got.jitter_secs(), 0);
+        assert!(!got.is_enabled());
+        assert!(!got.catches_up());
+    }
+
+    #[test]
+    fn appending_and_removing_a_schedule_leaves_the_rest_of_the_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("centinel.toml");
+        std::fs::write(
+            &path,
+            "# a comment somebody wrote\n[[source]]\nid = \"tampa\"\nsite = \"https://tampa.gov\"\n",
+        )
+        .unwrap();
+
+        append_schedule(
+            &path,
+            &ScheduleConfig {
+                id: "daily".into(),
+                cron: "0 3 * * *".into(),
+                sources: vec!["tampa".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# a comment somebody wrote"), "{text}");
+        assert_eq!(Config::parse(&text).unwrap().schedules.len(), 1);
+
+        remove_schedule(&path, "daily").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# a comment somebody wrote"), "{text}");
+        assert!(Config::parse(&text).unwrap().schedules.is_empty());
+        assert_eq!(
+            Config::parse(&text).unwrap().sources.len(),
+            1,
+            "removing a schedule must not touch the sources"
+        );
+    }
+
+    /// The relational check has to happen against the file being joined, not in isolation.
+    #[test]
+    fn appending_a_schedule_for_an_unknown_source_is_refused_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("centinel.toml");
+        std::fs::write(
+            &path,
+            "[[source]]\nid = \"tampa\"\nsite = \"https://tampa.gov\"\n",
+        )
+        .unwrap();
+
+        let err = append_schedule(
+            &path,
+            &ScheduleConfig {
+                id: "daily".into(),
+                cron: "0 3 * * *".into(),
+                sources: vec!["orlando".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("orlando"), "{err}");
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("schedule"),
+            "the file was written anyway: {text}"
+        );
     }
 
     #[test]
