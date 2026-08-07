@@ -78,3 +78,8 @@ zip = "8"
 # of the conversation — Range headers, 206 vs 200, a connection dropped mid-body — and a
 # server framework will not let a test write a deliberately truncated response.
 tokio = { workspace = true, features = ["net"] }
+
+# The pid-liveness check behind `run.lock`'s stale-lock recovery, and nothing else.
+# Already in the tree under tokio, so this costs no new download.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -51,6 +51,14 @@ pub struct Discovered {
     /// for fifty others moved by fifty and its counts did not move at all, which is
     /// exactly the run someone needs told about.
     pub new: usize,
+    /// Addresses the previous snapshot held and this one does not.
+    ///
+    /// The other half of the set difference `new` computes, and **not a deletion**: the
+    /// site stopped listing the address, which says nothing about whether it is still
+    /// served. Everything already collected from it stays in the corpus, addressable and
+    /// searchable. This is the first of the three subtractions in `docs/SCHEDULING.md`
+    /// §7.2, and the only one discovery can see.
+    pub vanished: usize,
     /// The previous snapshot's size, for the delta. A large negative swing is the
     /// signature of a truncated crawl rather than a shrinking source.
     pub previous_run: Option<usize>,
@@ -92,6 +100,20 @@ pub async fn discover(
         .filter(|r| !known.contains(r.natural_key.as_str()))
         .count();
 
+    // The mirror of `new`, and a set difference for the same reason: a site that swapped
+    // fifty pages for fifty others moved by fifty in each direction while its counts did
+    // not move at all.
+    let present: std::collections::HashSet<&str> = enumeration
+        .resources
+        .iter()
+        .map(|r| r.natural_key.as_str())
+        .collect();
+    let vanished = previous
+        .iter()
+        .flatten()
+        .filter(|r| !present.contains(r.natural_key.as_str()))
+        .count();
+
     let sample: Vec<String> = enumeration
         .resources
         .iter()
@@ -125,6 +147,7 @@ pub async fn discover(
     Ok(Discovered {
         found,
         new,
+        vanished,
         previous_run,
         notes: enumeration.notes,
         warnings: enumeration.warnings,
@@ -193,9 +216,20 @@ pub struct Collected {
     pub changed: usize,
     /// Addresses that refused, or whose every artifact was dropped.
     pub failed: usize,
-    /// Failures that were refusals rather than absence. A non-zero count with zero
-    /// successes is a wall, and reads nothing like an empty source unless it is counted.
+    /// Refused in a way that is **not evidence of absence** — WAF 403, 429, robots, the
+    /// bot wall. A non-zero count with zero successes is a wall, and reads nothing like an
+    /// empty source unless it is counted.
     pub blocked: usize,
+    /// Fetched, and the server said the address is gone: 404 or 410. Evidence about the
+    /// address.
+    pub gone: usize,
+    /// A transport fault — a timeout, a 500, a hang that had to be killed. Evidence about
+    /// **this machine**, and about the address not at all.
+    ///
+    /// Counted apart from `gone` because collapsing them records a server having a bad
+    /// afternoon as a page that was deleted, which is the mistake `Liveness::Blocked`
+    /// already exists to prevent one variant over.
+    pub errored: usize,
     pub bytes: u64,
     /// Still unacquired. Non-zero means re-running continues where this stopped.
     pub remaining: usize,
@@ -382,8 +416,11 @@ pub async fn collect(
                 store.append(&id, &LogRecord::Status(st.clone())).await?;
 
                 report.failed += 1;
-                if refusal.state == Liveness::Blocked {
-                    report.blocked += 1;
+                match refusal.state {
+                    Liveness::Blocked => report.blocked += 1,
+                    Liveness::Gone => report.gone += 1,
+                    Liveness::Error => report.errored += 1,
+                    Liveness::Live => {}
                 }
                 push_failure(
                     &mut report,
@@ -947,6 +984,65 @@ mod tests {
         .unwrap();
         assert_eq!(out.stored, 1);
         assert_eq!(out.remaining, 2, "re-running continues from here");
+    }
+
+    /// Two set differences, in both directions. A site that swapped fifty pages for fifty
+    /// others moved by fifty each way and its count did not move at all — which is exactly
+    /// the run somebody needs told about, and exactly what a count-delta cannot say.
+    #[tokio::test]
+    async fn discovery_reports_what_vanished_as_well_as_what_is_new() {
+        let (_d, store) = store().await;
+
+        let first = Scripted::new("x", &["https://x.gov/a", "https://x.gov/b"]);
+        let out = discover(&store, &first, &DiscoverOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+        assert_eq!(out.new, 2);
+        assert_eq!(out.vanished, 0, "nothing can vanish from an empty history");
+
+        // `b` drops out, `c` appears: the count is unchanged and both differences are one.
+        let second = Scripted::new("x", &["https://x.gov/a", "https://x.gov/c"]);
+        let out = discover(&store, &second, &DiscoverOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+        assert_eq!(out.found, 2);
+        assert_eq!(out.previous_run, Some(2), "the counts did not move");
+        assert_eq!(out.new, 1);
+        assert_eq!(out.vanished, 1, "the churn is invisible without this");
+    }
+
+    /// The three refusals are three different facts and must never arrive as one number.
+    /// A WAF block counted as absence records a live page as deleted, which is the whole
+    /// reason `Liveness::Blocked` exists.
+    #[tokio::test]
+    async fn the_three_kinds_of_refusal_are_counted_apart() {
+        let (_d, store) = store().await;
+        let src = Scripted::new(
+            "x",
+            &[
+                "https://x.gov/blocked",
+                "https://x.gov/gone",
+                "https://x.gov/broken",
+                "https://x.gov/fine",
+            ],
+        )
+        .refuses("https://x.gov/blocked", Liveness::Blocked, "HTTP 403")
+        .refuses("https://x.gov/gone", Liveness::Gone, "HTTP 404")
+        .refuses("https://x.gov/broken", Liveness::Error, "connection reset")
+        .yields("https://x.gov/fine", "hello");
+        discover(&store, &src, &DiscoverOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+
+        let out = collect(&store, &src, &CollectOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+
+        assert_eq!(out.stored, 1);
+        assert_eq!(out.failed, 3, "the three still add up as failures");
+        assert_eq!(out.blocked, 1);
+        assert_eq!(out.gone, 1);
+        assert_eq!(out.errored, 1);
     }
 
     /// Cancellation has to leave the store in the state an ordinary stop would, or the

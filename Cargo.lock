@@ -871,6 +871,7 @@ dependencies = [
  "inventory",
  "jiff",
  "lancedb",
+ "libc",
  "llama-cpp-2",
  "pdf-inspector",
  "reqwest",

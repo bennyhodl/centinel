@@ -583,7 +583,14 @@ async fn run_acquisition(
                         stage,
                         Tally::of(
                             r.new as u64,
-                            &[("found", r.found as u64), ("new", r.new as u64)],
+                            &[
+                                ("found", r.found as u64),
+                                ("new", r.new as u64),
+                                // The one subtraction discovery can see. Carried as a
+                                // figure so the journal reads it off the report rather
+                                // than recomputing a set difference from the log.
+                                ("vanished", r.vanished as u64),
+                            ],
                         )
                         .and(r.figures),
                         format!(
@@ -636,7 +643,12 @@ async fn run_acquisition(
                                     ("changed", r.changed as u64),
                                     ("already_had", r.already_had as u64),
                                     ("failed", r.failed as u64),
+                                    // Three figures, never one, and never a sum. A
+                                    // blocked address counted as absence reports a live
+                                    // page as deleted.
                                     ("blocked", r.blocked as u64),
+                                    ("gone", r.gone as u64),
+                                    ("errored", r.errored as u64),
                                     ("remaining", r.remaining as u64),
                                     ("bytes", r.bytes),
                                 ],
