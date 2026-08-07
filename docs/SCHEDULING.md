@@ -313,7 +313,7 @@ Validation is unchanged and shared: the wizard cannot produce a block that `sche
 --id … --cron …` would have rejected, because both hand the same struct to the same
 validator.
 
-#### The crate: `dialoguer`
+#### The crate: `dialoguer`  *(built)*
 
 It is built on `console`, which is **already in the tree under `indicatif`** — the same
 reasoning, in the same words, that the binary's `Cargo.toml` already gives for depending on
@@ -478,6 +478,22 @@ the nice value is for. It costs one hook and no design.
 One contention this does *not* fix, and it is worth naming: memory. A search loads the
 reranker and a query embedder while a run holds the embedding model. Two multi-gigabyte
 residents on a machine chosen for neither. §12 flags it.
+
+#### The due check is measured from the last fire, not from now
+
+Not in the original design, and the omission was load-bearing. "Is this schedule due" has
+to be asked as *has its next occurrence since it last fired passed*, because the next
+occurrence after **now** is in the future by construction — so `due <= now` is never true
+and **nothing ever fires**.
+
+That failure has no symptom of its own. The server logs that it started, reports its
+schedules as armed, sleeps, and collects nothing, forever. It was found by running it for
+seventy seconds and reading an empty `history`.
+
+So the scheduler keeps the last fire per schedule — seeded from the journal at startup,
+advanced when it fires, and advanced **even when the run fails**, or one broken source is
+re-attempted at every wake-up instead of at its cadence. A schedule that has never fired
+measures from process start, so adding one is not a request to collect now.
 
 #### Cancellation: a token, never `abort()`
 
@@ -736,6 +752,13 @@ one".
 SIGTERM stops accepting fires, cancels the in-flight run at the next item boundary, writes
 an `interrupted` record, releases the lock, and exits. It does not wait for a four-hour
 transcription to finish.
+
+This needed `serve` to gain a graceful shutdown it did not have. Without one the process is
+simply killed: the cancellation path above is unreachable, the journal keeps no record of
+the run that was in flight, and the only evidence is a stale `run.lock` for the next
+startup to reclaim. The signal is a parameter of the HTTP server rather than a handler
+installed inside it, because what happens *after* the socket closes — cancel the run, join
+the scheduler thread — belongs to the caller.
 
 Losing work is not a concern, and the reason is the one from §1.2: everything is resumable
 by construction. The next fire subtracts what was done from what is needed and continues.
