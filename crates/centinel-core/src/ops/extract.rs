@@ -10,9 +10,9 @@ use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::content::{ContentKind, SNIFF_BYTES};
 use crate::domain::Underivable;
 use crate::extract::{self, Extracted};
-use crate::fetch::{SNIFF_BYTES, content_kind};
 use crate::op::{ItemOutcome, Verdict};
 use crate::prelude::*;
 use crate::store::LogRecord;
@@ -204,9 +204,9 @@ pub async fn extract(
             // right thing to do before extracting and the wrong thing to do before
             // finding out there is nothing to extract.
             let head = ctx.store.blob_head(&obs.blob_sha, SNIFF_BYTES).await?;
-            let kind = content_kind(&obs.meta, &head).to_string();
+            let kind = ContentKind::classify(&obs.meta, &head);
             if let Some(want) = &args.kind
-                && want != &kind
+                && want != kind.as_str()
             {
                 continue;
             }

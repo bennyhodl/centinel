@@ -152,7 +152,9 @@ impl SiteSource {
     /// serves plenty of HTML from paths that end in neither `.html` nor a slash, and a PDF
     /// must never be scanned as though it were markup.
     fn enclosures(&self, fetched: &crate::domain::Fetched, base: &str) -> Vec<String> {
-        if crate::fetch::content_kind(&fetched.meta, &fetched.bytes) != "html" {
+        if crate::content::ContentKind::classify(&fetched.meta, &fetched.bytes)
+            != crate::content::ContentKind::Html
+        {
             return Vec::new();
         }
         let html = String::from_utf8_lossy(&fetched.bytes);

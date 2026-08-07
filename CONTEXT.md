@@ -63,8 +63,18 @@ only ever answer what the first bytes prove: a `.docx` and a `.pptx` are both
 making it say `docx` — would put a guess in the record at the one point where nothing has
 read enough of the file to know, and every stage downstream would carry the guess.
 
+It is a **type**, in `content`, and the four questions it answers — *what is this*, *what
+would a server have called it*, *what should the file be named*, *is it worth fetching on
+its own* — are all projections of one table. They were five tables in three modules that
+no compiler related to each other, so adding a kind meant ten edits and the compiler asked
+for none: the arm `materialize` was missing is why every caption track landed in `current/`
+as `.bin`, and the one `enclosure` was missing would mean the document at the end of a link
+is never fetched at all. Both failures are silent and both look like a site that had
+nothing. The word in the record stays a string, because the log is append-only and a store
+written by a newer build holds kinds this one has never heard of.
+
 **Declared vs inferred type** — a `content-type` a server sent, against one read off a
-filename. Both feed `content_kind` and only the first is evidence. It matters because a
+filename. Both feed `ContentKind::classify` and only the first is evidence. It matters because a
 file read off disk has no headers, and for the formats whose first bytes are ordinary text
 — `.csv`, `.json`, `.txt` — magic bytes alone reach `other` and no extractor claims them,
 so the same bytes a server calls `text/csv` become unreadable the moment they arrive as a

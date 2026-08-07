@@ -19,7 +19,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, SYSTEM_DEFAULT};
-use crate::fetch::content_kind;
+use crate::content::ContentKind;
 use crate::materialize::materialize;
 use crate::ops::target::resolve;
 use crate::prelude::*;
@@ -121,7 +121,7 @@ pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
     };
     let reads_as_machine_format = original_bytes
         .as_deref()
-        .is_some_and(|bytes| content_kind(&obs.meta, bytes) == "captions");
+        .is_some_and(|bytes| ContentKind::classify(&obs.meta, bytes) == ContentKind::Captions);
     // `--original` is an instruction and beats every inference, including a hash that
     // named the extraction.
     let derived = !args.original && (args.derived || named.is_some() || reads_as_machine_format);
@@ -146,7 +146,7 @@ pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
                     .to_sha
             }
         };
-        (to_sha, "markdown".to_string())
+        (to_sha, ContentKind::Markdown)
     } else {
         // Read once: the default path already fetched these to classify them.
         let bytes = match original_bytes {
@@ -155,7 +155,7 @@ pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
         };
         (
             obs.blob_sha.clone(),
-            content_kind(&obs.meta, &bytes).to_string(),
+            ContentKind::classify(&obs.meta, &bytes),
         )
     };
 
@@ -164,7 +164,7 @@ pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
         &source,
         &resource.natural_key,
         &opened_sha,
-        &kind,
+        kind,
     )
     .await?;
     let bytes = tokio::fs::metadata(&path).await?.len() as usize;
@@ -177,14 +177,14 @@ pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
         let opener = args
             .with
             .clone()
-            .unwrap_or_else(|| config.open.opener_for(&kind).to_string());
+            .unwrap_or_else(|| config.open.opener_for(kind.as_str()).to_string());
         Some(launch(&opener, &path).await?)
     };
 
     Ok(OpenReport {
         url: resource.natural_key,
         source: source.to_string(),
-        kind,
+        kind: kind.to_string(),
         path: path.display().to_string(),
         blob_sha: obs.blob_sha.to_string(),
         opened_sha: opened_sha.to_string(),

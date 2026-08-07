@@ -17,62 +17,9 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::content::ContentKind;
 use crate::domain::{BlobSha, SourceId};
 use crate::store::Store;
-
-/// File extension for a content kind.
-///
-/// Every kind [`crate::fetch::content_kind`] can return needs an arm here. A kind that
-/// falls through to `bin` produces a file no application will open, which defeats the
-/// entire purpose of `current/` — the point of this tree is that the bytes arrive
-/// wearing a name their handler recognises.
-///
-/// `head` is the first bytes of the blob, and matters only for kinds the vocabulary
-/// deliberately generalises: `audio` is one word for five containers. Pass an empty
-/// slice when the bytes are not to hand; the answer degrades to the commonest container
-/// rather than to `bin`.
-pub fn extension_for(kind: &str, head: &[u8]) -> &'static str {
-    match kind {
-        "pdf" => "pdf",
-        "html" => "html",
-        "markdown" => "md",
-        "spreadsheet" => "xlsx",
-        "csv" => "csv",
-        "json" => "json",
-        // A json3 caption track is JSON however machine-shaped it reads, and JSON opens
-        // in every editor and browser on the machine. `.bin` opens in none of them.
-        "captions" => "json",
-        "xml" => "xml",
-        "text" => "txt",
-        // One word, eight formats. The head settles the two containers that announce
-        // themselves in their first bytes; the rest hide their identity at the end of the
-        // file, past anything this function holds, so `.docx` is the commonest guess.
-        // [`relative_path`] does better, because it has the address to read.
-        "document" => document_container(head).unwrap_or("docx"),
-        // yt-dlp's default for this project's sources, and so the safest fallback when
-        // the head was not read or the container is one we do not know.
-        "audio" => crate::fetch::audio_container(head).unwrap_or("m4a"),
-        "zip-container" => "zip",
-        _ => "bin",
-    }
-}
-
-/// Which document container, as a file extension, where the first bytes can say.
-///
-/// RTF announces itself in five bytes. An OLE compound file announces only that it is
-/// one: whether it holds Word, PowerPoint or Excel is written in a directory sector that
-/// can sit anywhere in the file, so `.doc` is the answer — the commonest of the three on
-/// a `.gov` server, and one Word will at least open. `.docx` on those bytes opens in
-/// nothing, because Word checks the container before the extension.
-fn document_container(head: &[u8]) -> Option<&'static str> {
-    if head.starts_with(b"{\\rtf") {
-        return Some("rtf");
-    }
-    if head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
-        return Some("doc");
-    }
-    None
-}
 
 /// Every container signature this file decides on fits in the first dozen bytes.
 const HEAD_BYTES: usize = 16;
@@ -132,8 +79,11 @@ fn sanitize(segment: &str) -> String {
 ///
 /// Kept verbatim rather than folded onto the parser's name, because `.docm` and `.xlsb`
 /// are what the server served and what their handler expects to be given.
-fn extension_from_url(url: &str, kind: &str) -> Option<String> {
-    if !matches!(kind, "document" | "zip-container" | "spreadsheet") {
+fn extension_from_url(url: &str, kind: ContentKind) -> Option<String> {
+    if !matches!(
+        kind,
+        ContentKind::Document | ContentKind::ZipContainer | ContentKind::Spreadsheet
+    ) {
         return None;
     }
     let path = url.split(['?', '#']).next()?;
@@ -146,9 +96,8 @@ fn extension_from_url(url: &str, kind: &str) -> Option<String> {
 /// Query strings are folded into the filename as a short hash rather than dropped.
 /// `.gov` agenda systems are routinely query-string addressed — `MeetingView.aspx?id=1`
 /// and `?id=2` are different documents, and collapsing them would silently overwrite.
-pub fn relative_path(url: &str, kind: &str, head: &[u8]) -> PathBuf {
-    let ext =
-        extension_from_url(url, kind).unwrap_or_else(|| extension_for(kind, head).to_string());
+pub fn relative_path(url: &str, kind: ContentKind, head: &[u8]) -> PathBuf {
+    let ext = extension_from_url(url, kind).unwrap_or_else(|| kind.extension(head).to_string());
 
     // A hostless "URL" is an opaque identifier, not an address — `legistar:matter:5107`
     // parses fine but has no host and no meaningful path structure. Treat the whole
@@ -201,7 +150,7 @@ pub fn target_path(
     current: &Path,
     source: &SourceId,
     url: &str,
-    kind: &str,
+    kind: ContentKind,
     head: &[u8],
 ) -> PathBuf {
     current
@@ -219,7 +168,7 @@ pub async fn materialize(
     source: &SourceId,
     url: &str,
     blob_sha: &BlobSha,
-    kind: &str,
+    kind: ContentKind,
 ) -> anyhow::Result<PathBuf> {
     let src = store.blob_path_of(blob_sha);
     let dest = target_path(
@@ -254,7 +203,7 @@ pub async fn materialize(
 mod tests {
     use super::*;
 
-    fn p(url: &str, kind: &str) -> String {
+    fn p(url: &str, kind: ContentKind) -> String {
         relative_path(url, kind, b"")
             .to_string_lossy()
             .replace('\\', "/")
@@ -263,11 +212,11 @@ mod tests {
     #[test]
     fn mirrors_host_and_path_with_a_real_extension() {
         assert_eq!(
-            p("https://www.tampa.gov/city-council", "html"),
+            p("https://www.tampa.gov/city-council", ContentKind::Html),
             "www.tampa.gov/city-council.html"
         );
         assert_eq!(
-            p("https://hcfl.gov/departments/budget/2026", "pdf"),
+            p("https://hcfl.gov/departments/budget/2026", ContentKind::Pdf),
             "hcfl.gov/departments/budget/2026.pdf"
         );
     }
@@ -275,12 +224,12 @@ mod tests {
     #[test]
     fn an_existing_correct_extension_is_not_doubled() {
         assert_eq!(
-            p("https://x.gov/docs/Report.pdf", "pdf"),
+            p("https://x.gov/docs/Report.pdf", ContentKind::Pdf),
             "x.gov/docs/Report.pdf"
         );
         // A wrong one is kept as part of the stem — the server's kind wins.
         assert_eq!(
-            p("https://x.gov/docs/Report.aspx", "html"),
+            p("https://x.gov/docs/Report.aspx", ContentKind::Html),
             "x.gov/docs/Report.aspx.html"
         );
     }
@@ -289,8 +238,14 @@ mod tests {
     /// query, genuinely different documents.
     #[test]
     fn query_strings_do_not_collide() {
-        let a = p("https://x.gov/MeetingView.aspx?MeetingID=1", "html");
-        let b = p("https://x.gov/MeetingView.aspx?MeetingID=2", "html");
+        let a = p(
+            "https://x.gov/MeetingView.aspx?MeetingID=1",
+            ContentKind::Html,
+        );
+        let b = p(
+            "https://x.gov/MeetingView.aspx?MeetingID=2",
+            ContentKind::Html,
+        );
         assert_ne!(a, b, "distinct meetings must not share a file");
         assert!(a.starts_with("x.gov/MeetingView.aspx~"));
     }
@@ -298,11 +253,11 @@ mod tests {
     #[test]
     fn a_bare_origin_becomes_index() {
         assert_eq!(
-            p("https://www.phila.gov/", "html"),
+            p("https://www.phila.gov/", ContentKind::Html),
             "www.phila.gov/index.html"
         );
         assert_eq!(
-            p("https://www.phila.gov", "html"),
+            p("https://www.phila.gov", ContentKind::Html),
             "www.phila.gov/index.html"
         );
     }
@@ -319,7 +274,7 @@ mod tests {
             "..",
             "https://x.gov/a/../../../../b",
         ] {
-            let path = relative_path(target, "text", b"");
+            let path = relative_path(target, ContentKind::Text, b"");
             assert!(path.is_relative(), "{target} produced an absolute path");
             for component in path.components() {
                 assert!(
@@ -331,14 +286,14 @@ mod tests {
             }
         }
         // The host still anchors a real URL.
-        assert!(p("https://x.gov/../../etc/passwd", "text").starts_with("x.gov/"));
+        assert!(p("https://x.gov/../../etc/passwd", ContentKind::Text).starts_with("x.gov/"));
     }
 
     #[test]
     fn absurdly_long_segments_are_truncated_and_disambiguated() {
         let long = "a".repeat(400);
-        let one = p(&format!("https://x.gov/{long}1"), "pdf");
-        let two = p(&format!("https://x.gov/{long}2"), "pdf");
+        let one = p(&format!("https://x.gov/{long}1"), ContentKind::Pdf);
+        let two = p(&format!("https://x.gov/{long}2"), ContentKind::Pdf);
 
         let name = one.rsplit('/').next().unwrap();
         assert!(name.len() < 200, "component still too long: {}", name.len());
@@ -352,102 +307,45 @@ mod tests {
     #[test]
     fn a_document_keeps_the_extension_its_address_names() {
         assert_eq!(
-            p("https://x.gov/agendas/Presentation.pptx", "zip-container"),
+            p(
+                "https://x.gov/agendas/Presentation.pptx",
+                ContentKind::ZipContainer
+            ),
             "x.gov/agendas/Presentation.pptx"
         );
         assert_eq!(
-            p("https://x.gov/Ordinance.docm", "document"),
+            p("https://x.gov/Ordinance.docm", ContentKind::Document),
             "x.gov/Ordinance.docm"
         );
         assert_eq!(
-            p("https://x.gov/Budget.xlsb", "spreadsheet"),
+            p("https://x.gov/Budget.xlsb", ContentKind::Spreadsheet),
             "x.gov/Budget.xlsb"
         );
         // Upper case as served, lower case on disk.
         assert_eq!(
-            p("https://x.gov/Minutes.ODT", "document"),
+            p("https://x.gov/Minutes.ODT", ContentKind::Document),
             "x.gov/Minutes.odt"
         );
         // An address that names no document format falls back to the kind, keeping its
         // own name — `.aspx` is how the agenda system addresses it, not how it opens.
         assert_eq!(
-            p("https://x.gov/GetFile.aspx", "document"),
+            p("https://x.gov/GetFile.aspx", ContentKind::Document),
             "x.gov/GetFile.aspx.docx"
         );
         // And the fallback stays confined to the kinds that need it: an HTML page whose
         // URL ends `.doc` is still HTML.
-        assert_eq!(p("https://x.gov/page.doc", "html"), "x.gov/page.doc.html");
-    }
-
-    #[test]
-    fn a_legacy_container_is_named_by_its_signature_not_by_the_common_case() {
-        assert_eq!(extension_for("document", br"{\rtf1\ansi"), "rtf");
         assert_eq!(
-            extension_for(
-                "document",
-                &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
-            ),
-            "doc",
-            "a .docx name on OLE bytes opens in nothing — Word checks the container"
+            p("https://x.gov/page.doc", ContentKind::Html),
+            "x.gov/page.doc.html"
         );
-        assert_eq!(extension_for("document", b""), "docx");
     }
 
     #[test]
     fn non_url_targets_still_get_a_filename() {
         assert_eq!(
-            p("legistar:matter:5107", "json"),
+            p("legistar:matter:5107", ContentKind::Json),
             "legistar_matter_5107.json"
         );
-    }
-
-    #[test]
-    fn extensions_cover_the_kinds_the_fetcher_reports() {
-        assert_eq!(extension_for("pdf", b""), "pdf");
-        assert_eq!(extension_for("markdown", b""), "md");
-        assert_eq!(extension_for("spreadsheet", b""), "xlsx");
-        assert_eq!(extension_for("other", b""), "bin");
-    }
-
-    /// The gap that shipped: `captions` had no arm, so every YouTube caption track
-    /// materialised as `watch~ec1ba331.bin` and opened in nothing.
-    ///
-    /// Kept as a list rather than a spot-check because the failure mode is silent —
-    /// `content_kind` gains a word, `extension_for` does not, and nobody finds out until
-    /// they try to open one.
-    #[test]
-    fn no_kind_the_fetcher_reports_falls_through_to_bin() {
-        for kind in [
-            "pdf",
-            "html",
-            "text",
-            "json",
-            "captions",
-            "xml",
-            "csv",
-            "spreadsheet",
-            "document",
-            "audio",
-            "zip-container",
-            "markdown",
-        ] {
-            assert_ne!(
-                extension_for(kind, b""),
-                "bin",
-                "`{kind}` materialises as .bin — add an arm to extension_for"
-            );
-        }
-    }
-
-    /// One word, five containers: a player refuses a WebM called `.m4a`, so the head
-    /// decides. An unread head still beats `.bin`.
-    #[test]
-    fn audio_is_named_by_its_container() {
-        assert_eq!(extension_for("audio", b"\x00\x00\x00\x20ftypM4A "), "m4a");
-        assert_eq!(extension_for("audio", &[0x1A, 0x45, 0xDF, 0xA3]), "webm");
-        assert_eq!(extension_for("audio", b"OggS\0\x02"), "ogg");
-        assert_eq!(extension_for("audio", b"ID3\x04\0\0"), "mp3");
-        assert_eq!(extension_for("audio", b""), "m4a");
     }
 
     #[test]
@@ -455,7 +353,7 @@ mod tests {
         assert_eq!(
             p(
                 "https://www.youtube.com/watch?v=VPMDoKtJQG8#captions.json3",
-                "captions"
+                ContentKind::Captions
             ),
             "www.youtube.com/watch~92aa30ca.json"
         );

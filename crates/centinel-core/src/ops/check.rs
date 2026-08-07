@@ -34,8 +34,8 @@ use std::path::{Path, PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::content::ContentKind;
 use crate::extract::{self, Extracted};
-use crate::fetch::content_kind;
 use crate::policy::{DEFAULT_USER_AGENT, HostPolicy};
 use crate::prelude::*;
 use crate::sources::SiteSource;
@@ -119,7 +119,7 @@ pub struct Checked {
     /// are not the same evidence.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub type_inferred: bool,
-    /// What [`content_kind`] decided, which is what picks the extractor.
+    /// What [`ContentKind::classify`] decided, which is what picks the extractor.
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_status: Option<String>,
@@ -233,14 +233,14 @@ pub async fn check(
         cancel.check()?;
         progress.step(item.address.clone(), i as u64, total);
 
-        let kind = content_kind(&item.meta, &item.bytes).to_string();
+        let kind = ContentKind::classify(&item.meta, &item.bytes);
         let stem = format!("{:02}-{}", i + 1, slug(&item.address));
 
         // The bytes land on disk before anything reads them, and with an extension that
         // matches what they *are* rather than what the address called them: every viewer
         // dispatches on the extension, so a PDF served from a URL ending `/view` opens in
         // a text editor unless this says otherwise.
-        let as_served = dir.join(format!("{stem}.{}", extension_for(&kind, &item)));
+        let as_served = dir.join(format!("{stem}.{}", extension_for(kind, &item)));
         tokio::fs::write(&as_served, &item.bytes)
             .await
             .map_err(|e| anyhow::anyhow!("writing {}: {e}", as_served.display()))?;
@@ -251,7 +251,7 @@ pub async fn check(
             bytes: item.bytes.len(),
             declared_type: item.meta.get("content-type").cloned(),
             type_inferred: item.type_inferred,
-            kind: kind.clone(),
+            kind: kind.to_string(),
             http_status: item.meta.get("http_status").cloned(),
             final_url: item
                 .meta
@@ -275,7 +275,7 @@ pub async fn check(
         // primary reader comes back empty. It wants a path, and the bytes are already at
         // one — which is the other reason they are written first.
         let derived = extract::derive(
-            &kind,
+            kind.as_str(),
             &item.bytes,
             &as_served,
             Some(&item.address),
@@ -441,8 +441,8 @@ async fn acquire_file(path: &Path) -> anyhow::Result<Item> {
     // So this fills the one gap it was written for: `.csv`, `.txt`, `.json` and `.xml`,
     // whose first bytes are indistinguishable from any other text, reach `other` on their
     // own and no extractor claims them.
-    let inferred = match content_kind(&BTreeMap::new(), &bytes) {
-        "other" => crate::fetch::declared_type_for_path(&absolute),
+    let inferred = match ContentKind::classify(&BTreeMap::new(), &bytes) {
+        ContentKind::Other => ContentKind::declared_type_for_path(&absolute),
         _ => None,
     };
     if let Some(ct) = inferred {
@@ -499,21 +499,28 @@ fn slug(address: &str) -> String {
 /// From the content kind rather than from the address, because the address is exactly what
 /// gets it wrong: a CMS serves a PDF from a URL ending `/view`, and a file named for the
 /// URL opens in a text editor showing `%PDF-1.7`. `zip-container` and `document` are as far
-/// as classification got — see `content_kind` — so they take the address's own extension
+/// as classification got — see [`ContentKind`] — so they take the address's own extension
 /// when it has one, and fall back to a container that at least opens.
-fn extension_for(kind: &str, item: &Item) -> String {
-    if let Some(ext) = match kind {
-        "html" => Some("html"),
-        "pdf" => Some("pdf"),
-        "text" => Some("txt"),
-        "csv" => Some("csv"),
-        "json" | "captions" => Some("json"),
-        "xml" => Some("xml"),
-        // The one kind whose container is knowable from the bytes, and the one where
-        // guessing wrong means no player will open it at all.
-        "audio" => crate::fetch::audio_container(&item.bytes),
-        _ => None,
-    } {
+fn extension_for(kind: ContentKind, item: &Item) -> String {
+    use ContentKind::*;
+
+    // What the kind itself says, where the kind is specific enough to be trusted. The
+    // answers come from [`ContentKind::extension`] — the same table `materialize` writes
+    // `current/` with — so the two cannot name the same blob differently. What differs is
+    // only *when* the kind is trusted, which is this function's own business.
+    //
+    // Exhaustive on purpose: a new kind has to say which side of that line it falls on.
+    let from_kind = match kind {
+        Html | Pdf | Text | Csv | Json | Captions | Xml => Some(kind.extension(&item.bytes)),
+        // Knowable from the bytes, and the one kind where guessing wrong means no player
+        // opens it at all — so an unrecognised container defers to the address instead of
+        // taking `materialize`'s commonest-container guess.
+        Audio => crate::content::audio_container(&item.bytes),
+        // As far as classification got. The kind alone would name every deck `.docx`, a
+        // file PowerPoint refuses; the address carries what the bytes cannot.
+        Document | Spreadsheet | ZipContainer | Markdown | Other => None,
+    };
+    if let Some(ext) = from_kind {
         return ext.to_string();
     }
 
@@ -521,8 +528,8 @@ fn extension_for(kind: &str, item: &Item) -> String {
         .map(str::to_string)
         .unwrap_or_else(|| {
             match kind {
-                "spreadsheet" => "xlsx",
-                "document" | "zip-container" => "docx",
+                Spreadsheet => "xlsx",
+                Document | ZipContainer => "docx",
                 _ => "bin",
             }
             .to_string()

@@ -359,7 +359,7 @@ pub async fn collect(
                         continue;
                     }
 
-                    let kind = crate::fetch::content_kind(&artifact.fetched.meta, bytes);
+                    let kind = crate::content::ContentKind::classify(&artifact.fetched.meta, bytes);
                     *report.by_kind.entry(kind.to_string()).or_default() += 1;
                     *report
                         .parts
