@@ -213,7 +213,6 @@ pub async fn extract(
             report.attempted += 1;
 
             let bytes = ctx.store.get_blob(&obs.blob_sha).await?;
-            let kind = kind.as_str();
             *report.by_kind.entry(kind.to_string()).or_default() += 1;
 
             // **A Derivation always has bytes**, and `derive` is where that invariant is
