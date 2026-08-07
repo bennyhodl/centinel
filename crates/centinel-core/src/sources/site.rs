@@ -13,7 +13,8 @@ use futures::future::BoxFuture;
 
 use crate::discovery::{Discoverer, DiscoveryLimits};
 use crate::domain::{
-    Acquired, Enumeration, Note, NoteMark, Refusal, Resource, Source, SourceId, SourceKind,
+    Acquired, Enumeration, Liveness, Note, NoteMark, Refusal, Resource, Source, SourceId,
+    SourceKind,
 };
 use crate::enclosure;
 use crate::fetch::Fetcher;
@@ -56,6 +57,31 @@ fn status_in(detail: &str) -> Option<u16> {
         .next()?
         .parse()
         .ok()
+}
+
+/// How a refusal reads on the progress line.
+///
+/// From the [`Liveness`] the fetcher already decided, not from a second reading of the
+/// status code. This used to re-derive its own answer out of the message text —
+/// `(400..500).contains(&s) && s != 429` — and reach a different one: that calls a WAF 403
+/// `Missing`, where [`crate::fetch::classify`] calls it `Blocked`. The difference between
+/// those two is the entire reason `Blocked` exists, and the correctly classified state was
+/// sitting on the same `Refusal` two lines above, unused.
+///
+/// A 403 shown as *gone* is a live page reported deleted, on the one line an operator
+/// watches to decide whether a crawl is working.
+fn verdict_for(state: Liveness) -> Verdict {
+    match state {
+        // Gone, and that is a fact about the address. Routine on a corpus full of links
+        // to files migrated years ago.
+        Liveness::Gone => Verdict::Missing,
+        // Blocked or errored: about this run, or about this host, and in neither case
+        // evidence that the document is not there.
+        Liveness::Blocked | Liveness::Error => Verdict::Fail,
+        // A refusal is never live, but the type permits saying so and a silent `Missing`
+        // would be the same lie in a rarer form.
+        Liveness::Live => Verdict::Fail,
+    }
 }
 
 impl SiteSource {
@@ -119,20 +145,14 @@ impl SiteSource {
             },
             Err(refusal) => {
                 // `HTTP 404` is a status; a timeout or a DNS failure is not, and the two
-                // must not be shown as though they were the same kind of answer.
+                // must not be shown as though they were the same kind of answer. The code
+                // is a *label* here and nothing turns on it — which is the whole reason
+                // reading it back out of prose is tolerable.
                 let status = status_in(&refusal.detail);
                 ItemOutcome {
                     address: url.to_string(),
                     tag: status.map_or_else(|| "—".into(), |s| s.to_string()),
-                    // A 429 is the host asking for room, and a 4xx is an address that is
-                    // gone; neither is the run breaking. A 5xx or no answer at all is.
-                    verdict: match status {
-                        // Gone, and that is a fact about the address. Routine on a corpus
-                        // full of links to files migrated years ago.
-                        Some(s) if (400..500).contains(&s) && s != 429 => Verdict::Missing,
-                        // A 429, a 5xx, or no answer at all is about this run.
-                        _ => Verdict::Fail,
-                    },
+                    verdict: verdict_for(refusal.state),
                     noun: "requests".into(),
                     bytes: 0,
                     produced: None,
@@ -398,5 +418,39 @@ mod tests {
     fn an_unparseable_address_still_paces() {
         let s = source();
         let _ = s.pacer_for("not a url");
+    }
+
+    /// The mistake `Blocked` exists to prevent, one level up from the record.
+    ///
+    /// A WAF 403 used to read as `Missing` on the progress line, because the verdict was
+    /// re-derived from the status code rather than taken from the state `fetch::classify`
+    /// had already decided — and `400..500` catches 403 alongside 404.
+    #[test]
+    fn a_blocked_page_is_never_shown_as_gone() {
+        assert_eq!(verdict_for(Liveness::Blocked), Verdict::Fail);
+        assert_eq!(verdict_for(Liveness::Error), Verdict::Fail);
+        assert_eq!(verdict_for(Liveness::Gone), Verdict::Missing);
+    }
+
+    /// The two classifications now agree by construction, so this walks the codes that
+    /// used to divide them.
+    #[test]
+    fn every_refused_status_reads_the_same_way_it_is_recorded() {
+        for (status, expected) in [
+            (404, Verdict::Missing),
+            (410, Verdict::Missing),
+            // The three that the old `400..500 && != 429` rule got wrong.
+            (401, Verdict::Fail),
+            (403, Verdict::Fail),
+            (429, Verdict::Fail),
+            (500, Verdict::Fail),
+            (503, Verdict::Fail),
+        ] {
+            assert_eq!(
+                verdict_for(crate::fetch::classify(status)),
+                expected,
+                "HTTP {status}"
+            );
+        }
     }
 }
