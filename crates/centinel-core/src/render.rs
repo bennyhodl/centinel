@@ -76,7 +76,12 @@ pub enum Ink {
 }
 
 impl Ink {
-    fn codes(self) -> (&'static str, &'static str) {
+    /// The escape pair this ink opens and closes with.
+    ///
+    /// Public and `const` so the progress display can build its own constants from this
+    /// table rather than keeping a second copy of the same seven escapes — which it did,
+    /// in another crate, where nothing would ever have caught them drifting.
+    pub const fn codes(self) -> (&'static str, &'static str) {
         match self {
             Ink::Plain => ("", ""),
             Ink::Dim => ("\x1b[2m", "\x1b[0m"),
