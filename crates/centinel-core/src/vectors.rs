@@ -249,7 +249,12 @@ impl VectorTable {
             query.len(),
             self.dims
         );
-        if limit == 0 || self.is_empty().await? {
+        // Deliberately not an emptiness check. `count_rows` reads the whole table's
+        // metadata, `search` already asks for that count on every query to report the
+        // vector arm's coverage, and asking twice made a second full count the price of
+        // re-checking a condition the caller had already rejected. An empty table simply
+        // returns no rows.
+        if limit == 0 {
             return Ok(Vec::new());
         }
 
