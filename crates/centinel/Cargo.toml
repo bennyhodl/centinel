@@ -19,6 +19,7 @@ tokio.workspace = true
 futures.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+jiff.workspace = true
 axum.workspace = true
 tokio-stream.workspace = true
 async-stream = "0.3"
@@ -29,3 +30,8 @@ console = "0.16"
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+
+# `setpriority` for the scheduler's threads — collection is throughput work and search is
+# latency work. Already in the tree under tokio, so this costs no new download.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

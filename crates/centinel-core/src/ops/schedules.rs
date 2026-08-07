@@ -143,7 +143,7 @@ pub async fn schedules(ctx: &Ctx, args: SchedulesArgs) -> anyhow::Result<Schedul
                             &schedule.id,
                             schedule.jitter_secs(),
                         );
-                        (at + jiff::Span::new().seconds(jitter as i64)).to_string()
+                        local(at + jiff::Span::new().seconds(jitter as i64), &zone)
                     });
                     if next_fire.is_none() {
                         problem = Some(format!("`{}` parses but never occurs", schedule.cron));
@@ -171,7 +171,14 @@ pub async fn schedules(ctx: &Ctx, args: SchedulesArgs) -> anyhow::Result<Schedul
             skip: schedule.skip.clone(),
             refresh: schedule.refresh,
             next_fire,
-            last_fire: last.map(|a| a.started_at.clone()),
+            // Rendered in the schedule's zone, not the journal's UTC. An operator who
+            // wrote "3am New York" and reads back "07:04" concludes it is broken — and
+            // the whole reason `tz` is a name is that they reason in local time.
+            last_fire: last.map(|a| {
+                a.started()
+                    .map(|at| local(at, &zone_or_utc(schedule)))
+                    .unwrap_or_else(|| a.started_at.clone())
+            }),
             last_outcome: last.map(|a| a.outcome),
             consecutive_failures,
             running: running
@@ -186,6 +193,23 @@ pub async fn schedules(ctx: &Ctx, args: SchedulesArgs) -> anyhow::Result<Schedul
         schedules: out,
         running,
     })
+}
+
+/// An instant as RFC 3339 in a named zone — local wall clock, with the offset that makes
+/// it unambiguous.
+///
+/// Deliberately not the bracketed RFC 9557 form: the offset carries everything a reader or
+/// a `Date` constructor needs, and the brackets break both.
+fn local(at: jiff::Timestamp, zone: &jiff::tz::TimeZone) -> String {
+    at.to_zoned(zone.clone())
+        .strftime("%Y-%m-%dT%H:%M:%S%:z")
+        .to_string()
+}
+
+/// A schedule's zone, falling back to UTC only when it does not resolve — in which case
+/// `problem` is already set and the timestamps are the least of it.
+fn zone_or_utc(schedule: &crate::config::ScheduleConfig) -> jiff::tz::TimeZone {
+    schedule.zone().unwrap_or(jiff::tz::TimeZone::UTC)
 }
 
 /// The per-install seed jitter is derived from.
@@ -678,7 +702,15 @@ mod tests {
             "the shutdown and the skip should be invisible to the streak"
         );
         assert_eq!(s.last_outcome, Some(Outcome::Failed));
-        assert_eq!(s.last_fire.as_deref(), Some("2026-08-05T03:00:00Z"));
+        // Compared as an *instant*: `last_fire` is rendered in the schedule's zone, which
+        // here is whatever the test machine's is. Asserting the string would pass in UTC
+        // and fail everywhere else.
+        assert_eq!(
+            s.last_fire
+                .as_deref()
+                .map(|t| t.parse::<jiff::Timestamp>().unwrap()),
+            Some("2026-08-05T03:00:00Z".parse::<jiff::Timestamp>().unwrap())
+        );
     }
 
     #[tokio::test]
