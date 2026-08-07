@@ -99,9 +99,18 @@ pub async fn ingest(
         ..Default::default()
     })?;
 
-    // Liveness is replayed once up front so `since` and `consecutive_failures` carry
-    // across runs rather than resetting on every invocation.
-    let mut statuses = ctx.store.statuses(&source).await?;
+    // One replay, two questions. Liveness is read up front so `since` and
+    // `consecutive_failures` carry across runs rather than resetting on every invocation;
+    // the fingerprints are here for the same reason `acquire` preloads them — the
+    // alternative is `Store::observe`, which reads the whole log again per URL, so a
+    // hundred addresses read it a hundred times.
+    let replay = ctx.store.replay(&source).await?;
+    let mut statuses = replay.statuses();
+    let mut fingerprints: std::collections::BTreeMap<Resource, Fingerprint> = replay
+        .latest_observations()
+        .into_iter()
+        .map(|(resource, obs)| (resource, obs.fingerprint))
+        .collect();
 
     let total = args.urls.len() as u64;
     let mut outcomes = Vec::with_capacity(args.urls.len());
@@ -116,8 +125,14 @@ pub async fn ingest(
         match fetcher.get(url).await {
             Ok(Fetched { bytes, meta }) => {
                 let n = bytes.len();
-                let (obs, previous) = ctx.store.observe(&resource, &bytes, at, meta).await?;
+                let obs = ctx
+                    .store
+                    .record_observation(&resource, &bytes, at, meta)
+                    .await?;
 
+                // The map is the history: whatever it held for this address is what the
+                // last run saw, and the new fingerprint replaces it for the next URL.
+                let previous = fingerprints.insert(resource.clone(), obs.fingerprint.clone());
                 let first_seen = previous.is_none();
                 let did_change = previous.as_ref() != Some(&obs.fingerprint);
 
