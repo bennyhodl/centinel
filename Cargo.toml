@@ -11,7 +11,10 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# Set by LanceDB, which is the only dependency that asks for more than edition 2024's
+# 1.85. Holding 1.85 would hold LanceDB at 0.23 — ten releases back — to keep a floor
+# no CI job tests against.
+rust-version = "1.91"
 license = "MIT"
 repository = "https://github.com/bennyhodl/centinel"
 

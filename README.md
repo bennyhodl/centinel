@@ -10,6 +10,8 @@
 
 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — How it is built. The store, the domain model, and how one function definition becomes a CLI command, an MCP tool, and an HTTP route. Includes the quickstart.
 
+**[docs/RETRIEVAL.md](docs/RETRIEVAL.md)** — How a question becomes a cited passage. Chunking, the two stores, the local embedder and reranker, and what a result tells you about how much of the corpus it could actually see.
+
 **[docs/SPEC.md](docs/SPEC.md)** — The settled specification. Every locked decision with its reasoning and its accepted costs, plus the six that are still open.
 
 **[docs/research/](docs/research/)** — The evidence underneath it. ~3,850 lines, ~450 primary-source citations.

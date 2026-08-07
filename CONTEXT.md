@@ -71,8 +71,16 @@ and edits no renderer.
 ## The store
 
 **Truth vs derived** — only `blobs/` and `log/` are truth. `current/`, `centinel.db` and
-the vector cache are derived and can be deleted at any time. *Why it matters:* it is what
+`vectors.lance/` are derived and can be rebuilt from them. *Why it matters:* it is what
 makes the index disposable and the corpus something you can hand to somebody with `rsync`.
+
+**Derived is not the same as cheap.** Everything derived is rebuildable; only some of it
+is rebuildable over a coffee. `centinel.db` is minutes. `vectors.lance/` is **a day** on a
+400,000-chunk corpus, because rebuilding it means inference over the whole thing. Both are
+safe to delete in the sense that nothing evidentiary is lost, and one of them is a very
+expensive thing to delete by accident — a distinction worth keeping, because SPEC §5.2
+used to spend a whole architecture on it (a separate durable embedding cache) and that
+architecture did not survive being measured. Backing up the vectors is `cp -R`.
 
 **Replay** — one Source's log, read once and answerable many times. Every derived view —
 liveness, the latest Observation per Resource, what was derived from what — is an
@@ -111,7 +119,7 @@ work that was never done.
 | extract | blobs with a Derivation **of bytes**, or an Underivable, from the latest Observations | the log |
 | transcribe | blobs derived by the transcriber from the audio blobs | the log |
 | index | **placements** already written, per address | `centinel.db` |
-| embed | cached chunk hashes from indexed chunk hashes | the vector cache |
+| embed | stored chunk hashes from indexed chunk hashes | `vectors.lance/` |
 
 **Underivable** — a derivation that was attempted and produced nothing. The peer of
 `ResourceStatus` on the derivation side, and it exists for the same reason: a `Derivation`
@@ -179,6 +187,33 @@ and says `1 of 19 failed`; the `error` is every failure joined, for a machine. R
 second in place of the first shows one source's error as though it were the whole story.
 
 ## Retrieval
+
+**Arm** — one retriever feeding the fusion. There are two: BM25 over FTS5 in
+`centinel.db`, and cosine over `vectors.lance/`. They are deliberately independent stores
+— either rebuilds without touching the other — which is why the BM25 arm stays on FTS5
+rather than moving to LanceDB's own Tantivy, and why Lance's built-in RRF reranker goes
+unused: it can only fuse arms Lance owns.
+
+**Rank vs pool** — a rank is a position *inside* a set and says nothing about the size of
+that set. RRF weights by rank alone, so the vector arm's rank 1 counts exactly the same
+whether it was drawn from 397,830 vectors or from 2,309. *Why it matters:* a partly
+embedded corpus therefore does **not** degrade gently — it promotes confident results
+from a tiny pool and looks identical to a complete one. So `search` reports
+`vectors_indexed` beside `total_chunks_indexed` and prints the share. It is the same
+error shape as `pages_needing_ocr`: a chunk's absence from an arm is a fact about what has
+been *processed*, never about whether it answers the question.
+
+**Method** — the name of the pipeline that produced this ordering, assembled from what
+actually ran: `bm25`, `bm25→rerank`, `bm25+vector→rrf`, `bm25+vector→rrf→rerank`. It is
+built rather than written out per call site, because it is the one field a reader trusts
+to know what they are looking at, and a stale literal there is worse than no field. Its
+peers `no_vectors` and `no_rerank` carry *why* a stage did not run — an absent stage is a
+different answer, not a slower one, and neither is left to be inferred.
+
+**Always on vs always available** — §6.3 makes reranking always on, which is a rule about
+there being no flag that silently returns worse results. It is not a promise that a
+machine with no reranker weights refuses to search. Missing weights degrade the ordering
+and say so; they never turn a query into an error the reader cannot act on.
 
 **Handle** — a hash that identifies one blob *and* that the tool will accept back. The
 rule is that anything Centinel prints, Centinel takes back, by prefix, git-style. A

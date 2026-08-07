@@ -1,19 +1,22 @@
 //! `embed` — turn indexed chunks into vectors.
 //!
-//! The expensive stage, and the one the whole caching design exists for. Separate from
-//! `index` for the same reason `collect` is separate from `extract`: `index` is minutes
-//! and rebuildable, this is hours and worth keeping.
+//! The expensive stage. Separate from `index` for the same reason `collect` is separate
+//! from `extract`: `index` is minutes and rebuildable, this is hours.
+//!
+//! Vectors are written straight to [`crate::vectors`], which is where `search` reads
+//! them. There is no intermediate cache — see that module for why the one there used to
+//! be did not survive being measured.
 //!
 //! ## Resumability is a consequence, not a feature
 //!
 //! There is no checkpoint file. The work list is
 //!
 //! ```text
-//!   chunk hashes in the index  −  chunk hashes already in the cache
+//!   chunk hashes in the index  −  chunk hashes already in the table
 //! ```
 //!
 //! so killing a run at chunk 40,000 and re-running starts at 40,001. That falls out of
-//! the cache being append-only and content-addressed, exactly as `collect`'s
+//! the table being append-only and content-addressed, exactly as `collect`'s
 //! resumability falls out of the log. It is also why a **monthly recrawl is cheap**: a
 //! re-crawled site is ~95% identical, identical text has an identical `chunk_hash`, and
 //! only genuinely new chunks reach the model (SPEC §6.1).
@@ -34,7 +37,7 @@ use crate::embed::Embedder;
 use crate::index::Index;
 use crate::models;
 use crate::prelude::*;
-use crate::vectors::VectorCache;
+use crate::vectors::VectorTable;
 
 /// Large enough to amortise context creation, small enough that a batch of long chunks
 /// does not blow past the embedder's context window in aggregate.
@@ -103,11 +106,12 @@ pub struct EmbedReport {
     pub model: String,
     pub variant: String,
     pub dims: usize,
-    pub cache: std::path::PathBuf,
+    /// Where the vectors went — `vectors.lance/`.
+    pub vectors: std::path::PathBuf,
     /// Chunks in the index.
     pub indexed: usize,
-    /// Already cached when the run started — the resumed-past portion.
-    pub already_cached: usize,
+    /// Already stored when the run started — the resumed-past portion.
+    pub already_embedded: usize,
     pub embedded: usize,
     /// Still outstanding after this run, from `--limit` or from failures.
     pub remaining: usize,
@@ -118,7 +122,7 @@ pub struct EmbedReport {
     pub skipped: Vec<Skipped>,
 }
 
-/// Embed indexed chunks into the durable vector cache.
+/// Embed indexed chunks into the vector table.
 #[op(long_running, group = "stage")]
 pub async fn embed(ctx: &Ctx, args: EmbedArgs, progress: &Progress) -> anyhow::Result<EmbedReport> {
     anyhow::ensure!(args.batch > 0, "--batch must be at least 1");
@@ -126,7 +130,7 @@ pub async fn embed(ctx: &Ctx, args: EmbedArgs, progress: &Progress) -> anyhow::R
     let index = Index::open(ctx.store.require_index()?)?;
     let indexed = index.chunk_hashes()?;
 
-    // Dimensions come from the registry so the cache can be opened — and the outstanding
+    // Dimensions come from the registry so the table can be opened — and the outstanding
     // work computed — before a multi-gigabyte model is loaded. A dry run never loads one.
     let spec = models::require(&args.model)?;
     let dims = spec
@@ -134,13 +138,22 @@ pub async fn embed(ctx: &Ctx, args: EmbedArgs, progress: &Progress) -> anyhow::R
         .ok_or_else(|| anyhow::anyhow!("`{}` is not an embedding model", args.model))?
         as usize;
 
-    let cache = VectorCache::open(&ctx.store.vector_cache_dir(), spec.id, dims)?;
-    let cached = cache.hashes()?;
-    let already_cached = indexed.iter().filter(|h| cached.contains(*h)).count();
+    // Opening creates the table, and `--dry-run` must leave nothing behind — so an
+    // absent table is read as "nothing stored" rather than created to be asked. An
+    // existing one is opened either way, because that is what checks the model.
+    let stored = if ctx.store.vectors_path().exists() {
+        VectorTable::open(&ctx.store.vectors_db(), spec.id, dims)
+            .await?
+            .hashes()
+            .await?
+    } else {
+        std::collections::HashSet::new()
+    };
+    let already_embedded = indexed.iter().filter(|h| stored.contains(*h)).count();
 
     let mut todo: Vec<String> = indexed
         .iter()
-        .filter(|h| !cached.contains(*h))
+        .filter(|h| !stored.contains(*h))
         .cloned()
         .collect();
     let outstanding = todo.len();
@@ -155,9 +168,9 @@ pub async fn embed(ctx: &Ctx, args: EmbedArgs, progress: &Progress) -> anyhow::R
             .clone()
             .unwrap_or_else(|| spec.default_variant.to_string()),
         dims,
-        cache: cache.path().to_path_buf(),
+        vectors: ctx.store.vectors_path(),
         indexed: indexed.len(),
-        already_cached,
+        already_embedded,
         embedded: 0,
         remaining: outstanding,
         elapsed_secs: 0.0,
@@ -167,10 +180,12 @@ pub async fn embed(ctx: &Ctx, args: EmbedArgs, progress: &Progress) -> anyhow::R
 
     if args.dry_run || todo.is_empty() {
         if todo.is_empty() {
-            progress.say("nothing to embed — every indexed chunk is already cached");
+            progress.say("nothing to embed — every indexed chunk is already stored");
         }
         return Ok(base);
     }
+
+    let table = VectorTable::open(&ctx.store.vectors_db(), spec.id, dims).await?;
 
     progress.say(format!(
         "loading {} ({})",
@@ -192,10 +207,17 @@ pub async fn embed(ctx: &Ctx, args: EmbedArgs, progress: &Progress) -> anyhow::R
     let started = Instant::now();
     let (embedded, skipped) = {
         let batch_size = args.batch;
-        let cache = cache.clone();
+        let table = table.clone();
         let progress = progress.clone();
-        tokio::task::spawn_blocking(move || run(embedder, index, cache, todo, batch_size, progress))
-            .await??
+        // The table's API is async and the loop is not. A handle captured here lets the
+        // blocking thread drive an append to completion without a runtime of its own —
+        // safe precisely because a `spawn_blocking` thread is not a runtime worker, so
+        // parking it starves nothing.
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            run(embedder, index, table, todo, batch_size, progress, handle)
+        })
+        .await??
     };
 
     let elapsed = started.elapsed().as_secs_f64();
@@ -213,10 +235,11 @@ pub async fn embed(ctx: &Ctx, args: EmbedArgs, progress: &Progress) -> anyhow::R
 fn run(
     embedder: Embedder,
     index: Index,
-    cache: VectorCache,
+    table: VectorTable,
     todo: Vec<String>,
     batch_size: usize,
     progress: Progress,
+    handle: tokio::runtime::Handle,
 ) -> anyhow::Result<(usize, Vec<Skipped>)> {
     let total = todo.len() as u64;
     let started = Instant::now();
@@ -231,9 +254,9 @@ fn run(
             Ok(vectors) => {
                 let entries: Vec<(String, Vec<f32>)> =
                     window.iter().cloned().zip(vectors).collect();
-                // Written before the counter moves: the cache is the only record of
+                // Written before the counter moves: the table is the only record of
                 // progress, so a crash between the two must lose work, never invent it.
-                cache.append(&entries)?;
+                handle.block_on(table.append(&entries))?;
                 embedded += entries.len();
             }
             // A batch fails as a unit — usually because one chunk is over-long — so it
@@ -245,7 +268,7 @@ fn run(
                     let text = index.chunk_texts(std::slice::from_ref(hash))?;
                     match embedder.embed_documents(&text) {
                         Ok(mut v) => {
-                            cache.append(&[(hash.clone(), v.remove(0))])?;
+                            handle.block_on(table.append(&[(hash.clone(), v.remove(0))]))?;
                             embedded += 1;
                         }
                         Err(e) => skipped.push(Skipped {
@@ -293,7 +316,7 @@ impl Render for EmbedReport {
         p.nest(|p| {
             p.figures(&[
                 (self.indexed as u64, "chunks indexed"),
-                (self.already_cached as u64, "already cached"),
+                (self.already_embedded as u64, "already embedded"),
                 (self.embedded as u64, "embedded"),
                 (self.remaining as u64, "remaining"),
             ])?;
@@ -385,7 +408,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.indexed, 7);
-        assert_eq!(report.already_cached, 0);
+        assert_eq!(report.already_embedded, 0);
         assert_eq!(report.remaining, 7);
         assert_eq!(report.embedded, 0);
         assert_eq!(report.dims, 2560);
@@ -431,21 +454,22 @@ mod tests {
         assert_eq!(report.embedded, 0);
     }
 
-    /// The resumability claim, without running a model: pre-seed the cache and confirm
+    /// The resumability claim, without running a model: pre-seed the table and confirm
     /// the work list is the difference rather than the whole index.
     #[tokio::test]
-    async fn cached_chunks_are_subtracted_from_the_work_list() {
+    async fn stored_chunks_are_subtracted_from_the_work_list() {
         let (_dir, ctx) = indexed_store(10).await;
         let index = Index::open(ctx.store.require_index().unwrap()).unwrap();
         let hashes = index.chunk_hashes().unwrap();
 
-        let cache =
-            VectorCache::open(&ctx.store.vector_cache_dir(), "qwen3-embedding-4b", 2560).unwrap();
+        let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
+            .await
+            .unwrap();
         let seeded: Vec<(String, Vec<f32>)> = hashes[..4]
             .iter()
             .map(|h| (h.clone(), vec![0.0; 2560]))
             .collect();
-        cache.append(&seeded).unwrap();
+        table.append(&seeded).await.unwrap();
 
         let report = embed(
             &ctx,
@@ -462,8 +486,29 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.indexed, 10);
-        assert_eq!(report.already_cached, 4);
-        assert_eq!(report.remaining, 6, "only uncached chunks are work");
+        assert_eq!(report.already_embedded, 4);
+        assert_eq!(report.remaining, 6, "only unembedded chunks are work");
+    }
+
+    /// A dry run is a plan, so it must not leave a table behind on a store that had
+    /// none — the same rule `doctor` follows for the models directory.
+    #[tokio::test]
+    async fn a_dry_run_creates_no_table() {
+        let (_d, ctx) = indexed_store(3).await;
+        embed(
+            &ctx,
+            EmbedArgs {
+                model: default_model(),
+                variant: None,
+                batch: 8,
+                limit: None,
+                dry_run: true,
+            },
+            &Progress::none(),
+        )
+        .await
+        .unwrap();
+        assert!(!ctx.store.vectors_path().exists());
     }
 
     #[tokio::test]
@@ -506,28 +551,38 @@ mod tests {
         assert!(err.contains("not an embedding model"), "{err}");
     }
 
-    /// Two embedders write to different files, so switching models can never append
-    /// incomparable vectors to an existing cache (§6.2).
+    /// One table, so switching models is refused rather than silently mixed. A vector
+    /// from another model is in another space and still returns a ranked list, which is
+    /// why the refusal has to happen before anything is written (§6.2).
     #[tokio::test]
-    async fn each_model_gets_its_own_cache_file() {
+    async fn a_second_model_is_refused_rather_than_mixed_in() {
         let (_d, ctx) = indexed_store(2).await;
-        let mut paths = Vec::new();
-        for model in ["qwen3-embedding-4b", "qwen3-embedding-0.6b"] {
-            let report = embed(
-                &ctx,
-                EmbedArgs {
-                    model: model.into(),
-                    variant: None,
-                    batch: 8,
-                    limit: None,
-                    dry_run: true,
-                },
-                &Progress::none(),
-            )
+        VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
             .await
             .unwrap();
-            paths.push(report.cache);
-        }
-        assert_ne!(paths[0], paths[1]);
+
+        let err = embed(
+            &ctx,
+            EmbedArgs {
+                model: "qwen3-embedding-0.6b".into(),
+                variant: None,
+                batch: 8,
+                limit: None,
+                dry_run: true,
+            },
+            &Progress::none(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        // Which of the two guards catches it depends on the pair — `0.6b` is 1024-dim,
+        // so the width check fires before the model check. Either is a refusal, and both
+        // have to name the way out; the model-id path is asserted on its own in
+        // `vectors`, where two models share a width.
+        assert!(
+            err.contains("centinel embed"),
+            "refused, and names the fix: {err}"
+        );
     }
 }

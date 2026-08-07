@@ -13,6 +13,7 @@
 //! site's boilerplate from crowding the index, and it means the eventual embedding step
 //! embeds each distinct passage once rather than once per page.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -255,7 +256,7 @@ impl Index {
     ///
     /// A `chunk_hash` is the hash of the chunk's *text*, and the text is decided by the
     /// geometry — so re-chunking at a different size produces a wholly different set of
-    /// hashes. Nothing in the index or the vector cache can tell the two sets apart, and
+    /// hashes. Nothing in the index or the vector table can tell the two sets apart, and
     /// both are append-only, so mixing them leaves the old chunks in place and re-embeds
     /// the entire corpus. Recording the geometry is what makes that a question the
     /// caller gets asked instead of a bill they get later.
@@ -388,8 +389,42 @@ impl Index {
             .collect()
     }
 
+    /// Which of `hashes` have a placement in `source`.
+    ///
+    /// The vector arm's `--source` filter. Lance carries no source column — a chunk has
+    /// many placements, across sources — so the filter is applied after retrieval, and
+    /// applying it one `placements_of` call per candidate would be a query per hit.
+    pub fn in_source(&self, hashes: &[String], source: &str) -> anyhow::Result<HashSet<String>> {
+        if hashes.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let holes = std::iter::repeat_n("?", hashes.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT DISTINCT chunk_hash FROM placement
+             WHERE source = ?1 AND chunk_hash IN ({holes})"
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(hashes.len() + 1);
+        params.push(&source);
+        for h in hashes {
+            params.push(h);
+        }
+        let rows = stmt.query_map(params.as_slice(), |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<HashSet<_>, _>>()?)
+    }
+
+    /// Where a chunk sits, everywhere it sits.
+    ///
+    /// `prepare_cached` because the hybrid arms reach 100 deep each, so this runs a
+    /// hundred times per query rather than the ten it did when `search` was the only
+    /// caller and took `limit` directly. Compiling the same statement each time measured
+    /// 1.11 ms against 0.61 ms per query on a 460,000-placement corpus — small beside a
+    /// reranker pass, and free to not pay.
     pub fn placements_of(&self, chunk_hash: &str) -> anyhow::Result<Vec<Placement>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT source, resource, blob_sha, derived_sha, ordinal, heading,
                     char_start, char_end, observed_at, tool, title
              FROM placement WHERE chunk_hash = ?1 ORDER BY source, resource",
@@ -412,6 +447,28 @@ impl Index {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// How many distinct chunks the index holds.
+    ///
+    /// Separate from [`Self::stats`] because that one sums `chars`, and summing a column
+    /// means reading every row: on a 397,830-chunk corpus holding 330 MB of text it
+    /// measured **6.0 s cold** against **0.29 s** for the count alone, which `COUNT(*)`
+    /// answers from an index without touching the text.
+    ///
+    /// `search` needs the count on every query — it is the denominator of the vector
+    /// arm's coverage — and needs none of the other three figures. Paying six seconds
+    /// for a number in a report footer made the corpus size the most expensive part of
+    /// asking the corpus a question.
+    pub fn chunk_count(&self) -> anyhow::Result<usize> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunk", [], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
+    /// Every figure about the index, including the expensive one.
+    ///
+    /// For `index`, which reports on the store it just built. A caller that wants only
+    /// the chunk count wants [`Self::chunk_count`].
     pub fn stats(&self) -> anyhow::Result<IndexStats> {
         let (chunks, chars): (i64, i64) = self.conn.query_row(
             "SELECT COUNT(*), COALESCE(SUM(chars), 0) FROM chunk",
@@ -593,6 +650,73 @@ mod tests {
         assert_eq!(p.resource, "https://www.tampa.gov/lobbyist");
         assert_eq!(p.tool, "dom_smoothie+htmd");
         assert_eq!(p.title.as_deref(), Some("A page"));
+    }
+
+    /// The vector arm's `--source` filter. Lance has no source column, so retrieval
+    /// over-fetches and this narrows the candidates in one query rather than one per hit.
+    #[test]
+    fn in_source_keeps_only_the_chunks_placed_in_that_source() {
+        let mut idx = Index::in_memory().unwrap();
+        let mut hashes = Vec::new();
+        for (i, (source, text)) in [
+            ("tampa", "the stormwater improvement fee funds new inlets"),
+            ("pinellas", "the county drainage district met on tuesday"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let derived = format!("{:064x}", i);
+            let chunk = Chunk::new(text.to_string(), 0, String::new(), 0);
+            hashes.push(chunk.chunk_hash.clone());
+            idx.insert(
+                &chunk,
+                &placement(source, &format!("https://x/{i}"), &derived),
+            )
+            .unwrap();
+        }
+
+        let kept = idx.in_source(&hashes, "tampa").unwrap();
+        assert_eq!(kept, HashSet::from([hashes[0].clone()]));
+        assert!(idx.in_source(&hashes, "nowhere").unwrap().is_empty());
+        assert!(idx.in_source(&[], "tampa").unwrap().is_empty());
+    }
+
+    /// The same passage under two sources is one chunk with two placements, so filtering
+    /// by either source must keep it.
+    #[test]
+    fn in_source_finds_a_shared_chunk_under_each_of_its_sources() {
+        let mut idx = Index::in_memory().unwrap();
+        let chunk = Chunk::new("identical boilerplate notice".into(), 0, String::new(), 0);
+        for (i, source) in ["tampa", "pinellas"].iter().enumerate() {
+            idx.insert(
+                &chunk,
+                &placement(source, &format!("https://x/{i}"), &format!("{:064x}", i)),
+            )
+            .unwrap();
+        }
+
+        let hashes = vec![chunk.chunk_hash.clone()];
+        assert_eq!(idx.in_source(&hashes, "tampa").unwrap().len(), 1);
+        assert_eq!(idx.in_source(&hashes, "pinellas").unwrap().len(), 1);
+    }
+
+    /// `chunk_count` has to agree with `stats`, because it exists only to avoid the
+    /// `SUM(chars)` that makes `stats` read every row.
+    #[test]
+    fn chunk_count_agrees_with_stats_without_summing_text() {
+        let idx = indexed(&[
+            (
+                "https://x/a",
+                "# A\n\nThe stormwater plan for the coming year.",
+            ),
+            (
+                "https://x/b",
+                "# B\n\nA notice of public hearing on rezoning.",
+            ),
+        ]);
+        assert_eq!(idx.chunk_count().unwrap(), idx.stats().unwrap().chunks);
+        assert!(idx.chunk_count().unwrap() > 0);
+        assert_eq!(Index::in_memory().unwrap().chunk_count().unwrap(), 0);
     }
 
     #[test]

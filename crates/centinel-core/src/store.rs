@@ -5,9 +5,8 @@
 //!   blobs/ab/cd/abcd1234…      TRUTH    immutable, content-addressed, pooled across Sources
 //!   log/<source>/YYYY-MM.jsonl TRUTH    append-only
 //!   current/<source>/…         DERIVED  URL-mirroring tree. Regenerable.
-//!   cache/embeddings/          DURABLE  Tier A
-//!   centinel.db                DERIVED  SQLite: metadata + FTS5
-//!   index/                     DERIVED  LanceDB
+//!   centinel.db                DERIVED  SQLite: metadata + FTS5   — the BM25 arm
+//!   vectors.lance/             DERIVED  LanceDB: chunk vectors    — the vector arm
 //! ```
 //!
 //! Only `blobs/` and `log/` are truth. Everything else is rebuildable from them, which
@@ -111,6 +110,9 @@ type Result<T> = std::result::Result<T, StoreError>;
 /// The SQLite file, named once.
 pub const INDEX_FILE: &str = "centinel.db";
 
+/// The suffix Lance gives every table directory.
+const LANCE_SUFFIX: &str = ".lance";
+
 fn io_at(path: impl Into<PathBuf>) -> impl FnOnce(std::io::Error) -> StoreError {
     let path = path.into();
     move |source| StoreError::Io { path, source }
@@ -128,7 +130,9 @@ impl Store {
     /// Opens (and creates, if absent) a store at `root`.
     pub async fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
-        for sub in ["blobs", "log", "current", "cache/embeddings", "index"] {
+        // `vectors.lance/` is absent: Lance creates its own table directory, and an empty
+        // one left here would be a database with a table that cannot be opened.
+        for sub in ["blobs", "log", "current"] {
             let p = root.join(sub);
             tokio::fs::create_dir_all(&p).await.map_err(io_at(&p))?;
         }
@@ -166,10 +170,33 @@ impl Store {
         self.root.join("current")
     }
 
-    /// `cache/embeddings/` — durable vectors, keyed by chunk hash.
-    pub fn vector_cache_dir(&self) -> PathBuf {
-        self.root.join("cache").join("embeddings")
+    /// The LanceDB **database** directory, which is the store root itself.
+    ///
+    /// Lance names a table's directory after the table, so the table lands beside
+    /// `centinel.db` at [`Self::vectors_path`] rather than nested inside a second
+    /// directory that would only ever hold one thing.
+    ///
+    /// Opening a database here creates nothing, and Lance lists only real tables from
+    /// it — `blobs/`, `log/`, `current/`, `centinel.db` and `centinel.toml` are all
+    /// invisible to `table_names()`.
+    pub fn vectors_db(&self) -> PathBuf {
+        self.root.clone()
     }
+
+    /// `vectors.lance/` — the chunk vectors. Derived, and safe to delete.
+    ///
+    /// Built from [`crate::vectors::TABLE`] rather than spelled out, because Lance
+    /// derives the directory from the table name and the two must not be able to drift.
+    pub fn vectors_path(&self) -> PathBuf {
+        self.root
+            .join(format!("{}{LANCE_SUFFIX}", crate::vectors::TABLE))
+    }
+
+    // There is deliberately no `require_vectors` beside `require_index`. The pair looks
+    // symmetric and is not: a missing index is fatal to `search`, while missing vectors
+    // are an ordinary state it reports and works around. `VectorTable::open_existing`
+    // already answers "is there a table, and whose is it" in one call, and a second
+    // spelling of the same message here only invites the two to drift.
 
     /// `centinel.db` — the SQLite metadata and FTS5 index. Derived, and rebuildable.
     pub fn index_path(&self) -> PathBuf {
@@ -961,12 +988,25 @@ mod tests {
 
         assert!(s.blobs_dir().ends_with("blobs"));
         assert!(s.current_dir().ends_with("current"));
-        assert!(s.vector_cache_dir().ends_with("cache/embeddings"));
         assert!(s.index_path().ends_with("centinel.db"));
+        assert!(s.vectors_path().ends_with("vectors.lance"));
         assert!(
             s.blob_path_of(&BlobSha::from_bytes(b"x"))
                 .starts_with(s.blobs_dir())
         );
+    }
+
+    /// The two arms sit beside each other under the root, and neither is created up
+    /// front: `centinel.db` is `index`'s to make, and `vectors.lance/` is Lance's.
+    #[tokio::test]
+    async fn the_two_search_arms_are_siblings_and_neither_is_pre_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path()).await.unwrap();
+
+        assert_eq!(s.vectors_path().parent(), s.index_path().parent());
+        assert_eq!(s.vectors_db(), s.root());
+        assert!(!s.vectors_path().exists());
+        assert!(!s.index_path().exists());
     }
 
     /// A reader gets a handle without the tree being created underneath it.

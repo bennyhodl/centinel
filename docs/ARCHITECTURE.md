@@ -29,12 +29,13 @@ Every index is derived and rebuildable:
   blobs/ab/cd/abcd1234…          TRUTH    immutable, content-addressed, pooled across sources
   log/<source>/YYYY-MM.jsonl     TRUTH    append-only observations, discovery runs, status, derivations
   current/<source>/…             DERIVED  URL-mirroring tree
-  cache/embeddings/              DURABLE  survives an index rebuild
-  centinel.db                    DERIVED  SQLite metadata + FTS5
-  index/                         DERIVED  LanceDB vectors
+  centinel.db                    DERIVED  SQLite metadata + FTS5      — the BM25 arm
+  vectors.lance/                 DERIVED  LanceDB chunk vectors        — the vector arm
 ```
 
-Delete everything derived and you lose minutes, not evidence. The corpus is `rsync`-able and complete on its own.
+Delete everything derived and you lose no evidence — but not everything derived is cheap.
+`centinel.db` rebuilds in minutes; `vectors.lance/` is inference over the whole corpus, so
+on 400,000 chunks it is a day. Backing it up is `cp -R`. The corpus is `rsync`-able and complete on its own.
 
 Blobs are **pooled across sources** — the same PDF on two `.gov` sites stores once. Logs and trees are **per-source**, so a single city's corpus stays separable for handoff.
 
@@ -445,21 +446,23 @@ centinel embed                    # the rest; re-run to resume
 ```
 
 ```
-cache/embeddings/<model_id>-<dims>.vec
-  [64-byte header][record][record]…
-  header:  magic(12) version(4) dims(4) model_id(40, NUL-padded) reserved(4)
-  record:  chunk_hash(32 raw bytes)  vector(dims × f32 little-endian)
+vectors.lance/          LanceDB, one table: chunk_hash (Utf8) → vector (FixedSizeList<f32, dims>)
 ```
 
-**Tier A** ([`SPEC.md`](SPEC.md) §5.2) — expensive to rebuild, portable across search
-backends, and the natural unit to publish. Fixed-width and append-only, so a record sits
-at a computable offset and an interrupted run keeps everything it wrote. A crash mid-append
-leaves a partial trailing record; reopening detects the length mismatch and truncates it,
-which is safe because the dropped chunk is simply re-embedded.
+Two columns and no more. Text and placements stay in `centinel.db`; a second copy goes out
+of date the first time the corpus changes, and `chunk_hash` is the join both stores already
+use. The model id lives in the table's schema metadata, and a query vector from any other
+model is **refused at open** — vectors from two models are in different spaces and still
+return a confident ranked list.
+
+There is no separate embedding cache. [`SPEC.md`](SPEC.md) §5.2 specified one and then
+reversed it: a `.lance` dataset is an ordinary directory, so `cp -R` backs it up and a
+plain scan reads every vector back out. The cache's stated purpose — making a backend swap
+a re-import rather than a re-embed — was already true without it.
 
 **Resumability is a consequence, not a feature.** No checkpoint file — the work list is
-`index chunk hashes − cached chunk hashes`. Kill it at chunk 40,000 and re-run; it starts
-at 40,001. Same shape as `collect`, for the same reason. It is also why a monthly recrawl
+`index chunk hashes − stored chunk hashes`. Kill it at chunk 40,000 and re-run; it starts
+at 40,001. Lance commits a version per append, so what landed before the kill is there. Same shape as `collect`, for the same reason. It is also why a monthly recrawl
 is cheap: identical text has an identical `chunk_hash`, so only genuinely new chunks reach
 the model (§6.1).
 
@@ -480,22 +483,31 @@ from FTS5 — the water report says `PWSName`, `Analyte`, `UCMR 5`, and the only
 containing "drinking" is a tax table about *Drinking Places (Alcoholic Beverages)*. BM25 is
 behaving correctly and is still useless.
 
-```console
-$ cargo run --release --example vector_search
-  0.4726  |PWSName|Sample Collection Date|EPA Method|Analyte|Result|…
-          …/2023_Q2_Pebble_Creek_System_UCMR_5_Results.pdf
+That is the case hybrid retrieval is for, and the reason §6.4 makes it the default rather
+than an option. It is asserted as a test rather than described:
+`ops::search::tests::a_query_reaches_the_passage_that_answers_it` indexes that passage
+beside two irrelevant ones, embeds all three, and requires the query to reach it.
+
+## What retrieval reports about itself
+
+```
+query
+  ├─ BM25   (SQLite FTS5)     → top 100
+  └─ vector (Qwen3 + Lance)   → top 100
+        └─ RRF fuse (k=60)    → top 40
+              └─ Qwen3-Reranker → top n
 ```
 
-Top three hits, all the right document. That is the case hybrid retrieval is for, and the
-reason §6.4 makes it the default rather than an option.
-
-`examples/vector_search.rs` also demonstrates that a linear scan over the Tier A cache
-answers queries on its own — which is what makes LanceDB a deferrable optimisation rather
-than a prerequisite.
+RRF weights by **rank**, and a rank says nothing about the size of the pool it came from —
+so a corpus that is 0.6% embedded returns confident results that look exactly like a
+complete one's. `search` therefore reports `vectors_indexed` beside `total_chunks_indexed`,
+prints the share, and names in `method` exactly which stages ran (`bm25`, `bm25→rerank`,
+`bm25+vector→rrf`, `bm25+vector→rrf→rerank`). A stage that did not run says why, in
+`no_vectors` or `no_rerank`. Missing weights degrade the answer; they never turn a query
+into an error.
 
 ## Not built yet
 
-Hybrid RRF fusion, reranking, crawling, YouTube, scheduling. The pieces exist —
-FTS5 BM25, the vector cache, and a working embedder — but nothing fuses them yet.
+Crawling, YouTube, scheduling.
 
 [`SPEC.md`](SPEC.md) §3–§6 are settled and should not be relitigated without reopening the ticket they came from. §8 lists the six open decisions.

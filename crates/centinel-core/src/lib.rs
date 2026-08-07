@@ -16,9 +16,13 @@
 //!
 //! ## What is not here yet
 //!
-//! Search and retrieval (SPEC §6) is specified but unimplemented — it needs LanceDB and
-//! the Qwen3 model pair, neither of which the spine requires. Seven decisions in SPEC §8
-//! remain open; nothing in this crate should quietly assume an answer to one.
+//! Search and retrieval (SPEC §6) is built: both arms, RRF fusion and the reranker.
+//! What is missing is **coverage** — a corpus is keyword-searchable as soon as it is
+//! indexed and semantically searchable only after `embed`, which is hours. `search` says
+//! which of the two a given answer came from rather than letting the difference pass.
+//!
+//! Seven decisions in SPEC §8 remain open; nothing in this crate should quietly assume
+//! an answer to one.
 
 // So the `#[op]` macro's `::centinel_core::…` paths resolve inside this crate too,
 // exactly as they do for downstream users.
@@ -41,6 +45,7 @@ pub mod op;
 pub mod ops;
 pub mod policy;
 pub mod render;
+pub mod rerank;
 pub mod sources;
 pub mod store;
 pub mod tool;
