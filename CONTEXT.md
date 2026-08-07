@@ -168,6 +168,17 @@ wrote off 168 of 490 PDFs that had a text layer all along — an executive order
 minutes, a 315,000-character action plan. A fallback is not a second guess at the same
 question; it is the admission that the first tool's silence was never evidence.
 
+**The order is data**, in `extract::readers_for`, and there is one definition of *produced
+nothing* (`produced_text`) for every pair. It was three mechanisms — a `bool` for PDF, a
+free-text note for HTML, a re-route for documents — which meant each pair decided for
+itself what failure meant, and one of them decided wrong: `derive` returned before the
+fallback whenever the primary said `Unextractable`, which is exactly the verdict
+`extract_pdf` files for a PDF whose text layer `pdf-inspector` cannot see. So the fallback
+that entry describes could not be reached by the 168 documents it was written for. Written
+once, the predicate can be wrong once; written per pair, it is wrong per pair. A second
+reader for a new kind is now an element in a list rather than a fourth mechanism, and
+`recovered_by_fallback` counts every kind's fallback rather than only PDF's.
+
 **Chunk geometry** — the target and overlap sizes chunking uses. Load-bearing far outside
 chunking, because a `chunk_hash` hashes the chunk's *text* and the geometry decides the
 text. Changing it produces a wholly different set of hashes, so the old chunks stay in the

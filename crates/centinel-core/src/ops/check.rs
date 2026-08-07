@@ -275,7 +275,7 @@ pub async fn check(
         // primary reader comes back empty. It wants a path, and the bytes are already at
         // one — which is the other reason they are written first.
         let derived = extract::derive(
-            kind.as_str(),
+            kind,
             &item.bytes,
             &as_served,
             Some(&item.address),

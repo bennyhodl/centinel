@@ -24,6 +24,8 @@ use std::io::Cursor;
 
 use serde::{Deserialize, Serialize};
 
+use crate::content::ContentKind;
+
 /// Versions of the extraction tools, recorded on every [`crate::domain::Derivation`].
 ///
 /// Manually synced with `Cargo.toml` — a wart, but a deliberate one: deriving them at
@@ -112,36 +114,144 @@ impl Extracted {
             Self::Unextractable { .. } => None,
         }
     }
+
+    /// Records what the readers before this one came up against.
+    ///
+    /// A verdict carries its own reason and takes none of these: they are the story of how
+    /// a *successful* extraction was reached.
+    fn note_all(&mut self, notes: &[String]) {
+        if let Self::Text(e) | Self::Partial { extraction: e, .. } = self {
+            // Ahead of the reader's own notes: they are what happened first.
+            let mut all = notes.to_vec();
+            all.append(&mut e.notes);
+            e.notes = all;
+        }
+    }
 }
 
-/// Extracts text from bytes, dispatching on the content kind from [`crate::fetch`].
-pub fn extract(kind: &str, bytes: &[u8], url: Option<&str>, title: Option<&str>) -> Extracted {
-    match kind {
-        "html" => extract_html(bytes, url),
-        "pdf" => extract_pdf(bytes),
-        "spreadsheet" => extract_spreadsheet(bytes),
-        // Two words, one extractor. `document` is what the `content-type` declared;
-        // `zip-container` is what the magic bytes could tell on their own, which for a
-        // `.docx` served as `application/octet-stream` is only "this is a zip". Both
-        // reach the same question, and `extract_document` is where it gets answered.
-        "document" | "zip-container" => extract_document(bytes),
-        "captions" => extract_captions(bytes, title),
-        "text" | "csv" | "json" | "xml" => match std::str::from_utf8(bytes) {
-            Ok(s) => Extracted::Text(Extraction {
-                text: s.to_string(),
-                title: None,
-                tool: "passthrough".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                notes: vec![],
-            }),
-            Err(e) => Extracted::Unextractable {
-                reason: format!("declared {kind} but not valid UTF-8: {e}"),
-            },
-        },
-        other => Extracted::Unextractable {
-            reason: format!("no extractor for content kind `{other}`"),
-        },
+/// The blob a reader is given.
+///
+/// Both forms, because a reader is either an in-process parser or a child process, and
+/// which one a kind needs is the reader's business rather than the caller's. The caller
+/// has the blob at its content address either way.
+pub struct Blob<'a> {
+    pub bytes: &'a [u8],
+    pub path: &'a std::path::Path,
+    pub url: Option<&'a str>,
+    pub title: Option<&'a str>,
+}
+
+/// One tool that can turn a blob into text.
+///
+/// A **primary and fallback reader** used to be three different things in this file: a
+/// `bool` for PDF, a free-text note for HTML, and a re-route for documents. So a kind that
+/// wanted two readers had to invent a fourth mechanism, and — worse — each pair decided
+/// for itself what "produced nothing" meant. That decision is exactly the one the PDF pair
+/// got wrong: `derive` returned before the fallback whenever the primary said
+/// `Unextractable`, which is precisely what `extract_pdf` emits for a PDF whose text layer
+/// `pdf-inspector` cannot see. Poppler reads a third of those.
+///
+/// Now the order is data, [`produced_text`] is written once, and the record names whoever
+/// spoke.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reader {
+    /// `dom_smoothie` for the article, `htmd` for the markdown.
+    Readability,
+    /// The whole page minus scripts. Worse for search, but a listing page with no article
+    /// is still content worth having.
+    WholePage,
+    PdfInspector,
+    /// A child process. Reads a text layer `pdf-inspector` misses on a third of the PDFs
+    /// it makes nothing of.
+    Poppler,
+    AnyDoc,
+    Spreadsheet,
+    Captions,
+    /// The bytes, as text. For the kinds that are already text.
+    Passthrough,
+}
+
+impl Reader {
+    /// The name that reaches the record when this reader is the one that spoke.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Readability => "dom_smoothie+htmd",
+            Self::WholePage => "htmd",
+            Self::PdfInspector => "pdf-inspector",
+            Self::Poppler => PDFTOTEXT,
+            Self::AnyDoc => "anydoc",
+            Self::Spreadsheet => "calamine",
+            Self::Captions => "youtube-asr-json3",
+            Self::Passthrough => "passthrough",
+        }
     }
+
+    /// Whether running this one means starting a child process.
+    ///
+    /// [`extract`] is synchronous and answers for the in-process pipeline alone; only
+    /// [`derive`] can reach the rest.
+    fn spawns(self) -> bool {
+        matches!(self, Self::Poppler)
+    }
+
+    fn read_in_process(self, blob: &Blob<'_>) -> Extracted {
+        match self {
+            Self::Readability => html_readability(blob.bytes, blob.url),
+            Self::WholePage => html_whole_page(blob.bytes),
+            Self::PdfInspector => extract_pdf(blob.bytes),
+            Self::AnyDoc => extract_document(blob.bytes),
+            Self::Spreadsheet => extract_spreadsheet(blob.bytes),
+            Self::Captions => extract_captions(blob.bytes, blob.title),
+            Self::Passthrough => passthrough(blob.bytes),
+            Self::Poppler => unreachable!("a spawning reader is never read in process"),
+        }
+    }
+
+    async fn read(self, blob: &Blob<'_>) -> Extracted {
+        match self {
+            Self::Poppler => match pdf_text_via_poppler(blob.path).await {
+                Some(extraction) => Extracted::Text(extraction),
+                None => Extracted::Unextractable {
+                    reason: "poppler found no text either".into(),
+                },
+            },
+            reader => reader.read_in_process(blob),
+        }
+    }
+}
+
+/// The readers for a kind, in the order they are tried.
+///
+/// Adding a kind means adding a row here; adding a second reader to an existing kind means
+/// adding an element. Neither needs a new field, a new flag, or a new idea about what
+/// failure means.
+pub fn readers_for(kind: ContentKind) -> &'static [Reader] {
+    use ContentKind::*;
+    match kind {
+        Html => &[Reader::Readability, Reader::WholePage],
+        Pdf => &[Reader::PdfInspector, Reader::Poppler],
+        Spreadsheet => &[Reader::Spreadsheet],
+        // Two kinds, one reader. `document` is what the `content-type` declared;
+        // `zip-container` is what the magic bytes could tell on their own, which for a
+        // `.docx` served as `application/octet-stream` is only "this is a zip". Both reach
+        // the same question, and `anydoc` is where it gets answered.
+        Document | ZipContainer => &[Reader::AnyDoc],
+        Captions => &[Reader::Captions],
+        Text | Csv | Json | Xml => &[Reader::Passthrough],
+        // Nothing to read. `audio` goes to `transcribe`; `markdown` is already derived
+        // text; `other` is bytes nothing here claims.
+        Markdown | Audio | Other => &[],
+    }
+}
+
+/// Whether a reader actually produced something to keep.
+///
+/// **The one definition**, which is the point. Written per pair, it can be wrong per pair,
+/// and it was: the PDF pair's version returned early on `Unextractable` — the very verdict
+/// its fallback exists to answer — so `pdftotext` was unreachable for the 168 PDFs of 490
+/// that have a text layer `pdf-inspector` cannot see.
+fn produced_text(outcome: &Extracted) -> bool {
+    outcome.text().is_some_and(|t| !t.trim().is_empty())
 }
 
 /// An extraction and how it was reached.
@@ -153,60 +263,131 @@ pub fn extract(kind: &str, bytes: &[u8], url: Option<&str>, title: Option<&str>)
 #[derive(Clone, Debug)]
 pub struct Derived {
     pub outcome: Extracted,
-    /// The primary reader found no text and a fallback did. The measure of how much the
-    /// primary is missing, and the number to watch after any change to it.
+    /// A reader after the first is the one that spoke. The measure of how much the primary
+    /// is missing, and the number to watch after any change to it.
+    ///
+    /// True for every kind with a fallback, not just PDF — which is what makes the HTML
+    /// pair's rate visible at all. It used to be readable only by counting `by_tool`.
     pub recovered_by_fallback: bool,
+}
+
+/// Extracts text from bytes, using every reader for the kind that runs in process.
+///
+/// Synchronous, and therefore blind to any reader that spawns a child. That is the whole
+/// difference between this and [`derive`]: callers that only have bytes get the answer the
+/// in-process pipeline can give.
+pub fn extract(
+    kind: ContentKind,
+    bytes: &[u8],
+    url: Option<&str>,
+    title: Option<&str>,
+) -> Extracted {
+    let blob = Blob {
+        bytes,
+        path: std::path::Path::new(""),
+        url,
+        title,
+    };
+    let mut carried: Vec<(Reader, String)> = Vec::new();
+    for reader in readers_for(kind).iter().copied().filter(|r| !r.spawns()) {
+        let mut outcome = reader.read_in_process(&blob);
+        if produced_text(&outcome) {
+            outcome.note_all(&notes_of(&carried));
+            return outcome;
+        }
+        carried.push((reader, no_text_reason(&outcome)));
+    }
+    Extracted::Unextractable {
+        reason: give_up_reason(kind, &carried),
+    }
 }
 
 /// The extraction the **record** takes, as against the one a reader produced.
 ///
-/// [`extract`] answers "what did this reader make of these bytes". This answers the
-/// question the log asks, and the two differ in exactly one place: a reader that parsed
-/// cleanly and came back with nothing has produced a *verdict*, not a derivation. A PDF
-/// gets one more reader first — see [`pdf_text_via_poppler`] — and anything still empty
-/// becomes an [`Extracted::Unextractable`], so the answer lands where a pipeline-version
+/// [`extract`] answers "what did the in-process readers make of these bytes". This answers
+/// the question the log asks, and the two differ in exactly one place: a reader that parsed
+/// cleanly and came back with nothing has produced a *verdict*, not a derivation. Every
+/// reader for the kind is tried, including the ones that spawn, and anything still empty
+/// becomes an [`Extracted::Unextractable`] so the answer lands where a pipeline-version
 /// bump can revisit it. A `Derivation` always has bytes.
 ///
 /// *Why it is here and not in the op that writes the record:* it was in the op, which
 /// meant it was reachable only by a corpus-wide `extract`. Anything else deriving one
 /// document — `check` — would have re-implemented it, and a QA tool that runs a different
 /// extractor from the pipeline it is checking answers a question nobody asked.
-///
-/// Takes the blob's `path` as well as its bytes because the fallback is a child process
-/// that reads a file; the caller has the blob at its content address either way.
 pub async fn derive(
-    kind: &str,
+    kind: ContentKind,
     bytes: &[u8],
     path: &std::path::Path,
     url: Option<&str>,
     title: Option<&str>,
 ) -> Derived {
-    let outcome = extract(kind, bytes, url, title);
-    if !outcome.text().is_some_and(|t| t.trim().is_empty()) {
-        return Derived {
-            outcome,
-            recovered_by_fallback: false,
-        };
+    let blob = Blob {
+        bytes,
+        path,
+        url,
+        title,
+    };
+    let mut carried: Vec<(Reader, String)> = Vec::new();
+
+    for (i, reader) in readers_for(kind).iter().copied().enumerate() {
+        let mut outcome = reader.read(&blob).await;
+        if produced_text(&outcome) {
+            // What the readers before it came up against. On HTML this is the note the
+            // old code wrote by hand — "readability found only 90 chars" — and on PDF it
+            // is the page count that used to be lost on the way to the fallback.
+            outcome.note_all(&notes_of(&carried));
+            return Derived {
+                outcome,
+                recovered_by_fallback: i > 0,
+            };
+        }
+        carried.push((reader, no_text_reason(&outcome)));
     }
 
-    match kind {
-        "pdf" => match pdf_text_via_poppler(path).await {
-            Some(extraction) => Derived {
-                outcome: Extracted::Text(extraction),
-                recovered_by_fallback: true,
-            },
-            None => Derived {
-                outcome: Extracted::Unextractable {
-                    reason: no_text_reason(&outcome),
-                },
-                recovered_by_fallback: false,
-            },
+    Derived {
+        outcome: Extracted::Unextractable {
+            reason: give_up_reason(kind, &carried),
         },
-        _ => Derived {
-            outcome: Extracted::Unextractable {
-                reason: no_text_reason(&outcome),
-            },
-            recovered_by_fallback: false,
+        recovered_by_fallback: false,
+    }
+}
+
+/// What the readers that came up short had to say, each named.
+///
+/// Notes go on a *successful* extraction, so the name is the point: the text came from the
+/// second reader and this is why the first did not give it.
+fn notes_of(carried: &[(Reader, String)]) -> Vec<String> {
+    carried
+        .iter()
+        .map(|(reader, reason)| format!("{}: {reason}", reader.name()))
+        .collect()
+}
+
+/// Why nothing was derived, after every reader for the kind had a turn.
+fn give_up_reason(kind: ContentKind, carried: &[(Reader, String)]) -> String {
+    match carried {
+        // No reader was even tried, which is a fact about the kind rather than the bytes.
+        [] => format!("no reader for content kind `{kind}`"),
+        // One reader, one story. Naming it would only repeat what `PIPELINE` already
+        // records, and this keeps the wording a verdict had before there was a list.
+        [(_, reason)] => reason.clone(),
+        many => notes_of(many).join("; "),
+    }
+}
+
+/// The bytes, as text, for the kinds that already are text.
+fn passthrough(bytes: &[u8]) -> Extracted {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => Extracted::Text(Extraction {
+            text: s.to_string(),
+            title: None,
+            tool: Reader::Passthrough.name().into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            notes: vec![],
+        }),
+        Err(e) => Extracted::Unextractable {
+            reason: format!("declared text but not valid UTF-8: {e}"),
         },
     }
 }
@@ -235,7 +416,9 @@ fn no_text_reason(outcome: &Extracted) -> String {
                 "are"
             },
         ),
-        _ => "parsed but holds no text".into(),
+        // A reader that already said why keeps its own words.
+        Extracted::Unextractable { reason } => reason.clone(),
+        Extracted::Text(_) => "parsed but holds no text".into(),
     }
 }
 
@@ -275,56 +458,74 @@ fn extract_captions(bytes: &[u8], title: Option<&str>) -> Extracted {
     }
 }
 
-/// `dom_smoothie` for the article, `htmd` for the markdown, bare `htmd` as a fallback.
-fn extract_html(bytes: &[u8], url: Option<&str>) -> Extracted {
+/// Skipping these matters: htmd otherwise serialises inline JSON-LD and drupalSettings
+/// into the markdown, tripling the output with machine noise.
+fn markdown_converter() -> htmd::HtmlToMarkdown {
+    htmd::HtmlToMarkdown::builder()
+        .skip_tags(vec!["script", "style", "noscript", "svg", "form"])
+        .build()
+}
+
+/// `dom_smoothie` for the article, `htmd` for the markdown.
+///
+/// "Found an article too short to be one" is a refusal here rather than a note, because
+/// that is how [`derive`] learns to try the next reader. `MIN_READABLE_CHARS` of output is
+/// the line, and the count travels in the reason so it reaches the record either way.
+fn html_readability(bytes: &[u8], url: Option<&str>) -> Extracted {
     let html = String::from_utf8_lossy(bytes);
 
-    // Skipping these matters: htmd otherwise serialises inline JSON-LD and
-    // drupalSettings into the markdown, tripling the output with machine noise.
-    let converter = htmd::HtmlToMarkdown::builder()
-        .skip_tags(vec!["script", "style", "noscript", "svg", "form"])
-        .build();
-
-    let mut notes = Vec::new();
-
-    if let Ok(mut readability) = dom_smoothie::Readability::new(html.as_ref(), url, None) {
-        if let Ok(article) = readability.parse() {
-            let inner = article.content.to_string();
-            if let Ok(md) = converter.convert(&inner) {
-                let md = md.trim().to_string();
-                if md.chars().count() >= MIN_READABLE_CHARS {
-                    let title = Some(article.title.to_string())
-                        .filter(|t| !t.is_empty())
-                        .or_else(|| html_title(&html));
-                    return Extracted::Text(Extraction {
-                        text: with_title(title.as_deref(), &md),
-                        title,
-                        tool: "dom_smoothie+htmd".into(),
-                        version: format!("{DOM_SMOOTHIE_VERSION}+{HTMD_VERSION}"),
-                        notes,
-                    });
-                }
-                notes.push(format!(
-                    "readability found only {} chars; kept the full page instead",
-                    md.chars().count()
-                ));
-            }
-        } else {
-            notes.push("readability could not parse this page".into());
+    let Ok(mut readability) = dom_smoothie::Readability::new(html.as_ref(), url, None) else {
+        return Extracted::Unextractable {
+            reason: "readability could not read this page".into(),
+        };
+    };
+    let Ok(article) = readability.parse() else {
+        return Extracted::Unextractable {
+            reason: "readability could not parse this page".into(),
+        };
+    };
+    let md = match markdown_converter().convert(article.content.as_ref()) {
+        Ok(md) => md.trim().to_string(),
+        Err(e) => {
+            return Extracted::Unextractable {
+                reason: format!("html conversion failed: {e}"),
+            };
         }
+    };
+    if md.chars().count() < MIN_READABLE_CHARS {
+        return Extracted::Unextractable {
+            reason: format!(
+                "readability found only {} chars; kept the full page instead",
+                md.chars().count()
+            ),
+        };
     }
 
-    // Fallback: the whole page, minus scripts. Worse for search, but a listing page
-    // with no article is still content worth having.
-    match converter.convert(&html) {
+    let title = Some(article.title.to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(|| html_title(&html));
+    Extracted::Text(Extraction {
+        text: with_title(title.as_deref(), &md),
+        title,
+        tool: Reader::Readability.name().into(),
+        version: format!("{DOM_SMOOTHIE_VERSION}+{HTMD_VERSION}"),
+        notes: vec![],
+    })
+}
+
+/// The whole page, minus scripts. Worse for search, but a listing page with no article is
+/// still content worth having.
+fn html_whole_page(bytes: &[u8]) -> Extracted {
+    let html = String::from_utf8_lossy(bytes);
+    match markdown_converter().convert(&html) {
         Ok(md) => {
             let title = html_title(&html);
             Extracted::Text(Extraction {
                 text: with_title(title.as_deref(), md.trim()),
                 title,
-                tool: "htmd".into(),
+                tool: Reader::WholePage.name().into(),
                 version: HTMD_VERSION.into(),
-                notes,
+                notes: vec![],
             })
         }
         Err(e) => Extracted::Unextractable {
@@ -478,7 +679,9 @@ pub async fn pdf_text_via_poppler(path: &std::path::Path) -> Option<Extraction> 
         title: None,
         tool: PDFTOTEXT.into(),
         version: poppler_version().await.unwrap_or_else(|| "unknown".into()),
-        notes: vec!["pdf-inspector found no text; read by poppler instead".into()],
+        // Why the primary came up short is `derive`'s to record, and it says so in the
+        // primary's own words rather than in a sentence written here about it.
+        notes: vec![],
     })
 }
 
@@ -650,7 +853,7 @@ mod tests {
     #[test]
     fn html_extraction_drops_chrome_and_keeps_the_article() {
         let out = extract(
-            "html",
+            ContentKind::Html,
             DRUPAL_ISH.as_bytes(),
             Some("https://www.tampa.gov/x"),
             None,
@@ -676,7 +879,7 @@ mod tests {
         let listing = r#"<html><body><h1>Documents</h1>
             <ul><li><a href="/a.pdf">Budget A</a></li><li><a href="/b.pdf">Budget B</a></li></ul>
             </body></html>"#;
-        let out = extract("html", listing.as_bytes(), None, None);
+        let out = extract(ContentKind::Html, listing.as_bytes(), None, None);
         let text = out.text().expect("must not be dropped");
 
         assert!(text.contains("Budget A"), "listing content was lost");
@@ -688,7 +891,7 @@ mod tests {
     fn scripts_and_styles_never_reach_the_text_even_on_the_fallback_path() {
         let noisy = r#"<html><body><script>var drupalSettings={"a":1}</script>
             <style>body{margin:0}</style><p>Short.</p></body></html>"#;
-        let text = extract("html", noisy.as_bytes(), None, None)
+        let text = extract(ContentKind::Html, noisy.as_bytes(), None, None)
             .text()
             .unwrap()
             .to_string();
@@ -719,7 +922,7 @@ mod tests {
     #[test]
     fn a_page_whose_subject_is_only_in_its_title_still_carries_it() {
         let out = extract(
-            "html",
+            ContentKind::Html,
             PROCLAMATION.as_bytes(),
             Some("https://www.tampa.gov/proclamation/irish-american-heritage-month"),
             None,
@@ -743,7 +946,7 @@ mod tests {
             <meta property="og:title" content="Bid Opportunities" /></head><body>
             <h1>Documents</h1><ul><li><a href="/a.pdf">Budget A</a></li></ul>
             </body></html>"#;
-        let out = extract("html", listing.as_bytes(), None, None);
+        let out = extract(ContentKind::Html, listing.as_bytes(), None, None);
         assert_eq!(out.tool().unwrap().0, "htmd", "should have fallen back");
         assert!(out.text().unwrap().starts_with("# Bid Opportunities"));
     }
@@ -795,7 +998,7 @@ mod tests {
     #[test]
     fn unknown_formats_are_recorded_not_guessed() {
         // .dwg and .dgn CAD files really are in the Hillsborough County corpus.
-        let out = extract("other", b"\x00\x01AC1027", None, None);
+        let out = extract(ContentKind::Other, b"\x00\x01AC1027", None, None);
         assert!(matches!(out, Extracted::Unextractable { .. }));
         assert!(out.text().is_none());
     }
@@ -840,7 +1043,7 @@ mod tests {
             \b Ordinance 2026-114\b0\par
             The City Council hereby amends the zoning code.\par}";
 
-        let out = extract("document", rtf, None, None);
+        let out = extract(ContentKind::Document, rtf, None, None);
         let text = out.text().expect("rtf should extract");
 
         assert!(text.contains("Ordinance 2026-114"), "{text}");
@@ -866,7 +1069,7 @@ mod tests {
             "the head cannot tell a .docx from any other zip, and must not pretend to"
         );
 
-        let out = extract("zip-container", &bytes, None, None);
+        let out = extract(ContentKind::ZipContainer, &bytes, None, None);
         let text = out
             .text()
             .expect("a docx must not be lost for want of a header");
@@ -904,7 +1107,7 @@ mod tests {
             ("xl/worksheets/sheet1.xml", sheet),
         ]);
 
-        let out = extract("zip-container", &bytes, None, None);
+        let out = extract(ContentKind::ZipContainer, &bytes, None, None);
         let text = out.text().expect("a workbook should extract");
 
         assert_eq!(
@@ -923,7 +1126,7 @@ mod tests {
     #[test]
     fn a_zip_that_holds_no_document_is_recorded_rather_than_retried_forever() {
         let bytes = zip_of(&[("site-plan.dwg", b"\x00\x01AC1027")]);
-        let out = extract("zip-container", &bytes, None, None);
+        let out = extract(ContentKind::ZipContainer, &bytes, None, None);
 
         assert!(matches!(out, Extracted::Unextractable { .. }));
         assert!(out.text().is_none());
@@ -934,7 +1137,12 @@ mod tests {
     /// routing without saying so.
     #[test]
     fn a_pdf_mislabelled_as_a_document_keeps_the_pdf_path() {
-        let out = extract("document", b"%PDF-1.7\nnot really a pdf", None, None);
+        let out = extract(
+            ContentKind::Document,
+            b"%PDF-1.7\nnot really a pdf",
+            None,
+            None,
+        );
         match out {
             Extracted::Unextractable { reason } => {
                 assert!(reason.starts_with("pdf parse failed"), "{reason}");
@@ -945,19 +1153,19 @@ mod tests {
 
     #[test]
     fn a_corrupt_pdf_is_unextractable_rather_than_a_panic() {
-        let out = extract("pdf", b"%PDF-1.7\nnot really a pdf", None, None);
+        let out = extract(ContentKind::Pdf, b"%PDF-1.7\nnot really a pdf", None, None);
         assert!(matches!(out, Extracted::Unextractable { .. }));
     }
 
     #[test]
     fn plain_text_passes_through() {
-        let out = extract("text", b"just some text", None, None);
+        let out = extract(ContentKind::Text, b"just some text", None, None);
         assert_eq!(out.text(), Some("just some text"));
     }
 
     #[test]
     fn invalid_utf8_claiming_to_be_text_is_rejected() {
-        let out = extract("text", &[0xff, 0xfe, 0x00], None, None);
+        let out = extract(ContentKind::Text, &[0xff, 0xfe, 0x00], None, None);
         assert!(matches!(out, Extracted::Unextractable { .. }));
     }
 
@@ -981,7 +1189,7 @@ mod tests {
     #[test]
     fn a_caption_track_carries_the_title_that_is_never_spoken() {
         let out = extract(
-            "captions",
+            ContentKind::Captions,
             &caption_track(),
             None,
             Some("Mayor Jane Castor 2026 Budget Presentation"),
@@ -1001,7 +1209,7 @@ mod tests {
 
     #[test]
     fn a_caption_track_without_a_title_still_extracts() {
-        let out = extract("captions", &caption_track(), None, None);
+        let out = extract(ContentKind::Captions, &caption_track(), None, None);
         let text = out.text().expect("captions should extract");
         assert!(!text.starts_with('#'));
         assert!(text.contains("[00:00:01] I am proud to present"));
@@ -1022,6 +1230,110 @@ mod tests {
         assert_eq!(
             crate::content::ContentKind::classify(&meta, br#"{"id":"abc","title":"a video"}"#),
             crate::content::ContentKind::Json
+        );
+    }
+
+    // ── the reader list ───────────────────────────────────────────────────────
+
+    /// The bug this list exists to make impossible.
+    ///
+    /// `derive` used to return before the fallback whenever the primary said
+    /// `Unextractable` — which is precisely what `extract_pdf` says about a PDF whose text
+    /// layer `pdf-inspector` cannot see. 168 of 490 real PDFs are that case, and poppler
+    /// reads them.
+    ///
+    /// Asserts that poppler was *asked*, not what it found: whether the binary is
+    /// installed is a fact about the machine, and a test that turned on it would fail on
+    /// half the boxes that run it. Both readers naming themselves in the verdict is the
+    /// invariant either way.
+    #[tokio::test]
+    async fn a_refusing_primary_does_not_stop_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scan.pdf");
+        let bytes = b"%PDF-1.7\nnot really a pdf";
+        std::fs::write(&path, bytes).unwrap();
+
+        let derived = derive(ContentKind::Pdf, bytes, &path, None, None).await;
+
+        let Extracted::Unextractable { reason } = derived.outcome else {
+            panic!("a corrupt pdf cannot yield text");
+        };
+        assert!(
+            reason.contains("pdf-inspector"),
+            "the primary is not named: {reason}"
+        );
+        assert!(
+            reason.contains(PDFTOTEXT),
+            "the fallback was never reached: {reason}"
+        );
+    }
+
+    /// "Produced nothing" is one definition now, and this is it. Written per pair it can
+    /// be wrong per pair, and it was.
+    #[test]
+    fn a_verdict_and_a_blank_both_count_as_nothing() {
+        assert!(!produced_text(&Extracted::Unextractable {
+            reason: "x".into()
+        }));
+        assert!(!produced_text(&Extracted::Text(Extraction {
+            text: "   \n ".into(),
+            title: None,
+            tool: "t".into(),
+            version: "1".into(),
+            notes: vec![],
+        })));
+        assert!(produced_text(&Extracted::Text(Extraction {
+            text: "a word".into(),
+            title: None,
+            tool: "t".into(),
+            version: "1".into(),
+            notes: vec![],
+        })));
+    }
+
+    /// A kind with no reader says so as a fact about the kind, not about the bytes.
+    #[test]
+    fn a_kind_with_no_reader_says_which_kind() {
+        let out = extract(ContentKind::Audio, b"\x00\x01", None, None);
+        match out {
+            Extracted::Unextractable { reason } => assert!(reason.contains("audio"), "{reason}"),
+            other => panic!("audio has no reader here: {other:?}"),
+        }
+    }
+
+    /// Every kind the classifier can return either has a reader or is deliberately
+    /// unreadable — and the deliberate ones are the two that go elsewhere plus `other`.
+    #[test]
+    fn only_the_kinds_that_go_elsewhere_have_no_reader() {
+        for kind in ContentKind::ALL {
+            let has = !readers_for(*kind).is_empty();
+            let expected = !matches!(
+                kind,
+                ContentKind::Audio | ContentKind::Markdown | ContentKind::Other
+            );
+            assert_eq!(has, expected, "{kind} has the wrong reader list");
+        }
+    }
+
+    /// The fallback's own account of why the primary came up short reaches the record.
+    /// It used to be a sentence written by hand inside the HTML reader.
+    #[test]
+    fn the_winner_carries_what_the_readers_before_it_said() {
+        // Too little article for readability, so the whole-page reader takes it.
+        let out = extract(
+            ContentKind::Html,
+            b"<html><body><p>hi</p></body></html>",
+            None,
+            None,
+        );
+        let Extracted::Text(e) = out else {
+            panic!("the whole page is still content");
+        };
+        assert_eq!(e.tool, Reader::WholePage.name());
+        assert!(
+            e.notes.iter().any(|n| n.contains("readability")),
+            "{:?}",
+            e.notes
         );
     }
 }
