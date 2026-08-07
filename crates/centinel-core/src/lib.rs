@@ -39,6 +39,7 @@ pub mod enclosure;
 pub mod extract;
 pub mod fetch;
 pub mod index;
+pub mod journal;
 pub mod materialize;
 pub mod models;
 pub mod op;

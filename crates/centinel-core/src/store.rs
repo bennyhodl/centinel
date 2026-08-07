@@ -198,6 +198,41 @@ impl Store {
     // already answers "is there a table, and whose is it" in one call, and a second
     // spelling of the same message here only invites the two to drift.
 
+    /// `runs/` — the journal of what this machine did. **Truth, and the third thing that
+    /// is.**
+    ///
+    /// `log/` records what the world served; this records what was attempted, including
+    /// the attempts that served nothing. Not derived from `log/` because a quiet run —
+    /// the common outcome, and the one a watchman exists to produce — writes nothing
+    /// there, so "the schedule fired at 03:00 and everything was current" is not
+    /// recoverable and is indistinguishable from "it has not fired since March".
+    ///
+    /// Not in `centinel.db` for the same reason `log/` is not: deleting that file is
+    /// documented as safe, and it must not erase the history of collection.
+    pub fn runs_dir(&self) -> PathBuf {
+        self.root.join("runs")
+    }
+
+    /// `runs/YYYY-MM.jsonl` — month-partitioned like the log, and for the same reason.
+    ///
+    /// Flat rather than per source: a run spans sources and a quiet run touches none, so
+    /// filing it under one would either duplicate the record or lose it.
+    pub fn runs_path(&self, at: Timestamp) -> PathBuf {
+        let zoned = at.to_zoned(TimeZone::UTC);
+        self.runs_dir()
+            .join(format!("{:04}-{:02}.jsonl", zoned.year(), zoned.month()))
+    }
+
+    /// `run.lock` — the run in flight, if any.
+    ///
+    /// On disk rather than in the scheduler's memory, because the CLI is a second process:
+    /// an operator typing `centinel run` while the server's scheduler is mid-run is not an
+    /// exotic case, and an in-process queue does nothing about it. It is also what lets
+    /// both surfaces give the *same* answer to "is a run happening right now".
+    pub fn lock_path(&self) -> PathBuf {
+        self.root.join("run.lock")
+    }
+
     /// `centinel.db` — the SQLite metadata and FTS5 index. Derived, and rebuildable.
     pub fn index_path(&self) -> PathBuf {
         self.root.join(INDEX_FILE)
