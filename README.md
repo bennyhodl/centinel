@@ -67,22 +67,54 @@ Light the candle.
 
 ## Install
 
-Rust 1.85+, and a C++ toolchain — two of the dependencies compile `llama.cpp` and `whisper.cpp`.
-
-**Centinel is two binaries, and you need both.**
+Rust 1.91+ and a C++ toolchain — two of the dependencies compile `llama.cpp` and `whisper.cpp`.
 
 ```bash
-cargo install --git https://github.com/bennyhodl/centinel centinel centinel-whisper
+git clone https://github.com/bennyhodl/centinel
+cd centinel
+./install.sh
 ```
 
-From a clone, install each package in turn. Cargo cannot take two `--path` arguments, and the workspace root is a virtual manifest:
+The script checks this host before it builds anything and names the command for whatever is missing, rather than installing a toolchain behind your back. Expect a long first build.
+
+Three things it does that a `cargo install` line cannot. It selects the GPU backend for the host — Metal on macOS, CUDA or ROCm on Linux when their toolchains are present. It tunes for the CPU it is building on, which matters more than it sounds like (below). And it puts **both** binaries in one directory, which is the thing transcription does not work without.
+
+| | |
+|---|---|
+| `--accel auto\|none\|cuda\|vulkan\|rocm` | override the detected backend |
+| `--portable` | build for the baseline CPU, so the binary can be copied to another machine |
+| `--bin-dir <dir>` | somewhere other than `~/.cargo/bin` |
+| `--deps` | install `ffmpeg` and `yt-dlp` too, with this host's package manager |
+| `--no-doctor` | skip the closing `centinel doctor` |
+
+### Why it tunes for your CPU
+
+`llama-cpp-sys-2` reads `target-cpu` back out of the Rust flags and, when it is not `native`, sets `GGML_NATIVE=OFF` and derives ggml's instruction-set flags from the *baseline* target features instead. On `x86_64-unknown-linux-gnu` those are `fxsr,sse,sse2,x87` — so a plain `cargo install` compiles llama.cpp's CPU kernels with **no AVX, no AVX2 and no FMA**, and nothing recovers it at runtime, because the runtime dispatch that would (`GGML_CPU_ALL_VARIANTS`) ships with a feature this build does not enable. On Linux `aarch64` the same build script pins `GGML_CPU_ARM_ARCH=armv8-a` and drops dotprod.
+
+`whisper.cpp` has none of this — `whisper-rs-sys` passes no `target-cpu` handling, so ggml's own default applies and it builds native already. So the untuned case is not "both a little slow". It is the transcriber tuned and the embedder not, and embedding is the stage measured in days.
+
+The cost is that the binary is then built for the CPU that built it and must not be copied to an older one. `--portable` is the way out, and it leaves `RUSTFLAGS` alone — so a middle tier that still carries AVX2 and FMA but runs on anything since about 2013 is:
+
+```bash
+RUSTFLAGS="-C target-cpu=x86-64-v3" ./install.sh --portable
+```
+
+### By hand
+
+**Centinel is two binaries, and you need both.** From the clone, install each package in turn — cargo cannot take two `--path` arguments, and the workspace root is a virtual manifest:
 
 ```bash
 cargo install --path crates/centinel
 cargo install --path crates/centinel-whisper
 ```
 
-Expect a long first build. Both packages compile a C++ library from source.
+Without a clone, one command does both:
+
+```bash
+cargo install --git https://github.com/bennyhodl/centinel centinel centinel-whisper
+```
+
+Both packages compile a C++ library from source, so the first build is long either way. Any GPU backend other than Metal is a `--features` flag on **each** of the two commands: passing `--features cuda` to one binary and not the other leaves half the pipeline on the CPU.
 
 ### Why two
 
@@ -95,7 +127,7 @@ Expect a long first build. Both packages compile a C++ library from source.
 
 It links without a warning, runs without a crash, and transcribes nothing. There is no error to catch. So `centinel` links `llama.cpp`, `centinel-whisper` links `whisper.cpp`, and the two meet over a pipe. [`docs/SPEC.md`](docs/SPEC.md) §3.6 has the full reasoning and the alternatives it rejected.
 
-`centinel` finds the worker beside itself first, then `$CENTINEL_WHISPER_BIN`, then `PATH`. Installing both with the same command puts them in the same directory, which is all it needs.
+`centinel` finds the worker beside itself first, then `$CENTINEL_WHISPER_BIN`, then `PATH`. Installing both with the same command puts them in the same directory, which is all it needs — and the install script checks they landed there rather than trusting that they did.
 
 ### External tools
 
@@ -111,6 +143,8 @@ Centinel shells out rather than running a second language runtime.
 brew install yt-dlp ffmpeg          # macOS
 sudo apt install yt-dlp ffmpeg      # Debian/Ubuntu
 ```
+
+The install script reports whichever of the two is missing, and installs them itself under `--deps`.
 
 Keep `yt-dlp` current. It ships releases in emergency clusters when YouTube changes, and `centinel doctor` warns once yours is past ninety days.
 
