@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use centinel_core::op::{Ctx, OpDef, Progress, ProgressEvent};
+use centinel_core::op::{Cancel, Ctx, OpDef, Progress, ProgressEvent};
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing_subscriber::EnvFilter;
@@ -75,6 +75,22 @@ pub async fn invoke(
     args: Value,
     progress: Option<Progress>,
 ) -> Result<Value> {
+    invoke_cancellable(surface, def, ctx, args, progress, Cancel::none()).await
+}
+
+/// [`invoke`], for a caller that may need to stop the work.
+///
+/// Only the scheduler passes a live token today: the CLI's interruption is the process
+/// dying, and an HTTP or MCP caller hanging up cannot ask for a crawl to stop — it never
+/// had the authority to start one (SPEC scheduling §1.1).
+pub async fn invoke_cancellable(
+    surface: &'static str,
+    def: &'static OpDef,
+    ctx: Arc<Ctx>,
+    args: Value,
+    progress: Option<Progress>,
+    cancel: Cancel,
+) -> Result<Value> {
     let (progress, drain) = match progress {
         Some(sink) => (sink, None),
         None => {
@@ -86,7 +102,7 @@ pub async fn invoke(
     tracing::info!(surface, op = def.name, args = %one_line(&args), "op started");
     let started = Instant::now();
 
-    let result = (def.invoke)(ctx, args, progress).await;
+    let result = (def.invoke)(ctx, args, progress, cancel).await;
 
     // The sink was dropped with the invocation, so the drain has already ended or is
     // about to; awaiting it just keeps the last progress line above the closing one.

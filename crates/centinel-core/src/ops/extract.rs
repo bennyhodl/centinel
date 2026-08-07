@@ -117,11 +117,12 @@ pub struct ExtractReport {
 }
 
 /// Derive searchable text from collected documents.
-#[op(long_running, group = "stage")]
+#[op(long_running, reach = "operator", group = "stage")]
 pub async fn extract(
     ctx: &Ctx,
     args: ExtractArgs,
     progress: &Progress,
+    cancel: &Cancel,
 ) -> anyhow::Result<ExtractReport> {
     let sources = match &args.source {
         Some(s) => vec![SourceId::new(s.clone())?],
@@ -176,6 +177,8 @@ pub async fn extract(
 
         let total = latest.len() as u64;
         for (i, (resource, obs)) in latest.iter().enumerate() {
+            // The item boundary: one blob's derivation is appended before the next is read.
+            cancel.check()?;
             if let Some(limit) = args.limit
                 && report.attempted >= limit
             {
@@ -393,8 +396,16 @@ fn no_text_reason(outcome: &Extracted) -> String {
         } => format!(
             "parsed but holds no readable text; {} page{} {} images no reader here can read",
             pages_needing_ocr.len(),
-            if pages_needing_ocr.len() == 1 { "" } else { "s" },
-            if pages_needing_ocr.len() == 1 { "is" } else { "are" },
+            if pages_needing_ocr.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if pages_needing_ocr.len() == 1 {
+                "is"
+            } else {
+                "are"
+            },
         ),
         _ => "parsed but holds no text".into(),
     }
@@ -538,13 +549,17 @@ mod tests {
     async fn a_blob_nothing_can_extract_is_attempted_once() {
         let (_d, ctx) = store_with(AUDIO, "https://y.test/watch?v=a#audio").await;
 
-        let first = extract(&ctx, args(), &Progress::none()).await.unwrap();
+        let first = extract(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
         assert_eq!(first.attempted, 1);
         assert_eq!(first.unextractable, 1);
         assert_eq!(first.already_unextractable, 0);
         assert_eq!(first.unreadable.len(), 1, "and it is reported once");
 
-        let again = extract(&ctx, args(), &Progress::none()).await.unwrap();
+        let again = extract(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
         assert_eq!(again.attempted, 0, "the second run must not try again");
         assert_eq!(again.unextractable, 0);
         assert_eq!(again.already_unextractable, 1);
@@ -570,7 +585,9 @@ mod tests {
     async fn an_extraction_that_yields_nothing_is_never_a_derivation() {
         let (_d, ctx) = store_with(BLANK_PDF, "https://tampa.test/blank.pdf").await;
 
-        let report = extract(&ctx, args(), &Progress::none()).await.unwrap();
+        let report = extract(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
         assert_eq!(report.attempted, 1);
         assert_eq!(report.unextractable, 1, "nothing readable came out");
         assert_eq!(report.extracted, 0, "and nothing was derived");
@@ -611,7 +628,10 @@ mod tests {
             obs.blob_sha
         };
         let nothing = ctx.store.put_blob(b"").await.unwrap();
-        assert!(nothing.is_of_nothing(), "the sentinel is the hash of no bytes");
+        assert!(
+            nothing.is_of_nothing(),
+            "the sentinel is the hash of no bytes"
+        );
         ctx.store
             .append(
                 &source,
@@ -628,7 +648,9 @@ mod tests {
             .await
             .unwrap();
 
-        let report = extract(&ctx, args(), &Progress::none()).await.unwrap();
+        let report = extract(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
         assert_eq!(
             report.already_derived, 0,
             "an empty derivation is not a derivation"
@@ -641,7 +663,9 @@ mod tests {
     #[tokio::test]
     async fn refresh_reopens_a_question_a_previous_run_closed() {
         let (_d, ctx) = store_with(AUDIO, "https://y.test/watch?v=a#audio").await;
-        extract(&ctx, args(), &Progress::none()).await.unwrap();
+        extract(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
 
         let forced = extract(
             &ctx,
@@ -650,6 +674,7 @@ mod tests {
                 ..args()
             },
             &Progress::none(),
+            &Cancel::none(),
         )
         .await
         .unwrap();
@@ -661,7 +686,9 @@ mod tests {
     #[tokio::test]
     async fn the_verdict_is_recorded_against_the_pipeline_that_reached_it() {
         let (_d, ctx) = store_with(AUDIO, "https://y.test/watch?v=a#audio").await;
-        extract(&ctx, args(), &Progress::none()).await.unwrap();
+        extract(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
 
         let replay = ctx
             .store
@@ -690,11 +717,15 @@ mod tests {
         )
         .await;
 
-        let first = extract(&ctx, args(), &Progress::none()).await.unwrap();
+        let first = extract(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
         assert_eq!(first.extracted, 1);
         assert_eq!(first.unextractable, 0);
 
-        let again = extract(&ctx, args(), &Progress::none()).await.unwrap();
+        let again = extract(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
         assert_eq!(again.already_derived, 1);
         assert_eq!(again.already_unextractable, 0);
         assert_eq!(again.attempted, 0);

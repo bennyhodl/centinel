@@ -23,6 +23,7 @@
 //! the full description written for a model to read.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -272,6 +273,132 @@ impl Progress {
     }
 }
 
+/// The error a cancelled op returns.
+///
+/// Its own type rather than a string, because the driver has to tell "the operator asked
+/// this to stop" from "this failed": the first is recorded as `interrupted` and is not a
+/// fault, the second is recorded as a failure and counts against the schedule. A run that
+/// reported every shutdown as a failed collection would train an operator to ignore the
+/// column that matters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// Whether an in-flight op has been asked to stop.
+///
+/// The peer of [`Progress`], travelling the same way and for the same reason: the op says
+/// what it is doing and is told when to stop, and never learns who is on the other end.
+///
+/// **Deliberately not folded into `Progress`.** That type is one-directional and documents
+/// that a dropped receiver is not an op's problem; making it the cancellation channel too
+/// would quietly change that contract at every existing call site.
+///
+/// ## Checked at item boundaries, never at an arbitrary await
+///
+/// `tokio::task::JoinHandle::abort` cancels wherever the task happens to be suspended, and
+/// some of those points are inside a log append or a blob write. A half-written line in
+/// `log/<source>/` is corruption of the one thing this project calls truth, in a format
+/// with no way to say that a line was interrupted.
+///
+/// So an op polls [`Cancel::check`] *between* units of work — between addresses, between
+/// blobs, between batches — which are exactly the points where the record is consistent
+/// and everything so far is durable. Nothing is lost by stopping there: every stage
+/// computes its work list as a subtraction, so the next run resumes from what the log says
+/// rather than from a checkpoint.
+///
+/// [`Cancel::cancelled`] is the awaitable form, for the one case polling cannot reach: a
+/// child process that has been running for hours. A `select!` on it lets the child be
+/// killed rather than waited out.
+#[derive(Clone, Debug, Default)]
+pub struct Cancel {
+    /// `None` never cancels, so an op needs no branching for the common case — the same
+    /// shape as [`Progress::none`].
+    inner: Option<Arc<CancelInner>>,
+}
+
+#[derive(Debug, Default)]
+struct CancelInner {
+    flag: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+/// The other end of a [`Cancel`] — held by whoever may stop the work.
+#[derive(Clone, Debug)]
+pub struct Canceller {
+    inner: Arc<CancelInner>,
+}
+
+impl Canceller {
+    /// Asks the op to stop at its next item boundary. Idempotent.
+    pub fn cancel(&self) {
+        self.inner.flag.store(true, Ordering::SeqCst);
+        // `notify_waiters` would drop the signal for anyone not yet waiting, which is the
+        // race that makes a shutdown hang: cancel arrives, then a tool starts a child and
+        // waits forever. This one is remembered by every future waiter.
+        self.inner.notify.notify_last();
+    }
+}
+
+impl Cancel {
+    /// A token that never cancels.
+    pub fn none() -> Self {
+        Self { inner: None }
+    }
+
+    /// A token plus the handle that stops it.
+    pub fn channel() -> (Canceller, Self) {
+        let inner = Arc::new(CancelInner::default());
+        (
+            Canceller {
+                inner: Arc::clone(&inner),
+            },
+            Self { inner: Some(inner) },
+        )
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner
+            .as_ref()
+            .is_some_and(|i| i.flag.load(Ordering::SeqCst))
+    }
+
+    /// The line an op puts at the top of its loop: `cancel.check()?`.
+    pub fn check(&self) -> anyhow::Result<()> {
+        if self.is_cancelled() {
+            return Err(Cancelled.into());
+        }
+        Ok(())
+    }
+
+    /// Resolves once cancelled. Pends forever on a [`Cancel::none`], so a `select!` arm
+    /// built on it is simply never taken.
+    pub async fn cancelled(&self) {
+        let Some(inner) = self.inner.as_ref() else {
+            std::future::pending::<()>().await;
+            return;
+        };
+        // Registered before the flag is re-read, so a cancel landing between the two is
+        // caught by the notify rather than lost.
+        let notified = inner.notify.notified();
+        if inner.flag.load(Ordering::SeqCst) {
+            return;
+        }
+        notified.await;
+    }
+}
+
+/// Whether an error is a cancellation rather than a fault.
+pub fn is_cancelled(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<Cancelled>().is_some()
+}
+
 /// A type-erased op invocation: JSON in, JSON out.
 ///
 /// Erasure is what lets one registry serve three surfaces. The macro generates the
@@ -281,6 +408,7 @@ pub type InvokeFn = fn(
     Arc<Ctx>,
     serde_json::Value,
     Progress,
+    Cancel,
 ) -> BoxFuture<'static, anyhow::Result<serde_json::Value>>;
 
 /// Renders an op's result for a person at a terminal.
@@ -333,6 +461,50 @@ pub fn in_group(group: Group) -> Vec<&'static OpDef> {
     all().into_iter().filter(|o| o.group == group).collect()
 }
 
+/// Who may cause this op to run.
+///
+/// Not "how dangerous is it" but **"who asked"**. The server, MCP, and every consumer of
+/// either may read the record; none of them may cause it to grow. A scheduled run is not
+/// the server deciding to collect — it is the operator's instruction, written in the
+/// operator's config file and executed later, so its authority comes from a file on disk
+/// rather than from a request anyone who reaches the port can send.
+///
+/// *Why it matters:* an agent is a client of the record, never its author (SPEC §1). A
+/// model that can trigger a crawl decides what the corpus contains. It is also the
+/// concrete denial of service — `POST /ops/run` twenty times is twenty crawls against a
+/// city's web server, from a port with no authentication.
+///
+/// **Why an enum and not a second bool** beside `mcp`: two independent booleans describe
+/// four states and only three exist. The fourth — "the scheduler may fire it *and* so may
+/// any HTTP caller" — is the exact defect this type exists to prevent, and a pair of
+/// booleans leaves it one typo away.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reach {
+    /// Anyone who can reach a surface. Read-only by construction.
+    #[default]
+    Public,
+    /// The operator: the CLI, and the scheduler acting on their written instruction.
+    /// Never HTTP, never MCP.
+    Operator,
+    /// The CLI alone — this op acts on the host it runs on. Not even the scheduler:
+    /// `open` launches a configured command, and `models` pulls gigabytes into a cache,
+    /// which must never ambush a 3am run (SPEC §3.6).
+    Host,
+}
+
+impl Reach {
+    /// Whether a remote surface — HTTP or MCP — may see or call this op.
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Self::Public)
+    }
+
+    /// Whether the scheduler may fire this op on a cadence.
+    pub fn is_schedulable(&self) -> bool {
+        matches!(self, Self::Operator)
+    }
+}
+
 /// One registered operation.
 ///
 /// Built by [`centinel_macros::op`] and submitted to the `inventory` registry. Nothing
@@ -351,14 +523,11 @@ pub struct OpDef {
     ///
     /// Not every library function should be one — ticket #9's "a model does not need
     /// forty tools". Exposure is **opt-out**: uniform by default, curated deliberately.
+    /// Subordinate to [`OpDef::reach`], which decides whether a remote surface sees this
+    /// op at all.
     pub mcp: bool,
-    /// This op acts on the machine it runs on, so remote invocation is meaningless or
-    /// dangerous. Excluded from **both** MCP and HTTP; reachable only from the CLI.
-    ///
-    /// `open` is the motivating case: it launches a GUI application on the host and
-    /// accepts a command template. Exposed remotely that is arbitrary command execution
-    /// against a server that (SPEC §8) has no authentication.
-    pub local_only: bool,
+    /// Who may cause this op to run. See [`Reach`].
+    pub reach: Reach,
     /// Adds this op's arguments to a `clap::Command`.
     pub augment_clap: fn(clap::Command) -> clap::Command,
     /// Extracts parsed CLI arguments as the same JSON the other surfaces send.
@@ -383,13 +552,21 @@ pub fn all() -> Vec<&'static OpDef> {
 pub fn mcp_tools() -> Vec<&'static OpDef> {
     all()
         .into_iter()
-        .filter(|o| o.mcp && !o.local_only)
+        .filter(|o| o.mcp && o.reach.is_remote())
         .collect()
 }
 
 /// Ops reachable over HTTP.
 pub fn remote_ops() -> Vec<&'static OpDef> {
-    all().into_iter().filter(|o| !o.local_only).collect()
+    all().into_iter().filter(|o| o.reach.is_remote()).collect()
+}
+
+/// Ops the scheduler may fire on a cadence.
+pub fn schedulable_ops() -> Vec<&'static OpDef> {
+    all()
+        .into_iter()
+        .filter(|o| o.reach.is_schedulable())
+        .collect()
 }
 
 /// Looks up an op by name.
@@ -408,7 +585,7 @@ pub mod __private {
     pub use serde_json;
 
     /// Re-exported so expansion sites can name these without importing them.
-    pub use super::{Ctx, Group, OpDef, Progress};
+    pub use super::{Cancel, Ctx, Group, OpDef, Progress, Reach};
     pub use crate::render::{Painter, Render};
 
     /// Builds the `render` body: JSON → the concrete report → its own prose.
@@ -524,6 +701,93 @@ mod tests {
         assert_eq!(json["id"], "m/model.onnx");
     }
 
+    /// The rule that keeps the write surface off the network as the registry grows.
+    ///
+    /// `Group::Pipeline` and `Group::Stage` *are* the ops that cause collection — that is
+    /// what those headings mean — so every one of them has to be `Operator`. Written over
+    /// the registry rather than as a list of names, because the op it has to catch is the
+    /// one somebody adds next year without reading this file.
+    #[test]
+    fn every_op_that_causes_collection_is_operator_only() {
+        for def in all() {
+            if matches!(def.group, Group::Pipeline | Group::Stage) {
+                assert_eq!(
+                    def.reach,
+                    Reach::Operator,
+                    "`{}` is in the {} group, so it causes collection — it must be \
+                     `reach = \"operator\"` or an HTTP caller can start a crawl",
+                    def.name,
+                    def.group.heading(),
+                );
+            }
+        }
+    }
+
+    /// The other half: nothing remote-reachable may be a writing op. Stated separately
+    /// because it is the property a reviewer actually wants — the group partition above
+    /// is the mechanism, not the promise.
+    #[test]
+    fn nothing_remotely_reachable_causes_collection() {
+        for def in remote_ops() {
+            assert!(
+                matches!(def.group, Group::Corpus | Group::Host),
+                "`{}` is reachable over HTTP but sits in the {} group",
+                def.name,
+                def.group.heading(),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_detached_cancel_never_fires() {
+        let c = Cancel::none();
+        assert!(!c.is_cancelled());
+        assert!(c.check().is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelling_is_visible_to_the_poll_and_the_await() {
+        let (canceller, cancel) = Cancel::channel();
+        assert!(cancel.check().is_ok());
+
+        canceller.cancel();
+        assert!(cancel.is_cancelled());
+
+        let err = cancel.check().unwrap_err();
+        assert!(
+            is_cancelled(&err),
+            "a cancel must be distinguishable: {err}"
+        );
+
+        // Already cancelled, so this must resolve rather than wait for a second signal.
+        tokio::time::timeout(std::time::Duration::from_secs(1), cancel.cancelled())
+            .await
+            .expect("`cancelled` hung on an already-cancelled token");
+    }
+
+    /// The race that makes a shutdown hang: cancel lands *after* the flag was last read
+    /// but *before* the wait begins. Registering the notify first is what closes it.
+    #[tokio::test]
+    async fn a_cancel_arriving_during_the_wait_is_not_lost() {
+        let (canceller, cancel) = Cancel::channel();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            canceller.cancel();
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), cancel.cancelled())
+            .await
+            .expect("a cancel raced with the wait and was dropped");
+    }
+
+    /// A fault must not be mistaken for a shutdown, or a failing schedule would report
+    /// itself as having been interrupted and never show a failure.
+    #[test]
+    fn an_ordinary_error_is_not_a_cancellation() {
+        let err = anyhow::anyhow!("connection reset");
+        assert!(!is_cancelled(&err));
+    }
+
     /// It must not collide with anything an op would name a work item, or that item
     /// would silently overwrite the aggregate.
     #[test]
@@ -554,7 +818,7 @@ mod render_path_tests {
         let ctx = Arc::new(Ctx::new(store));
 
         let def = find(name).unwrap_or_else(|| panic!("op `{name}` is not registered"));
-        let value = (def.invoke)(ctx, args, Progress::none())
+        let value = (def.invoke)(ctx, args, Progress::none(), Cancel::none())
             .await
             .expect("op failed");
 

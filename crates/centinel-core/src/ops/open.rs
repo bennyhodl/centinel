@@ -93,7 +93,7 @@ pub struct OpenReport {
 /// template, so exposing it over MCP or HTTP would be arbitrary command execution
 /// against a server that has no authentication. Agents wanting the *content* of a
 /// document should call `read`, which returns text and touches nothing.
-#[op(local_only, group = "corpus")]
+#[op(reach = "host", group = "corpus")]
 pub async fn open(ctx: &Ctx, args: OpenArgs) -> anyhow::Result<OpenReport> {
     let found = resolve(ctx, &args.target, args.source.as_deref()).await?;
     let (source, resource, obs) = (found.source, found.resource, found.observation);

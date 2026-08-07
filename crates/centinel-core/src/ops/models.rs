@@ -158,7 +158,7 @@ pub enum ModelsReport {
 }
 
 /// Inspect, fetch, verify and remove model weights.
-#[op(long_running, local_only, group = "host")]
+#[op(long_running, reach = "host", group = "host")]
 pub async fn models(
     _ctx: &Ctx,
     args: ModelsArgs,
@@ -585,14 +585,15 @@ impl Render for ModelsReport {
                                 render::bytes(file.resumed_from)
                             ));
                         }
-                        p.marked(
-                            Mark::Ok,
-                            format!("{name}  {}", p.paint(&note, Ink::Dim)),
-                        )?;
+                        p.marked(Mark::Ok, format!("{name}  {}", p.paint(&note, Ink::Dim)))?;
                     }
                     for name in skipped {
                         let text = format!("{name}  already present");
-                        p.line(format!("{}  {}", p.paint("·", Ink::Dim), p.paint(&text, Ink::Dim)))?;
+                        p.line(format!(
+                            "{}  {}",
+                            p.paint("·", Ink::Dim),
+                            p.paint(&text, Ink::Dim)
+                        ))?;
                     }
                     Ok(())
                 })
@@ -603,10 +604,7 @@ impl Render for ModelsReport {
                 let verdict = if *ok {
                     p.paint("every digest matches", Ink::Green)
                 } else {
-                    p.paint(
-                        &format!("{} of {} failed", failed, checked.len()),
-                        Ink::Red,
-                    )
+                    p.paint(&format!("{} of {} failed", failed, checked.len()), Ink::Red)
                 };
                 p.line(verdict)?;
 
@@ -659,10 +657,8 @@ impl Render for ModelsReport {
                 )?;
                 p.nest(|p| {
                     for orphan in orphaned {
-                        let text = render::truncate_start(
-                            &orphan.path.display().to_string(),
-                            p.width(),
-                        );
+                        let text =
+                            render::truncate_start(&orphan.path.display().to_string(), p.width());
                         p.line(p.paint(&text, Ink::Dim))?;
                         p.nest(|p| {
                             let note = format!(
@@ -695,12 +691,7 @@ impl Render for ModelStatus {
             p.nest(|p| {
                 p.wrapped(&self.about, Ink::Dim)?;
 
-                let mut table = Table::bare(&[
-                    Align::Left,
-                    Align::Left,
-                    Align::Right,
-                    Align::Left,
-                ]);
+                let mut table = Table::bare(&[Align::Left, Align::Left, Align::Right, Align::Left]);
                 for variant in &self.variants {
                     // Three states, not two: a variant with bytes on disk but not all of
                     // them is a resumable pull, and calling it "missing" would tell
@@ -721,12 +712,20 @@ impl Render for ModelStatus {
                             render::bytes(variant.bytes_total)
                         )
                     };
-                    let ink = if variant.installed { Ink::Plain } else { Ink::Dim };
+                    let ink = if variant.installed {
+                        Ink::Plain
+                    } else {
+                        Ink::Dim
+                    };
                     table.push(vec![
                         Cell::mark(mark),
                         Cell::new(
                             &variant.variant,
-                            if variant.installed { Ink::Plain } else { Ink::Dim },
+                            if variant.installed {
+                                Ink::Plain
+                            } else {
+                                Ink::Dim
+                            },
                         ),
                         Cell::new(size, ink),
                         Cell::dim(if variant.is_default { "default" } else { "" }),
