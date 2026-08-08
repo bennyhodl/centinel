@@ -150,8 +150,29 @@ impl<'s> Tag<'s> {
     }
 }
 
+/// One quoted run in a fragment of script, and whether the script was building it.
+pub struct Quoted<'a> {
+    pub text: &'a str,
+    /// A `+` sits immediately either side of this literal, so it is one **piece** of a
+    /// string the browser assembles at run time — never a whole value.
+    ///
+    /// The distinction is what separates a viewer's configuration from a URL template:
+    ///
+    /// ```js
+    /// var pdfURL = "https://www.tampa.gov/…/20220301_Irish.pdf"   // a whole address
+    /// link.attr("href", "/Documents/DownloadFile/"
+    ///     + encodeURIComponent(doc.UrlFriendlyName)
+    ///     + ".pdf?documentType=" + doc.MeetingDocumentType)        // pieces, with holes
+    /// ```
+    ///
+    /// A caller that resolves the second against the page's base gets a plausible-looking
+    /// address that names no document — and on a host that answers HTTP 200 for one, that
+    /// is an error page stored as content on every page collected.
+    pub concatenated: bool,
+}
+
 /// Every single- or double-quoted run in a fragment of script.
-pub fn quoted_strings(script: &str) -> Vec<&str> {
+pub fn quoted_strings(script: &str) -> Vec<Quoted<'_>> {
     let mut out = Vec::new();
     let bytes = script.as_bytes();
     let mut i = 0;
@@ -159,8 +180,12 @@ pub fn quoted_strings(script: &str) -> Vec<&str> {
         let quote = bytes[i];
         if quote == b'"' || quote == b'\'' {
             if let Some(end) = script[i + 1..].find(quote as char) {
-                out.push(&script[i + 1..i + 1 + end]);
-                i += end + 2;
+                let close = i + 1 + end;
+                out.push(Quoted {
+                    text: &script[i + 1..close],
+                    concatenated: joins_before(bytes, i) || joins_after(bytes, close + 1),
+                });
+                i = close + 1;
                 continue;
             }
             break;
@@ -168,6 +193,22 @@ pub fn quoted_strings(script: &str) -> Vec<&str> {
         i += 1;
     }
     out
+}
+
+/// Whether the nearest non-space byte before `at` is a `+`.
+///
+/// Bytes rather than chars, and safe on UTF-8 by construction: a continuation byte is
+/// neither a space nor a `+`, so the walk stops on it exactly as it would on any other
+/// character.
+fn joins_before(bytes: &[u8], at: usize) -> bool {
+    bytes[..at].iter().rev().find(|b| !b.is_ascii_whitespace()) == Some(&b'+')
+}
+
+fn joins_after(bytes: &[u8], from: usize) -> bool {
+    bytes
+        .get(from..)
+        .and_then(|rest| rest.iter().find(|b| !b.is_ascii_whitespace()))
+        == Some(&b'+')
 }
 
 /// The entities that appear in real titles and real URLs.
@@ -239,13 +280,54 @@ mod tests {
         assert_eq!(Scan::new("<html></html>").title(), None);
     }
 
+    /// The literals of a script, without their concatenation flags.
+    fn literals(script: &str) -> Vec<&str> {
+        quoted_strings(script).into_iter().map(|q| q.text).collect()
+    }
+
     #[test]
     fn script_bodies_come_back_in_their_original_casing() {
         let scan = Scan::new(r#"<SCRIPT>var pdfURL = "/Docs/A.PDF";</SCRIPT>"#);
         let bodies = scan.scripts();
         assert_eq!(bodies.len(), 1);
         assert!(bodies[0].contains("/Docs/A.PDF"));
-        assert_eq!(quoted_strings(bodies[0]), vec!["/Docs/A.PDF"]);
+        assert_eq!(literals(bodies[0]), vec!["/Docs/A.PDF"]);
+    }
+
+    /// A whole value against a piece of one. Only the first is an address.
+    #[test]
+    fn a_literal_in_a_plus_expression_is_marked_as_assembled() {
+        let found = quoted_strings(
+            r#"var whole = "/a.pdf";
+               var built = "/DownloadFile/" + name + ".pdf?documentType=" + type;"#,
+        );
+        let flags: Vec<_> = found.iter().map(|q| (q.text, q.concatenated)).collect();
+        assert_eq!(
+            flags,
+            vec![
+                ("/a.pdf", false),
+                ("/DownloadFile/", true),
+                (".pdf?documentType=", true),
+            ]
+        );
+    }
+
+    /// The `+` is found across a line break, because that is how the sighting was written.
+    #[test]
+    fn whitespace_does_not_hide_the_join() {
+        let found = quoted_strings("f(\n  \"/x/\"\n  + a\n  + \".pdf?t=\"\n)");
+        assert!(found.iter().all(|q| q.concatenated), "a join was missed");
+
+        // And a comma is not a join: an argument list is not a concatenation.
+        let found = quoted_strings(r#"f("/a.pdf", "/b.pdf")"#);
+        assert!(found.iter().all(|q| !q.concatenated));
+    }
+
+    /// Non-ASCII either side of a literal must not be read as a join, and must not panic.
+    #[test]
+    fn a_multibyte_neighbour_is_not_a_join() {
+        let found = quoted_strings("var s = \"café\"; var t = «\"/a.pdf\"»;");
+        assert!(found.iter().all(|q| !q.concatenated));
     }
 
     /// One allocation per page, not one per question asked of it.
@@ -258,7 +340,7 @@ mod tests {
         );
         assert_eq!(scan.title().as_deref(), Some("Proclamation"));
         assert_eq!(scan.tags(&["a"])[0].attr("href"), Some("/a.pdf"));
-        assert_eq!(quoted_strings(scan.scripts()[0]), vec!["/b.pdf"]);
+        assert_eq!(literals(scan.scripts()[0]), vec!["/b.pdf"]);
     }
 
     #[test]
