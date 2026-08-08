@@ -876,6 +876,7 @@ dependencies = [
  "lancedb",
  "libc",
  "llama-cpp-2",
+ "markup5ever_rcdom",
  "pdf-inspector",
  "reqwest",
  "roxmltree",
