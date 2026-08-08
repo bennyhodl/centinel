@@ -74,21 +74,19 @@ impl Strategy for Listing {
             return None;
         }
 
-        let mut r = Recognition::new(self.name(), Keyed::ServerDefault(server))
-            .seeing("markup", format!("the page carries a {server}"))
-            .seeing("links", format!("{links} anchors, one per row"))
-            .seeing(
-                "root",
-                format!("the walk stays under {}", directory_of(&url)),
-            );
-
-        if !seed.robots.declared {
-            // Measured on this exact host: `publicrec.hillsclerk.com` answers 404 for
-            // robots.txt. Worth saying, because it is why the walk is bounded by the
-            // seed's own path rather than by the host's rules.
-            r = r.warning("robots.txt", "unreachable — rules were assumed, not read");
-        }
-        Some(r)
+        // No `robots.txt` warning here, though `publicrec.hillsclerk.com` answers 404 for
+        // one. The seed already reports whether the rules were read or assumed, and every
+        // caller of this shows that — so repeating it made `investigate` state the same
+        // fact three times on one screen.
+        Some(
+            Recognition::new(self.name(), Keyed::ServerDefault(server))
+                .seeing("markup", format!("the page carries an {server}"))
+                .seeing("links", format!("{links} anchors, one per row"))
+                .seeing(
+                    "root",
+                    format!("the walk stays under {}", directory_of(&url)),
+                ),
+        )
     }
 
     fn enumerate<'a>(

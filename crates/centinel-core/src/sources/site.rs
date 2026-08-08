@@ -179,7 +179,11 @@ impl SiteSource {
     /// perfectly good sitemap. The seed is built with empty bytes and a warning instead:
     /// recognisers that need markup answer `None`, and the ones that only need
     /// `robots.txt` are unaffected.
-    async fn seed(&self, progress: &Progress) -> anyhow::Result<(Seed, Vec<String>)> {
+    ///
+    /// Public so `investigate` can ask the registry itself rather than only being told
+    /// which strategy won. Two requests are enough to run every recogniser in the build,
+    /// and paying for them twice to see the runners-up would be the wrong trade.
+    pub async fn seed(&self, progress: &Progress) -> anyhow::Result<(Seed, Vec<String>)> {
         let base = url::Url::parse(&self.site)?;
         let mut warnings = Vec::new();
 
@@ -225,6 +229,33 @@ impl SiteSource {
         };
 
         Ok((Seed { page, robots }, warnings))
+    }
+
+    /// Runs one strategy against a seed already in hand, and records that it spoke.
+    ///
+    /// Split out of [`Source::enumerate`] so `investigate` can recognise, choose from the
+    /// full list, and then enumerate — without fetching the seed a second time.
+    pub async fn run(
+        &self,
+        chosen: &'static StrategyDef,
+        seed: &Seed,
+        progress: &Progress,
+    ) -> anyhow::Result<crate::strategies::Enumerated> {
+        let _ = self.spoke.set(chosen);
+        progress.say(format!("enumerating with `{}`", chosen.name));
+
+        let crawl = SiteCrawl {
+            site: self,
+            progress,
+            spent: AtomicUsize::new(0),
+            // `--max-sitemaps` names the only strategy that existed when the flag was
+            // added. It has always meant "requests this enumeration may spend", which is
+            // what every strategy needs, so it is reused rather than renamed — a flag
+            // sitting in somebody's cron entry is not worth the tidier name.
+            budget: self.limits.max_sitemaps,
+            max_addresses: self.limits.max_urls,
+        };
+        chosen.it.enumerate(seed, &crawl).await
     }
 
     /// Which strategy runs, and on what evidence.
@@ -445,21 +476,7 @@ impl Source for SiteSource {
             let (seed, mut warnings) = self.seed(progress).await?;
 
             let (chosen, recognition) = self.choose(&seed, &mut warnings);
-            let _ = self.spoke.set(chosen);
-            progress.say(format!("enumerating with `{}`", chosen.name));
-
-            let crawl = SiteCrawl {
-                site: self,
-                progress,
-                spent: AtomicUsize::new(0),
-                // `--max-sitemaps` names the only strategy that existed when the flag was
-                // added. It has always meant "requests this enumeration may spend", which
-                // is what every strategy needs, so it is reused rather than renamed — a
-                // flag sitting in somebody's cron entry is not worth the tidier name.
-                budget: self.limits.max_sitemaps,
-                max_addresses: self.limits.max_urls,
-            };
-            let found = chosen.it.enumerate(&seed, &crawl).await?;
+            let found = self.run(chosen, &seed, progress).await?;
 
             // Recognition first, because it is what the operator checks before trusting
             // the count under it.

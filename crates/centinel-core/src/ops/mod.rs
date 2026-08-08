@@ -23,6 +23,7 @@ mod doctor;
 mod embed;
 mod extract;
 mod ingest;
+mod investigate;
 mod list;
 mod models;
 mod open;
@@ -50,6 +51,9 @@ pub use doctor::{Binary, DoctorArgs, DoctorReport, GateStatus, Weights, doctor};
 pub use embed::{EmbedArgs, EmbedReport, Skipped, embed};
 pub use extract::{ExtractArgs, ExtractReport, ExtractSample, Unreadable, extract};
 pub use ingest::{IngestArgs, IngestOutcome, IngestReport, ingest};
+pub use investigate::{
+    Crumb, InvestigateArgs, InvestigateReport, Lead, Probe, Recognised, SeedSummary, investigate,
+};
 pub use list::{ListArgs, ListReport, Problem, SourceSummary, list};
 pub use run::{RunArgs, RunReport, SourceRun, Stage, StageRun, StageStatus, run};
 pub use schedule::{RmArgs, ScheduleAction, ScheduleArgs, ScheduleReport, SetArgs, schedule};
