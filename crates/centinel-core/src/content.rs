@@ -255,8 +255,33 @@ impl ContentKind {
         if declared.starts_with("audio/") {
             return Audio;
         }
+        if let Some(kind) = Self::from_magic(bytes) {
+            return kind;
+        }
 
-        Self::from_magic(bytes).unwrap_or(Other)
+        // Both signals came back empty. The served address's own name is the last thing
+        // left, and it is better than [`Other`].
+        Self::from_served_name(meta).unwrap_or(Other)
+    }
+
+    /// The kind the served address's filename names, for bytes that proved nothing.
+    ///
+    /// Reached **only** where the declared type named no kind and the first bytes could
+    /// not tell either, which is exactly the `.csv` case: ordinary text has no magic, and
+    /// `application/octet-stream` is not an opinion about the content at all — it is IIS's
+    /// default for an extension missing from its MIME map. Measured on the Hillsborough
+    /// clerk's file server: **over 300 CSV files, more than 2.2 GB**, every one collected
+    /// and every one recorded Underivable, in silence, because no reader claims [`Other`].
+    ///
+    /// *Why this does not reopen what [`Self::declared_type_for_path`] refuses.* That rule
+    /// keeps a filename's opinion out of the place a server's header belongs. Here there is
+    /// no header worth the word and no evidence in the bytes, so nothing is being
+    /// displaced — and the name being read is the **server's own address**, not one a
+    /// caller supplied. Every server that declares something real is unaffected, because
+    /// this is never reached when one does.
+    fn from_served_name(meta: &BTreeMap<String, String>) -> Option<Self> {
+        let served = url::Url::parse(meta.get("final_url")?).ok()?;
+        Self::from_path(Path::new(served.path()))
     }
 
     /// The kind a content-type names, exactly.
@@ -550,6 +575,67 @@ mod tests {
             Document
         );
         assert_eq!(classify("application/octet-stream", &OLE_MAGIC), Document);
+    }
+
+    /// The 2.2 GB case. IIS serves `.csv` as `application/octet-stream`, which asserts
+    /// nothing, and a CSV's first bytes are ordinary text — so both signals come back
+    /// empty and the served address is the only evidence left.
+    fn served(url: &str, ct: &str, bytes: &[u8]) -> ContentKind {
+        let mut meta = meta(ct);
+        meta.insert("final_url".into(), url.into());
+        ContentKind::classify(&meta, bytes)
+    }
+
+    #[test]
+    fn a_csv_served_as_octet_stream_is_read_off_the_address_it_came_from() {
+        assert_eq!(
+            served(
+                "https://publicrec.hillsclerk.com/Probate/dailyfilings/ProbateFiling_20260806.csv",
+                "application/octet-stream",
+                b"CaseNbr,Party,Judge\n25-CA-012120,DOE,SMITH\n",
+            ),
+            Csv,
+            "the largest category on that server, lost in silence"
+        );
+    }
+
+    /// The rule this must not reopen: a server that declares something real still wins,
+    /// and so do the bytes. The address is consulted last or not at all.
+    #[test]
+    fn a_real_declaration_and_real_magic_both_outrank_the_address() {
+        // The header names a kind — the `.csv` in the address is not consulted.
+        assert_eq!(
+            served("https://x.gov/report.csv", "text/html", b"anything"),
+            Html
+        );
+        // The header says nothing, but the bytes do.
+        assert_eq!(
+            served(
+                "https://x.gov/report.csv",
+                "application/octet-stream",
+                b"%PDF-1.7\n"
+            ),
+            Pdf
+        );
+    }
+
+    #[test]
+    fn an_address_that_names_nothing_still_reaches_other() {
+        // A directory, an unknown extension, and the invented address from a `<script>`
+        // whose filename has no stem at all.
+        for url in [
+            "https://x.gov/Civil/bulkdata/",
+            "https://x.gov/plans.dwg",
+            "https://x.gov/251agendaonline/.pdf",
+        ] {
+            assert_eq!(
+                served(url, "application/octet-stream", b"\x00\x01\x02"),
+                Other,
+                "{url}"
+            );
+        }
+        // And a missing `final_url` is simply no evidence.
+        assert_eq!(classify("application/octet-stream", b"\x00\x01\x02"), Other);
     }
 
     /// Every office type a `.gov` server labels correctly reaches one of two words.

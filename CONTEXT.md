@@ -79,8 +79,18 @@ file read off disk has no headers, and for the formats whose first bytes are ord
 — `.csv`, `.json`, `.txt` — magic bytes alone reach `other` and no extractor claims them,
 so the same bytes a server calls `text/csv` become unreadable the moment they arrive as a
 path. So `check` infers one from the extension and says that it did: presenting a guess as
-a header would put a filename's opinion where the archive expects a server's. Nothing that
-was *fetched* ever consults it.
+a header would put a filename's opinion where the archive expects a server's.
+
+**A name is the last evidence consulted, never the first.** `classify` asks the declared
+type, then the magic bytes, and only where both came back empty does it read the extension
+off the *served address*. That last step is not a softening of the rule above: it is
+reached only when there is no header worth the word — `application/octet-stream` is IIS's
+default for an extension missing from its MIME map, not a claim about the content — and no
+evidence in the bytes, because the formats this rescues are the ones whose first bytes are
+ordinary text. Without it, 2.2 GB of `.csv` on one Florida clerk's file server was
+collected, classified `other`, claimed by no reader, and recorded Underivable in silence.
+What stays forbidden is a *supplied* filename outranking a server that declared something
+real, which is the case the rule was written for.
 
 **Note** — a line of provenance a Source wants shown, and how it should read. Lets a
 report print which sitemaps were walked or which channel tabs returned nothing without the
