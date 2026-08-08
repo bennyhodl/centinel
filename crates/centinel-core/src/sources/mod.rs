@@ -66,7 +66,17 @@ pub fn from_config(
             if let Some(n) = over.limit {
                 limits.max_urls = limits.max_urls.min(n);
             }
-            Ok(Box::new(SiteSource::new(id, url, policy, limits)?))
+            // A named strategy resolves here. An unnamed one cannot: recognition needs a
+            // seed, and this function never fetches. `None` therefore means "ask the
+            // registry once the page is in hand", which `SiteSource::enumerate` does.
+            let named = cfg
+                .strategy
+                .as_deref()
+                .map(crate::strategies::by_name)
+                .transpose()?;
+            Ok(Box::new(
+                SiteSource::new(id, url, policy, limits)?.with_strategy(named),
+            ))
         }
 
         Acquisition::Channel(url) => {
@@ -110,6 +120,12 @@ pub struct Inferred {
     pub kind: SourceKind,
     /// `None` when the store proves the source exists but cannot say where from.
     pub target: Option<String>,
+    /// The `DiscoveryRun::method` last recorded — the strategy that collected this.
+    ///
+    /// `None` when this build does not have a strategy by that name, which is what an
+    /// older store or a strategy since removed looks like. Not an error: the source is
+    /// still collectable, it simply is not pinned to something that no longer exists.
+    pub strategy: Option<&'static crate::strategies::StrategyDef>,
 }
 
 impl Inferred {
@@ -117,7 +133,12 @@ impl Inferred {
     pub fn to_config(&self, id: &SourceId) -> Option<SourceConfig> {
         let target = self.target.as_ref()?;
         Some(match self.kind {
-            SourceKind::Site => SourceConfig::site(id.to_string(), target),
+            SourceKind::Site => SourceConfig {
+                // What the store says collected it last, so writing the block down does
+                // not quietly change how the next run enumerates.
+                strategy: self.strategy.map(|s| s.name.to_string()),
+                ..SourceConfig::site(id.to_string(), target)
+            },
             SourceKind::Channel => SourceConfig::channel(id.to_string(), target),
         })
     }
@@ -158,12 +179,16 @@ pub async fn infer_from(store: &Store, replay: &Replay) -> anyhow::Result<Option
         return Ok(Some(Inferred {
             kind: SourceKind::Channel,
             target: channel_url(store, replay.records()).await,
+            strategy: None,
         }));
     }
 
     Ok(Some(Inferred {
         kind: SourceKind::Site,
         target: keys.iter().find_map(|k| origin_of(k)),
+        // The same `method` string that names the kind also names the strategy. A method
+        // this build has no strategy for is simply not pinned — see [`Inferred::strategy`].
+        strategy: crate::strategies::by_name(replay.discovery_method()).ok(),
     }))
 }
 
@@ -189,7 +214,13 @@ pub async fn from_store(
     // DiscoveryRun already holds, so an unrecoverable target is not fatal here.
     let target = inferred.target.unwrap_or_default();
     let cfg = match inferred.kind {
-        SourceKind::Site => SourceConfig::site(id.to_string(), target),
+        SourceKind::Site => SourceConfig {
+            // The store is the authority here. A source discovered with `listing` and
+            // then collected in a second process must acquire as `listing` too, or
+            // acquisition would scan 6 GB of CSV for enclosed documents.
+            strategy: inferred.strategy.map(|s| s.name.to_string()),
+            ..SourceConfig::site(id.to_string(), target)
+        },
         SourceKind::Channel => SourceConfig::channel(id.to_string(), target),
     };
     from_config(&cfg, defaults, over)
@@ -463,6 +494,7 @@ mod tests {
         let channel = Inferred {
             kind: SourceKind::Channel,
             target: Some("https://www.youtube.com/@X".into()),
+            strategy: None,
         };
         assert_eq!(
             channel.to_config(&id).unwrap().channel.as_deref(),
@@ -472,10 +504,73 @@ mod tests {
         let unknown = Inferred {
             kind: SourceKind::Site,
             target: None,
+            strategy: None,
         };
         assert!(
             unknown.to_config(&id).is_none(),
             "a block with no address would fail on the next run"
         );
+    }
+
+    /// A source discovered with `listing` must be *acquired* as `listing` in a later
+    /// process, or acquisition would scan 6 GB of CSV looking for enclosed documents.
+    #[tokio::test]
+    async fn the_strategy_that_collected_a_source_is_recovered_from_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).await.unwrap();
+        let id = SourceId::new("publicrec").unwrap();
+        store
+            .append(
+                &id,
+                &LogRecord::DiscoveryRun(DiscoveryRun {
+                    source: id.clone(),
+                    at: jiff::Timestamp::now(),
+                    resources: vec![Resource::new(
+                        id.clone(),
+                        "https://publicrec.hillsclerk.com/Civil/a.csv",
+                    )],
+                    method: "listing".into(),
+                }),
+            )
+            .await
+            .unwrap();
+
+        let got = infer(&store, &id).await.unwrap().unwrap();
+        assert_eq!(got.kind, SourceKind::Site);
+        assert_eq!(got.strategy.map(|s| s.name), Some("listing"));
+        assert_eq!(
+            got.to_config(&id).unwrap().strategy.as_deref(),
+            Some("listing")
+        );
+
+        let s = from_store(&store, &id, &defaults(), &Overrides::default())
+            .await
+            .unwrap();
+        assert_eq!(s.method(), "listing", "and it acquires as what it was");
+    }
+
+    /// A method this build has no strategy for is not an error. An older store, or a
+    /// strategy since removed, still names a source that is perfectly collectable.
+    #[tokio::test]
+    async fn a_method_this_build_does_not_know_leaves_the_source_unpinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).await.unwrap();
+        let id = SourceId::new("old").unwrap();
+        store
+            .append(
+                &id,
+                &LogRecord::DiscoveryRun(DiscoveryRun {
+                    source: id.clone(),
+                    at: jiff::Timestamp::now(),
+                    resources: vec![Resource::new(id.clone(), "https://a.gov/x")],
+                    method: "some-retired-strategy".into(),
+                }),
+            )
+            .await
+            .unwrap();
+
+        let got = infer(&store, &id).await.unwrap().unwrap();
+        assert!(got.strategy.is_none());
+        assert!(got.to_config(&id).unwrap().strategy.is_none());
     }
 }

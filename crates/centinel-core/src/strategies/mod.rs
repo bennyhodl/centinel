@@ -342,6 +342,17 @@ impl std::fmt::Debug for StrategyDef {
     }
 }
 
+/// By name, which [`no_two_strategies_share_a_name`] proves is an identity.
+///
+/// [`no_two_strategies_share_a_name`]: tests::no_two_strategies_share_a_name
+impl PartialEq for StrategyDef {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl Eq for StrategyDef {}
+
 inventory::collect!(StrategyDef);
 
 /// Every registered strategy, in a stable order.
@@ -390,6 +401,21 @@ pub fn recognise(seed: &Seed) -> Vec<Recognition> {
 /// The strategy that should run for this seed, if any recognised it.
 pub fn best(seed: &Seed) -> Option<Recognition> {
     recognise(seed).into_iter().next()
+}
+
+/// What runs when nothing recognised the seed.
+///
+/// A guess, and it should be read as one. [`sitemap::Sitemap`] is the best available
+/// default because a `.gov` site usually has a sitemap whether or not it declares one, and
+/// because it is what every source already in the store was collected with.
+///
+/// **Reaching this is the event a Lead records.** `docs/STRATEGIES.md` §17: a sitemap walk
+/// that ran because `robots.txt` declared an index is a recognition, and a sitemap walk
+/// that ran because nothing else spoke is a fallback. The two produce identical
+/// `DiscoveryRun`s today, and telling them apart is what makes it possible to find the
+/// hosts worth writing a strategy for.
+pub fn fallback() -> &'static StrategyDef {
+    by_name("sitemap").expect("the sitemap strategy is compiled in")
 }
 
 #[cfg(test)]

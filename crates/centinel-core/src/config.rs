@@ -251,6 +251,19 @@ pub struct SourceConfig {
     /// Overrides [`Defaults::lang`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
+
+    /// The collection strategy the operator accepted for this source.
+    ///
+    /// Website sources only. Absent means *ask the registry every run*, which is the
+    /// right default for a source added before any strategy existed.
+    ///
+    /// Present means the operator saw the evidence once and said yes. It is not a lock:
+    /// the strategy is still asked to recognise the site on every run, and a strategy that
+    /// stops recognising the address it was accepted for produces a **warning** rather
+    /// than a silent switch to a weaker one. Sites change, and an empty corpus with a
+    /// green run is the failure this key exists to make loud.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
 }
 
 /// One cadence, and the `run` it fires.
@@ -435,6 +448,9 @@ impl SourceConfig {
         }
         if let Some(rps) = self.rps {
             s.push_str(&format!("rps = {rps}\n"));
+        }
+        if let Some(strategy) = &self.strategy {
+            s.push_str(&format!("strategy = {}\n", quote(strategy)));
         }
         if let Some(lang) = &self.lang {
             s.push_str(&format!("lang = {}\n", quote(lang)));
@@ -1771,6 +1787,7 @@ mod tests {
             yt_dlp_args: vec!["--cookies-from-browser=brave".into()],
             audio_if_no_captions: Some(true),
             lang: Some("es".into()),
+            strategy: Some("listing".into()),
         };
         let c = Config::parse(&source.to_toml_block()).unwrap();
         let got = &c.sources[0];
@@ -1785,6 +1802,7 @@ mod tests {
         assert_eq!(got.yt_dlp_args, ["--cookies-from-browser=brave"]);
         assert_eq!(got.audio_if_no_captions, Some(true));
         assert_eq!(got.lang.as_deref(), Some("es"));
+        assert_eq!(got.strategy.as_deref(), Some("listing"));
         assert!(!got.is_enabled());
     }
 

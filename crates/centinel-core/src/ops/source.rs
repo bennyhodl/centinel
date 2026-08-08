@@ -233,6 +233,12 @@ async fn add(
         // today's answer into the file and make a later change to that default invisible.
         audio_if_no_captions: None,
         lang: None,
+        // Unset for the same reason, and for one more: pinning a strategy is a statement
+        // that the operator saw the evidence and accepted it, and `source add` has seen
+        // nothing — it does not fetch. An absent key means "ask the registry every run",
+        // so the source still gets the right strategy; it is simply not pinned to one.
+        // `centinel investigate` is what will write this key.
+        strategy: None,
     };
 
     let acquisition = source.acquisition()?;

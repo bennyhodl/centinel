@@ -163,7 +163,6 @@ pub async fn discover(
         limits: Some(DiscoveryLimits {
             max_sitemaps: args.max_sitemaps,
             max_urls: args.max_urls,
-            ..Default::default()
         }),
         ..Default::default()
     };
