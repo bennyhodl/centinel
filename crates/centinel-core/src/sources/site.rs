@@ -1,33 +1,70 @@
 //! A crawled website as a [`Source`].
 //!
-//! Enumeration is `robots.txt` → sitemaps → the declared URL set; acquisition is an HTTP
-//! GET. Both were already implemented in [`crate::discovery`] and [`crate::fetch`] — this
-//! is the ~120 lines that put them behind the trait, which is roughly the amount of code
+//! Enumeration is a **strategy** — see [`crate::strategies`] — and acquisition is an HTTP
+//! GET. This file is what puts both behind the trait, which is roughly the amount of code
 //! `collect` and `discover` used to spend knowing they were talking to a website.
+//!
+//! ## What this Source owns, and what the strategy owns
+//!
+//! Everything a strategy must not be trusted with lives here: the [`Pacer`], the
+//! [`HostPolicy`], the request budget, `robots.txt`, and the decision about what counts as
+//! a [`Resource`]. A strategy is handed a [`Seed`] and a [`Crawl`], and it hands back
+//! addresses.
+//!
+//! That split is why a strategy cannot hammer a host and cannot write a false record. It
+//! is also why the strategy that ran is recorded rather than assumed: [`Source::method`]
+//! reports what actually spoke, so the store alone recovers it later.
+//!
+//! ## Choosing one
+//!
+//! A `[[source]]` block may pin a strategy, which means an operator saw the evidence and
+//! accepted it. A pinned strategy is still asked to recognise the site on every run, and
+//! one that stops recognising the address it was accepted for produces a **warning**. It
+//! does not produce a silent switch to a weaker strategy and an empty corpus.
+//!
+//! With nothing pinned the registry is asked. When nothing answers, the sitemap walk runs
+//! anyway — it is the best available guess and it is what every source in the store was
+//! collected with — and the run says so, because a fallback and a recognition currently
+//! produce identical records and only one of them is worth investigating.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use futures::future::BoxFuture;
 
-use crate::discovery::{Discoverer, DiscoveryLimits};
+use crate::discovery::{DiscoveryLimits, Robots};
 use crate::domain::{
-    Acquired, Enumeration, Liveness, Note, NoteMark, Refusal, Resource, Source, SourceId,
+    Acquired, Enumeration, Fetched, Liveness, Note, NoteMark, Refusal, Resource, Source, SourceId,
     SourceKind,
 };
 use crate::enclosure;
 use crate::fetch::Fetcher;
 use crate::op::{ItemOutcome, Progress, Verdict};
 use crate::policy::{HostPolicy, Pacer};
+use crate::strategies::{self, Addresses, Crawl, Recognition, Seed, StrategyDef};
 
 pub struct SiteSource {
     id: SourceId,
     /// Any URL on the site. Only the origin is used.
     site: String,
     policy: HostPolicy,
-    discoverer: Discoverer,
+    limits: DiscoveryLimits,
     fetcher: Fetcher,
+    /// The strategy the `[[source]]` block pinned, if it pinned one.
+    named: Option<&'static StrategyDef>,
+    /// The strategy that actually ran.
+    ///
+    /// Set during [`Source::enumerate`], which is before `discover` writes the
+    /// [`crate::domain::DiscoveryRun`] — so the run records what spoke rather than what
+    /// was hoped for.
+    spoke: OnceLock<&'static StrategyDef>,
+    /// The host's declared `Crawl-delay`, once `robots.txt` has been read.
+    ///
+    /// Honoured as a floor on the request interval: a host asking to be crawled slowly
+    /// gets that, even where our own rate cap would allow faster.
+    crawl_delay: OnceLock<Option<Duration>>,
     /// One limiter per host, created on first sight.
     ///
     /// Per host and not per run, because a discovery run routinely spans hosts —
@@ -95,13 +132,141 @@ impl SiteSource {
             id,
             site: site.into(),
             fetcher: Fetcher::new(&policy)?,
-            discoverer: Discoverer::new(policy.clone(), limits)?,
             policy,
+            limits,
+            named: None,
+            spoke: OnceLock::new(),
+            crawl_delay: OnceLock::new(),
             pacers: Mutex::new(HashMap::new()),
             partial: Mutex::new(Vec::new()),
             enclosed: AtomicUsize::new(0),
             dropped: AtomicUsize::new(0),
         })
+    }
+
+    /// Pins the strategy an operator accepted, or the one the store remembers.
+    pub fn with_strategy(mut self, named: Option<&'static StrategyDef>) -> Self {
+        self.named = named;
+        self
+    }
+
+    /// The strategy in force: what ran, else what was pinned, else nothing yet.
+    fn strategy(&self) -> Option<&'static StrategyDef> {
+        self.spoke.get().or(self.named.as_ref()).copied()
+    }
+
+    /// Whether a fetched page is worth looking inside.
+    ///
+    /// A `sitemap` names pages, and a page is often a wrapper around a PDF its CMS renders
+    /// in a viewer — so the scan pays for itself. A `listing` names the documents
+    /// themselves: scanning those finds nothing, and it is how
+    /// `/251agendaonline/.pdf?documentType=` was invented, an address naming no document
+    /// on a host where every dead address answers 200.
+    ///
+    /// Defaults to scanning, which is what every source in the store was collected with.
+    fn scans_for_enclosures(&self) -> bool {
+        !matches!(
+            self.strategy().map(|s| s.it.addresses_are()),
+            Some(Addresses::Documents)
+        )
+    }
+
+    /// Fetches the landing page and `robots.txt` — everything a recogniser is allowed to
+    /// see, and one request more than discovery used to cost.
+    ///
+    /// A landing page that refuses is **not** fatal. `Discoverer` never fetched one at
+    /// all, so failing here would break every site that 403s its front door and serves a
+    /// perfectly good sitemap. The seed is built with empty bytes and a warning instead:
+    /// recognisers that need markup answer `None`, and the ones that only need
+    /// `robots.txt` are unaffected.
+    async fn seed(&self, progress: &Progress) -> anyhow::Result<(Seed, Vec<String>)> {
+        let base = url::Url::parse(&self.site)?;
+        let mut warnings = Vec::new();
+
+        progress.say(format!(
+            "reading robots.txt for {}",
+            base.host_str().unwrap_or("?")
+        ));
+        let robots_url = base.join("/robots.txt")?;
+        self.pacer_for(robots_url.as_str()).wait().await;
+        let robots = match self.fetcher.get(robots_url.as_str()).await {
+            Ok(f) => Robots::parse(&self.policy.user_agent, &f.bytes),
+            Err(e) => {
+                // Measured on phila.gov: CloudFront 403 on robots.txt, 200 on the site.
+                warnings.push(format!("robots.txt unreachable ({e}); assuming no rules"));
+                Robots::unreachable(self.policy.unreachable_robots)
+            }
+        };
+
+        // From here on, honour what the host asked for. The pacers built for the two
+        // requests above are dropped rather than reused, because a cached limiter with no
+        // delay in it would silently outrank the `Crawl-delay` we just read.
+        let _ = self.crawl_delay.set(robots.crawl_delay());
+        if robots.crawl_delay().is_some() {
+            self.pacers
+                .lock()
+                .expect("pacer map is never poisoned")
+                .clear();
+        }
+
+        self.pacer_for(&self.site).wait().await;
+        let page = match self.fetcher.get(&self.site).await {
+            Ok(f) => f,
+            Err(refusal) => {
+                warnings.push(format!(
+                    "{} — {refusal}; recognition ran on robots.txt alone",
+                    self.site
+                ));
+                Fetched {
+                    bytes: Vec::new(),
+                    meta: BTreeMap::from([("final_url".to_string(), self.site.clone())]),
+                }
+            }
+        };
+
+        Ok((Seed { page, robots }, warnings))
+    }
+
+    /// Which strategy runs, and on what evidence.
+    ///
+    /// Three outcomes, and the third is the one worth naming. A pinned strategy that no
+    /// longer recognises its own site still runs — the operator asked for it, and refusing
+    /// would collect nothing — but the disagreement is a warning, because a vendor
+    /// shipping a new version is exactly how a healthy-looking run starts returning an
+    /// empty corpus.
+    fn choose(
+        &self,
+        seed: &Seed,
+        warnings: &mut Vec<String>,
+    ) -> (&'static StrategyDef, Option<Recognition>) {
+        if let Some(named) = self.named {
+            let recognition = named.it.recognise(seed);
+            if recognition.is_none() {
+                warnings.push(format!(
+                    "`{}` no longer recognises {} — it was run anyway, and the count \
+                     below may be wrong",
+                    named.name, self.site
+                ));
+            }
+            return (named, recognition);
+        }
+
+        match strategies::best(seed) {
+            Some(r) => (
+                strategies::by_name(r.strategy).unwrap_or_else(|_| strategies::fallback()),
+                Some(r),
+            ),
+            // Nothing spoke. The sitemap walk is the best available guess, and saying so
+            // is what separates a fallback from a recognition — today they write identical
+            // records, and only one of them is worth a person's attention.
+            None => {
+                warnings.push(format!(
+                    "no strategy recognised {}; walking it as a sitemap",
+                    self.site
+                ));
+                (strategies::fallback(), None)
+            }
+        }
     }
 
     fn note_partial(&self, detail: String) {
@@ -191,12 +356,58 @@ impl SiteSource {
             .ok()
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_default();
+        let declared = self.crawl_delay.get().copied().flatten();
         let mut pacers = self.pacers.lock().expect("pacer map is never poisoned");
         Arc::clone(
             pacers
                 .entry(host)
-                .or_insert_with(|| Arc::new(Pacer::new(self.policy.min_interval(None)))),
+                .or_insert_with(|| Arc::new(Pacer::new(self.policy.min_interval(declared)))),
         )
+    }
+}
+
+/// The host, as a strategy is allowed to see it.
+///
+/// Holds the budget rather than delegating it, so "how many requests has this enumeration
+/// spent" is one counter in one place instead of a number each strategy tracks its own way
+/// and reports differently.
+struct SiteCrawl<'a> {
+    site: &'a SiteSource,
+    progress: &'a Progress,
+    spent: AtomicUsize,
+    budget: usize,
+    max_addresses: usize,
+}
+
+impl Crawl for SiteCrawl<'_> {
+    /// Paced, counted, and reported by the strategy rather than here.
+    ///
+    /// Deliberately not [`SiteSource::fetch_reporting`]: that emits one item line per
+    /// request, which is right for acquisition — where each line is a document somebody
+    /// wanted — and wrong for enumeration, where two hundred sitemap fetches would bury
+    /// the run. A strategy narrates its own walk through [`Crawl::progress`].
+    fn get<'b>(&'b self, url: &'b str) -> BoxFuture<'b, Result<Fetched, Refusal>> {
+        Box::pin(async move {
+            self.spent.fetch_add(1, Ordering::Relaxed);
+            self.site.pacer_for(url).wait().await;
+            self.site.fetcher.get(url).await
+        })
+    }
+
+    fn may_fetch(&self) -> bool {
+        self.spent.load(Ordering::Relaxed) < self.budget
+    }
+
+    fn budget(&self) -> usize {
+        self.budget
+    }
+
+    fn max_addresses(&self) -> usize {
+        self.max_addresses
+    }
+
+    fn progress(&self) -> &Progress {
+        self.progress
     }
 }
 
@@ -209,8 +420,13 @@ impl Source for SiteSource {
         SourceKind::Site
     }
 
+    /// What actually spoke, falling back to what was pinned and then to the default.
+    ///
+    /// Read after [`Source::enumerate`], which is when `discover` writes the run — so a
+    /// `DiscoveryRun` records the strategy that produced it. `sources::infer` reads it
+    /// back, which is how a source collected by hand recovers its own strategy.
     fn method(&self) -> &'static str {
-        "sitemap"
+        self.strategy().map_or("sitemap", |s| s.name)
     }
 
     fn target(&self) -> &str {
@@ -222,55 +438,80 @@ impl Source for SiteSource {
         progress: &'a Progress,
     ) -> BoxFuture<'a, anyhow::Result<Enumeration>> {
         Box::pin(async move {
-            let found = self.discoverer.discover(&self.site, progress).await?;
+            let (seed, mut warnings) = self.seed(progress).await?;
 
-            // Everything that would explain a wrong count, stated as provenance rather
-            // than left for the reader to reconstruct from a bare number.
-            let mut notes = vec![Note::ok_or_warn(
-                "robots.txt",
-                if found.robots_declared {
-                    "read".to_string()
-                } else {
-                    "unreachable — rules were assumed, not read".to_string()
-                },
-                found.robots_declared,
-            )];
-            if let Some(delay) = found.crawl_delay {
-                notes.push(Note::new(
-                    "crawl-delay",
-                    format!("{}s declared by the host", delay.as_secs_f64()),
-                ));
+            let (chosen, recognition) = self.choose(&seed, &mut warnings);
+            let _ = self.spoke.set(chosen);
+            progress.say(format!("enumerating with `{}`", chosen.name));
+
+            let crawl = SiteCrawl {
+                site: self,
+                progress,
+                spent: AtomicUsize::new(0),
+                // `--max-sitemaps` names the only strategy that existed when the flag was
+                // added. It has always meant "requests this enumeration may spend", which
+                // is what every strategy needs, so it is reused rather than renamed — a
+                // flag sitting in somebody's cron entry is not worth the tidier name.
+                budget: self.limits.max_sitemaps,
+                max_addresses: self.limits.max_urls,
+            };
+            let found = chosen.it.enumerate(&seed, &crawl).await?;
+
+            // Recognition first, because it is what the operator checks before trusting
+            // the count under it.
+            let mut notes = Vec::new();
+            match &recognition {
+                Some(r) => {
+                    notes.push(Note::marked(
+                        "strategy",
+                        format!("{} — {}", r.strategy, r.keyed_on),
+                        NoteMark::Ok,
+                    ));
+                    notes.extend(r.evidence.iter().cloned());
+                    notes.extend(r.warnings.iter().cloned());
+                }
+                None => notes.push(Note::marked(
+                    "strategy",
+                    format!("{} — nothing recognised this address", chosen.name),
+                    NoteMark::Warn,
+                )),
             }
-            if found.disallowed > 0 {
-                notes.push(Note::marked(
-                    "disallowed",
+            notes.extend(found.notes);
+            warnings.extend(found.warnings);
+
+            let mut figures = found.figures;
+            if let Some(total) = found.declared_total {
+                // The number that tells "collected the site" from "collected 4% of it".
+                notes.push(Note::ok_or_warn(
+                    "declared",
                     format!(
-                        "{} excluded by the site's own rules",
-                        crate::render::count(found.disallowed as u64)
+                        "the source names {} item(s); this pass found {}",
+                        crate::render::count(total),
+                        crate::render::count(found.addresses.len() as u64)
                     ),
-                    NoteMark::Ok,
+                    found.addresses.len() as u64 >= total,
                 ));
-            }
-            for sitemap in &found.sitemaps_fetched {
-                notes.push(Note::new("sitemap", sitemap));
+                figures.insert("declared_total".to_string(), total);
             }
 
-            let figures = BTreeMap::from([
-                ("disallowed".to_string(), found.disallowed as u64),
-                (
-                    "sitemaps_fetched".to_string(),
-                    found.sitemaps_fetched.len() as u64,
-                ),
-                ("robots_declared".to_string(), found.robots_declared as u64),
-            ]);
+            // Addresses become Resources **here**, and nowhere else. A strategy that could
+            // mint them could mint two identities for one document.
+            let base = seed.final_url();
+            let resources = found
+                .addresses
+                .iter()
+                .filter_map(|a| {
+                    let absolute = match &base {
+                        Some(b) => b.join(a).ok()?.to_string(),
+                        None => a.clone(),
+                    };
+                    Some(Resource::new(self.id.clone(), absolute))
+                })
+                .collect();
 
             Ok(Enumeration {
-                resources: found
-                    .entries
-                    .iter()
-                    .map(|e| Resource::new(self.id.clone(), e.loc.clone()))
-                    .collect(),
-                warnings: found.warnings,
+                resources,
+                warnings,
                 notes,
                 figures,
             })
@@ -308,7 +549,11 @@ impl Source for SiteSource {
                 .get("final_url")
                 .cloned()
                 .unwrap_or_else(|| resource.natural_key.clone());
-            let enclosed = self.enclosures(&fetched, &base);
+            // The branch is on what the strategy *named*, never on which strategy it was.
+            let enclosed = match self.scans_for_enclosures() {
+                true => self.enclosures(&fetched, &base),
+                false => Vec::new(),
+            };
 
             let mut out = vec![Acquired {
                 resource: resource.clone(),
@@ -389,6 +634,45 @@ mod tests {
         assert_eq!(s.method(), "sitemap");
         assert_eq!(s.target(), "https://www.tampa.gov");
         assert!(!s.yields_audio(), "a crawled site never produces audio");
+    }
+
+    /// Nothing has spoken yet, so the run reads as what it would fall back to. This is
+    /// also every source added before any strategy existed.
+    #[test]
+    fn an_unpinned_source_reads_as_a_sitemap_until_something_recognises_it() {
+        let s = source();
+        assert_eq!(s.method(), "sitemap");
+        assert!(
+            s.scans_for_enclosures(),
+            "the default must stay what the store was collected with"
+        );
+    }
+
+    /// A pinned strategy is recorded before it runs, so `discover` writes what the
+    /// operator accepted rather than a name the log has to guess at afterwards.
+    #[test]
+    fn a_pinned_strategy_is_what_the_run_records_and_how_it_acquires() {
+        let listing = crate::strategies::by_name("listing").unwrap();
+        let s = source().with_strategy(Some(listing));
+
+        assert_eq!(s.method(), "listing");
+        assert!(
+            !s.scans_for_enclosures(),
+            "a file in a directory index IS the document; scanning 6 GB of CSV for \
+             enclosed documents finds nothing"
+        );
+    }
+
+    /// The strategy that actually ran outranks the one that was pinned, because a run
+    /// must record what happened rather than what was asked for.
+    #[test]
+    fn what_spoke_outranks_what_was_pinned() {
+        let s = source().with_strategy(Some(crate::strategies::by_name("listing").unwrap()));
+        s.spoke
+            .set(crate::strategies::by_name("sitemap").unwrap())
+            .unwrap();
+        assert_eq!(s.method(), "sitemap");
+        assert!(s.scans_for_enclosures());
     }
 
     /// A page is collected when the page is observed — there is no sub-address to key on.

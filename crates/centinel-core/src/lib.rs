@@ -64,7 +64,7 @@ pub use centinel_macros::op;
 
 /// The imports an op definition needs.
 pub mod prelude {
-    pub use crate::discovery::{Discoverer, DiscoveryLimits, SiteDiscovery};
+    pub use crate::discovery::DiscoveryLimits;
     pub use crate::domain::{
         Acquired, Anchor, BlobSha, ChangeEvent, ChangeKind, ChangeSignal, Derivation, DiscoveryRun,
         Enumeration, Fetched, Fingerprint, Liveness, ModelTier, Note, NoteMark, Observation,
