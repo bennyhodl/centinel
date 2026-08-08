@@ -1,7 +1,8 @@
 # Centinel — Collection strategies
 
-**Status:** a plan, not a specification. Nothing here is built. The central claim rests on
-four sites and **has not been falsified yet** — §11 names the ten-minute test that would.
+**Status:** a plan, not a specification. §11's five universal fixes are **built** — branch
+`enumeration`, five commits. Nothing else here is. The central claim rests on four sites and
+**has not been falsified yet** — §12 names the ten-minute test that would.
 
 **Evidence:** [`docs/FIELD-NOTES.md`](FIELD-NOTES.md) — four sites, walked by hand.
 Every claim below cites an entry there. Nothing here is reasoned from first principles.
@@ -80,11 +81,17 @@ never keyed on a site.
 
 ```rust
 pub trait Strategy: Send + Sync {
+    /// The name recorded on the DiscoveryRun. `Source::method` returns it.
+    fn name(&self) -> &'static str;
+
     /// What did you see, and how sure are you? `None` is a valid, common answer.
     fn recognise(&self, seed: &Fetched) -> Option<Recognition>;
 
-    /// Produce the complete Resource set. The same contract `Source::enumerate` has today.
-    fn enumerate<'a>(&'a self, ...) -> BoxFuture<'a, anyhow::Result<Enumeration>>;
+    /// Produce the complete address set. The contract `Source::enumerate` has today.
+    fn enumerate(&self, seed: &Fetched) -> anyhow::Result<Enumerated>;
+
+    /// Did this strategy name **pages**, or did it name **documents**? See below.
+    fn addresses_are(&self) -> Addresses { Addresses::Pages }
 }
 ```
 
@@ -95,6 +102,12 @@ The pairing is the design, not a convenience.
 
 Without that invariant the registry rots into a set of confident half-answers, and §7 shows
 what a confident half-answer costs.
+
+**`addresses_are` is the third method, and it earns its place.** `sitemap` names **pages**,
+so a page can still hide a PDF inside a viewer and the enclosure scan must run. `onbase`
+names **documents**, so nothing is left to find — and running the scan there is exactly what
+invented `/251agendaonline/.pdf?documentType=`. Without this method `acquire` would have to
+test the strategy's *name*, which is the `match` §6 exists to prevent.
 
 `SiteSource` does not disappear. It becomes the **Source** that holds a strategy, and the
 strategy replaces the one hardcoded line — `self.discoverer.discover(&self.site)`.
@@ -285,24 +298,40 @@ strategies 1–4 are collecting, and until a third site needs it.
 
 ---
 
-## 11. The universal fixes come first
+## 11. The universal fixes come first — **built**
 
 These are not strategies. They belong to no site, they need no config, and each one improves
 every source already in the store. They are listed here because building strategies before
 them collects more of everything into the same defects.
 
+All five are on branch `enumeration`, one commit each, 18 new tests.
+
 | | Fix | Reach | Entry |
 |---|---|---|---|
 | 1 | render `<table>` with cell and row boundaries | **every HTML source in the store** | 3 |
 | 2 | strip `data:` URIs from extracted text | every source, every kind | 2 |
-| 3 | `application/octet-stream` means *no declaration* — fall back to the inferred type | every file server and open-data portal | 4 |
-| 4 | enclosure candidates from parsed attributes only, never a scan of a `<script>` body | every page whose JavaScript builds links | 2 |
+| 3 | `application/octet-stream` means *no declaration* — fall back to the served address | every file server and open-data portal | 4 |
+| 4 | a URL a script was still assembling is not an address | every page whose JavaScript builds links | 2 |
 | 5 | a redirect to an error path is a **Refusal**, not an Observation | every platform that answers 200 on error | 2 |
 
-Two are confirmed against the code, not only against the notes. `ContentKind::classify`
-takes `meta` and `bytes` only, so a `.csv` with no magic bytes reaches `Other` and no reader
-claims it. `enclosure::script_targets` pulls quoted strings out of `<script>` bodies, which
-is exactly what invented the address in fix 4.
+**Fix 4 shipped narrower than this file first wrote it, and the difference is instructive.**
+The original wording was *"candidates from parsed attributes only, never a scan of a
+`<script>` body"*. Implemented literally, that deletes the PDFObject path — `tampa.gov` runs
+its viewer with **zero** `<embed>` tags, so a `var pdfURL` literal is the only place 915 of
+1005 addresses exist. The rule would have removed 91% of one host's documents to fix one
+invented address on another.
+
+So the test is **assembled or whole**, not **script or markup**. A literal with a `+`
+immediately either side is one piece of a string the browser builds at run time, and it is
+skipped. A whole literal still resolves. A filename must also have a stem, which is what
+kills `/251agendaonline/.pdf` at its root.
+
+The lesson generalises past this fix: a lever written from one entry can be true about that
+entry and wrong as a rule. **Check a lever against the entry it was not written from.**
+
+Fix 3 also changed a stated invariant rather than working around it. `CONTEXT.md` said
+*"nothing that was fetched ever consults it"* of the address, which fix 3 makes false, so
+that sentence is now *"a name is the last evidence consulted, never the first."*
 
 **One warning, from entry 4.** Fix 3 makes things worse before it makes them better: it
 converts 2.2 GB of honest `Underivable` into 2.2 GB of record-shaped text that chunks into
@@ -341,16 +370,23 @@ Run §12 first. Then:
 
 | | Work | Estimate |
 |---|---|---|
-| 1 | the five universal fixes (§11) | ~2 days, and no design is needed |
-| 2 | `Strategy` trait, registry, and `recognise`; port `sitemap` and add `listing` | ~3 days |
+| 1 | the five universal fixes (§11) | **done.** Branch `enumeration` |
+| 2 | `Strategy` trait, `strategies/` registry (§16); port `sitemap`, add `listing` | ~3 days |
 | 3 | `centinel investigate` — the registry's front door, and crumbs on the output | ~3 days |
 | 4 | check a DiscoveryRun against a declared total | ~1 day, and it makes 1–3 trustworthy |
-| 5 | `index` strategy, with OpenGov Stories and OnBase as its two sightings | ~3 days |
+| 5 | **Leads** — record what nothing recognised, and measure it (§17) | ~2 days |
+| 6 | `index` strategy, with OpenGov Stories and OnBase as its two sightings | ~3 days |
+| 7 | the `write-a-strategy` skill (§18) | ~1 day, and it must come last |
 
 Item 4 is small and out of order on purpose. Entry 2 caps at 100 in silence and entry 3
 prints *"2606 items in 53 pages"* in its footer — the same defect from both ends. Without
 the check, "collected the site" and "collected 4% of it" look identical from a search box,
-and every strategy above inherits that blindness.
+and every strategy above inherits that blindness. Item 5 also wants it: an unreached
+declared total is the sharpest measure a Lead can carry.
+
+Item 7 comes last because a skill must document a built thing. A skill written against this
+file would teach an interface that does not exist yet, and every strategy written from it
+would need rewriting on the day the interface arrives.
 
 ---
 
@@ -372,3 +408,377 @@ Each of these is named rather than answered, and none blocks §13.
    field today.
 5. **Whether a Source ever spans hosts.** Entry 4 proved a domain is not a Source. The
    reverse — one system across two hostnames — has not been seen.
+
+---
+
+## 15. A worked example — entry 2, end to end
+
+Written out because §4 to §10 are each one decision, and the shape only becomes checkable
+when one strategy makes all of them at once. Hyland OnBase is the richest of the four: it
+keys on a product, it needs a parse and not a scan, it carries a warning forward, and it
+runs into the limit of §9's pure-function rule in a way worth seeing.
+
+```rust
+// crates/centinel-core/src/strategies/onbase.rs
+//
+// Keyed on a PRODUCT — Hyland OnBase Agenda Online. Not on Tampa. Not on Florida.
+// At ONE sighting, so §5 says this does not merge. It is written here as the shape.
+
+pub struct OnBaseAgenda;
+
+impl Strategy for OnBaseAgenda {
+    fn name(&self) -> &'static str { "onbase-agenda" }
+
+    fn recognise(&self, seed: &Fetched) -> Option<Recognition> {
+        let url  = seed.final_url()?;                 // where the bytes CAME from
+        let host = url.host_str()?;
+
+        // Two fingerprints. Both belong to the vendor. Neither belongs to a city.
+        if !host.ends_with(".hylandcloud.com")                 { return None }
+        if !path_matches(url.path(), "/<digits>agendaonline/") { return None }
+
+        // Confirm on the bytes, not only on the address. A parked domain can match a
+        // hostname. Only the running application ships this call.
+        if !contains(&seed.bytes, "showSearchResults(new SearchResults(") { return None }
+
+        Some(Recognition {
+            strategy: self.name(),
+            keyed_on: Keyed::Product("Hyland OnBase Agenda Online"),
+
+            // What the operator ACCEPTS on. A bare verdict is what §7 rule 1 forbids.
+            evidence: vec![
+                Note::new("host",   format!("{host} is *.hylandcloud.com")),
+                Note::new("path",   format!("{} matches /NNNagendaonline/", url.path())),
+                Note::new("markup", "the page calls showSearchResults(new SearchResults(…))"),
+            ],
+
+            // Entry 2 fault 2, carried FORWARD into every run — not printed once.
+            warnings: vec![
+                Note::warn("liveness", "this server answers HTTP 200 on its error page"),
+            ],
+        })
+    }
+
+    // A PURE FUNCTION over the seed bytes (§9). It does not fetch. The host already
+    // fetched, so the Pacer, robots.txt and HostPolicy stay where they are.
+    fn enumerate(&self, seed: &Fetched) -> anyhow::Result<Enumerated> {
+        // A PARSE, never a scan. Entry 2 fault 1 is what a scan of this page produces.
+        let json  = between(&seed.bytes, "showSearchResults(new SearchResults(", "))")?;
+        let found: SearchResults = serde_json::from_str(json)?;
+
+        let mut addresses = vec![];
+        for m in &found.meetings {
+            // The flags the product itself publishes. An address for a document the
+            // source SAYS is absent is a guess, and this host answers 200 to a guess.
+            if m.is_agenda_available  { addresses.push(document(m.id, DocType::Agenda))  }
+            if m.is_minutes_available { addresses.push(document(m.id, DocType::Minutes)) }
+            // doctype 3 is the summary. 20 bytes, every meeting sampled. Never asked for.
+        }
+
+        Ok(Enumerated {
+            addresses,
+            // A number for the check in §13 item 4 to disagree with.
+            declared_total: Some(found.meetings.len()),
+            notes: vec![
+                Note::new("meetings", format!("{} on the landing page", found.meetings.len())),
+                // The honest limit of a PURE strategy on this product, said out loud —
+                // a corpus holding 61 of 2,600 meetings must not look complete.
+                Note::warn("history", "older meetings need the search POST — a token, a \
+                     cookie, and a window walk. That is `sequence` (§10), and it is held."),
+            ],
+        })
+    }
+
+    // This strategy names documents, so `acquire` runs no enclosure scan. See §4.
+    fn addresses_are(&self) -> Addresses { Addresses::Documents }
+}
+
+/// `/Documents/DownloadFileBytes/<anything>.pdf?documentType=N&meetingId=ID`
+///
+/// The path segment is DECORATIVE — the server ignores it. So one document has unbounded
+/// addresses, and a Resource *is* an address. The canonical form uses the meeting id and
+/// no free text. (§14 item 3, decided here rather than left open.)
+///
+/// NOT `DownloadFile` — one word shorter, 1,448 bytes of HTML, and it needs a publishId
+/// the search result never carries. A decoy, and entry 2 recorded the mistake.
+fn document(meeting: u64, doc: DocType) -> String {
+    format!("/Documents/DownloadFileBytes/{meeting}.pdf?documentType={}&meetingId={meeting}",
+            doc as u8)
+}
+```
+
+**What it collects, with the city never named:** 61 meetings, up to 122 PDFs at ~280 KB
+each. Extraction is already excellent — 123,172 characters out of one minutes document,
+Readability first try, headings intact.
+
+**A product can need two strategies, at different purity levels.** This is new, and §10 did
+not say it. The `index` half above is pure and buildable now. The full back catalogue needs
+the search POST, and a POST is not a pure function over a seed. So OnBase is not one
+strategy held until `sequence` exists; it is a buildable strategy that **reports its own
+ceiling** and a held one that would lift it. That is a better answer than waiting, and it is
+only safe because item 4 makes the ceiling visible.
+
+### Where a source branches
+
+```
+  centinel investigate https://tampagov.hylandcloud.com/251agendaonline/
+                                │
+                    Fetcher::get   ← paced, robots.txt read. The host fetches, never a strategy.
+                                │
+                    registry.recognise(&seed)
+                    a LIST. Each element answers for itself. No `match`. (§6)
+        ┌───────────────┬───────────┴────────┬──────────────────┐
+     a strategy      a refusal          wrong address         None
+        │           (a query box)         (a crumb)             │
+        │                │                    │                 │
+   evidence +      "no collection      "the system you     a LEAD (§17):
+   warnings +       strategy, and       want is on         recorded, measured,
+   the `source      that is the         <other host>"      and collected by
+    add` line        answer" (§7.3)      (§7.4)             sitemap anyway
+```
+
+Then the pipeline. Three of the four stages change nothing at all.
+
+```rust
+// ── source add ──────────────────────────────────────────────────────────────
+[[source]]
+id       = "tampa-agendas"
+site     = "https://tampagov.hylandcloud.com/251agendaonline/"
+strategy = "onbase-agenda"     # written down, so later disagreement can WARN (§7.5)
+
+
+// ── sources::from_config — the one `match` on Acquisition. One arm gains one line.
+Acquisition::Site(url) => {
+    // A NAMED strategy resolves now. An unnamed one cannot: recognition needs a seed,
+    // and `from_config` never fetches. So the field is an Option and §7's promise —
+    // the operator accepted this one — is what `Some` means.
+    let named = cfg.strategy.as_deref().map(registry::by_name).transpose()?;
+    Box::new(SiteSource::new(id, url, policy, limits, named)?)
+}
+
+
+// ── discover → SiteSource::enumerate ────────────────────────────────────────
+struct SiteSource {
+    named:  Option<&'static StrategyDef>,   // what the config declared
+    spoke:  OnceLock<&'static StrategyDef>, // what actually ran. `method()` reads this.
+    …
+}
+
+fn enumerate(&self, progress) -> Enumeration {
+    let seed = self.fetch_reporting(&self.site, false, progress).await?;
+
+    let strategy = match self.named {
+        // §7 rule 5. Sites change. OnBase ships a new version, the fingerprint stops
+        // matching, and the operator is TOLD. They do not get a silent switch to a
+        // weaker strategy and an empty corpus.
+        Some(s) => {
+            if s.recognise(&seed).is_none() {
+                warnings.push(format!("{} no longer recognises {} — the count below \
+                                       may be wrong", s.name(), self.site));
+            }
+            s
+        }
+        // Nothing declared. Ask the registry, and if nothing speaks, fall back —
+        // but record a LEAD with its measurements first (§17).
+        None => registry::recognise(&seed).unwrap_or_else(|| {
+            leads.record(&self.site, Measures::of(&seed));
+            registry::SITEMAP
+        }),
+    };
+    let _ = self.spoke.set(strategy);
+
+    let found = strategy.enumerate(&seed)?;    // ← was self.discoverer.discover(…)
+
+    Enumeration {
+        resources: found.addresses.map(|a| Resource::new(self.id, absolute(a, &seed))),
+        notes:     found.notes,      // the strategy explains itself. No renderer edited.
+        figures:   { "declared_total": found.declared_total },
+        warnings,
+    }
+}
+
+// ← was the hardcoded "sitemap". Read after enumerate, which is when discover writes
+// the DiscoveryRun, so the run records what actually spoke rather than what was hoped.
+fn method(&self) -> &'static str {
+    self.spoke.get().or(self.named.as_ref()).map_or("sitemap", |s| s.name())
+}
+// …so `sources::infer` reads the strategy back out of the store alone — the same way it
+// recovers site-from-channel today. No new mechanism: `Source::method` is already
+// documented as "the discriminator that later recovers a Source's kind from the store".
+
+
+// ── collect → SiteSource::acquire ───────────────────────────────────────────
+fn acquire(&self, resource, progress) -> Vec<Acquired> {
+    let fetched = self.fetch_reporting(&resource.natural_key, false, progress).await?;
+
+    // The branch that matters, and it does not test the strategy's NAME.
+    let enclosed = match self.strategy.addresses_are() {
+        Addresses::Pages     => self.enclosures(&fetched, base),
+        Addresses::Documents => vec![],
+    };
+    …
+}
+
+
+// ── extract ─────────────────────────────────────────────────────────────────
+// NO branch. None. This file cannot name a strategy, because nothing passes one in,
+// and that is enforced by the signature rather than by a rule. This is §3.
+let kind = ContentKind::classify(&meta, &bytes);   // declared → magic → served name
+for reader in extract::readers_for(kind) { … }     // an ordered list. Data, not code.
+```
+
+**The cost, counted.** One field on `SiteSource`, one line changed in `enumerate`, one
+`match` in `acquire`, one `&'static str` that stops being a literal, and one optional key in
+the config block. Everything else — `Note`, `figures`, `method`, `infer`, `readers_for` —
+was already the right shape. That is not luck. §6 lists the three earlier times this
+codebase made the same call.
+
+---
+
+## 16. One file per strategy
+
+`strategies/` mirrors `sources/`, which is the layout this codebase already proved:
+`sources/mod.rs` holds the trait plumbing, `site.rs` and `channel.rs` hold one Source each,
+and `mod.rs` re-exports them.
+
+```
+crates/centinel-core/src/strategies/
+├── mod.rs         the trait, Recognition, Enumerated, Addresses, the registry, `pub use`
+├── sitemap.rs     a standard        — port of the existing Discoverer
+├── listing.rs     a server default  — an open directory index
+├── index.rs       the address set is on the page and not in a link
+├── none.rs        a query box, recognised and REFUSED (§7 rule 3)
+└── onbase.rs      a product         — §15
+```
+
+**A file is the unit of contribution.** One file is what a reviewer reads, what a pull
+request adds, and what `git blame` attributes. A strategy split across a shared match arm
+and a helper module is a strategy nobody can review in one sitting.
+
+**The registry collects itself.** `inventory` is already a dependency and `op.rs` already
+does exactly this — `inventory::collect!(OpDef)`, with `centinel-macros` submitting one
+`OpDef` per op. A strategy registry is the same mechanism a second time:
+
+```rust
+// strategies/mod.rs
+inventory::collect!(StrategyDef);
+
+/// Every strategy, in a stable order. The registry holds no `match` and no list literal.
+pub fn all() -> Vec<&'static StrategyDef> { … }
+
+mod sitemap; mod listing; mod index; mod none; mod onbase;
+
+// strategies/onbase.rs
+inventory::submit! { StrategyDef { name: "onbase-agenda", make: || Box::new(OnBaseAgenda) } }
+```
+
+So adding a strategy is **one new file plus one `mod` line**. The `mod` line is not
+overhead: it is the compiler's proof that the file is in the build, and a strategy that
+silently failed to register would be indistinguishable from one that recognises nothing.
+
+---
+
+## 17. Leads — what nothing recognised
+
+A **Lead** is a host that no strategy recognised, recorded with the measurements that would
+justify writing one. It is recorded and not acted on. The operator promotes it.
+
+**A Lead is not a Crumb, and the difference decides the action.** A Crumb is an address on
+*another* host, seen and deliberately not followed. A Lead is *this* host — already
+collected, and possibly collected badly. A Crumb asks *should we go there?* A Lead asks
+*is what we already have any good?*
+
+### Falling back is not the same as recognising
+
+`sitemap` **recognises itself**: `robots.txt` names a `<sitemapindex>`, and entry 4 system A
+is a clean, correct, evidenced recognition. That writes no Lead.
+
+The fallback is a different event. Nothing spoke, and `sitemap` ran anyway because it is the
+best available guess. Today those two outcomes are byte-identical in the store — both record
+`method = "sitemap"` — and this section exists to separate them.
+
+### What a Lead measures
+
+Five measures, each taken from the entry that proves it works. None needs a strategy.
+
+| Measure | Entry | What a bad value says |
+|---|---|---|
+| characters extracted per KB of seed | 2 — 94,125 bytes → **695 chars** | the page's text is not the page's content |
+| `<a href>` count against `<script>` bytes | 1 and 2 | the address set is on the page and not in a link |
+| sitemap: none declared, none at `/sitemap.xml` | 1 | there is no declared surface to walk |
+| distinct extracted lengths across N resources | 1 — **75 identical** nav menus | the corpus gained N copies of one page |
+| a declared total that discovery did not reach | 2 and 3 | build item 4 supplies this number |
+
+**A Lead needs a bad measure, not only a failed recognition.** Most `.gov` sites are
+correctly collected by `sitemap`, so flagging every unrecognised host would produce noise at
+exactly the scale that makes it useless. A Lead is written when nothing recognised the seed
+**and at least one measure is bad**, and the list is ranked by the measure — never flat.
+
+### Why this is the most valuable of the three
+
+§5 says a strategy merges at two sightings. **Nothing currently supplies the second one.**
+Four entries came from a person walking four sites by hand over two days, and that does not
+reach 67 Florida counties, let alone 3,000.
+
+A Lead list makes the second sighting arrive by itself. Collect twenty `.gov` sites, and the
+ones that share a fingerprint sort next to each other with the evidence already attached.
+That also turns §12 from a manual grep into a question the store answers — and §12 is the
+test that decides whether any of this file is worth building.
+
+```
+centinel investigate --leads
+
+  3 hosts collected by fallback, ranked by what looks wrong
+
+  stories.opengov.com          75 resources, 74 identical extractions, no sitemap
+  apps.tampagov.net            2,606 declared in the page footer, 53 collected
+  tampagov.hylandcloud.com     94 KB in, 695 chars out, 0 anchors, 41 KB of <script>
+```
+
+---
+
+## 18. The skill — teaching the method, not the conclusions
+
+The last item, and it must stay last. `.claude/skills/write-a-strategy/SKILL.md`, and no
+`.claude/skills/` directory exists yet.
+
+**What it carries is the method, not the findings.** Four site entries and five framework
+fixes came out of one repeatable walk. The walk is the asset. `FIELD-NOTES.md` records what
+that walk found; the skill records how to do it again on a site nobody has seen.
+
+### The walk
+
+1. `centinel check <url>`. It fetches, runs the **real** extractor, follows enclosures, and
+   stores nothing. Read the bytes-in against the characters-out.
+2. Compare them. 94,125 bytes producing 695 characters means the content is not in the text.
+3. Read the raw HTML. Find where the address set lives: an attribute, a literal inside a
+   `<script>`, an ordinary link, or a directory index.
+4. Fetch one address by hand, then vary it. Watch for decoys — `DownloadFile` and
+   `DownloadFileBytes` are one word apart and only one of them serves a document.
+5. Write the `FIELD-NOTES.md` entry **first**, judged against the three levers.
+6. Only at **two sightings**, write the strategy.
+
+Steps 3 and 4 are a person reading source code to find an address. That is the honest cost,
+it is not automatable, and the skill must say so rather than imply a crawler can do it.
+
+### What the skill must refuse
+
+Each of these is a rule an agent will otherwise break, and the entry that proves the cost:
+
+- **Never key on a jurisdiction.** Key on a product, a framework, a server default, or a
+  standard (§5).
+- **An extraction fault is a framework fix and never enters a strategy** (§3). This is the
+  one a helpful agent breaks first, because working around a fused table locally looks like
+  finishing the task.
+- **`None` is a valid answer**, and *"no collection strategy"* is a valid finding (§7.3).
+- **A parse, never a scan** (§10). Entry 2 fault 1 is what a scan produces.
+- **Recognition carries evidence, not a verdict** (§7.1). Entry 1 is what a confident
+  wrong answer costs: 75 successful acquisitions and not one budget figure.
+- **Two sightings, and name both hosts in the pull request.** A reviewer asks one question,
+  and the answer is checkable.
+
+### What it produces
+
+A `FIELD-NOTES.md` entry, a `strategies/<name>.rs`, and a test. The test's fixture is a blob
+sha that is **already in the store** — §9 point 3 — because a strategy is a pure function
+over bytes and the bytes were kept.
