@@ -242,9 +242,13 @@ impl SiteSource {
         if let Some(named) = self.named {
             let recognition = named.it.recognise(seed);
             if recognition.is_none() {
+                // Not "no longer": this same path serves `check --strategy=<name>`, where
+                // the strategy was forced by hand and never recognised the address at all.
+                // The sentence has to be true for both, so it states what is observed and
+                // leaves the operator to know which of the two they are looking at.
                 warnings.push(format!(
-                    "`{}` no longer recognises {} — it was run anyway, and the count \
-                     below may be wrong",
+                    "`{}` does not recognise {} — it was run anyway, and the count below \
+                     may be wrong. If it used to, the site changed.",
                     named.name, self.site
                 ));
             }

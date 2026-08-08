@@ -119,6 +119,17 @@ impl Strategy for Listing {
                     ));
                     break;
                 }
+                // Here rather than only where an address is pushed, so the walk stops
+                // instead of listing the rest of the tree to discard it — and so the
+                // warning is written once rather than once per directory after the cap.
+                if out.addresses.len() >= crawl.max_addresses() {
+                    out.warnings.push(format!(
+                        "stopped at {} addresses; the tree is larger than this run \
+                         captured",
+                        crawl.max_addresses()
+                    ));
+                    break;
+                }
                 if !visited.insert(dir.to_string()) {
                     continue;
                 }
@@ -154,11 +165,8 @@ impl Strategy for Listing {
                     match target.as_str().ends_with('/') {
                         true => queue.push((target, depth + 1)),
                         false => {
+                            // The loop above writes the warning and ends the walk.
                             if out.addresses.len() >= crawl.max_addresses() {
-                                out.warnings.push(format!(
-                                    "stopped at {} addresses",
-                                    crawl.max_addresses()
-                                ));
                                 break;
                             }
                             if !seed.robots.allowed(target.as_str()) {

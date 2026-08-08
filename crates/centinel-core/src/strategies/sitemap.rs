@@ -64,8 +64,11 @@ impl Strategy for Sitemap {
                 }
             ),
         );
-        for s in sitemaps.iter().take(3) {
-            r = r.seeing("sitemap", s.clone());
+        // Labelled `declared` rather than `sitemap`, because the walk below reports the
+        // documents it actually *fetched* under that word and printing both under one
+        // label reads as the same fact stated twice.
+        if let Some(first) = sitemaps.first() {
+            r = r.seeing("declared", first.clone());
         }
         // Routine, and the reason discovery is per-host rather than per-run: hcfl.gov's
         // sitemap is advertised by hillsboroughcounty.org.
@@ -131,6 +134,18 @@ impl Strategy for Sitemap {
                     ));
                     break;
                 }
+                // Tested here rather than only where addresses are pushed, so a full run
+                // stops fetching instead of walking the remaining index to throw every
+                // urlset away — and so the warning is written once rather than once per
+                // document that arrived after the cap.
+                if out.addresses.len() >= crawl.max_addresses() {
+                    out.warnings.push(format!(
+                        "stopped at {} addresses; the surface is larger than this run \
+                         captured",
+                        crawl.max_addresses()
+                    ));
+                    break;
+                }
                 // Loop protection. Self-referential indexes exist in the wild.
                 if !visited.insert(loc.clone()) {
                     continue;
@@ -165,11 +180,8 @@ impl Strategy for Sitemap {
                     }
                     Ok(SitemapDoc::UrlSet(entries)) => {
                         for e in entries {
+                            // The loop above writes the warning and ends the walk.
                             if out.addresses.len() >= crawl.max_addresses() {
-                                out.warnings.push(format!(
-                                    "stopped at {} addresses",
-                                    crawl.max_addresses()
-                                ));
                                 break;
                             }
                             if !robots.allowed(&e.loc) {
