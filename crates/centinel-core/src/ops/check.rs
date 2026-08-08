@@ -86,7 +86,41 @@ pub struct CheckArgs {
     #[arg(long, default_value_t = 30)]
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+
+    /// Also ask what **enumeration** would make of this address.
+    ///
+    /// `--strategy` alone asks the registry who recognises it. `--strategy=listing` forces
+    /// one, which is how you find out *why* a recogniser said nothing. Either way the
+    /// strategy runs and the addresses it found are reported.
+    ///
+    /// The `=` is required when naming one. Without it `--strategy https://x.gov/` would
+    /// read the address as the strategy's name and then complain that no target was given,
+    /// which is a confusing answer to a reasonable thing to type.
+    ///
+    /// Off by default. Extraction is the question `check` was built for, and enumeration
+    /// costs requests that a person asking about one document did not ask for.
+    #[arg(
+        long,
+        value_name = "NAME",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = AUTO,
+    )]
+    #[serde(default)]
+    pub strategy: Option<String>,
 }
+
+/// `--strategy` with no name: ask the registry rather than naming one.
+const AUTO: &str = "auto";
+
+/// Requests one `check --strategy` may spend, and addresses it will keep.
+///
+/// Far below a real run's, because this is a probe. Pointing it at a directory index would
+/// otherwise walk the tree — `publicrec.hillsclerk.com` is ~1,500 files — to answer a
+/// question about the first page. A strategy that runs out says so in its own warning,
+/// which is printed, so a truncated probe never reads like a small site.
+const PROBE_REQUESTS: usize = 25;
+const PROBE_ADDRESSES: usize = 500;
 
 fn default_head() -> usize {
     DEFAULT_HEAD
@@ -176,10 +210,41 @@ pub struct CheckReport {
     /// or refused. A silent cap reads exactly like a page that carried nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_fetched: Vec<String>,
+    /// What `--strategy` found. Absent unless it was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enumeration: Option<Enumerated>,
     /// The command this platform opens a file with.
     pub opener: String,
     pub elapsed_secs: f64,
 }
+
+/// What enumeration made of the address, as a probe rather than a run.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Enumerated {
+    /// The strategy that ran. With `--strategy` alone this is what the registry chose,
+    /// and with a name it is what was forced.
+    pub strategy: String,
+    /// Whether the strategy that ran also **recognised** the address.
+    ///
+    /// False is the interesting answer, and it has two shapes: a forced strategy that
+    /// does not fit, or nothing recognising anything and the sitemap fallback running
+    /// because it is the best available guess. The warnings say which.
+    pub recognised: bool,
+    /// How many addresses came back. A count, because the sample below is a sample.
+    pub addresses: usize,
+    /// The first few, to read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sample: Vec<String>,
+    /// The strategy's own account of itself — the recognition evidence first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Note>,
+    /// Everything that would explain a wrong count, including a probe that ran out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Addresses printed before the list is cut off.
+const SAMPLE: usize = 10;
 
 /// See what extraction makes of one link or file. Nothing is stored.
 ///
@@ -323,14 +388,90 @@ pub async fn check(
         documents.push(doc);
     }
 
+    // After extraction, because extraction is the question this command was built for and
+    // a strategy that runs long should not delay the answer somebody asked for.
+    let enumeration = match (&args.strategy, Target::of(&args.target)) {
+        (Some(name), Target::Url(url)) => Some(enumerate_with(name, &url, &args, progress).await?),
+        // A local file has no host to enumerate, and no address for a relative link to
+        // resolve against. Saying so beats reporting an empty result.
+        (Some(_), Target::File(_)) => {
+            anyhow::bail!("--strategy needs a URL: enumeration is a walk of a host")
+        }
+        (None, _) => None,
+    };
+
     Ok(CheckReport {
         target: args.target,
         dir,
         temporary,
         documents,
         not_fetched,
+        enumeration,
         opener: super::open::system_opener().to_string(),
         elapsed_secs: started.elapsed().as_secs_f64(),
+    })
+}
+
+/// Runs one enumeration against the address and reports what it found.
+///
+/// Goes through [`SiteSource`] rather than calling the strategy directly, so this is the
+/// path a real run takes: the same seed, the same recognition, the same fallback when
+/// nothing speaks, and the same pacing. A probe that used its own shortcut would answer a
+/// question nobody asked.
+///
+/// It costs one more fetch of the address than the extraction above, because enumeration
+/// builds its own seed and the two are not the same bytes — a redirect, or a page served
+/// differently to a second request, is a thing worth seeing rather than hiding.
+async fn enumerate_with(
+    name: &str,
+    url: &str,
+    args: &CheckArgs,
+    progress: &Progress,
+) -> anyhow::Result<Enumerated> {
+    let named = match name {
+        AUTO => None,
+        other => Some(crate::strategies::by_name(other)?),
+    };
+    let id = SourceId::new("check".to_string())?;
+    let policy = HostPolicy {
+        user_agent: args.user_agent.clone(),
+        timeout: std::time::Duration::from_secs(args.timeout_secs),
+        ..Default::default()
+    };
+    let site = SiteSource::new(
+        id,
+        url,
+        policy,
+        crate::discovery::DiscoveryLimits {
+            max_sitemaps: PROBE_REQUESTS,
+            max_urls: PROBE_ADDRESSES,
+        },
+    )?
+    .with_strategy(named);
+
+    let found = site.enumerate(progress).await?;
+
+    // `enumerate` writes exactly one `strategy` note, and marks it `Warn` when nothing
+    // recognised the address. Reading the mark back is what keeps the two answers from
+    // drifting apart — there is no second place that decides what "recognised" means.
+    let recognised = found
+        .notes
+        .iter()
+        .find(|n| n.label == "strategy")
+        .is_some_and(|n| n.mark != Some(NoteMark::Warn));
+
+    Ok(Enumerated {
+        strategy: site.method().to_string(),
+        recognised,
+        addresses: found.resources.len(),
+        sample: found
+            .resources
+            .iter()
+            .take(SAMPLE)
+            .map(|r| r.natural_key.clone())
+            .collect(),
+        notes: found.notes,
+        warnings: found.warnings,
     })
 }
 
@@ -582,6 +723,11 @@ impl Render for CheckReport {
                 }
             }
 
+            if let Some(e) = &self.enumeration {
+                p.blank()?;
+                e.render(p)?;
+            }
+
             if self.temporary {
                 p.blank()?;
                 let note = format!("files are in {} — nothing was stored", self.dir.display());
@@ -614,6 +760,62 @@ impl CheckReport {
                 Ink::Bold,
             ),
         )
+    }
+}
+
+impl Render for Enumerated {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        p.section("enumeration")?;
+        p.nest(|p| {
+            let mark = match self.recognised {
+                true => Mark::Ok,
+                false => Mark::Warn,
+            };
+            p.marked(
+                mark,
+                p.paint(
+                    &format!(
+                        "{} — {} address(es)",
+                        self.strategy,
+                        render::count(self.addresses as u64)
+                    ),
+                    Ink::Bold,
+                ),
+            )?;
+
+            // The recognition evidence, then whatever the strategy wanted said. Both
+            // arrive as Notes, so a new strategy explains itself and edits nothing here.
+            for note in &self.notes {
+                let ink = match note.mark {
+                    Some(NoteMark::Warn) | Some(NoteMark::Bad) => Ink::Plain,
+                    _ => Ink::Dim,
+                };
+                p.kv(
+                    &note.label,
+                    12,
+                    p.paint(&render::one_line(&note.detail), ink),
+                )?;
+            }
+
+            for w in &self.warnings {
+                p.marked(Mark::Warn, p.paint(&render::one_line(w), Ink::Dim))?;
+            }
+
+            if !self.sample.is_empty() {
+                p.blank()?;
+                for address in &self.sample {
+                    p.wrapped(address, Ink::Dim)?;
+                }
+                // A sample that reads like a total is the same lie a silent cap tells.
+                if self.addresses > self.sample.len() {
+                    p.wrapped(
+                        &format!("… and {} more", self.addresses - self.sample.len()),
+                        Ink::Dim,
+                    )?;
+                }
+            }
+            Ok(())
+        })
     }
 }
 
@@ -738,6 +940,7 @@ mod tests {
             head: default_head(),
             user_agent: default_ua(),
             timeout_secs: default_timeout(),
+            strategy: None,
         }
     }
 
@@ -910,6 +1113,51 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("all.pdf"), "{err}");
+    }
+
+    /// Extraction is what this command is for. Enumeration costs requests, so it happens
+    /// only when it is asked for.
+    #[tokio::test]
+    async fn nothing_is_enumerated_unless_a_strategy_is_asked_for() {
+        let (d, ctx) = fixture().await;
+        let target = write(&d, "page.html", HTML);
+        let report = check(&ctx, args(&target), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
+        assert!(report.enumeration.is_none());
+    }
+
+    /// A local file has no host to walk and no address for a relative link to resolve
+    /// against, so an empty result would be a wrong answer rather than a small one.
+    #[tokio::test]
+    async fn a_strategy_probe_against_a_local_file_says_why_it_cannot() {
+        let (d, ctx) = fixture().await;
+        let target = write(&d, "page.html", HTML);
+        let err = check(
+            &ctx,
+            CheckArgs {
+                strategy: Some(AUTO.into()),
+                ..args(&target)
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("needs a URL"), "{err}");
+    }
+
+    /// The name is checked before anything is fetched, and the error says what exists —
+    /// a typo must not read like a site that enumerates to nothing.
+    #[tokio::test]
+    async fn an_unknown_strategy_names_the_ones_this_build_has() {
+        let err = crate::strategies::by_name("onbase")
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("listing") && err.contains("sitemap"), "{err}");
     }
 
     #[test]
