@@ -739,8 +739,21 @@ centinel investigate --leads
 
 ## 18. The skill — teaching the method, not the conclusions
 
-The last item, and it must stay last. `.claude/skills/write-a-strategy/SKILL.md`, and no
-`.claude/skills/` directory exists yet.
+The last item, and it must stay last.
+
+```
+contrib/
+├── centinel.toml.example
+└── skills/
+    └── write-a-strategy/
+        └── SKILL.md
+```
+
+**`contrib/` and not `.claude/`, on purpose.** The skill is a contribution guide that
+happens to be machine-readable, so it belongs beside the config example a contributor
+already reads — versioned with the interface it documents, and reviewed in the same pull
+request that changes that interface. `.claude/` is one tool's directory in one checkout; a
+skill written for whoever adds the next strategy must not be.
 
 **What it carries is the method, not the findings.** Four site entries and five framework
 fixes came out of one repeatable walk. The walk is the asset. `FIELD-NOTES.md` records what
