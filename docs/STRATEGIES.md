@@ -272,13 +272,13 @@ Point 4 is what makes the mechanism a later decision. Ranked, when it is time:
 
 Ranked by how many of the four entries each one collects.
 
-| | Strategy | Covers | Cost |
+| | Strategy | Covers | State |
 |---|---|---|---|
-| 1 | `sitemap` — a standard | entry 4 system A | **built.** Wrap the existing `Discoverer`. |
-| 2 | `listing` — an open directory index | entry 4 system C, ~6 GB | small. A recursive `<A HREF>` walk. |
-| 3 | `index` — the address set is on the page and not in a link | entries 1 **and** 2 | medium. See below. |
-| 4 | `none` — a query box, recognised and refused | entry 4 system B | trivial, and it is the point of §7 rule 3 |
-| 5 | `sequence` — carried state across requests | entries 2 and 3 | **the fragile one.** Hold it. |
+| 1 | `sitemap` — a standard | entry 4 system A | **built**, and measured: tampa.gov recognises off `robots.txt`. |
+| 2 | `listing` — an open directory index | entry 4 system C, ~6 GB | **built**, and measured: `/Civil/bulkdata/` returns 73 addresses, which is what the entry recorded. |
+| 3 | `index` — the address set is on the page and not in a link | entries 1 **and** 2 | not built. Medium, and the most valuable one left. See below. |
+| 4 | `none` — a query box, recognised and refused | entry 4 system B | not built. Trivial, and blocked on `investigate` rather than on effort. |
+| 5 | `sequence` — carried state across requests | entries 2 and 3 | **held.** The fragile one. |
 
 **On strategy 3.** This is the promoted shape at two sightings, and the catalogue already
 found the seam: *"the lever is not 'read the links'; it is **a source declares where its
@@ -643,13 +643,26 @@ and `mod.rs` re-exports them.
 
 ```
 crates/centinel-core/src/strategies/
-├── mod.rs         the trait, Recognition, Enumerated, Addresses, the registry, `pub use`
-├── sitemap.rs     a standard        — port of the existing Discoverer
-├── listing.rs     a server default  — an open directory index
-├── index.rs       the address set is on the page and not in a link
-├── none.rs        a query box, recognised and REFUSED (§7 rule 3)
-└── onbase.rs      a product         — §15
+├── mod.rs         BUILT  the trait, Seed, Crawl, Recognition, Keyed, the registry
+├── sitemap.rs     BUILT  a standard       — ported from the old Discoverer
+├── listing.rs     BUILT  a server default — an open directory index
+├── index.rs       —      the address set is on the page and not in a link (§10.3)
+└── none.rs        —      a query box, recognised and REFUSED (§7 rule 3)
 ```
+
+**This is the target, not the directory.** Two of the four exist. `index` is build-order
+item 6; `none` is ten lines and still blocked, because *"no collection strategy"* answers a
+question nothing asks yet — dropped into a `discover` run it enumerates zero and reads as a
+failure. It wants `investigate` first.
+
+**There is no `onbase.rs`, and §15 is not an instruction to write one.** OnBase sits at one
+sighting, and §5 is explicit that one sighting is a note rather than a strategy. §15 spends
+that example on the *shape* — how recognition, evidence, canonicalisation and a declared
+ceiling fit together — precisely because writing it as a file would break the rule the file
+above it states. A second city on OnBase changes that; nothing else does.
+
+`sequence` (§10.5) has no row at all, deliberately. Two sightings promoted it to a shape
+and not to a build.
 
 **A file is the unit of contribution.** One file is what a reviewer reads, what a pull
 request adds, and what `git blame` attributes. A strategy split across a shared match arm
