@@ -115,11 +115,22 @@ fn resolve(base: &url::Url, candidate: &str) -> Option<String> {
 /// bytes no stage can turn into text spends a request to store something nothing will
 /// search — and a list kept beside the table it must agree with drifts from it silently,
 /// in the direction of a document at the end of a link that is never fetched at all.
+///
+/// **The name must have a stem.** `.pdf` on its own is an extension with nothing in front
+/// of it, and no server has ever published a document at that address. What produces one
+/// is a URL template whose variable is still missing — Hyland OnBase builds
+/// `"…/DownloadFile/" + encodeURIComponent(name) + ".pdf?documentType=" + type`, and the
+/// middle piece read on its own resolves to `/251agendaonline/.pdf?documentType=`. That
+/// address was fetched on every page collected, and because the host answers HTTP 200 on
+/// error it came back as a live Observation titled *"Error - OnBase Agenda Online"*.
 fn is_document(path: &str) -> bool {
     let last = path.rsplit('/').next().unwrap_or(path);
-    let Some((_, ext)) = last.rsplit_once('.') else {
+    let Some((stem, ext)) = last.rsplit_once('.') else {
         return false;
     };
+    if stem.is_empty() {
+        return false;
+    }
     let ext = ext.to_ascii_lowercase();
     ContentKind::enclosable_extensions().any(|e| e == ext)
 }
@@ -141,14 +152,30 @@ fn tag_targets(scan: &crate::html::Scan<'_>) -> Vec<String> {
 }
 
 /// Quoted document URLs inside `<script>` blocks — the runtime viewer's configuration.
+///
+/// **A literal the script was concatenating is not an address.** A `<script>` body is
+/// source code, and a URL assembled from pieces has holes in it where its variables go, so
+/// resolving any one piece produces an address that names no document. Hyland OnBase is the
+/// sighting: `".pdf?documentType="` matched inside a `+` expression, resolved against the
+/// page's base, and was fetched once per page collected.
+///
+/// The whole literals stay, and they have to: `tampa.gov` runs PDFObject, so its pages
+/// carry **no** `<embed>` tag at all and the address exists only as `var pdfURL = "…"`.
+/// Dropping the scan outright — which is how this defect first reads — would take 915 of
+/// 1005 pages back out of the corpus. So the test is *assembled or whole*, not *script or
+/// markup*.
 fn script_targets(scan: &crate::html::Scan<'_>) -> Vec<String> {
     let mut out = Vec::new();
     for body in scan.scripts() {
         for quoted in crate::html::quoted_strings(body) {
+            if quoted.concatenated {
+                continue;
+            }
             // Checked before resolving so a script full of ordinary strings costs a
             // suffix test rather than a URL parse each.
-            if is_document(quoted.split(['#', '?']).next().unwrap_or(quoted)) {
-                out.push(quoted.to_string());
+            let path = quoted.text.split(['#', '?']).next().unwrap_or(quoted.text);
+            if is_document(path) {
+                out.push(quoted.text.to_string());
             }
         }
     }
@@ -179,6 +206,60 @@ mod tests {
             found(html),
             vec!["https://www.tampa.gov/sites/default/files/proclamation/2022/20220301_Irish.pdf"],
             "the viewer's own html file is not a document, and the fragment is not an address"
+        );
+    }
+
+    /// Verbatim from `tampagov.hylandcloud.com`. The scanner used to match the middle
+    /// piece and fetch `/251agendaonline/.pdf?documentType=`, which names no document —
+    /// and on a host that answers HTTP 200 for a missing one, that is an error page
+    /// entering the corpus once per page collected.
+    #[test]
+    fn a_url_the_script_was_still_building_is_not_an_address() {
+        let html = r#"<script>
+            let link = $("<a>").attr("href",
+                "/251agendaonline/Documents/DownloadFile/"
+                + encodeURIComponent(doc.UrlFriendlyName)
+                + ".pdf?documentType=" + doc.MeetingDocumentType
+                + "&meetingId=" + meeting.ID);
+            </script>"#;
+        assert!(
+            documents(
+                html,
+                "https://tampagov.hylandcloud.com/251agendaonline/",
+                10
+            )
+            .urls
+            .is_empty(),
+            "a template with its variables still missing is not a document"
+        );
+    }
+
+    /// The other half of the same rule, and the reason it is not simply "never read a
+    /// script": Tampa's viewer injects at run time, so the whole literal is the only place
+    /// the address exists. 915 of 1005 pages depend on this staying found.
+    #[test]
+    fn a_whole_literal_beside_a_template_is_still_found() {
+        let html = r#"<script>
+            var base = "/files/" + year + "/summary.pdf";
+            var pdfURL = "/sites/default/files/proclamation/20220301_Irish.pdf";
+            </script>"#;
+        assert_eq!(
+            found(html),
+            vec!["https://www.tampa.gov/sites/default/files/proclamation/20220301_Irish.pdf"],
+            "the assembled address goes, the whole one stays"
+        );
+    }
+
+    /// A name with no stem is an extension on its own. No server publishes one, and a
+    /// concatenation is what produces one.
+    #[test]
+    fn an_extension_with_nothing_in_front_of_it_is_not_a_document() {
+        assert!(found(r#"<a href="/.pdf">nothing</a>"#).is_empty());
+        assert!(found(r#"<embed src="/reports/.docx">"#).is_empty());
+        // And a real name that merely begins with a dot-directory still works.
+        assert_eq!(
+            found(r#"<a href="/a.b/report.pdf">x</a>"#),
+            vec!["https://www.tampa.gov/a.b/report.pdf"]
         );
     }
 
