@@ -33,6 +33,10 @@ flate2 = "1.1.9"
 url = "2.5.8"
 governor = "0.10.4"
 htmd = "0.5.5"
+# htmd's own DOM types, so `extract` can render a `<table>` itself. Pinned to the version
+# htmd re-exports `Node` from: a different one compiles and then fails to unify, because
+# the handler is handed htmd's `Rc<Node>` and would be reading a second crate's.
+markup5ever_rcdom = "=0.38.0"
 dom_smoothie = "0.18.0"
 pdf-inspector = "0.1.7"
 # Office formats, and only those. PDFs stay on `pdf-inspector` directly: anydoc wraps the

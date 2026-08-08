@@ -115,6 +115,41 @@ impl Extracted {
         }
     }
 
+    /// Removes every `data:` URI from the derived text, and says how much that was.
+    ///
+    /// A `data:` URI is a file spelled out in the document — almost always an image, and
+    /// never searchable text. `htmd` writes one into the markdown as the image's target,
+    /// so it survives into the derived blob, into the chunks, and into an embedding:
+    ///
+    /// ```text
+    /// ![A logo of a city Description automatically generated](data:image/jpeg;base64,/9j/4AAQ…
+    /// ```
+    ///
+    /// One set of OnBase minutes carried **53,345 of its 123,172 characters** as two such
+    /// URIs — a city letterhead, spelled out. That is 43% of a document, and it inflates
+    /// every cost downstream of extraction while quietly poisoning whichever chunk it lands
+    /// in with a vector that means nothing.
+    ///
+    /// Applied to every kind rather than to HTML, because it is a property of the *text*
+    /// and not of the reader that produced it: `anydoc` reads the same Word export, and a
+    /// passthrough `.txt` can hold one too. The alt text is left where it is — a page's
+    /// description of its own image is real content, and it is the URI that is not.
+    fn strip_data_uris(&mut self) {
+        if let Self::Text(e) | Self::Partial { extraction: e, .. } = self {
+            let Some(stripped) = without_data_uris(&e.text) else {
+                return;
+            };
+            // Counted rather than merely dropped. A document that was mostly base64 is
+            // worth knowing about, and once the text is clean this note is the only
+            // evidence left that it ever was.
+            e.notes.push(format!(
+                "{} chars removed from {} `data:` URI(s)",
+                stripped.removed, stripped.count
+            ));
+            e.text = stripped.text;
+        }
+    }
+
     /// Records what the readers before this one came up against.
     ///
     /// A verdict carries its own reason and takes none of these: they are the story of how
@@ -291,6 +326,9 @@ pub fn extract(
     let mut carried: Vec<(Reader, String)> = Vec::new();
     for reader in readers_for(kind).iter().copied().filter(|r| !r.spawns()) {
         let mut outcome = reader.read_in_process(&blob);
+        // Before the check, not after: a page whose only "text" was a spelled-out image
+        // has produced nothing, and the next reader deserves its turn.
+        outcome.strip_data_uris();
         if produced_text(&outcome) {
             outcome.note_all(&notes_of(&carried));
             return outcome;
@@ -332,6 +370,9 @@ pub async fn derive(
 
     for (i, reader) in readers_for(kind).iter().copied().enumerate() {
         let mut outcome = reader.read(&blob).await;
+        // Before the check, not after: a page whose only "text" was a spelled-out image
+        // has produced nothing, and the next reader deserves its turn.
+        outcome.strip_data_uris();
         if produced_text(&outcome) {
             // What the readers before it came up against. On HTML this is the note the
             // old code wrote by hand — "readability found only 90 chars" — and on PDF it
@@ -458,12 +499,207 @@ fn extract_captions(bytes: &[u8], title: Option<&str>) -> Extracted {
     }
 }
 
+/// A text with its `data:` URIs taken out, and the size of what went.
+struct Stripped {
+    text: String,
+    removed: usize,
+    count: usize,
+}
+
+/// `None` when the text held none — which is most of them, and they allocate nothing.
+///
+/// A URI runs from `data:` to the first character that cannot continue one: whitespace, a
+/// closing bracket, or a quote. In markdown that is the `)` of `![alt](…)`, so the alt text
+/// either side is untouched.
+fn without_data_uris(text: &str) -> Option<Stripped> {
+    if !text.contains("data:") {
+        return None;
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let (mut removed, mut count) = (0, 0);
+    let mut rest = text;
+
+    while let Some(at) = rest.find("data:") {
+        let (before, from) = rest.split_at(at);
+        let end = from
+            .find(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\'' | '<' | '>'))
+            .unwrap_or(from.len());
+        let (uri, after) = from.split_at(end);
+
+        out.push_str(before);
+        // The word `data:` in prose is not a URI. A real one names a media type and a
+        // payload, so the comma between them is the cheapest proof that this is one — and
+        // without the test, a sentence beginning "the data: values are…" loses a word.
+        match uri.contains(',') {
+            true => {
+                removed += uri.chars().count();
+                count += 1;
+            }
+            false => out.push_str(uri),
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+
+    (count > 0).then_some(Stripped {
+        text: out,
+        removed,
+        count,
+    })
+}
+
 /// Skipping these matters: htmd otherwise serialises inline JSON-LD and drupalSettings
 /// into the markdown, tripling the output with machine noise.
 fn markdown_converter() -> htmd::HtmlToMarkdown {
     htmd::HtmlToMarkdown::builder()
         .skip_tags(vec!["script", "style", "noscript", "svg", "form"])
+        .add_handler(vec!["table"], table_to_markdown)
         .build()
+}
+
+/// Every `<table>` as a markdown table, whether or not it declared a header.
+///
+/// `htmd` writes one only when the table has a `<th>` or a `<thead>` somewhere. Anything
+/// else falls to a handler that concatenates the cells with **no separator at all** — no
+/// pipe, no space, no row break. On the CTTV caption index that turned fifty rows into a
+/// single 10,736-character line:
+///
+/// ```text
+/// [Transcript #2693](…)8/3/2026Tampa City Council Special Discussion [▶ Watch](…)[Transcript #2692](…)…
+/// ```
+///
+/// `8/3/2026Tampa City Council Special Discussion` — the date fused to the meeting name,
+/// and every row boundary gone.
+///
+/// *Why it is worth owning the tag rather than working around the fallback:* a `.gov` site
+/// is made of tables — budget line items, salary schedules, permit registers, election
+/// returns, bid tabulations — and a headerless one is the common case, not the exotic one.
+/// On every table in the corpus the number currently fuses to the label it belongs to, so
+/// any chunk drawn from such a page mixes dozens of unrelated records and can never be
+/// searched apart. It is the widest-reaching defect in `docs/FIELD-NOTES.md` and the only
+/// one that improves documents already collected.
+fn table_to_markdown(
+    handlers: &dyn htmd::element_handler::Handlers,
+    element: htmd::Element<'_>,
+) -> Option<htmd::element_handler::HandlerResult> {
+    let mut rows = table_rows(handlers, element.node);
+    let width = rows.iter().map(|r| r.cells.len()).max().unwrap_or(0);
+
+    // A `<table>` used for layout holds no rows at all. Nothing here can improve on what
+    // htmd already does with one, and inventing an empty table for it would be worse.
+    if width == 0 {
+        return handlers.fallback(element);
+    }
+
+    // A markdown table needs a header row. The table's own if it declared one; an empty
+    // one if it did not — promoting the first row of data would silently spend a record on
+    // the header of every table that never had one, and on a permit register that record
+    // is somebody's permit.
+    let header = match rows.first().is_some_and(|r| r.all_header) {
+        true => rows.remove(0).cells,
+        false => Vec::new(),
+    };
+
+    let mut out = String::from("\n\n");
+    push_row(&mut out, &header, width);
+    out.push('|');
+    for _ in 0..width {
+        out.push_str(" --- |");
+    }
+    out.push('\n');
+    for row in &rows {
+        push_row(&mut out, &row.cells, width);
+    }
+    out.push('\n');
+
+    Some(out.into())
+}
+
+/// One `<tr>`, converted.
+struct TableRow {
+    cells: Vec<String>,
+    /// Every cell was a `<th>`, so this row is the table's own header.
+    all_header: bool,
+}
+
+/// The rows of a table, from `<tr>` directly under it or under a `<thead>`/`<tbody>`/`<tfoot>`.
+///
+/// Two levels deep and no further, which is what keeps a nested table's rows out of its
+/// parent: html5ever puts a nested `<table>` inside the `<td>` that held it, so the only
+/// way to reach those rows is through a cell — and a cell is converted whole, by this same
+/// handler, one level down.
+fn table_rows(
+    handlers: &dyn htmd::element_handler::Handlers,
+    table: &std::rc::Rc<htmd::Node>,
+) -> Vec<TableRow> {
+    let mut rows = Vec::new();
+    for child in table.children.borrow().iter() {
+        match tag_name(child) {
+            Some("tr") => rows.push(table_row(handlers, child)),
+            Some("thead" | "tbody" | "tfoot") => {
+                for row in child.children.borrow().iter() {
+                    if tag_name(row) == Some("tr") {
+                        rows.push(table_row(handlers, row));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    rows
+}
+
+fn table_row(
+    handlers: &dyn htmd::element_handler::Handlers,
+    tr: &std::rc::Rc<htmd::Node>,
+) -> TableRow {
+    let mut cells = Vec::new();
+    let mut all_header = true;
+    for cell in tr.children.borrow().iter() {
+        let tag = match tag_name(cell) {
+            Some(tag @ ("td" | "th")) => tag,
+            _ => continue,
+        };
+        all_header &= tag == "th";
+        cells.push(cell_text(
+            &handlers.handle(cell).map(|r| r.content).unwrap_or_default(),
+        ));
+    }
+    TableRow {
+        all_header: all_header && !cells.is_empty(),
+        cells,
+    }
+}
+
+fn tag_name(node: &std::rc::Rc<htmd::Node>) -> Option<&str> {
+    match &node.data {
+        markup5ever_rcdom::NodeData::Element { name, .. } => Some(name.local.as_ref()),
+        _ => None,
+    }
+}
+
+/// One cell, flattened onto one line.
+///
+/// A markdown table row is a line, so a cell holding a list or a paragraph break has to
+/// give up its own line breaks or it ends the row early. A literal `|` is escaped for the
+/// same reason: unescaped, it would open a column that is not there and shift every value
+/// to its right into the wrong one.
+fn cell_text(raw: &str) -> String {
+    raw.replace('|', "\\|")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn push_row(out: &mut String, cells: &[String], width: usize) {
+    out.push('|');
+    for i in 0..width {
+        out.push(' ');
+        out.push_str(cells.get(i).map_or("", String::as_str));
+        out.push_str(" |");
+    }
+    out.push('\n');
 }
 
 /// `dom_smoothie` for the article, `htmd` for the markdown.
@@ -871,6 +1107,120 @@ mod tests {
 
         let (tool, _) = out.tool().unwrap();
         assert_eq!(tool, "dom_smoothie+htmd");
+    }
+
+    /// The CTTV caption index, verbatim in shape: `<td>` cells, and not one `<th>`.
+    ///
+    /// This is the table htmd's own handler refuses, and refusing it is what fused fifty
+    /// rows into one 10,736-character line with `8/3/2026Tampa City Council Special
+    /// Discussion` in the middle of it.
+    #[test]
+    fn a_table_with_no_header_still_keeps_its_cell_and_row_boundaries() {
+        let grid = r#"<html><body><h1>Transcripts</h1><table><tbody>
+            <tr><td><a href="Agenda.aspx?pkey=2693">Transcript #2693</a></td>
+                <td width="300">8/3/2026</td>
+                <td>Tampa City Council Special Discussion</td></tr>
+            <tr><td><a href="Agenda.aspx?pkey=2692">Transcript #2692</a></td>
+                <td width="300">7/30/2026</td>
+                <td>Tampa City Council Regular</td></tr>
+            </tbody></table></body></html>"#;
+        let text = extract(ContentKind::Html, grid.as_bytes(), None, None)
+            .text()
+            .expect("a listing page is content")
+            .to_string();
+
+        assert!(
+            !text.contains("8/3/2026Tampa"),
+            "the date fused to the meeting name:\n{text}"
+        );
+        assert!(
+            text.contains("| 8/3/2026 |"),
+            "a cell needs a boundary either side:\n{text}"
+        );
+        // Two rows means two lines, and the row that follows starts with its own cell.
+        assert!(
+            text.contains("| 7/30/2026 |"),
+            "the second row was lost or fused:\n{text}"
+        );
+        assert_eq!(
+            text.matches("Transcript #").count(),
+            2,
+            "every row survives:\n{text}"
+        );
+        // A markdown table is only a table with a separator under its header row.
+        assert!(text.contains("| --- |"), "no separator row:\n{text}");
+    }
+
+    /// The header a table *does* declare is used, and no row of data is spent on it.
+    #[test]
+    fn a_declared_header_is_the_header_and_the_data_rows_are_all_kept() {
+        let html = r#"<table>
+            <tr><th>Fund</th><th>Amount</th></tr>
+            <tr><td>General</td><td>1,204,000</td></tr>
+            <tr><td>Utility</td><td>880,500</td></tr>
+            </table>"#;
+        let text = extract(ContentKind::Html, html.as_bytes(), None, None)
+            .text()
+            .unwrap()
+            .to_string();
+
+        assert!(text.contains("| Fund | Amount |"), "{text}");
+        assert!(text.contains("| General | 1,204,000 |"), "{text}");
+        assert!(text.contains("| Utility | 880,500 |"), "{text}");
+        assert!(
+            !text.contains("1,204,000880,500"),
+            "rows must not fuse:\n{text}"
+        );
+    }
+
+    /// A cell that holds a `|` would otherwise open a column that is not there, and shift
+    /// every value to its right into the wrong one.
+    #[test]
+    fn a_pipe_inside_a_cell_does_not_invent_a_column() {
+        let html = r#"<table><tr><td>DDA|29|2026206861</td><td>ORDER</td></tr></table>"#;
+        let text = extract(ContentKind::Html, html.as_bytes(), None, None)
+            .text()
+            .unwrap()
+            .to_string();
+        assert!(text.contains(r"DDA\|29\|2026206861"), "{text}");
+    }
+
+    /// 53,345 of 123,172 characters on one set of OnBase minutes were a city logo,
+    /// spelled out. It is never searchable text and it poisons whichever chunk it lands in.
+    #[test]
+    fn a_spelled_out_image_does_not_reach_the_text() {
+        let payload = "/9j/4AAQSkZJRgABAQEASABIAAD".repeat(40);
+        let html = format!(
+            r#"<html><body><article>
+            <h1>Council Regular</h1>
+            <p><img src="data:image/jpeg;base64,{payload}" alt="A logo of a city"></p>
+            <p>The meeting was called to order at nine o'clock in the morning, and the
+               clerk recorded the attendance of every member then present in the chamber.</p>
+            </article></body></html>"#
+        );
+        let out = extract(ContentKind::Html, html.as_bytes(), None, None);
+        let text = out.text().expect("the minutes are still text").to_string();
+
+        assert!(!text.contains("base64"), "the URI survived:\n{text}");
+        assert!(!text.contains(&payload), "the payload survived");
+        assert!(text.contains("called to order"), "the prose was lost");
+        // The page's own description of its image is content; the URI is not.
+        assert!(
+            text.contains("A logo of a city"),
+            "alt text was lost:\n{text}"
+        );
+    }
+
+    /// The word `data:` in prose is not a URI, and a sentence must not lose a word to this.
+    #[test]
+    fn prose_that_merely_says_data_is_left_alone() {
+        assert!(without_data_uris("the data: values are below").is_none());
+        assert!(without_data_uris("no colon here at all").is_none());
+
+        let stripped = without_data_uris("see ![x](data:image/png;base64,AAAA) here").unwrap();
+        assert_eq!(stripped.text, "see ![x]() here");
+        assert_eq!(stripped.count, 1);
+        assert_eq!(stripped.removed, "data:image/png;base64,AAAA".len());
     }
 
     #[test]
