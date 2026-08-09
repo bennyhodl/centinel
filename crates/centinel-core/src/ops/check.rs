@@ -39,6 +39,7 @@ use crate::extract::{self, Extracted};
 use crate::policy::{DEFAULT_USER_AGENT, HostPolicy};
 use crate::prelude::*;
 use crate::sources::SiteSource;
+use crate::verdict::Verdict;
 
 /// Lines of extracted text shown inline before the paths.
 const DEFAULT_HEAD: usize = 20;
@@ -176,6 +177,14 @@ pub struct Checked {
     pub title: Option<String>,
     #[serde(default)]
     pub chars: usize,
+    /// What we think of the read.
+    ///
+    /// A count of characters is not an opinion about them. This command reported
+    /// `hillsclerk.com/marriage-license-application-success-kiosk` as 23,213 characters
+    /// with a title and a tool, and every one of those facts was true of a page that is
+    /// 84% navigation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<Verdict>,
     /// The primary reader found no text and the fallback did.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recovered_by_fallback: bool,
@@ -328,6 +337,7 @@ pub async fn check(
             tool: None,
             title: None,
             chars: 0,
+            verdict: None,
             recovered_by_fallback: false,
             pages_needing_ocr: 0,
             notes: Vec::new(),
@@ -374,6 +384,7 @@ pub async fn check(
         doc.tool = Some(format!("{} {}", extraction.tool, extraction.version));
         doc.title = extraction.title.clone();
         doc.chars = extraction.text.chars().count();
+        doc.verdict = Some(Verdict::on(&item.bytes, &extraction.text));
         doc.pages_needing_ocr = pages_needing_ocr.len();
         doc.notes = extraction.notes.clone();
         doc.preview = extraction
@@ -860,10 +871,29 @@ impl Render for Checked {
             }
 
             let tool = self.tool.as_deref().unwrap_or("unknown");
-            let read_by = format!("{tool}  ·  {} of text", render::count(self.chars as u64));
-            p.marked(Mark::Ok, p.paint(&read_by, Ink::Dim))?;
+            let mut read_by = format!("{tool}  ·  {} of text", render::count(self.chars as u64));
+            // Stated whether or not it is a problem. A share nobody can see is a measure
+            // nobody can calibrate, and this one was chosen from a corpus, not a guess.
+            if let Some(v) = &self.verdict
+                && v.links > 0
+            {
+                read_by.push_str(&format!("  ·  {:.0}% link text", v.link_share * 100.0));
+            }
+            // A read with a finding against it is not a tick. This line printed `✓` over
+            // a page that is 84% navigation, and the tick was the whole problem.
+            let poor = self.verdict.as_ref().is_some_and(Verdict::is_poor);
+            let mark = match poor {
+                true => Mark::Warn,
+                false => Mark::Ok,
+            };
+            p.marked(mark, p.paint(&read_by, Ink::Dim))?;
 
             p.nest(|p| {
+                if let Some(v) = &self.verdict {
+                    for f in &v.findings {
+                        p.marked(Mark::Warn, p.paint(f, Ink::Plain))?;
+                    }
+                }
                 match &self.title {
                     Some(title) => p.line(p.paint(&format!("title  {title}"), Ink::Plain))?,
                     // The title is written into the text as an `# H1` and becomes every

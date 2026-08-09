@@ -48,6 +48,7 @@ use crate::policy::{DEFAULT_USER_AGENT, HostPolicy};
 use crate::prelude::*;
 use crate::sources::SiteSource;
 use crate::strategies::{self, Seed};
+use crate::verdict::Verdict;
 
 /// Requests the size probe may spend, and addresses it will keep.
 ///
@@ -61,15 +62,6 @@ const SAMPLE: usize = 5;
 
 /// Off-host hosts named before the list is cut off.
 const MAX_CRUMBS: usize = 8;
-
-/// Below this, a page's text is not a page's content.
-///
-/// **Provisional, and it wants more data.** The one measured case is entry 2 in
-/// `docs/FIELD-NOTES.md`: 94,125 bytes of Hyland OnBase producing 695 characters, which is
-/// 7.6 per KB. An IIS directory listing measures ~980. The gap is three orders of
-/// magnitude, so the exact line matters less than being somewhere inside it — but this is
-/// a threshold chosen from two points and it should be revisited when there are ten.
-const THIN_CHARS_PER_KB: f64 = 60.0;
 
 #[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct InvestigateArgs {
@@ -160,24 +152,26 @@ pub struct Probe {
 /// and each of these is taken from the field-note entry that proves it works.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Lead {
-    /// Entry 2: 94,125 bytes in, 695 characters out.
-    pub chars: usize,
-    pub chars_per_kb: f64,
+    /// What the reader actually got out of the seed — entry 2's 94,125 bytes in and 695
+    /// characters out, and the menu case that has no site shape at all.
+    pub read: Verdict,
     /// Entries 1 and 2: the address set is on the page and not in a link.
     pub anchors: usize,
     pub script_bytes: usize,
     /// Entry 1: no sitemap, so there is no declared surface to walk.
     pub sitemap_declared: bool,
-    /// The findings that fired, in words. Empty means the silence looks ordinary.
+    /// Findings about the site's *shape*. What is wrong with the **read** lives in
+    /// [`Self::read`], because the two are independent: `hillsclerk.com` has an ordinary
+    /// shape and a ruined read, and only separating them makes that sayable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<String>,
 }
 
 impl Lead {
-    /// Whether this is worth a person's attention, rather than an ordinary unrecognised
-    /// site the sitemap fallback will collect perfectly well.
+    /// Whether this is worth a person's attention, rather than an ordinary site the
+    /// sitemap fallback will collect perfectly well.
     pub fn is_lead(&self) -> bool {
-        !self.findings.is_empty()
+        !self.findings.is_empty() || self.read.is_poor()
     }
 }
 
@@ -293,12 +287,13 @@ pub async fn investigate(
         _ => None,
     };
 
-    // Only where nothing spoke. A recognised site needs no explaining, and measuring one
-    // would invite reading the numbers as a quality score they are not.
-    let lead = match hits.is_empty() {
-        true => Some(measure(&seed).await),
-        false => None,
-    };
+    // Always, and the correction matters. This was once gated on `hits.is_empty()`, on
+    // the reasoning that a recognised site needs no explaining. `hillsclerk.com` is
+    // recognised by `sitemap`, enumerates cleanly, and puts 23,213 characters of
+    // navigation into the corpus for a page whose content is one sentence — so the gate
+    // made the tool structurally unable to report the only thing wrong with it.
+    // Recognition says how to find the pages. It says nothing about reading them.
+    let lead = Some(measure(&seed).await);
 
     let promote = hits
         .first()
@@ -334,10 +329,7 @@ pub async fn investigate(
 /// a number produced by a second, simpler reader would answer a question nobody asked.
 async fn measure(seed: &Seed) -> Lead {
     let kind = ContentKind::classify(&seed.page.meta, &seed.page.bytes);
-    let chars = extracted_chars(kind, seed).await;
-
-    let kb = (seed.page.bytes.len() as f64 / 1024.0).max(1.0 / 1024.0);
-    let chars_per_kb = chars as f64 / kb;
+    let read = Verdict::on(&seed.page.bytes, &extracted_text(kind, seed).await);
 
     let html = seed.text();
     let scan = crate::html::Scan::new(&html);
@@ -346,12 +338,6 @@ async fn measure(seed: &Seed) -> Lead {
     let sitemap_declared = !seed.robots.sitemaps().is_empty();
 
     let mut findings = Vec::new();
-    if kind == ContentKind::Html && chars_per_kb < THIN_CHARS_PER_KB {
-        findings.push(format!(
-            "the page's text is not the page's content — {chars} chars from {}",
-            crate::render::bytes(seed.page.bytes.len() as u64)
-        ));
-    }
     // The shape entries 1 and 2 share: a source declares where its addresses are, and it
     // is not in a link.
     //
@@ -375,8 +361,7 @@ async fn measure(seed: &Seed) -> Lead {
     }
 
     Lead {
-        chars,
-        chars_per_kb,
+        read,
         anchors,
         script_bytes,
         sitemap_declared,
@@ -384,26 +369,30 @@ async fn measure(seed: &Seed) -> Lead {
     }
 }
 
-/// Characters the real extractor gets out of the seed.
+/// What the real extractor gets out of the seed.
 ///
 /// The bytes go to a temporary file because [`crate::extract::derive`] takes a path — some
 /// readers shell out to a tool that needs one. It is removed when this returns, which is
 /// the difference between this command and `check`: nothing here is meant to be opened.
-async fn extracted_chars(kind: ContentKind, seed: &Seed) -> usize {
+///
+/// The text rather than a count of it, because [`Verdict`] reads the text: a page can be
+/// long and still be a menu, and only the characters say which.
+async fn extracted_text(kind: ContentKind, seed: &Seed) -> String {
     let Ok(file) = tempfile::NamedTempFile::new() else {
-        return 0;
+        return String::new();
     };
     if tokio::fs::write(file.path(), &seed.page.bytes)
         .await
         .is_err()
     {
-        return 0;
+        return String::new();
     }
     crate::extract::derive(kind, &seed.page.bytes, file.path(), None, None)
         .await
         .outcome
         .text()
-        .map_or(0, |t| t.chars().count())
+        .map(str::to_string)
+        .unwrap_or_default()
 }
 
 /// Every off-host link on the seed, grouped by host.
@@ -671,7 +660,12 @@ impl Render for Lead {
                 "text",
                 12,
                 p.paint(
-                    &format!("{} chars, {:.0} per KB", self.chars, self.chars_per_kb),
+                    &format!(
+                        "{} chars, {:.0} per KB, {:.0}% link text",
+                        self.read.chars,
+                        self.read.chars_per_kb,
+                        self.read.link_share * 100.0
+                    ),
                     Ink::Dim,
                 ),
             )?;
@@ -699,10 +693,12 @@ impl Render for Lead {
                 ),
             )?;
 
-            if !self.findings.is_empty() {
+            if self.is_lead() {
                 p.blank()?;
                 p.marked(Mark::Warn, p.paint("a lead", Ink::Bold))?;
-                for f in &self.findings {
+                // The read first. A site can be recognised, enumerate perfectly, and
+                // still hand back a menu, and that is the finding an operator acts on.
+                for f in self.read.findings.iter().chain(self.findings.iter()) {
                     p.wrapped(f, Ink::Plain)?;
                 }
             }
@@ -723,6 +719,17 @@ mod tests {
             },
             robots: crate::discovery::Robots::unreachable(Default::default()),
         }
+    }
+
+    /// A seed whose site shape is unremarkable — it declares a sitemap, so the only
+    /// thing a finding can be about is the text that came out.
+    fn ordinary_seed(body: &str, url: &str) -> Seed {
+        let mut seed = seed_of(body, url);
+        seed.robots = crate::discovery::Robots::parse(
+            DEFAULT_USER_AGENT,
+            format!("User-agent: *\nSitemap: {url}sitemap.xml\n").as_bytes(),
+        );
+        seed
     }
 
     #[test]
@@ -804,26 +811,49 @@ mod tests {
         );
     }
 
-    /// The measurement that would otherwise flag every ordinary site. A page of prose is
-    /// mostly prose, and must not read as a lead just because nothing recognised it.
+    /// The whole point of ungating the measurement: it now runs on every address, so it
+    /// must stay silent on the ordinary ones. A page of prose is mostly prose.
     #[tokio::test]
-    async fn an_ordinary_page_of_prose_is_not_flagged_as_thin() {
+    async fn an_ordinary_page_of_prose_is_not_a_lead() {
         let body = format!(
             "<html><body><article><h1>Council</h1>{}</article></body></html>",
             "<p>The council will consider the resurfacing contract at its next meeting, \
              and the item may be pulled for discussion by any member.</p>"
                 .repeat(40)
         );
-        let lead = measure(&seed_of(&body, "https://x.gov/")).await;
+        let lead = measure(&ordinary_seed(&body, "https://x.gov/")).await;
         assert!(
-            lead.chars_per_kb > THIN_CHARS_PER_KB,
-            "{} per KB",
-            lead.chars_per_kb
-        );
-        assert!(
-            !lead.findings.iter().any(|f| f.contains("not the page's")),
-            "{:?}",
+            !lead.is_lead(),
+            "an ordinary page must not be a lead: {:?} {:?}",
+            lead.read.findings,
             lead.findings
+        );
+    }
+
+    /// The case the gate used to hide. This page is recognised, enumerates cleanly, and
+    /// is still a menu — so `investigate` must say so, not stay quiet because a strategy
+    /// spoke. The shape findings are empty here on purpose: nothing about the *site* is
+    /// unusual, and only the read is wrong.
+    #[tokio::test]
+    async fn a_page_that_reads_as_a_menu_is_a_lead_even_though_its_shape_is_ordinary() {
+        let nav: String = (0..60)
+            .map(|i| format!("<li><a href=\"/services/{i}\">Service number {i}</a></li>"))
+            .collect();
+        let body = format!(
+            "<html><body><nav><ul>{nav}</ul></nav>\
+             <article><p>Thanks! Your application was submitted.</p></article></body></html>"
+        );
+        let lead = measure(&ordinary_seed(&body, "https://x.gov/")).await;
+
+        assert!(lead.findings.is_empty(), "the shape is ordinary");
+        assert!(lead.is_lead(), "but the read is not");
+        assert!(
+            lead.read
+                .findings
+                .iter()
+                .any(|f| f.contains("This is a menu")),
+            "{:?}",
+            lead.read.findings
         );
     }
 

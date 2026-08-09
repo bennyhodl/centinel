@@ -714,18 +714,34 @@ best available guess. Today those two outcomes are byte-identical in the store �
 
 Five measures, each taken from the entry that proves it works. None needs a strategy.
 
-| Measure | Entry | What a bad value says |
-|---|---|---|
-| characters extracted per KB of seed | 2 — 94,125 bytes → **695 chars** | the page's text is not the page's content |
-| `<a href>` count against `<script>` bytes | 1 and 2 | the address set is on the page and not in a link |
-| sitemap: none declared, none at `/sitemap.xml` | 1 | there is no declared surface to walk |
-| distinct extracted lengths across N resources | 1 — **75 identical** nav menus | the corpus gained N copies of one page |
-| a declared total that discovery did not reach | 2 and 3 | build item 4 supplies this number |
+| Measure | Entry | What a bad value says | Status |
+|---|---|---|---|
+| share of extracted text that is link text | hillsclerk — **7 pages at 82–85%** | the reader returned the menu, not the page | BUILT |
+| `<a href>` count against `<script>` bytes | 1 and 2 | the address set is on the page and not in a link | BUILT |
+| sitemap: none declared, none at `/sitemap.xml` | 1 | there is no declared surface to walk | BUILT |
+| characters extracted per KB of seed | 2 — 94,125 bytes → **695 chars** | *nothing reliable* | **WITHDRAWN** |
+| distinct extracted lengths across N resources | 1 — **75 identical** nav menus | the corpus gained N copies of one page | superseded |
+| a declared total that discovery did not reach | 2 and 3 | build item 4 supplies this number | — |
 
-**A Lead needs a bad measure, not only a failed recognition.** Most `.gov` sites are
-correctly collected by `sitemap`, so flagging every unrecognised host would produce noise at
-exactly the scale that makes it useless. A Lead is written when nothing recognised the seed
-**and at least one measure is bad**, and the list is ranked by the measure — never flat.
+**Characters per KB was withdrawn, and the reason is worth keeping.** Run against the fifty
+hillsclerk documents it fires on **42, of which 41 are good pages**, and the sign is
+backwards: the seven ruined reads sit at 111–117 characters per KB and the healthy ones at
+2.4–2.7. A modern template weighs 200 KB whatever it holds, so the ratio measures the CMS,
+not the read. It looked convincing because the two points that set it — OnBase at 7.6 and a
+bare IIS listing at ~980 — are different *kinds of document*, not a good read and a bad one.
+What it was meant to catch is caught by the script share, on the same OnBase evidence. The
+number is still reported and now raises nothing.
+
+The fourth measure is **superseded** rather than withdrawn: repeated text is no longer
+counted per address and left for a person to notice, it is removed before indexing by
+`crate::boilerplate`.
+
+**~~A Lead needs a bad measure, not only a failed recognition.~~** Half right, and the wrong
+half cost a corpus. A Lead does need a bad measure — but this section also gated the
+measuring itself on nothing having recognised the seed, and `hillsclerk.com` is recognised
+by `sitemap`, enumerates cleanly, and hands back menus. The gate made the tool structurally
+unable to report the only thing wrong with it. **Every address is measured now**, recognised
+or not: recognition says how to find the pages and says nothing about reading them.
 
 ### Why this is the most valuable of the three
 
