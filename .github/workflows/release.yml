@@ -1,0 +1,169 @@
+# A merge to master decides its own version, writes the changelog, tags, and publishes
+# the release. Nothing is built here: `install.sh` builds from a clone and tunes for the
+# host CPU, so a generic prebuilt binary would be the slower thing to hand somebody.
+name: Release
+
+# After CI, not beside it. A push trigger would race the tests and could tag a master
+# whose suite is red — and a tag, unlike a build, is not something you take back.
+# CI does not run when a push touches prose only; such a push has nothing to release.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, as X.Y.Z. Empty reads it off the commits."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+# Two releases at once would race for the same tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: version, changelog, tag
+    runs-on: ubuntu-latest
+    # A green push to master, or a hand-started run. The release commit carries
+    # `[skip ci]`, so it starts no CI run and therefore reaches nothing here — that is
+    # what stops this job from releasing its own release.
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.event == 'push' &&
+           github.event.workflow_run.conclusion == 'success') }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The commit CI passed on, not whatever master holds by now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          # git-cliff reads the commits and the tags, and a shallow clone has neither.
+          fetch-depth: 0
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      - name: work out the next version
+        id: plan
+        env:
+          FORCED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          # The workspace manifest is the base, not the last tag: it is what a build
+          # actually carries, and the two tags from before this workspace existed
+          # (v0.1.0-hermes, v0.2.0-pi) mark lineages rather than versions of it.
+          base=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "centinel") | .version')
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+          last_tag=$(git tag --list --sort=-v:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
+          range="${last_tag:+$last_tag..}HEAD"
+          echo "base $base, reading commits in $range"
+
+          if [ -n "$FORCED_VERSION" ]; then
+            echo "$FORCED_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' \
+              || { echo "::error::version must be X.Y.Z, got '$FORCED_VERSION'"; exit 1; }
+            echo "forced to $FORCED_VERSION"
+            echo "version=$FORCED_VERSION" >> "$GITHUB_OUTPUT"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # An untagged history has no bound, so "everything since the last release"
+          # would mean every commit ever written, and the version it computed would be
+          # a guess dressed as a decision. The baseline is a deliberate act: tag it, or
+          # start this workflow by hand with a version.
+          if [ -z "$last_tag" ]; then
+            echo "::warning::no vX.Y.Z tag on this history — nothing to bound a changelog"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          subjects=$(git log --format='%s' "$range")
+          bodies=$(git log --format='%B' "$range")
+
+          if printf '%s\n' "$subjects" | grep -qE '^[a-z]+(\([^)]*\))?!:' \
+          || printf '%s\n' "$bodies" | grep -qE '^BREAKING[ -]CHANGE:'; then
+            kind=breaking
+          elif printf '%s\n' "$subjects" | grep -qE '^feat(\([^)]*\))?:'; then
+            kind=minor
+          elif printf '%s\n' "$subjects" | grep -qE '^(fix|perf)(\([^)]*\))?:'; then
+            kind=patch
+          else
+            kind=none
+          fi
+
+          IFS=. read -r major minor patch <<<"$base"
+          case "$kind" in
+            # Pre-1.0 a breaking change moves the minor. Semver says 0.x promises no
+            # compatibility, and spending 1.0 on the first `feat!` claims a stability
+            # this does not have yet.
+            breaking)
+              if [ "$major" -eq 0 ]; then minor=$((minor + 1)); patch=0
+              else major=$((major + 1)); minor=0; patch=0; fi ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+            none)
+              echo "no feat, fix or perf since ${last_tag:-the first commit} — nothing to release"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0 ;;
+          esac
+
+          echo "$kind bump: $base -> $major.$minor.$patch"
+          echo "version=$major.$minor.$patch" >> "$GITHUB_OUTPUT"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+
+      - name: bump the workspace version
+        if: steps.plan.outputs.release == 'true'
+        env:
+          BASE: ${{ steps.plan.outputs.base }}
+          NEXT: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          # One line, under [workspace.package]. Every member inherits it through
+          # `version.workspace = true`, so there is nothing else to edit.
+          sed -i "0,/^version = \"$BASE\"$/s//version = \"$NEXT\"/" Cargo.toml
+          grep -q "^version = \"$NEXT\"\$" Cargo.toml
+          # Cargo.lock names the members too, and a lockfile that disagrees with the
+          # manifest fails the next `--locked` build.
+          cargo update --workspace --quiet
+
+      - name: write the changelog
+        if: steps.plan.outputs.release == 'true'
+        env:
+          TAG: v${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The file keeps its header; --prepend puts the new section under it.
+          git cliff --tag "$TAG" --unreleased --prepend CHANGELOG.md
+          # The same section again, without the file header, as the release body.
+          git cliff --tag "$TAG" --unreleased --strip all -o "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+
+      - name: commit, tag, publish
+        if: steps.plan.outputs.release == 'true'
+        env:
+          TAG: v${{ steps.plan.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          # `[skip ci]`: this commit changes a version string and a markdown file, and CI
+          # on this workspace is half an hour of billed C++ builds to prove it.
+          git commit -m "chore(release): $TAG [skip ci]"
+          git tag -a "$TAG" -m "$TAG"
+          # No force. If master moved while this ran the right answer is to fail and let
+          # the next push decide a version, not to overwrite somebody's merge.
+          git push origin HEAD:master
+          git push origin "$TAG"
+          gh release create "$TAG" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"

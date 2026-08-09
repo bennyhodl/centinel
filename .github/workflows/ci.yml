@@ -1,0 +1,87 @@
+# Format, lint, test. Two jobs, and the split is about cost rather than tidiness:
+# `fmt` needs no dependency tree and answers in seconds, so a misformatted file does not
+# wait behind a build that links two vendored C++ libraries.
+name: CI
+
+# Prose does not compile, and this build is too expensive to run over a FIELD-NOTES.md
+# edit. The two lists are duplicated because the workflow parser does not read YAML
+# anchors — keep them in step.
+on:
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - ".gitignore"
+      - "contrib/**"
+  push:
+    branches: [master]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - ".gitignore"
+      - "contrib/**"
+
+# A second push to the same branch makes the first run's answer worthless, and this
+# workspace's build is too long to pay for an answer nobody will read.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Debug info is most of what a debug build weighs, and this one carries llama.cpp,
+  # whisper.cpp, arrow, datafusion and lance. Dropping it keeps the saved cache inside
+  # the 10 GB a repository gets. The cost is line numbers in a backtrace; the function
+  # names survive, which is what a failing test is read for.
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  check:
+    name: clippy and tests
+    runs-on: ubuntu-latest
+    # A cold build compiles two C++ libraries from source before a single test runs.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      # cmake builds the vendored llama.cpp and whisper.cpp. libclang is what bindgen
+      # reads their headers with. protoc is lance's, through prost-build — no crate in
+      # the tree vendors it, so a missing protoc is a failure a few hundred lines into
+      # a build script's output. OpenMP comes from gcc's libgomp, which the image has.
+      - name: install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake clang libclang-dev protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # clippy and the tests run in one job on purpose: both use the dev profile, so the
+      # second reuses the first's C++ build output instead of compiling llama.cpp twice.
+      - uses: Swatinem/rust-cache@v2
+
+      # Not `--all-features`. cuda, vulkan and rocm each need a toolchain (nvcc, hipcc,
+      # glslc) this runner does not have, so enabling them here only fails the build.
+      #
+      # `--locked` because the release job rewrites Cargo.lock from the manifest, and a
+      # lockfile that had already drifted would land that drift in a tagged release.
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # The suite is offline — every host in it is a `.test` name served by a fake — so
+      # nothing here needs ffmpeg, yt-dlp, or a network the runner might not reach.
+      - name: tests
+        run: cargo test --workspace --locked
