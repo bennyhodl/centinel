@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::boilerplate;
 use crate::chunk::{ChunkConfig, chunk_markdown};
 use crate::index::{Index, Placement};
 use crate::prelude::*;
@@ -75,6 +76,12 @@ pub struct IndexReport {
     pub total_chunks: usize,
     pub total_placements: usize,
     pub total_chars: usize,
+    /// Distinct lines this run judged to be chrome, across every source it touched.
+    pub boilerplate_lines: usize,
+    /// Characters of chrome kept out of the index.
+    pub boilerplate_chars: usize,
+    /// Documents that lost at least one line to it.
+    pub boilerplate_documents: usize,
 }
 
 /// Chunk extracted text into the search index.
@@ -123,6 +130,9 @@ pub async fn index(
         total_chunks: 0,
         total_placements: 0,
         total_chars: 0,
+        boilerplate_lines: 0,
+        boilerplate_chars: 0,
+        boilerplate_documents: 0,
     };
 
     for source in &sources {
@@ -182,6 +192,22 @@ pub async fn index(
         derivations.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.to_sha.cmp(&b.to_sha)));
         report.derivations += derivations.len();
 
+        // What repeats across this source is chrome, and it is learned before anything is
+        // chunked — from every derivation, including ones already placed. A resumed run
+        // must strip exactly what a fresh one would, or half a corpus carries the menu.
+        let sample = derivations.len().min(boilerplate::LEARN_SAMPLE);
+        let mut learner = boilerplate::Learner::new();
+        for (i, d) in derivations.iter().take(sample).enumerate() {
+            cancel.check()?;
+            if i % 25 == 0 {
+                progress.step(format!("reading {source}"), i as u64, sample as u64);
+            }
+            let bytes = ctx.store.get_blob(&d.to_sha).await?;
+            learner.add(&String::from_utf8_lossy(&bytes));
+        }
+        let chrome = learner.finish();
+        report.boilerplate_lines += chrome.len();
+
         let total = derivations.len() as u64;
         for (i, d) in derivations.iter().enumerate() {
             // The item boundary is one document, which is also the write batch — so what
@@ -216,9 +242,18 @@ pub async fn index(
 
             // The extraction pipeline does not record a title on the Derivation, so it
             // is recovered from the first heading — which is where both `htmd` and
-            // `pdf-inspector` put it.
+            // `pdf-inspector` put it. Taken from the text as derived: a title is a label
+            // for the document, not a passage in it, and it is wanted even on a page
+            // whose body turns out to be entirely chrome.
             let title = first_heading(&text);
-            let chunks = chunk_markdown(&text, &config);
+
+            let stripped = chrome.strip(&text);
+            if stripped.dropped_anything() {
+                report.boilerplate_documents += 1;
+                report.boilerplate_chars += stripped.chars_dropped;
+            }
+
+            let chunks = chunk_markdown(&stripped.text, &config);
             if chunks.is_empty() {
                 continue;
             }
@@ -244,8 +279,11 @@ pub async fn index(
                             derived_sha: d.to_sha.to_string(),
                             ordinal: chunk.ordinal,
                             heading: chunk.heading.clone(),
-                            char_start: chunk.char_start,
-                            char_end: chunk.char_end,
+                            // Translated back into the derived text's own coordinates.
+                            // The stripped text is never written anywhere, so a span
+                            // measured against it points into nothing anyone can open.
+                            char_start: stripped.origin(chunk.char_start),
+                            char_end: stripped.origin(chunk.char_end),
                             observed_at: observed_at.to_string(),
                             tool: format!("{} {}", d.tool, d.version),
                             title: title.clone(),
@@ -366,6 +404,19 @@ impl Render for IndexReport {
                 (self.chunks_written as u64, "chunks written"),
                 (self.chunks_deduplicated as u64, "chunks deduplicated"),
             ])?;
+
+            // Only where it fired. A silent zero reads as "there was no chrome", which
+            // is a claim, where absence is merely the ordinary case.
+            if self.boilerplate_lines > 0 {
+                p.blank()?;
+                let chrome = format!(
+                    "{} of chrome dropped from {} — {} repeated across the source",
+                    render::count(self.boilerplate_chars as u64),
+                    render::plural(self.boilerplate_documents, "document", "documents"),
+                    render::plural(self.boilerplate_lines, "line", "lines"),
+                );
+                p.marked(Mark::Ok, chrome)?;
+            }
 
             p.blank()?;
             let totals = format!(

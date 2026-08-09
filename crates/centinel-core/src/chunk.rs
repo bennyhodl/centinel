@@ -335,6 +335,14 @@ fn split_oversized(para: &str, target: usize) -> Vec<Piece> {
     }
 }
 
+/// Whether a paragraph holds records — delimited text, or a markdown table.
+///
+/// Exposed for [`crate::boilerplate`], which must leave record sets alone: a row that
+/// repeats across documents is data, not chrome.
+pub(crate) fn holds_records(para: &str) -> bool {
+    header_of(para.trim()).is_some()
+}
+
 /// The column names of a record block, and the bytes they occupy.
 ///
 /// Two shapes, both already in the store:
