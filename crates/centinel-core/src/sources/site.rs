@@ -43,7 +43,8 @@ use crate::enclosure;
 use crate::fetch::Fetcher;
 use crate::op::{ItemOutcome, Progress, Verdict};
 use crate::policy::{HostPolicy, Pacer};
-use crate::strategies::{self, Addresses, Crawl, Recognition, Seed, StrategyDef};
+use crate::strategies::Recognition;
+use crate::strategies::crawl::{self, Addresses, Seed, StrategyDef, Walk};
 
 pub struct SiteSource {
     id: SourceId,
@@ -240,7 +241,7 @@ impl SiteSource {
         chosen: &'static StrategyDef,
         seed: &Seed,
         progress: &Progress,
-    ) -> anyhow::Result<crate::strategies::Enumerated> {
+    ) -> anyhow::Result<crate::strategies::crawl::Enumerated> {
         let _ = self.spoke.set(chosen);
         progress.say(format!("enumerating with `{}`", chosen.name));
 
@@ -286,9 +287,9 @@ impl SiteSource {
             return (named, recognition);
         }
 
-        match strategies::best(seed) {
+        match crawl::best(seed) {
             Some(r) => (
-                strategies::by_name(r.strategy).unwrap_or_else(|_| strategies::fallback()),
+                crawl::by_name(r.strategy).unwrap_or_else(|_| crawl::fallback()),
                 Some(r),
             ),
             // Nothing spoke. The sitemap walk is the best available guess, and saying so
@@ -299,7 +300,7 @@ impl SiteSource {
                     "no strategy recognised {}; walking it as a sitemap",
                     self.site
                 ));
-                (strategies::fallback(), None)
+                (crawl::fallback(), None)
             }
         }
     }
@@ -414,7 +415,7 @@ struct SiteCrawl<'a> {
     max_addresses: usize,
 }
 
-impl Crawl for SiteCrawl<'_> {
+impl Walk for SiteCrawl<'_> {
     /// Paced, counted, and reported by the strategy rather than here.
     ///
     /// Deliberately not [`SiteSource::fetch_reporting`]: that emits one item line per
@@ -673,7 +674,7 @@ mod tests {
     /// operator accepted rather than a name the log has to guess at afterwards.
     #[test]
     fn a_pinned_strategy_is_what_the_run_records_and_how_it_acquires() {
-        let listing = crate::strategies::by_name("listing").unwrap();
+        let listing = crate::strategies::crawl::by_name("listing").unwrap();
         let s = source().with_strategy(Some(listing));
 
         assert_eq!(s.method(), "listing");
@@ -688,9 +689,9 @@ mod tests {
     /// must record what happened rather than what was asked for.
     #[test]
     fn what_spoke_outranks_what_was_pinned() {
-        let s = source().with_strategy(Some(crate::strategies::by_name("listing").unwrap()));
+        let s = source().with_strategy(Some(crate::strategies::crawl::by_name("listing").unwrap()));
         s.spoke
-            .set(crate::strategies::by_name("sitemap").unwrap())
+            .set(crate::strategies::crawl::by_name("sitemap").unwrap())
             .unwrap();
         assert_eq!(s.method(), "sitemap");
         assert!(s.scans_for_enclosures());

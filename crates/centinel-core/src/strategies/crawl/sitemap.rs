@@ -26,9 +26,10 @@ use std::collections::HashSet;
 
 use futures::future::BoxFuture;
 
-use super::{Crawl, Enumerated, Keyed, Recognition, Seed, Strategy, StrategyDef};
+use super::{Enumerated, Seed, Strategy, StrategyDef, Walk};
 use crate::discovery::{SitemapDoc, sitemap as doc};
 use crate::domain::Note;
+use crate::strategies::{Keyed, Recognition};
 
 pub struct Sitemap;
 
@@ -37,7 +38,7 @@ inventory::submit! { StrategyDef { name: "sitemap", it: &Sitemap } }
 /// Index nesting depth. `index → index → urlset` is legal, so this is not 1.
 ///
 /// Structural rather than configurable: it bounds the *shape* a document may have, where
-/// [`Crawl::budget`] bounds the work a run may do. Nothing has ever wanted to tune it.
+/// [`Walk::budget`] bounds the work a run may do. Nothing has ever wanted to tune it.
 const MAX_DEPTH: usize = 5;
 
 impl Strategy for Sitemap {
@@ -83,7 +84,7 @@ impl Strategy for Sitemap {
     fn enumerate<'a>(
         &'a self,
         seed: &'a Seed,
-        crawl: &'a dyn Crawl,
+        crawl: &'a dyn Walk,
     ) -> BoxFuture<'a, anyhow::Result<Enumerated>> {
         Box::pin(async move {
             let base = seed
@@ -223,7 +224,7 @@ impl Strategy for Sitemap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategies::tests::{Fake, seed_with_robots};
+    use crate::strategies::crawl::tests::{Fake, seed_with_robots};
 
     const INDEX: &str = r#"<?xml version="1.0"?>
         <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">

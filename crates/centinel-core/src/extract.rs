@@ -366,6 +366,31 @@ pub async fn derive(
         url,
         title,
     };
+
+    // Asked first, and empty today. A read strategy exists for bytes the content kind
+    // cannot tell apart — HTML by every measure, where *which part* is the document
+    // depends on a product. When nothing is registered this is one `is_empty` check and
+    // the readers below run exactly as they always have.
+    let doc = crate::strategies::read::Document {
+        kind,
+        bytes,
+        path,
+        url,
+    };
+    if let Some(def) = crate::strategies::read::best(&doc) {
+        let mut outcome = def.it.read(&doc).await;
+        outcome.strip_data_uris();
+        if produced_text(&outcome) {
+            return Derived {
+                outcome,
+                recovered_by_fallback: false,
+            };
+        }
+        // A strategy that recognised a document and then read nothing out of it is the
+        // confident half-answer the pairing rule exists to prevent. It does not get to
+        // stop the readers that would have run.
+    }
+
     let mut carried: Vec<(Reader, String)> = Vec::new();
 
     for (i, reader) in readers_for(kind).iter().copied().enumerate() {

@@ -441,7 +441,7 @@ async fn enumerate_with(
 ) -> anyhow::Result<Enumerated> {
     let named = match name {
         AUTO => None,
-        other => Some(crate::strategies::by_name(other)?),
+        other => Some(crate::strategies::crawl::by_name(other)?),
     };
     let id = SourceId::new("check".to_string())?;
     let policy = HostPolicy {
@@ -1183,7 +1183,7 @@ mod tests {
     /// a typo must not read like a site that enumerates to nothing.
     #[tokio::test]
     async fn an_unknown_strategy_names_the_ones_this_build_has() {
-        let err = crate::strategies::by_name("onbase")
+        let err = crate::strategies::crawl::by_name("onbase")
             .map(|_| ())
             .unwrap_err()
             .to_string();

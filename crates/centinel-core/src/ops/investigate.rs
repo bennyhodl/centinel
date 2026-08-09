@@ -47,7 +47,7 @@ use crate::discovery::DiscoveryLimits;
 use crate::policy::{DEFAULT_USER_AGENT, HostPolicy};
 use crate::prelude::*;
 use crate::sources::SiteSource;
-use crate::strategies::{self, Seed};
+use crate::strategies::crawl::{self, Seed};
 use crate::verdict::Verdict;
 
 /// Requests the size probe may spend, and addresses it will keep.
@@ -253,7 +253,7 @@ pub async fn investigate(
     // Every recogniser, not the first to answer. Recognition is pure over bytes already in
     // hand, so asking all of them costs nothing — and what the runners-up saw is evidence
     // worth showing when the choice between two of them matters.
-    let hits = strategies::recognise(&seed);
+    let hits = crawl::recognise(&seed);
     let recognised: Vec<Recognised> = hits
         .iter()
         .enumerate()
@@ -269,7 +269,7 @@ pub async fn investigate(
 
     let probe = match (hits.first(), args.no_probe) {
         (Some(best), false) => {
-            let def = strategies::by_name(best.strategy)?;
+            let def = crawl::by_name(best.strategy)?;
             let found = site.run(def, &seed, progress).await?;
             // The walk's own account of stopping early. A probe that ran out is the one
             // case where a count must never be read as a total.
