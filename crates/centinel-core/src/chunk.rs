@@ -71,16 +71,33 @@ impl Chunk {
     /// `pub(crate)` so other modules' tests can build a chunk with a real `chunk_hash`
     /// rather than fabricating one — a fabricated hash would make a cache-hit test pass
     /// for the wrong reason.
+    #[cfg(test)]
     pub(crate) fn new(text: String, ordinal: usize, heading: String, char_start: usize) -> Self {
+        let source_len = text.chars().count();
+        Self::spanning(text, ordinal, heading, char_start, source_len)
+    }
+
+    /// For text that is longer than the source it came from.
+    ///
+    /// A heading path prefix and a repeated column header are both *context*: they are
+    /// written into the chunk but were read once, elsewhere. Measuring the span from the
+    /// emitted text walks `char_end` past the end of the document and makes a hit
+    /// impossible to locate in the original — which is the only thing the span is for.
+    fn spanning(
+        text: String,
+        ordinal: usize,
+        heading: String,
+        char_start: usize,
+        source_len: usize,
+    ) -> Self {
         use sha2::{Digest, Sha256};
-        let char_end = char_start + text.chars().count();
         Self {
             chunk_hash: hex::encode(Sha256::digest(text.as_bytes())),
             text,
             ordinal,
             heading,
             char_start,
-            char_end,
+            char_end: char_start + source_len,
         }
     }
 }
@@ -101,7 +118,7 @@ pub fn chunk_markdown(markdown: &str, config: &ChunkConfig) -> Vec<Chunk> {
     let mut ordinal = 0usize;
 
     for block in blocks {
-        for (text, start) in pack(&block.text, block.char_start, config) {
+        for (text, start, source_len) in pack(&block.text, block.char_start, config) {
             // Prefixing the heading path is what lets a chunk stand alone. "Total:
             // $4.2M" is meaningless; "Budget > Capital Projects\n\nTotal: $4.2M" is
             // retrievable.
@@ -110,7 +127,13 @@ pub fn chunk_markdown(markdown: &str, config: &ChunkConfig) -> Vec<Chunk> {
             } else {
                 format!("{}\n\n{}", block.heading_path, text)
             };
-            chunks.push(Chunk::new(text, ordinal, block.heading_path.clone(), start));
+            chunks.push(Chunk::spanning(
+                text,
+                ordinal,
+                block.heading_path.clone(),
+                start,
+                source_len,
+            ));
             ordinal += 1;
         }
     }
@@ -183,20 +206,34 @@ fn parse_heading(line: &str) -> Option<(usize, String)> {
     Some((hashes, rest.to_string()))
 }
 
-/// Packs paragraphs into target-sized pieces with overlap, returning `(text, char_start)`.
-fn pack(text: &str, base_offset: usize, config: &ChunkConfig) -> Vec<(String, usize)> {
+/// Packs paragraphs into target-sized pieces with overlap.
+///
+/// Returns `(text, char_start, source_len)`. The last two describe the **source**, and
+/// only match the text's own length when nothing was carried onto the piece — see
+/// [`Chunk::spanning`].
+fn pack(text: &str, base_offset: usize, config: &ChunkConfig) -> Vec<(String, usize, usize)> {
     let text = text.trim();
     if text.is_empty() {
         return Vec::new();
     }
     if text.chars().count() <= config.target_chars {
-        return vec![(text.to_string(), base_offset)];
+        let len = text.chars().count();
+        return vec![(text.to_string(), base_offset, len)];
     }
 
-    let mut out: Vec<(String, usize)> = Vec::new();
+    let mut out: Vec<(String, usize, usize)> = Vec::new();
     let mut current = String::new();
     let mut current_start = base_offset;
     let mut offset = base_offset;
+
+    // Overlap text is repeated, but it is repeated *from the source at that position*,
+    // so a packed piece's span is simply its own length. Only the oversized path below
+    // emits text the document does not hold at `char_start`.
+    let packed = |s: &str| {
+        let t = s.trim().to_string();
+        let len = t.chars().count();
+        (t, len)
+    };
 
     for para in text.split("\n\n") {
         let para = para.trim();
@@ -206,24 +243,28 @@ fn pack(text: &str, base_offset: usize, config: &ChunkConfig) -> Vec<(String, us
         }
         let para_len = para.chars().count();
 
-        // A single paragraph over target — a PDF table, a wall of text — is split on
-        // character count. Ugly, but better than emitting one 40KB chunk.
+        // A single paragraph over target — a CSV, a PDF table, a wall of text. How it
+        // is cut depends on whether it holds records; see [`split_oversized`].
         if para_len > config.target_chars {
             if !current.trim().is_empty() {
-                out.push((current.trim().to_string(), current_start));
+                let (t, n) = packed(&current);
+                out.push((t, current_start, n));
                 current.clear();
             }
             for piece in split_oversized(para, config.target_chars) {
-                let piece_len = piece.chars().count();
-                out.push((piece, offset));
-                offset += piece_len;
+                out.push((piece.text, offset, piece.source_len));
+                // Advances by what the piece *consumed*, not by what it emitted. A
+                // repeated header is context, not new text, and charging it to the
+                // offset would push every later `char_start` off the source.
+                offset += piece.source_len;
             }
             current_start = offset;
             continue;
         }
 
         if current.chars().count() + para_len > config.target_chars && !current.trim().is_empty() {
-            out.push((current.trim().to_string(), current_start));
+            let (t, n) = packed(&current);
+            out.push((t, current_start, n));
             let tail = tail_chars(&current, config.overlap_chars);
             current_start = offset.saturating_sub(tail.chars().count());
             current = tail;
@@ -237,31 +278,167 @@ fn pack(text: &str, base_offset: usize, config: &ChunkConfig) -> Vec<(String, us
     }
 
     if !current.trim().is_empty() {
-        out.push((current.trim().to_string(), current_start));
+        let (t, n) = packed(&current);
+        out.push((t, current_start, n));
     }
 
     // Fold a runt tail into its predecessor rather than emitting it alone.
     if out.len() > 1
         && out
             .last()
-            .is_some_and(|(t, _)| t.chars().count() < config.min_chars)
+            .is_some_and(|(t, _, _)| t.chars().count() < config.min_chars)
     {
-        let (runt, _) = out.pop().expect("len > 1");
-        if let Some((prev, _)) = out.last_mut() {
+        let (runt, _, runt_len) = out.pop().expect("len > 1");
+        if let Some((prev, _, prev_len)) = out.last_mut() {
             prev.push_str("\n\n");
             prev.push_str(&runt);
+            *prev_len += runt_len;
         }
     }
 
     out
 }
 
-fn split_oversized(para: &str, target: usize) -> Vec<String> {
-    let chars: Vec<char> = para.chars().collect();
-    chars
-        .chunks(target)
-        .map(|c| c.iter().collect::<String>())
-        .collect()
+/// One piece of an oversized paragraph.
+///
+/// `text` and `source_len` differ whenever a header is repeated: the header is context
+/// carried onto the piece, not text the piece consumed from the document.
+struct Piece {
+    text: String,
+    source_len: usize,
+}
+
+/// Splits a paragraph that is over target.
+///
+/// **A record is never cut.** A CSV row sliced down the middle is not a record, and a row
+/// without its column names cannot be read — a hit on `4307 N Troy St` is unusable if
+/// nothing in the passage says which column an address sits in. So a paragraph that holds
+/// records is split on line boundaries with its header repeated on every piece, and
+/// anything else falls back to the blind character split this has always done.
+///
+/// Two sightings earned this: `publicrec.hillsclerk.com`'s daily filings, where 5,500 of
+/// 5,524 chunks carried no column names and several began mid-field, and the bulk data
+/// CSV before it. `docs/FIELD-NOTES.md` — *a record set is not a document*.
+fn split_oversized(para: &str, target: usize) -> Vec<Piece> {
+    match header_of(para) {
+        Some((header, consumed)) => split_records(para, header, consumed, target),
+        None => para
+            .chars()
+            .collect::<Vec<char>>()
+            .chunks(target)
+            .map(|c| {
+                let text: String = c.iter().collect();
+                let source_len = text.chars().count();
+                Piece { text, source_len }
+            })
+            .collect(),
+    }
+}
+
+/// The column names of a record block, and the bytes they occupy.
+///
+/// Two shapes, both already in the store:
+///
+/// - a **markdown table**, which `htmd` and `pdf-inspector` both emit with a `|---|` rule
+///   under the names — the rule is part of the header, or the repeat is not a table;
+/// - **delimited text** straight from `passthrough`, recognised by every row carrying the
+///   same field count as the first.
+///
+/// Returning `None` is the ordinary answer. Prose must fall through untouched.
+fn header_of(para: &str) -> Option<(&str, usize)> {
+    let mut lines = para.split_inclusive('\n');
+    let first = lines.next()?;
+    let second = lines.next()?;
+    let names = first.trim_end_matches(['\n', '\r']);
+    let rule = second.trim_end_matches(['\n', '\r']);
+
+    if names.trim_start().starts_with('|') && is_table_rule(rule) {
+        return Some((
+            &para[..first.len() + rule.len()],
+            first.len() + second.len(),
+        ));
+    }
+
+    // Quote-aware, because a court case title is `"Desir, Mildred vs Tampa General"` and
+    // counting raw commas would call that four fields.
+    for sep in [',', '\t', ';'] {
+        let n = fields(names, sep);
+        if n < 3 {
+            continue;
+        }
+        let sample: Vec<&str> = para
+            .lines()
+            .skip(1)
+            .filter(|l| !l.trim().is_empty())
+            .take(5)
+            .collect();
+        if sample.len() >= 2 && sample.iter().all(|l| fields(l, sep) == n) {
+            return Some((names, first.len()));
+        }
+    }
+    None
+}
+
+/// Field count, ignoring separators inside double quotes.
+fn fields(line: &str, sep: char) -> usize {
+    let mut n = 1;
+    let mut quoted = false;
+    for c in line.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            c if c == sep && !quoted => n += 1,
+            _ => {}
+        }
+    }
+    n
+}
+
+fn is_table_rule(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') && t.contains('-') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+}
+
+/// Packs whole rows under a repeated header.
+///
+/// No overlap here, unlike [`pack`]. Overlap guards a sentence split across a seam; rows
+/// are already whole, and repeating them would put near-identical passages in the index —
+/// the thing chunk-by-hash exists to avoid.
+fn split_records(para: &str, header: &str, consumed: usize, target: usize) -> Vec<Piece> {
+    // Counted once, on the first piece, because that is where the header is read from.
+    let head_source = para[..consumed].chars().count();
+    let head_chars = header.chars().count();
+
+    let mut out: Vec<Piece> = Vec::new();
+    let mut rows = String::new();
+    let mut rows_len = 0usize;
+
+    let flush = |rows: &mut String, rows_len: &mut usize, out: &mut Vec<Piece>| {
+        if rows.trim().is_empty() {
+            return;
+        }
+        let first = out.is_empty();
+        out.push(Piece {
+            text: format!("{header}\n{}", rows.trim_end()),
+            source_len: *rows_len + if first { head_source } else { 0 },
+        });
+        rows.clear();
+        *rows_len = 0;
+    };
+
+    // `split_inclusive` keeps each newline with its row, so `source_len` is exact rather
+    // than off by one wherever the document does not end in one.
+    for line in para[consumed..].split_inclusive('\n') {
+        let line_chars = line.chars().count();
+        // A row that alone exceeds the target still goes out whole. Cutting it would
+        // defeat the only rule this function has.
+        if !rows.is_empty() && head_chars + rows.chars().count() + line_chars > target {
+            flush(&mut rows, &mut rows_len, &mut out);
+        }
+        rows.push_str(line);
+        rows_len += line_chars;
+    }
+    flush(&mut rows, &mut rows_len, &mut out);
+    out
 }
 
 fn tail_chars(s: &str, n: usize) -> String {
@@ -398,5 +575,128 @@ mod tests {
             assert!(c.char_start <= c.char_end);
             assert!(c.char_start <= len, "span starts past the document");
         }
+    }
+
+    // ── record blocks ─────────────────────────────────────────────────────────
+    //
+    // The shapes below are `publicrec.hillsclerk.com`'s, copied rather than invented:
+    // the daily civil filings CSV and a Registry balances table out of `pdf-inspector`.
+
+    const CSV_HEADER: &str = "CaseCategory,CaseTypeDescription,CaseNumber,Title,FilingDate,\
+                              PartyType,FirstName,MiddleName,LastName/CompanyName,\
+                              PartyAddress,Attorney";
+
+    fn filings(rows: usize) -> String {
+        let row = "\"CV\",\"Professional Malpractice Business\",\"26-CA-007814\",\
+                   \"Desir, Mildred Sephora vs Tampa General Hospital\",\"07/19/2026\",\
+                   \"Plaintiff\",\"Mildred\",\"Sephora\",\"Desir\",\
+                   \"4307 N Troy St, Tampa, FL 33610\",\"No Attorney\"";
+        std::iter::once(CSV_HEADER.to_string())
+            .chain((0..rows).map(|_| row.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn every_chunk_of_a_csv_carries_the_column_names() {
+        let chunks = chunk_markdown(&filings(200), &cfg());
+        assert!(chunks.len() > 1, "200 rows must not fit in one chunk");
+        for c in &chunks {
+            assert!(
+                c.text.contains("PartyAddress"),
+                "a chunk without column names cannot be read:\n{}",
+                &c.text[..c.text.len().min(120)]
+            );
+        }
+    }
+
+    #[test]
+    fn a_csv_row_is_never_cut_in_half() {
+        for c in chunk_markdown(&filings(200), &cfg()) {
+            for line in c.text.lines().skip(1) {
+                assert!(
+                    line.starts_with("\"CV\"") && line.ends_with("\"No Attorney\""),
+                    "a record was split: {line}"
+                );
+            }
+        }
+    }
+
+    /// The header repeats in the text but is read once from the document, so spans must
+    /// stay inside it. Charging the repeat to the offset walks them off the end.
+    #[test]
+    fn a_repeated_header_does_not_push_spans_past_the_document() {
+        let csv = filings(200);
+        let len = csv.chars().count();
+        let chunks = chunk_markdown(&csv, &cfg());
+        assert!(
+            chunks.last().expect("chunks").char_end <= len,
+            "spans ran past a {len}-character document"
+        );
+        for pair in chunks.windows(2) {
+            assert!(
+                pair[0].char_start <= pair[1].char_start,
+                "spans went backwards"
+            );
+        }
+    }
+
+    /// A quoted comma inside a case title must not be counted as a field separator, or
+    /// the header is never recognised and nothing above fires.
+    #[test]
+    fn a_comma_inside_a_quoted_field_is_not_a_separator() {
+        assert_eq!(fields(CSV_HEADER, ','), 11);
+        assert_eq!(
+            fields(
+                "\"CV\",\"x\",\"26-CA-1\",\"Desir, Mildred vs Tampa General\",\"07/19/2026\",\
+                 \"Plaintiff\",\"M\",\"S\",\"D\",\"4307 N Troy St, Tampa, FL\",\"No Attorney\"",
+                ','
+            ),
+            11
+        );
+    }
+
+    #[test]
+    fn a_markdown_table_repeats_its_header_and_its_rule() {
+        let mut md =
+            String::from("|Case Number|Party Name|Increases|Decreases|\n|---|---|---|---|\n");
+        for i in 0..200 {
+            md.push_str(&format!(
+                "|13-CP-{i:06}|MUNN, ARTHUR RENA|$1,634.09|$1,634.09|\n"
+            ));
+        }
+        let chunks = chunk_markdown(&md, &cfg());
+        assert!(chunks.len() > 1);
+        for c in &chunks {
+            assert!(
+                c.text.contains("|Case Number|Party Name|"),
+                "lost the header"
+            );
+            assert!(c.text.contains("|---|---|---|---|"), "lost the table rule");
+        }
+    }
+
+    /// Prose is not a record set. A paragraph full of commas must not acquire a header
+    /// row that nobody wrote, and must keep splitting the way it always has.
+    #[test]
+    fn prose_is_not_mistaken_for_a_record_block() {
+        let one_line = "The clerk records deeds, liens, and judgments. ".repeat(80);
+        assert!(header_of(&one_line).is_none(), "one line has no header");
+
+        let many_lines: String = (0..40)
+            .map(|i| format!("Line {i} lists deeds, liens{}\n", ",".repeat(i % 4)))
+            .collect();
+        assert!(
+            header_of(&many_lines).is_none(),
+            "inconsistent field counts are prose, not records"
+        );
+
+        let chunks = chunk_markdown(&one_line, &cfg());
+        assert!(chunks.len() > 1, "an oversized paragraph still splits");
+        assert!(
+            chunks.iter().all(|c| !c.text.contains("The clerk records deeds, liens, and judgments. The clerk records deeds, liens, and judgments. The clerk")
+                || c.text.chars().count() <= cfg().target_chars + 200),
+            "prose chunks stayed near target"
+        );
     }
 }
