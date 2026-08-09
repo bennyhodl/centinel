@@ -1227,6 +1227,7 @@ framework defect that any site triggers, which is why none of them earns a `read
 4. **Surface the read verdict in `run`**, and count documents that index to nothing instead
    of dropping them.
 5. **Make the fallback prove it is an improvement**, instead of triggering on a length.
+6. **Read the region the page marks as its content**, before guessing at one.
 
 #### Item 5, and the ratio that did not survive being measured
 
@@ -1292,13 +1293,82 @@ still not extracted — `search Mitermiler` still returns nothing. That is the w
 failure, and no length or ratio reaches it. What changed is that 79 such pages now report
 themselves as producing nothing rather than filling the index with a phone number.
 
+### The page marks its own content, and reading that is the fix
+
+Fault 3 is the one nothing above reached: readability picking a *wrong* dense region. No
+length and no ratio distinguishes 378 characters of contact panel from 378 characters of
+record. The pages themselves do, and they say so in the markup.
+
+Measured across all 300 documents, **298 carry a content marker**:
+
+```
+main          198
+[role=main]   100
+none            2
+```
+
+Four unrelated platforms — Drupal, WordPress, CivicPlus, Granicus — and the marker is the
+HTML sectioning standard, not any of their conventions. Reading the marked region instead of
+scoring for density recovers every fact that was lost, and drops the one that was wrongly
+kept:
+
+| page | fact | readability | marked |
+|---|---|---|---|
+| `czech-sokol-hall` | `Mitermiler`, `Clark Avenue` | absent | **present** |
+| `czech-sokol-hall` | City Hall's phone number | present | **gone** |
+| `black-history-boston` | `Melnea Cass`, `Reggie Lewis` | absent | **present** |
+| `denison-cemetery` | `1835`, `Garden Avenue` | present | present |
+
+**The order matters and is not obvious.** `<main>` contains `<article>` on the Cleveland
+template, and the record sits *between* them — byte 112,264, where `<main>` opens at 109,469
+and `<article>` at 113,024. Taking the most specific marker would miss the one fact the page
+publishes. The rule is the widest region the page marks as its own.
+
+Re-derived across five stores:
+
+| Site | indexed before → after | empty before → after | characters |
+|---|---|---|---|
+| `clevelandohio.gov` | 31 → **110** | 79 → **0** | 148k → 185k |
+| `boston.gov` | 191 → 191 | 0 → 0 | 3.81M → 4.26M |
+| `dunedin.gov` | 61 → **66** | 5 → **0** | 235k → 354k |
+| `medinaco.org` | 50 → 50 | 0 → 0 | 374k → **116k** |
+| `clevelandcitycouncil.gov` | 53 → 53 | 0 → 0 | 146k → 149k |
+
+Medina losing 69% of its characters is the point, not a loss: that was the site-wide menu on
+every event page. Per-document comparison confirms no page lost its content — Dunedin's
+`May-COA` went 18,701 → 1,828 characters and *kept* the date and `Hale Senior Activity
+Center, 330 Douglas Avenue`, which had been buried at offset 17,700.
+
+```
+$ centinel search Mitermiler --source cleveohio
+  Czech-Sokol Hall | 1890  4314 Clark Avenue  Architect Andrew Mitermiler
+$ centinel search "Toggle Menu" --source boston
+  0 results
+```
+
+The second one is a free consequence: dropping `nav`, `header` and `footer` *inside* the
+marked region removed the chrome line that had led nearly every Boston snippet, without
+touching `MIN_LINE_CHARS` at all.
+
+**The cost, and who pays it.** A marked region is broader than readability's pick, so it
+carries in-page sub-navigation: the Cleveland police page goes from 4,248 characters at 10%
+link text to 12,478 at 50%, and Dunedin's flagged reads rise from 15 to 32. That is the right
+trade in one direction only — **content never extracted cannot be recovered by a later
+stage, and chrome that was extracted can be dropped by one.** Repeated sub-navigation is
+exactly what [`crate::boilerplate`] was written for, and it is now doing that job rather than
+compensating for a reader that picked the wrong region.
+
+**Where the verdict now over-fires.** `medinaco.org` still flags 50 of 50, and inspection
+says those pages now hold their real content — series, date, room — beside a block of
+calendar-export links that reads as 60%+ link text. The measure is not wrong about the
+links; it is wrong about what they mean. Recorded, not tuned.
+
 ### Left on the table
 
-- **A second sighting of "the extractor picked a different region than the page's own
-  template implies".** All four sightings here are readability guessing. A site that marks its
-  content region explicitly — `<main>`, `role="main"`, a schema.org `articleBody` — would say
-  whether the fix is a better ratio or a better region test. None of these six was checked for
-  that.
+- ~~**A second sighting of "the extractor picked a different region than the page's own
+  template implies".**~~ **Checked, and it is the answer.** See
+  [The page marks its own content](#the-page-marks-its-own-content-and-reading-that-is-the-fix)
+  below.
 - **CivicPlus as a product recognition.** `buffalony.gov` is CivicPlus by three independent
   signals: a `frame-ancestors` CSP naming `*.civicplus.com`, the literal string in the page,
   and the `AgendaCenter`/`DocumentCenter` modules. Centinel names only `sitemap`, a standard.

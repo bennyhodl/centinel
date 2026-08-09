@@ -25,26 +25,33 @@
 //! gets worked around in forty places instead of fixed once, and then the fix cannot land
 //! because forty workarounds depend on the bug.
 //!
-//! ## It is empty, and that is the design working
+//! ## What is registered, and what that says about the rest
 //!
-//! No strategy is registered. Every extraction fault found in `docs/FIELD-NOTES.md` — the
-//! fused table, the spelled-out image, the `data:` URI, the octet-stream PDF — was a
-//! framework defect that any site triggers, and each was fixed in the framework. The two
-//! outstanding read faults are the same: navigation returned instead of an article is
-//! handled corpus-wide by [`crate::boilerplate`], and text hidden behind a `var pdfURL` is
-//! an enclosure question.
+//! One strategy: [`marked`], which reads the region a page marks as its own content. It was
+//! written after six ordinary city and county sites showed the same fault — the reader
+//! guessing at the content region and guessing wrong, in both directions, on adjacent pages
+//! of identical markup. See `docs/FIELD-NOTES.md` entry 5.
 //!
-//! So this is a place, deliberately unfurnished. The registry is consulted on every
-//! derivation, a registered strategy wins over the content kind's readers, and the
-//! two-sighting rule in `docs/FIELD-NOTES.md` decides when the first one is written. An
-//! empty registry that is wired up costs one `is_empty` check per document; an unwired one
-//! costs a refactor at exactly the moment somebody has a shape to add.
+//! It is keyed on a **standard**, not a product, and that is the important part. `<main>`
+//! is HTML, satisfied by 298 of 300 measured documents across four unrelated platforms, so
+//! it is not a special case at all — it is the ordinary way to read a page, and it happens
+//! to live here because this registry runs before the content kind's readers and that is
+//! precisely the order it needs.
+//!
+//! Everything else stays out. Every other extraction fault in the field notes — the fused
+//! table, the spelled-out image, the `data:` URI, the octet-stream PDF — was a framework
+//! defect any site triggers, and each was fixed in the framework rather than worked around
+//! here. What would legitimately join `marked` is narrower than it once looked: a product
+//! whose markup lies about its own markers, or wraps the document in a viewer that marks
+//! nothing. That has not been met yet, and the two-sighting rule decides when it has.
 
 use futures::future::BoxFuture;
 
 use super::Recognition;
 use crate::content::ContentKind;
 use crate::extract::Extracted;
+
+pub mod marked;
 
 /// A document, as the readers are given it.
 ///
@@ -193,12 +200,15 @@ mod tests {
         assert!(!derived.recovered_by_fallback);
     }
 
-    /// The same bytes without the marker take the ordinary path, which is what every
-    /// document in the corpus does today.
+    /// The same bytes without the marker take the ordinary path.
+    ///
+    /// The fixture holds no `<main>`, `<article>` or `role="main"` on purpose: with
+    /// [`marked`] registered, markup that carries one is read by it, and this test is about
+    /// what happens to markup that carries none.
     #[tokio::test]
     async fn an_unrecognised_document_still_takes_the_readers_for_its_kind() {
-        let html = "<html><body><article><p>Ordinary prose about the county clerk and \
-                    the records it keeps for the public.</p></article></body></html>";
+        let html = "<html><body><div><p>Ordinary prose about the county clerk and \
+                    the records it keeps for the public.</p></div></body></html>";
         let file = tempfile::NamedTempFile::new().expect("temp");
         std::fs::write(file.path(), html).expect("write");
 
@@ -233,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_recognises_an_ordinary_page() {
+    fn nothing_recognises_a_page_that_marks_nothing() {
         let doc = Document {
             kind: ContentKind::Html,
             bytes: b"<html><body><p>An ordinary page.</p></body></html>",
@@ -242,5 +252,18 @@ mod tests {
         };
         assert!(recognise(&doc).is_empty());
         assert!(best(&doc).is_none());
+    }
+
+    /// And the converse, which is what makes the registry a mechanism rather than a claim:
+    /// a page that marks its content is claimed by `marked` before any reader is reached.
+    #[test]
+    fn a_page_that_marks_its_content_is_claimed_by_marked() {
+        let doc = Document {
+            kind: ContentKind::Html,
+            bytes: b"<html><body><main><p>The council met.</p></main></body></html>",
+            path: std::path::Path::new("/dev/null"),
+            url: Some("https://x.gov/"),
+        };
+        assert_eq!(best(&doc).map(|d| d.name), Some("marked"));
     }
 }
