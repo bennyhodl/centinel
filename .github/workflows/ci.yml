@@ -59,11 +59,17 @@ jobs:
       # reads their headers with. protoc is lance's, through prost-build — no crate in
       # the tree vendors it, so a missing protoc is a failure a few hundred lines into
       # a build script's output. OpenMP comes from gcc's libgomp, which the image has.
+      #
+      # Both protobuf packages, and the second is not redundant: `protobuf-compiler` is
+      # the protoc binary alone, while the well-known types it resolves imports against
+      # — `google/protobuf/empty.proto` and the rest of /usr/include/google/protobuf —
+      # ship in `libprotobuf-dev`. With only the compiler, protoc runs and then fails on
+      # lance's own `import "google/protobuf/empty.proto"`.
       - name: install build tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake clang libclang-dev protobuf-compiler
+            cmake clang libclang-dev protobuf-compiler libprotobuf-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
