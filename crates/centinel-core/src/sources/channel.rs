@@ -231,6 +231,9 @@ impl Source for ChannelSource {
                     ("tabs".to_string(), listing.tabs.len() as u64),
                     ("duration_secs".to_string(), seconds as u64),
                 ]),
+                // A tab listing is walked to exhaustion or it fails; there is no ceiling to
+                // stop on. A tab that returned nothing is a note above, not a truncation.
+                truncated: false,
             })
         })
     }

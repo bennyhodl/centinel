@@ -138,6 +138,10 @@ pub struct TranscribeReport {
     pub attempted: usize,
     pub transcribed: usize,
     pub failed: usize,
+    /// Still outstanding after this run, from `--limit`. The one figure here that is an
+    /// instruction rather than a result: it says run it again.
+    #[serde(default)]
+    pub remaining: usize,
     pub audio_ms: u64,
     pub transcribed_chars: usize,
     pub items: Vec<TranscribedItem>,
@@ -168,6 +172,7 @@ pub async fn transcribe(
         attempted: 0,
         transcribed: 0,
         failed: 0,
+        remaining: 0,
         audio_ms: 0,
         transcribed_chars: 0,
         items: Vec::new(),
@@ -204,9 +209,15 @@ pub async fn transcribe(
         }
     }
 
+    // Counted before the cut, exactly as `embed` and `extract` do. A `--limit` that
+    // truncates in silence is the defect "a cap that is not reported is data loss" was
+    // written against, and this was the one stage it missed: a run said `12 transcribed`
+    // and never said 300 recordings were still waiting.
+    let outstanding = todo.len();
     if let Some(limit) = args.limit {
         todo.truncate(limit);
     }
+    report.remaining = outstanding - todo.len();
 
     if args.dry_run {
         progress.say(format!("{} recordings would be transcribed", todo.len()));
@@ -390,6 +401,21 @@ impl Render for TranscribeReport {
                 p.marked(
                     Mark::Warn,
                     p.paint("no VAD — Whisper saw the silence too", Ink::Dim),
+                )?;
+            }
+
+            // The one figure here that is an instruction. Said on the line a person
+            // reads, because a `--limit` nobody is told about reads as a finished corpus.
+            if self.remaining > 0 {
+                p.marked(
+                    Mark::Warn,
+                    p.paint(
+                        &format!(
+                            "{} recording(s) left by --limit; run it again to continue",
+                            render::count(self.remaining as u64)
+                        ),
+                        Ink::Dim,
+                    ),
                 )?;
             }
 

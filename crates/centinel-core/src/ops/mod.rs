@@ -27,6 +27,7 @@ mod investigate;
 mod list;
 mod models;
 mod open;
+mod probe;
 mod read;
 mod run;
 mod schedule;
@@ -36,12 +37,13 @@ mod source;
 mod target;
 mod transcribe;
 
-pub use check::{CheckArgs, CheckReport, Checked, check};
+pub use check::{CheckArgs, CheckReport, Checked, Enumerated, check};
 pub use models::{
     FetchedFile, FileCheck, ModelsAction, ModelsArgs, ModelsReport, Orphan, PruneArgs, PullArgs,
     RemoveArgs, VerifyArgs, models,
 };
 pub use open::{OpenArgs, OpenReport, open};
+pub use probe::NetArgs;
 pub use read::{ReadArgs, ReadReport, read};
 
 pub use build_index::{IndexArgs, IndexReport, index};

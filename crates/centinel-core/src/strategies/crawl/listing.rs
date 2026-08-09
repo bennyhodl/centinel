@@ -23,12 +23,10 @@
 //! the parent link a non-event: `/` does not start with `/Civil/`, so it is dropped by the
 //! same test that drops a link to another host.
 
-use std::collections::HashSet;
-
 use futures::future::BoxFuture;
 use url::Url;
 
-use super::{Addresses, Enumerated, Seed, Strategy, StrategyDef, Walk};
+use super::{Addresses, Enumerated, Pass, Seed, Strategy, StrategyDef, Walk};
 use crate::domain::Note;
 use crate::strategies::{Keyed, Recognition};
 
@@ -100,114 +98,50 @@ impl Strategy for Listing {
                 .final_url()
                 .ok_or_else(|| anyhow::anyhow!("the seed does not record where it was served"))?;
             let root = directory_of(&start);
-            let mut out = Enumerated::default();
-            out.notes.push(Note::new("root", root.to_string()));
+            let mut pass = Pass::new(crawl, "tree", MAX_DEPTH);
+            pass.note(Note::new("root", root.to_string()));
+            pass.push(root.clone(), 0);
 
-            let mut queue: Vec<(Url, usize)> = vec![(root.clone(), 0)];
-            let mut visited: HashSet<String> = HashSet::new();
-            let mut seen: HashSet<String> = HashSet::new();
-            let mut directories = 0u64;
-            let mut disallowed = 0u64;
-
-            while let Some((dir, depth)) = queue.pop() {
-                if !crawl.may_fetch() {
-                    out.truncated = true;
-                    out.warnings.push(format!(
-                        "stopped at the {}-request budget; the tree is larger than this \
-                         run captured",
-                        crawl.budget()
-                    ));
-                    break;
-                }
-                // Here rather than only where an address is pushed, so the walk stops
-                // instead of listing the rest of the tree to discard it. The warning is
-                // written once, after the loop — see the same fix in `sitemap`, and the
-                // reason it had to move: this test needs a *next* iteration to run, and a
-                // walk that fills its ceiling on the last directory in the queue has none.
-                if out.addresses.len() >= crawl.max_addresses() {
-                    break;
-                }
-                if !visited.insert(dir.to_string()) {
-                    continue;
-                }
-                if depth > MAX_DEPTH {
-                    out.warnings
-                        .push(format!("depth limit reached, skipping {dir}"));
-                    continue;
-                }
-
-                crawl.progress().step(
-                    format!("listing {}", dir.path()),
-                    directories,
-                    directories + queue.len() as u64 + 1,
-                );
+            while let Some((dir, depth)) = pass.next_to_visit() {
+                pass.visiting(format!("listing {}", dir.path()));
 
                 // The root's bytes are already in hand: they are what the recogniser read.
                 // Fetching them again would spend a request to learn what we know, and on
                 // a one-directory tree that is the *only* request.
                 let body = match depth {
                     0 => seed.page.bytes.clone(),
-                    _ => match crawl.get(dir.as_str()).await {
+                    _ => match pass.walk().get(dir.as_str()).await {
                         Ok(f) => f.bytes,
                         Err(refusal) => {
-                            out.warnings.push(format!("{dir}: {refusal}"));
+                            pass.refused(&dir, &refusal);
                             continue;
                         }
                     },
                 };
-                directories += 1;
 
                 let html = String::from_utf8_lossy(&body);
                 for target in links_in(&html, &dir, &root) {
                     match target.as_str().ends_with('/') {
-                        true => queue.push((target, depth + 1)),
+                        true => pass.push(target, depth + 1),
                         false => {
-                            // The check after the walk records the ceiling; this one only
-                            // stops filling past it.
-                            if out.addresses.len() >= crawl.max_addresses() {
+                            // `next_to_visit` records the ceiling; this only stops filling past it.
+                            if pass.full() {
                                 break;
                             }
-                            if !seed.robots.allowed(target.as_str()) {
-                                disallowed += 1;
-                                continue;
-                            }
-                            if seen.insert(target.to_string()) {
-                                out.addresses.push(target.to_string());
-                            }
+                            pass.keep(target.to_string(), &seed.robots);
                         }
                     }
                 }
             }
 
-            // After the walk, so it catches the tree that fills its ceiling on the last
-            // directory in the queue as well as the one that breaks out early. See the
-            // same fix in `sitemap`, where a single large sitemap printed a checkmark.
-            if out.addresses.len() >= crawl.max_addresses() {
-                out.truncated = true;
-                out.warnings.push(format!(
-                    "stopped at {} addresses; the tree is larger than this run captured",
-                    crawl.max_addresses()
-                ));
-            }
-
-            if disallowed > 0 {
-                out.notes.push(Note::marked(
-                    "disallowed",
-                    format!(
-                        "{} excluded by the site's own rules",
-                        crate::render::count(disallowed)
-                    ),
-                    crate::domain::NoteMark::Ok,
-                ));
-            }
-            out.notes.push(Note::new(
+            let directories = pass.visits();
+            pass.note(Note::new(
                 "directories",
                 format!("{} walked", crate::render::count(directories)),
             ));
-            out.figures.insert("directories".into(), directories);
-            out.figures.insert("disallowed".into(), disallowed);
+            pass.figure("directories", directories);
 
-            Ok(out)
+            Ok(pass.finish())
         })
     }
 
@@ -221,21 +155,54 @@ impl Strategy for Listing {
     }
 }
 
-/// The directory a URL sits in: `…/Civil/index.html` → `…/Civil/`.
+/// The directory a URL sits in: `…/Civil/index.html` → `…/Civil/`, and `…/Civil` → `…/Civil/`.
 ///
 /// A listing served from a file path still bounds its walk by the folder, which is what a
 /// person clicking the same link would get.
+///
+/// **The last segment decides, and getting it wrong unbounds the walk.** A path with no
+/// trailing slash is ambiguous — `/Civil` is either a file in `/` or a directory served
+/// without the redirect — and reading it as a file cut the root back to `/`, so
+/// `target.path().starts_with("/")` admitted every link on the page and a request for one
+/// folder became a walk of the whole server. That is the failure the module docs call
+/// structurally impossible, and `investigate`'s own help text encourages the input that
+/// triggered it.
+///
+/// So a segment is only treated as a file when it **looks** like one, by the same rule
+/// `check` uses to name a downloaded file: a short alphanumeric extension. The residual
+/// case is a directory whose name ends in something extension-shaped — `/2026.budget` — and
+/// it degrades to the old behaviour rather than to anything worse, because every candidate
+/// is still bound to the seed's host.
 fn directory_of(url: &Url) -> Url {
     let path = url.path();
-    if path.ends_with('/') {
-        return url.clone();
-    }
-    let cut = path.rfind('/').map_or(1, |i| i + 1);
     let mut dir = url.clone();
-    dir.set_path(&path[..cut]);
+    // Never carried into the root: `…/Civil/?C=N;O=D` is a sort order, and keeping it made
+    // the walk's declared root a different address from the one it fetched.
     dir.set_query(None);
     dir.set_fragment(None);
+    if path.ends_with('/') {
+        return dir;
+    }
+
+    let last = path.rsplit('/').next().unwrap_or_default();
+    match names_a_file(last) {
+        true => {
+            let cut = path.rfind('/').map_or(1, |i| i + 1);
+            dir.set_path(&path[..cut]);
+        }
+        false => dir.set_path(&format!("{path}/")),
+    }
     dir
+}
+
+/// Whether a path segment reads as a filename rather than as a directory name.
+fn names_a_file(segment: &str) -> bool {
+    let Some((stem, ext)) = segment.rsplit_once('.') else {
+        return false;
+    };
+    !stem.is_empty()
+        && (1..=5).contains(&ext.len())
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// Every link on a listing page that is inside the tree being walked.
@@ -402,12 +369,64 @@ mod tests {
 
     #[test]
     fn a_directory_is_taken_from_a_file_path() {
-        let file = Url::parse("https://p.gov/Civil/index.html?sort=n#top").unwrap();
-        assert_eq!(directory_of(&file).as_str(), "https://p.gov/Civil/");
-        let dir = Url::parse("https://p.gov/Civil/").unwrap();
-        assert_eq!(directory_of(&dir).as_str(), "https://p.gov/Civil/");
-        let bare = Url::parse("https://p.gov").unwrap();
-        assert_eq!(directory_of(&bare).as_str(), "https://p.gov/");
+        let dir_of = |u: &str| directory_of(&Url::parse(u).unwrap()).to_string();
+
+        assert_eq!(
+            dir_of("https://p.gov/Civil/index.html?sort=n#top"),
+            "https://p.gov/Civil/"
+        );
+        assert_eq!(dir_of("https://p.gov/Civil/"), "https://p.gov/Civil/");
+        assert_eq!(dir_of("https://p.gov"), "https://p.gov/");
+        // A file at the root really does cut back to the root.
+        assert_eq!(dir_of("https://p.gov/index.html"), "https://p.gov/");
+    }
+
+    /// The case the walk's whole bound rested on, and the one shape the test above never
+    /// covered: a directory served without its redirect.
+    ///
+    /// Read as a file, `/Civil` cut the root back to `/` — and then every link on the page
+    /// passed `starts_with("/")`, so a request for one folder walked the whole server. The
+    /// module doc calls that structurally impossible and `investigate`'s help text
+    /// encourages exactly this input.
+    #[test]
+    fn a_path_with_no_trailing_slash_stays_inside_the_folder_it_names() {
+        let dir_of = |u: &str| directory_of(&Url::parse(u).unwrap()).to_string();
+
+        assert_eq!(dir_of("https://p.gov/Civil"), "https://p.gov/Civil/");
+        assert_eq!(
+            dir_of("https://p.gov/Civil/name_index"),
+            "https://p.gov/Civil/name_index/"
+        );
+        // The sort order a listing links to is not part of the root.
+        assert_eq!(
+            dir_of("https://p.gov/Civil?C=N;O=D"),
+            "https://p.gov/Civil/"
+        );
+        assert_eq!(
+            dir_of("https://p.gov/Civil/?C=N;O=D"),
+            "https://p.gov/Civil/"
+        );
+    }
+
+    /// The escape, end to end: a link to `/` must not become an address.
+    #[tokio::test]
+    async fn a_slashless_seed_does_not_walk_the_whole_server() {
+        let s = seed(
+            "<html><head><title>Index of /Civil</title></head><body>\
+             <a href=\"/\">Home</a><a href=\"/Other/secret.csv\">elsewhere</a>\
+             <a href=\"a.csv\">a.csv</a></body></html>",
+            "https://p.gov/Civil",
+        );
+        let crawl = Fake::new([]);
+
+        let got = Listing.enumerate(&s, &crawl).await.unwrap();
+
+        assert_eq!(got.addresses, ["https://p.gov/Civil/a.csv"]);
+        assert!(
+            got.notes.iter().any(|n| n.detail == "https://p.gov/Civil/"),
+            "the walk declared a root outside the folder it was given: {:?}",
+            got.notes
+        );
     }
 
     /// A document is a document, so nothing scans it for enclosures afterwards.

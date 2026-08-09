@@ -297,7 +297,11 @@ pub async fn extract(
             // moved on. 385 of that site's 1,098 addresses are that template. A verdict only
             // the diagnostic command shows is a verdict for people who already suspect
             // something, which is not who needs it.
-            let read = crate::verdict::Verdict::on(&bytes, outcome.text().unwrap_or_default());
+            let read = crate::verdict::ReadQuality::on(
+                &bytes,
+                outcome.text().unwrap_or_default(),
+                crate::verdict::Read::of(kind),
+            );
 
             let item = |verdict, produced, detail| ItemOutcome {
                 address: resource.natural_key.clone(),

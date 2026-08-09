@@ -43,19 +43,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::content::ContentKind;
-use crate::discovery::DiscoveryLimits;
-use crate::policy::{DEFAULT_USER_AGENT, HostPolicy};
 use crate::prelude::*;
-use crate::sources::SiteSource;
 use crate::strategies::crawl::{self, Seed};
-use crate::verdict::Verdict;
-
-/// Requests the size probe may spend, and addresses it will keep.
-///
-/// Deliberately small. This command exists to be run on ten hosts in a row while deciding
-/// which are worth collecting, and a walk that takes minutes is one nobody runs twice.
-const PROBE_REQUESTS: usize = 25;
-const PROBE_ADDRESSES: usize = 500;
+use crate::verdict::{Read, ReadQuality};
 
 /// Addresses shown before the list is cut off.
 const SAMPLE: usize = 5;
@@ -78,22 +68,9 @@ pub struct InvestigateArgs {
     #[serde(default)]
     pub no_probe: bool,
 
-    /// User-Agent header. A descriptive one measurably reduces WAF 403s.
-    #[arg(long, default_value = DEFAULT_USER_AGENT)]
-    #[serde(default = "default_ua")]
-    pub user_agent: String,
-
-    /// Per-request timeout in seconds.
-    #[arg(long, default_value_t = 30)]
-    #[serde(default = "default_timeout")]
-    pub timeout_secs: u64,
-}
-
-fn default_ua() -> String {
-    DEFAULT_USER_AGENT.to_string()
-}
-fn default_timeout() -> u64 {
-    30
+    #[command(flatten)]
+    #[serde(default, flatten)]
+    pub net: crate::ops::probe::NetArgs,
 }
 
 /// The address as served, which is what every recogniser keys on.
@@ -165,7 +142,7 @@ pub struct Probe {
 pub struct Lead {
     /// What the reader actually got out of the seed — entry 2's 94,125 bytes in and 695
     /// characters out, and the menu case that has no site shape at all.
-    pub read: Verdict,
+    pub read: ReadQuality,
     /// Entries 1 and 2: the address set is on the page and not in a link.
     pub anchors: usize,
     pub script_bytes: usize,
@@ -244,19 +221,8 @@ pub async fn investigate(
         .filter(|u| matches!(u.scheme(), "http" | "https"))
         .ok_or_else(|| anyhow::anyhow!("`{}` is not an http(s) address", args.target))?;
 
-    let site = SiteSource::new(
-        SourceId::new("investigate".to_string())?,
-        url.as_str(),
-        HostPolicy {
-            user_agent: args.user_agent.clone(),
-            timeout: std::time::Duration::from_secs(args.timeout_secs),
-            ..Default::default()
-        },
-        DiscoveryLimits {
-            max_sitemaps: PROBE_REQUESTS,
-            max_urls: PROBE_ADDRESSES,
-        },
-    )?;
+    let site =
+        super::probe::site("investigate", url.as_str(), &args.net)?.with_cancel(cancel.clone());
 
     let (seed, mut warnings) = site.seed(progress).await?;
     cancel.check()?;
@@ -268,7 +234,7 @@ pub async fn investigate(
     let recognised: Vec<Recognised> = hits
         .iter()
         .enumerate()
-        .map(|(i, r)| Recognised {
+        .map(|(i, (_, r))| Recognised {
             strategy: r.strategy.to_string(),
             keyed_on: r.keyed_on.name().to_string(),
             kind: r.keyed_on.kind().to_string(),
@@ -291,17 +257,24 @@ pub async fn investigate(
     // because `robots.txt` declared an index is a recognition, and a walk that ran because
     // nothing else spoke is a guess. `by_fallback` carries that, so the report can say
     // which happened instead of the operator inferring it from silence.
-    let walked = match args.no_probe {
-        true => None,
-        false => Some(match hits.first() {
-            Some(best) => (crawl::by_name(best.strategy)?, false),
-            None => (crawl::fallback(), true),
-        }),
-    };
+    //
+    // Asked of the source rather than re-derived from `hits`, which is what this did. Two
+    // definitions of one decision is one too many, and this one had a consequence: a
+    // `[[source]]` block that pins a strategy is honoured by `run` and was invisible here,
+    // so `investigate` answered "what would run" differently from `run` on exactly the
+    // sources somebody had already looked at once.
+    let (chosen, recognition) = site.choose(&seed, &mut warnings);
 
-    let probe = match walked {
-        Some((def, by_fallback)) => {
+    let probe = match args.no_probe {
+        true => None,
+        false => {
+            let (def, by_fallback) = (chosen, recognition.is_none());
             let found = site.run(def, &seed, progress).await?;
+            // The walk is the long-running part this op is declared for, and it used to be
+            // uninterruptible: `cancel` was checked once, before it. The Source now stops
+            // fetching between requests, and this is where that stop becomes an error
+            // rather than a silently short answer.
+            cancel.check()?;
             warnings.extend(found.warnings);
             Some(Probe {
                 addresses: found.addresses.len(),
@@ -312,13 +285,12 @@ pub async fn investigate(
                 complete: !found.truncated,
                 strategy: def.name.to_string(),
                 by_fallback,
-                requests_allowed: PROBE_REQUESTS,
+                requests_allowed: super::probe::REQUESTS,
                 sample: found.addresses.iter().take(SAMPLE).cloned().collect(),
                 figures: found.figures,
                 declared_total: found.declared_total,
             })
         }
-        None => None,
     };
 
     // Always, and the correction matters. This was once gated on `hits.is_empty()`, on
@@ -332,10 +304,13 @@ pub async fn investigate(
     // strategy naming documents was pointed at an index, and an index is a page of links
     // on purpose — `publicrec.hillsclerk.com/Civil/` reads as 62% link text and is working
     // perfectly. Its text is not the corpus; the files it lists are.
+    //
+    // Asked of the strategy the registry handed back, rather than of one looked up again
+    // by name — the same round-trip `choose` used to make, reaching a different answer on
+    // failure.
     let seed_is_collected = hits
         .first()
-        .and_then(|r| crawl::by_name(r.strategy).ok())
-        .is_none_or(|def| !matches!(def.it.addresses_are(), crawl::Addresses::Documents));
+        .is_none_or(|(def, _)| !matches!(def.it.addresses_are(), crawl::Addresses::Documents));
     let lead = Some(measure(&seed, seed_is_collected).await);
 
     // Offered on evidence of addresses, not on evidence of recognition. The old rule —
@@ -343,8 +318,20 @@ pub async fn investigate(
     // fallback collects, which is most of them, and paired that silence with a line saying
     // collecting the address "would store a front page and little else". A walk that just
     // returned 4,260 addresses is the strongest possible argument for the opposite.
-    let promote = (!hits.is_empty() || probe.as_ref().is_some_and(|p| p.addresses > 0))
-        .then(|| format!("centinel source add {} --site {url}", suggest_id(&url)));
+    //
+    // It pins the strategy when one **recognised** the address, and not when the fallback
+    // merely walked it: pinning is the operator saying they saw the evidence and accepted
+    // it, and there is no evidence in a guess. The key had no writer at all before this —
+    // `source.rs` carried a comment saying this command would write it, while this command
+    // is documented as writing nothing, so pinning meant hand-editing `centinel.toml`.
+    let promote =
+        (!hits.is_empty() || probe.as_ref().is_some_and(|p| p.addresses > 0)).then(|| {
+            let pin = match recognition.is_some() {
+                true => format!(" --strategy={}", chosen.name),
+                false => String::new(),
+            };
+            format!("centinel source add {} --site {url}{pin}", suggest_id(&url))
+        });
 
     Ok(InvestigateReport {
         address: args.target,
@@ -376,12 +363,17 @@ pub async fn investigate(
 /// a number produced by a second, simpler reader would answer a question nobody asked.
 async fn measure(seed: &Seed, seed_is_collected: bool) -> Lead {
     let kind = ContentKind::classify(&seed.page.meta, &seed.page.bytes);
-    let mut read = Verdict::on(&seed.page.bytes, &extracted_text(kind, seed).await);
-    // The numbers stay; only the judgement is withdrawn. Nothing is gained by telling an
-    // operator that the directory index they pointed at is a list of links.
-    if !seed_is_collected {
-        read.findings.clear();
-    }
+    // The question is chosen, not asked and then unasked. Clearing `findings` afterwards
+    // suppressed the printed line and left `--json` claiming an ordinary read beside a
+    // link share of 0.62.
+    let read = ReadQuality::on(
+        &seed.page.bytes,
+        &extracted_text(kind, seed).await,
+        match seed_is_collected {
+            true => Read::of(kind),
+            false => Read::Index,
+        },
+    );
 
     let html = seed.text();
     let scan = crate::html::Scan::new(&html);
@@ -618,7 +610,12 @@ impl Render for SeedSummary {
             p.wrapped(
                 &format!(
                     "{} · {} · {} · {robots}",
-                    self.http_status.as_deref().unwrap_or("200"),
+                    // Never invented. `seed` builds an empty page with a warning when the
+                    // front door refuses, and the meta it hands back carries no status — so
+                    // `unwrap_or("200")` rendered a WAF 403 as `200 · 0 B · other`, with
+                    // the truth demoted to a warning further down. An unknown status says
+                    // it is unknown, and the zero bytes beside it then read correctly.
+                    self.http_status.as_deref().unwrap_or("no status"),
                     render::bytes(self.bytes as u64),
                     self.kind,
                 ),
@@ -807,25 +804,17 @@ impl Render for Lead {
 mod tests {
     use super::*;
 
-    fn seed_of(body: &str, url: &str) -> Seed {
-        Seed {
-            page: Fetched {
-                bytes: body.as_bytes().to_vec(),
-                meta: BTreeMap::from([("final_url".to_string(), url.to_string())]),
-            },
-            robots: crate::discovery::Robots::unreachable(Default::default()),
-        }
-    }
+    // The strategy registry's own harness, which already builds both of these. This file
+    // had a second copy of each, differing only in whitespace.
+    use crate::strategies::crawl::tests::{seed as seed_of, seed_with_robots};
 
     /// A seed whose site shape is unremarkable — it declares a sitemap, so the only
     /// thing a finding can be about is the text that came out.
     fn ordinary_seed(body: &str, url: &str) -> Seed {
-        let mut seed = seed_of(body, url);
-        seed.robots = crate::discovery::Robots::parse(
-            DEFAULT_USER_AGENT,
-            format!("User-agent: *\nSitemap: {url}sitemap.xml\n").as_bytes(),
-        );
-        seed
+        Seed {
+            page: seed_of(body, url).page,
+            ..seed_with_robots(url, &format!("User-agent: *\nSitemap: {url}sitemap.xml\n"))
+        }
     }
 
     #[test]
@@ -1024,8 +1013,10 @@ mod tests {
             InvestigateArgs {
                 target: "/etc/passwd".into(),
                 no_probe: true,
-                user_agent: default_ua(),
-                timeout_secs: 1,
+                net: crate::ops::probe::NetArgs {
+                    timeout_secs: 1,
+                    ..Default::default()
+                },
             },
             &Progress::none(),
             &Cancel::none(),
@@ -1035,5 +1026,111 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("not an http(s) address"), "{err}");
+    }
+
+    // ── rendering ─────────────────────────────────────────────────────────────────
+    //
+    // Every other op renders into a `Painter` and asserts on the text. This one had 285
+    // lines of rendering and no test over any of it, which is how a fabricated HTTP status
+    // survived in the one line an operator reads first.
+
+    fn render_to_string(report: &InvestigateReport) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut p = Painter::new(&mut buf, false, 100);
+            report.render(&mut p).unwrap();
+        }
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn report() -> InvestigateReport {
+        InvestigateReport {
+            address: "https://x.gov/".into(),
+            seed: SeedSummary {
+                http_status: Some("200 OK".into()),
+                bytes: 91_000,
+                kind: "html".into(),
+                final_url: None,
+                robots_declared: true,
+            },
+            recognised: Vec::new(),
+            probe: None,
+            lead: None,
+            crumbs: Vec::new(),
+            promote: None,
+            warnings: Vec::new(),
+            elapsed_secs: 0.4,
+        }
+    }
+
+    fn probe() -> Probe {
+        Probe {
+            addresses: 500,
+            complete: false,
+            strategy: "sitemap".into(),
+            by_fallback: true,
+            requests_allowed: super::super::probe::REQUESTS,
+            sample: vec!["https://x.gov/a".into()],
+            figures: BTreeMap::new(),
+            declared_total: None,
+        }
+    }
+
+    /// A seed that refused carries no status, and inventing one put `200 · 0 B` on the
+    /// line an operator reads to decide whether the fetch worked. `seed` builds exactly
+    /// this — empty bytes, a warning, and no `http_status` — whenever the front door 403s.
+    #[test]
+    fn a_seed_that_never_answered_does_not_report_a_status_it_never_gave() {
+        let mut r = report();
+        r.seed.http_status = None;
+        r.seed.bytes = 0;
+        r.seed.kind = "other".into();
+
+        let out = render_to_string(&r);
+        assert!(
+            !out.contains("200"),
+            "a status nothing returned was rendered:\n{out}"
+        );
+        assert!(out.contains("no status"), "{out}");
+    }
+
+    /// A probe that filled its ceiling must not read as a total — §4.3 at probe scale.
+    #[test]
+    fn a_probe_that_ran_out_is_marked_rather_than_reported_as_a_size() {
+        let mut r = report();
+        r.probe = Some(probe());
+
+        let out = render_to_string(&r);
+        assert!(out.contains('!') || out.contains('⚠'), "unmarked:\n{out}");
+        assert!(
+            out.contains("at least") || out.contains("more"),
+            "the ceiling was not said out loud:\n{out}"
+        );
+    }
+
+    /// The two facts point opposite ways and an operator needs both: *nothing recognised
+    /// this* and *here are the addresses `run` will collect anyway*.
+    #[test]
+    fn a_fallback_walk_says_that_run_would_do_the_same() {
+        let mut r = report();
+        r.probe = Some(probe());
+
+        let out = render_to_string(&r);
+        assert!(out.contains("fallback"), "{out}");
+        assert!(out.contains("`run` would do the same"), "{out}");
+    }
+
+    /// A recognised walk is not a guess and must not be labelled one.
+    #[test]
+    fn a_recognised_walk_carries_no_fallback_line() {
+        let mut r = report();
+        r.probe = Some(Probe {
+            by_fallback: false,
+            complete: true,
+            ..probe()
+        });
+
+        let out = render_to_string(&r);
+        assert!(!out.contains("as a fallback"), "{out}");
     }
 }

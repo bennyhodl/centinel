@@ -69,6 +69,17 @@ pub struct AddArgs {
     #[serde(default)]
     pub yt_dlp_args: Vec<String>,
 
+    /// Pin the enumeration strategy, e.g. `--strategy=listing`. `centinel investigate`
+    /// prints this flag, already filled in, when something recognised the address.
+    ///
+    /// Omit it and the registry is asked on every run, which is the right default. Pin one
+    /// when `centinel investigate` showed you the evidence and you accepted it: a pinned
+    /// strategy that later stops recognising its own site still runs, and says so, rather
+    /// than switching silently to a weaker one and collecting a front page.
+    #[arg(long, value_name = "NAME")]
+    #[serde(default)]
+    pub strategy: Option<String>,
+
     /// Write the block but leave it out of a bare `centinel run`.
     #[arg(long)]
     #[serde(default)]
@@ -196,6 +207,12 @@ async fn add(
         None => Config::write_path(),
     };
 
+    // Checked before anything is written. A name nothing answers to would sit in the file
+    // and fail on the first run, and the error there names an address rather than a typo.
+    if let Some(name) = &args.strategy {
+        crate::strategies::crawl::by_name(name)?;
+    }
+
     // Neither target given: the store may already know. Someone who ran `centinel
     // discover --source tampa --site …` and now wants it in the config should not have
     // to retype an address the log has been holding all along.
@@ -233,12 +250,11 @@ async fn add(
         // today's answer into the file and make a later change to that default invisible.
         audio_if_no_captions: None,
         lang: None,
-        // Unset for the same reason, and for one more: pinning a strategy is a statement
-        // that the operator saw the evidence and accepted it, and `source add` has seen
-        // nothing — it does not fetch. An absent key means "ask the registry every run",
-        // so the source still gets the right strategy; it is simply not pinned to one.
-        // `centinel investigate` is what will write this key.
-        strategy: None,
+        // Absent unless asked for. An absent key means "ask the registry every run", which
+        // is right for a command that has fetched nothing and seen no evidence. `--strategy`
+        // is how an operator who *has* seen it — from `centinel investigate` — says so, and
+        // it is validated below rather than written through unchecked.
+        strategy: args.strategy.clone(),
     };
 
     let acquisition = source.acquisition()?;
@@ -778,6 +794,66 @@ mod tests {
             config.sources[0].site.as_deref(),
             Some("https://www.tampa.gov")
         );
+    }
+
+    /// The key had no writer: `investigate` is documented as writing nothing and `source
+    /// add` had no flag, so pinning a strategy meant hand-editing `centinel.toml`.
+    #[tokio::test]
+    async fn a_strategy_an_operator_accepted_can_be_pinned_when_the_source_is_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("centinel.toml");
+        let store = crate::store::Store::open(dir.path().join("store"))
+            .await
+            .unwrap();
+        let ctx = Ctx::new(store);
+
+        add(
+            &ctx,
+            AddArgs {
+                id: "hillsclerk".into(),
+                site: Some("https://publicrec.hillsclerk.com/Civil/".into()),
+                strategy: Some("listing".into()),
+                config: Some(path.display().to_string()),
+                ..Default::default()
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+
+        let config = Config::from_file(&path).unwrap();
+        assert_eq!(config.sources[0].strategy.as_deref(), Some("listing"));
+    }
+
+    /// Checked before the file is touched. A name nothing answers to would otherwise sit
+    /// in the config and fail on the first run, where the error names an address.
+    #[tokio::test]
+    async fn a_strategy_nothing_answers_to_is_refused_before_anything_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("centinel.toml");
+        let store = crate::store::Store::open(dir.path().join("store"))
+            .await
+            .unwrap();
+        let ctx = Ctx::new(store);
+
+        let err = add(
+            &ctx,
+            AddArgs {
+                id: "tampa".into(),
+                site: Some("https://www.tampa.gov".into()),
+                strategy: Some("onbase".into()),
+                config: Some(path.display().to_string()),
+                ..Default::default()
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("onbase"), "{err}");
+        assert!(!path.exists(), "a refused add must not create a config");
     }
 
     #[tokio::test]

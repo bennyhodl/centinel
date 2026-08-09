@@ -1,8 +1,8 @@
 //! Recognising a site, and enumerating what it holds.
 //!
 //! The **crawl** side of [`super`]: where are the addresses. What the text at those
-//! addresses turns out to say is [`super::read`]'s question, and a strategy here has no
-//! opinion on it.
+//! addresses turns out to say is [`crate::extract`]'s question, answered by a list of
+//! readers keyed on the content kind, and a strategy here has no opinion on it.
 //!
 //! A crawl strategy is a pair: it recognises a shape, and it enumerates the shape it
 //! recognised. The pairing is the design. You cannot add a strategy without teaching it to
@@ -22,7 +22,7 @@
 //! is what makes the work amortise: teaching Centinel to recognise Hyland OnBase collects
 //! every city running OnBase, where teaching it Tampa collects Tampa.
 //!
-//! [`Keyed`] has no `Jurisdiction` variant, so that rule is enforced by the type rather
+//! [`super::Keyed`] has no `Jurisdiction` variant, so that rule is enforced by the type rather
 //! than by review.
 //!
 //! ## What a strategy does not own
@@ -55,7 +55,7 @@
 //!
 //! 1. The [`Pacer`], `robots.txt` rules and [`HostPolicy`] stay with the host. A strategy
 //!    cannot hammer a site because it does not hold the throttle.
-//! 2. A strategy returns **addresses**, not [`Resource`]s. The host decides what a
+//! 2. A strategy returns **addresses**, not [`crate::domain::Resource`]s. The host decides what a
 //!    Resource is, so canonicalisation stays in one place and no strategy can write a
 //!    false record.
 //! 3. It is testable without a network. A [`Walk`] backed by a map of URL → bytes is the
@@ -76,7 +76,7 @@ pub mod sitemap;
 
 use super::Recognition;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use futures::future::BoxFuture;
 
@@ -173,6 +173,14 @@ pub struct Enumerated {
     /// The number that makes "collected the site" and "collected 4% of it" tell apart.
     /// Entry 2 caps at 100 in silence; entry 3 prints *"2606 items in 53 pages"* in its
     /// footer. Same defect from both ends, and from a search box they look identical.
+    ///
+    /// **No strategy writes this yet**, so it is structurally `None` and the reporting
+    /// hanging off it is unreachable. Neither shape that declares a total has a strategy:
+    /// a `<sitemapindex>` states no count, and a directory listing states no count. §10.3's
+    /// `index` — where the address set is on the page rather than in a link — is the first
+    /// one that will, because a paged result set is where the footer lives. Kept rather
+    /// than deleted because the readers are three lines each and the writer is the next
+    /// strategy; recorded here so nobody reads a live path off a field nothing sets.
     pub declared_total: Option<u64>,
     /// Provenance worth showing a person. A strategy explains itself through these and
     /// edits no renderer.
@@ -193,6 +201,196 @@ pub struct Enumerated {
     pub truncated: bool,
     /// The same provenance for a machine, named as the strategy names it.
     pub figures: BTreeMap<String, u64>,
+}
+
+/// One enumeration in progress: the queue, the ceilings, and what has been kept.
+///
+/// **Why this is not the strategy's business.** A strategy differs from another strategy in
+/// how it parses a page and what it queues next. It does not differ in what a ceiling means,
+/// and it must not: a walk that stops early and a source that is small look identical, and
+/// §4.3 is written against exactly that. Written per strategy, that rule is wrong per
+/// strategy — and it was, twice over. Both had to learn separately that the address cap has
+/// to be re-tested *after* the loop, because a walk that fills its ceiling on its last
+/// iteration has no next iteration to notice; `dunedin.gov` printed a checkmark beside 500
+/// addresses against a real 1,625 while only one of them knew.
+///
+/// So the two strategies now carry the ~80 lines that differ between them, and this carries
+/// the ones that did not: budget, address cap, `truncated`, dedup, loop protection, depth,
+/// the `robots.txt` exclusion count, and the progress arithmetic.
+///
+/// [`Walk`] stays the narrow trait it was — one paced GET and the ceilings — because it is
+/// what the *host* implements and what a test substitutes. This is a helper over it, which
+/// is why it is a struct and not more trait methods for every implementor to get right.
+pub struct Pass<'a, T> {
+    walk: &'a dyn Walk,
+    /// What the warnings call the thing being walked: `surface`, `tree`. The one word that
+    /// genuinely differed between the two copies of these sentences.
+    noun: &'static str,
+    /// How deep the queue may nest. A sitemap index nests shallowly and a directory tree
+    /// does not, so this is per strategy — passed rather than shadowed by two constants
+    /// under one name.
+    max_depth: usize,
+    queue: Vec<(T, usize)>,
+    visited: HashSet<String>,
+    seen: HashSet<String>,
+    visits: u64,
+    disallowed: u64,
+    out: Enumerated,
+}
+
+impl<'a, T: std::fmt::Display> Pass<'a, T> {
+    pub fn new(walk: &'a dyn Walk, noun: &'static str, max_depth: usize) -> Self {
+        Self {
+            walk,
+            noun,
+            max_depth,
+            queue: Vec::new(),
+            visited: HashSet::new(),
+            seen: HashSet::new(),
+            visits: 0,
+            disallowed: 0,
+            out: Enumerated::default(),
+        }
+    }
+
+    /// One paced GET. The strategy parses what comes back; it never chooses when to stop.
+    pub fn walk(&self) -> &dyn Walk {
+        self.walk
+    }
+
+    /// Somewhere else to look, at a depth.
+    pub fn push(&mut self, item: T, depth: usize) {
+        self.queue.push((item, depth));
+    }
+
+    /// The next place to visit, or `None` because a ceiling was reached or nothing is left.
+    ///
+    /// Loop protection and the depth limit are handled here rather than reported: a
+    /// self-referential index is a thing real sites serve, and skipping one is not news.
+    ///
+    /// Not `next`: this is not an [`Iterator`], and cannot be. The loop body needs the
+    /// `Pass` for [`Self::keep`] and [`Self::push`] while it holds an item, which is
+    /// exactly the borrow `for` would have taken.
+    pub fn next_to_visit(&mut self) -> Option<(T, usize)> {
+        loop {
+            if !self.walk.may_fetch() {
+                self.out.truncated = true;
+                self.out.warnings.push(format!(
+                    "stopped at the {}-request budget; the {} is larger than this run captured",
+                    self.walk.budget(),
+                    self.noun
+                ));
+                return None;
+            }
+            // Here rather than only where an address is kept, so the walk stops instead of
+            // reading the rest of the source to throw it away. The warning belongs to
+            // `finish`, which catches this and the walk that ends holding its ceiling.
+            if self.full() {
+                return None;
+            }
+
+            let (item, depth) = self.queue.pop()?;
+            if !self.visited.insert(item.to_string()) {
+                continue;
+            }
+            if depth > self.max_depth {
+                self.out
+                    .warnings
+                    .push(format!("depth limit reached, skipping {item}"));
+                continue;
+            }
+            return Some((item, depth));
+        }
+    }
+
+    /// Narrate one visit, and count it. So a paced walk reads as progress rather than a hang.
+    pub fn visiting(&mut self, label: impl Into<String>) {
+        self.walk.progress().step(
+            label.into(),
+            self.visits,
+            self.visits + self.queue.len() as u64 + 1,
+        );
+        self.visits += 1;
+    }
+
+    /// How many places have been visited. The strategy's own figure, under its own name.
+    pub fn visits(&self) -> u64 {
+        self.visits
+    }
+
+    /// Whether the address cap is reached, so an inner loop stops offering.
+    pub fn full(&self) -> bool {
+        self.out.addresses.len() >= self.walk.max_addresses()
+    }
+
+    /// Keep an address, unless the host's own rules exclude it or it is already held.
+    ///
+    /// Dedup is on the **full** address including any query string: stripping it would
+    /// collapse distinct `.gov` agenda pages into one.
+    pub fn keep(&mut self, addr: impl Into<String>, robots: &Robots) {
+        let addr = addr.into();
+        if !robots.allowed(&addr) {
+            self.disallowed += 1;
+            return;
+        }
+        if self.seen.insert(addr.clone()) {
+            self.out.addresses.push(addr);
+        }
+    }
+
+    /// A refusal at one address, which ends that branch and not the walk.
+    pub fn refused(&mut self, what: &impl std::fmt::Display, refusal: &Refusal) {
+        self.out.warnings.push(format!("{what}: {refusal}"));
+    }
+
+    pub fn note(&mut self, note: Note) {
+        self.out.notes.push(note);
+    }
+
+    pub fn warn(&mut self, message: String) {
+        self.out.warnings.push(message);
+    }
+
+    pub fn figure(&mut self, key: &str, value: u64) {
+        self.out.figures.insert(key.to_string(), value);
+    }
+
+    /// What the source itself says it holds. See [`Enumerated::declared_total`].
+    pub fn declares(&mut self, total: u64) {
+        self.out.declared_total = Some(total);
+    }
+
+    /// The pass, with its ceilings accounted for.
+    ///
+    /// The post-loop cap test lives here because both strategies had to discover it
+    /// separately: a walk that ends holding exactly its ceiling cannot know whether the
+    /// source stopped there or it did, so it says the cautious thing. That direction is
+    /// forced — a truncated snapshot reading as complete is the failure §4.3 exists to
+    /// prevent, and a complete one reading as truncated costs a sentence.
+    pub fn finish(mut self) -> Enumerated {
+        if self.full() {
+            self.out.truncated = true;
+            self.out.warnings.push(format!(
+                "stopped at {} addresses; the {} is larger than this run captured",
+                self.walk.max_addresses(),
+                self.noun
+            ));
+        }
+        if self.disallowed > 0 {
+            self.out.notes.push(Note::marked(
+                "disallowed",
+                format!(
+                    "{} excluded by the site's own rules",
+                    crate::render::count(self.disallowed)
+                ),
+                crate::domain::NoteMark::Ok,
+            ));
+        }
+        self.out
+            .figures
+            .insert("disallowed".into(), self.disallowed);
+        self.out
+    }
 }
 
 /// Whether a strategy named pages or documents.
@@ -257,9 +455,7 @@ impl std::fmt::Debug for StrategyDef {
     }
 }
 
-/// By name, which [`no_two_strategies_share_a_name`] proves is an identity.
-///
-/// [`no_two_strategies_share_a_name`]: tests::no_two_strategies_share_a_name
+/// By name, which `tests::no_two_strategies_share_a_name` proves is an identity.
 impl PartialEq for StrategyDef {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
@@ -305,16 +501,27 @@ pub fn by_name(name: &str) -> anyhow::Result<&'static StrategyDef> {
 /// cheap over an already-fetched seed, so asking all of them costs nothing — and what the
 /// runners-up saw is evidence the operator wants. A site that answers to both a product
 /// and a standard is a site where the choice between them matters.
-pub fn recognise(seed: &Seed) -> Vec<Recognition> {
-    let mut hits: Vec<Recognition> = all().iter().filter_map(|s| s.it.recognise(seed)).collect();
+/// Each answer paired with **the strategy that gave it**.
+///
+/// The pairing is free here — this function is iterating the registry, so it is holding
+/// the [`StrategyDef`] at the moment the [`Recognition`] comes back. It used to drop it and
+/// return the name alone, and every caller that wanted to *run* the winner looked the name
+/// back up: four `by_name` round-trips for a value the registry had already found, and the
+/// two production ones disagreed about what an impossible lookup failure meant — one
+/// returned an error, the other silently substituted the fallback.
+pub fn recognise(seed: &Seed) -> Vec<(&'static StrategyDef, Recognition)> {
+    let mut hits: Vec<_> = all()
+        .iter()
+        .filter_map(|def| def.it.recognise(seed).map(|r| (*def, r)))
+        .collect();
     // Specificity first; name second, so a tie is stable across runs and machines rather
     // than dependent on link order.
-    hits.sort_by_key(|r| (r.keyed_on.specificity(), r.strategy));
+    hits.sort_by_key(|(_, r)| (r.keyed_on.specificity(), r.strategy));
     hits
 }
 
-/// The strategy that should run for this seed, if any recognised it.
-pub fn best(seed: &Seed) -> Option<Recognition> {
+/// The strategy that should run for this seed, and why, if any recognised it.
+pub fn best(seed: &Seed) -> Option<(&'static StrategyDef, Recognition)> {
     recognise(seed).into_iter().next()
 }
 
