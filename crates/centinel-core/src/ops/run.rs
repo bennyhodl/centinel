@@ -120,6 +120,19 @@ pub struct RunArgs {
     /// applied to discovery: a DiscoveryRun is a full snapshot (§4.3), and a truncated
     /// one would look like a source that shrank — corrupting the very signal the
     /// snapshots exist to carry.
+    ///
+    /// **Collection only, and the word is load-bearing.** It used to reach `extract`,
+    /// `transcribe` and `embed` as well, which cost `boston.gov` every PDF it had:
+    /// acquisition follows enclosures, so 50 addresses arrived as 211 documents — 50 pages
+    /// on `boston.gov` and 161 files on `www.boston.gov`. Addresses sort alphabetically,
+    /// the bare host sorts first, and a shared budget of 50 was spent entirely on HTML
+    /// before extraction reached one PDF. The report read `50 documents · 301,798 chars ·
+    /// unextractable: 0` and said nothing was missing.
+    ///
+    /// The rule that falls out: a cap belongs to the stage that spends the resource it
+    /// bounds. `--limit` bounds requests to a host, so it stops at the last stage that
+    /// makes one. Deriving text from bytes already on disk is neither slow nor rude, and a
+    /// cap there is not politeness — it is silent data loss.
     #[arg(long)]
     #[serde(default)]
     pub limit: Option<usize>,
@@ -756,7 +769,8 @@ async fn run_derivation(
                         ctx,
                         ExtractArgs {
                             source,
-                            limit: args.limit,
+                            // No `limit`: see `RunArgs::limit`. These bytes are already on
+                            // disk, so nothing here is paced against a host.
                             refresh: args.refresh,
                             ..Default::default()
                         },
@@ -801,7 +815,9 @@ async fn run_derivation(
                             source,
                             model: model.clone(),
                             language: Some(config.defaults.lang.clone()),
-                            limit: args.limit,
+                            // No `limit`: see `RunArgs::limit`. Collection is already
+                            // capped, so there is nothing extra here to bound — and a
+                            // second cap over a backlog only hides it.
                             refresh: args.refresh,
                             ..Default::default()
                         },
@@ -889,7 +905,9 @@ async fn run_derivation(
                         ctx,
                         EmbedArgs {
                             model: model.clone(),
-                            limit: args.limit,
+                            // No `limit`: see `RunArgs::limit`. `--skip embed` is how a run
+                            // stops short of this stage, and `centinel embed --limit` is
+                            // how it is bounded deliberately.
                             ..Default::default()
                         },
                         progress,

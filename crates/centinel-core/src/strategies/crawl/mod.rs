@@ -180,6 +180,17 @@ pub struct Enumerated {
     /// Non-fatal problems. A partial enumeration with recorded warnings is far more useful
     /// than a hard failure, so nothing here aborts a pass.
     pub warnings: Vec<String>,
+    /// The walk stopped at one of its own ceilings, so [`Self::addresses`] is a floor and
+    /// never a total.
+    ///
+    /// A flag rather than a phrase in [`Self::warnings`], because a reader that greps for
+    /// `"stopped at"` is a reader that silently starts lying the day the wording changes —
+    /// and it did. `investigate` computed completeness that way, and `dunedin.gov` printed
+    /// a checkmark beside 500 addresses against a real 1,625: the walk stopped at the cap
+    /// on its final iteration, so no *next* iteration ran to write the phrase.
+    ///
+    /// Set by the strategy, which is the only thing that knows what its ceilings were.
+    pub truncated: bool,
     /// The same provenance for a machine, named as the strategy names it.
     pub figures: BTreeMap<String, u64>,
 }
@@ -356,6 +367,7 @@ pub(crate) mod tests {
         pages: BTreeMap<String, String>,
         seen: AtomicUsize,
         budget: usize,
+        max_addresses: usize,
         progress: Progress,
     }
 
@@ -365,12 +377,22 @@ pub(crate) mod tests {
                 pages: pages.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
                 seen: AtomicUsize::new(0),
                 budget: 100,
+                max_addresses: 10_000,
                 progress: Progress::none(),
             }
         }
 
         pub fn with_budget(mut self, n: usize) -> Self {
             self.budget = n;
+            self
+        }
+
+        /// The address ceiling, so a test can reach it without a fixture of ten thousand
+        /// URLs. The two ceilings are separate faults and want separate tests: a walk can
+        /// run out of requests with room for addresses, or fill on addresses inside one
+        /// cheap document — and the second is the one that used to go unreported.
+        pub fn with_max_addresses(mut self, n: usize) -> Self {
+            self.max_addresses = n;
             self
         }
 
@@ -404,7 +426,7 @@ pub(crate) mod tests {
         }
 
         fn max_addresses(&self) -> usize {
-            10_000
+            self.max_addresses
         }
 
         fn progress(&self) -> &Progress {

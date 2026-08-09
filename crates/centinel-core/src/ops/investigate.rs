@@ -134,6 +134,17 @@ pub struct Probe {
     /// False when the probe hit its own ceiling, which means the real number is larger and
     /// unknown. Never presented as a total.
     pub complete: bool,
+    /// Which strategy walked. Not always one that recognised the seed — see
+    /// [`Self::by_fallback`].
+    #[serde(default)]
+    pub strategy: String,
+    /// Nothing recognised the seed, so [`crawl::fallback`] walked it anyway.
+    ///
+    /// Worth its own field rather than left implicit in an empty `recognised` list, because
+    /// the two facts point opposite ways and an operator needs both: *no strategy claims
+    /// this site* and *here are the 4,260 addresses it will collect regardless.*
+    #[serde(default)]
+    pub by_fallback: bool,
     pub requests_allowed: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sample: Vec<String>,
@@ -267,24 +278,47 @@ pub async fn investigate(
         })
         .collect();
 
-    let probe = match (hits.first(), args.no_probe) {
-        (Some(best), false) => {
-            let def = crawl::by_name(best.strategy)?;
+    // Whatever `run` would do, and that is the whole point of the command. This used to
+    // probe only when something recognised the seed, which made `investigate` answer a
+    // different question from the one the pipeline answers: `run` falls back to
+    // `crawl::fallback()` when nothing speaks, and the fallback collects most `.gov` sites
+    // perfectly. So `boston.gov`, `clevelandohio.gov` and `clevelandcitycouncil.gov` — none
+    // of which declares a sitemap, all of which serve one — were reported as *"nothing here
+    // knows how to enumerate this address, so collecting it would store a front page and
+    // little else"*, and then collected 4,260, 1,098 and 1,309 addresses seconds later.
+    //
+    // The registry's distinction is still worth keeping and is kept below: a walk that ran
+    // because `robots.txt` declared an index is a recognition, and a walk that ran because
+    // nothing else spoke is a guess. `by_fallback` carries that, so the report can say
+    // which happened instead of the operator inferring it from silence.
+    let walked = match args.no_probe {
+        true => None,
+        false => Some(match hits.first() {
+            Some(best) => (crawl::by_name(best.strategy)?, false),
+            None => (crawl::fallback(), true),
+        }),
+    };
+
+    let probe = match walked {
+        Some((def, by_fallback)) => {
             let found = site.run(def, &seed, progress).await?;
-            // The walk's own account of stopping early. A probe that ran out is the one
-            // case where a count must never be read as a total.
-            let complete = found.warnings.iter().all(|w| !w.contains("stopped at"));
             warnings.extend(found.warnings);
             Some(Probe {
                 addresses: found.addresses.len(),
-                complete,
+                // The walk's own account of stopping early, asked rather than inferred. A
+                // probe that ran out is the one case where a count must never be read as a
+                // total, and this was previously recovered by grepping warning text —
+                // which missed the walk that fills its ceiling and then exits cleanly.
+                complete: !found.truncated,
+                strategy: def.name.to_string(),
+                by_fallback,
                 requests_allowed: PROBE_REQUESTS,
                 sample: found.addresses.iter().take(SAMPLE).cloned().collect(),
                 figures: found.figures,
                 declared_total: found.declared_total,
             })
         }
-        _ => None,
+        None => None,
     };
 
     // Always, and the correction matters. This was once gated on `hits.is_empty()`, on
@@ -304,9 +338,13 @@ pub async fn investigate(
         .is_none_or(|def| !matches!(def.it.addresses_are(), crawl::Addresses::Documents));
     let lead = Some(measure(&seed, seed_is_collected).await);
 
-    let promote = hits
-        .first()
-        .map(|_| format!("centinel source add {} --site {url}", suggest_id(&url)));
+    // Offered on evidence of addresses, not on evidence of recognition. The old rule —
+    // print it only when something recognised the seed — withheld it from every site the
+    // fallback collects, which is most of them, and paired that silence with a line saying
+    // collecting the address "would store a front page and little else". A walk that just
+    // returned 4,260 addresses is the strongest possible argument for the opposite.
+    let promote = (!hits.is_empty() || probe.as_ref().is_some_and(|p| p.addresses > 0))
+        .then(|| format!("centinel source add {} --site {url}", suggest_id(&url)));
 
     Ok(InvestigateReport {
         address: args.target,
@@ -489,22 +527,29 @@ impl Render for InvestigateReport {
         p.nest(|p| {
             self.seed.render(p)?;
 
+            // Three independent answers, printed unconditionally and in this order: what
+            // claims the site, what a walk actually found, and what the read looks like.
+            // Each used to hide behind another. The probe printed only when something
+            // recognised the seed, so a fallback walk of 4,260 addresses was invisible; the
+            // lead printed only when *nothing* did, so a recognised site with a ruined read
+            // had nowhere to say so. Both are the same mistake — treating recognition as a
+            // verdict on the whole site rather than an answer to one question.
             match self.recognised.is_empty() {
                 false => {
                     for r in &self.recognised {
                         r.render(p)?;
                     }
-                    if let Some(probe) = &self.probe {
-                        probe.render(p)?;
-                    }
                 }
                 true => {
                     p.section("recognised")?;
                     p.nest(|p| p.marked(Mark::Warn, p.paint("nothing", Ink::Bold)))?;
-                    if let Some(lead) = &self.lead {
-                        lead.render(p)?;
-                    }
                 }
+            }
+            if let Some(probe) = &self.probe {
+                probe.render(p)?;
+            }
+            if let Some(lead) = &self.lead {
+                lead.render(p)?;
             }
 
             if !self.crumbs.is_empty() {
@@ -537,9 +582,24 @@ impl Render for InvestigateReport {
             p.blank()?;
             match &self.promote {
                 Some(line) => p.wrapped(line, Ink::Bold),
+                // Reworded with the gate. The old text claimed nothing knew how to
+                // enumerate the address, which was said of `boston.gov` moments before
+                // `run` enumerated 4,260 of it. Now this line is only reached when a walk
+                // actually ran and came back empty — so it can say the narrower, true
+                // thing, and `--no-probe` gets its own wording because it did not look.
                 None => p.wrapped(
-                    "no `source add` line: nothing here knows how to enumerate this \
-                     address, so collecting it would store a front page and little else.",
+                    match self.probe.is_some() {
+                        true => {
+                            "no `source add` line: nothing recognised this address and \
+                                 a fallback walk found no addresses behind it, so \
+                                 collecting it would store this page and little else."
+                        }
+                        false => {
+                            "no `source add` line: nothing recognised this address, \
+                                  and `--no-probe` means no walk was tried. Run without it \
+                                  to see whether the fallback finds anything."
+                        }
+                    },
                     Ink::Dim,
                 ),
             }
@@ -647,6 +707,24 @@ impl Render for Probe {
                 },
                 p.paint(&line, Ink::Bold),
             )?;
+
+            // Said out loud, because the number above is the answer to "is this worth
+            // collecting?" and the reader has just been told nothing recognised the site.
+            // Without this line those two facts look like a contradiction.
+            if self.by_fallback {
+                p.kv(
+                    "walked by",
+                    12,
+                    p.paint(
+                        &format!(
+                            "`{}`, as a fallback — nothing recognised this address, and \
+                             `run` would do the same",
+                            self.strategy
+                        ),
+                        Ink::Dim,
+                    ),
+                )?;
+            }
 
             if let Some(total) = self.declared_total {
                 p.kv(

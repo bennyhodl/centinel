@@ -111,6 +111,7 @@ impl Strategy for Listing {
 
             while let Some((dir, depth)) = queue.pop() {
                 if !crawl.may_fetch() {
+                    out.truncated = true;
                     out.warnings.push(format!(
                         "stopped at the {}-request budget; the tree is larger than this \
                          run captured",
@@ -119,14 +120,11 @@ impl Strategy for Listing {
                     break;
                 }
                 // Here rather than only where an address is pushed, so the walk stops
-                // instead of listing the rest of the tree to discard it — and so the
-                // warning is written once rather than once per directory after the cap.
+                // instead of listing the rest of the tree to discard it. The warning is
+                // written once, after the loop — see the same fix in `sitemap`, and the
+                // reason it had to move: this test needs a *next* iteration to run, and a
+                // walk that fills its ceiling on the last directory in the queue has none.
                 if out.addresses.len() >= crawl.max_addresses() {
-                    out.warnings.push(format!(
-                        "stopped at {} addresses; the tree is larger than this run \
-                         captured",
-                        crawl.max_addresses()
-                    ));
                     break;
                 }
                 if !visited.insert(dir.to_string()) {
@@ -164,7 +162,8 @@ impl Strategy for Listing {
                     match target.as_str().ends_with('/') {
                         true => queue.push((target, depth + 1)),
                         false => {
-                            // The loop above writes the warning and ends the walk.
+                            // The check after the walk records the ceiling; this one only
+                            // stops filling past it.
                             if out.addresses.len() >= crawl.max_addresses() {
                                 break;
                             }
@@ -178,6 +177,17 @@ impl Strategy for Listing {
                         }
                     }
                 }
+            }
+
+            // After the walk, so it catches the tree that fills its ceiling on the last
+            // directory in the queue as well as the one that breaks out early. See the
+            // same fix in `sitemap`, where a single large sitemap printed a checkmark.
+            if out.addresses.len() >= crawl.max_addresses() {
+                out.truncated = true;
+                out.warnings.push(format!(
+                    "stopped at {} addresses; the tree is larger than this run captured",
+                    crawl.max_addresses()
+                ));
             }
 
             if disallowed > 0 {

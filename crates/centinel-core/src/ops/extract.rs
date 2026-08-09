@@ -97,6 +97,16 @@ pub struct ExtractReport {
     #[serde(default)]
     pub already_unextractable: usize,
     pub attempted: usize,
+    /// Documents that would have been attempted, had `--limit` not stopped the loop.
+    ///
+    /// The loop used to `break` and say nothing, so a run that stopped early was
+    /// indistinguishable from one that finished. `boston.gov` is the case: 211 documents
+    /// collected, a limit of 50, and every one of 161 PDFs left underived under a report
+    /// that read `extracted: 50 · unextractable: 0`. `run` no longer passes a limit here at
+    /// all, but `centinel extract --limit` still exists, and a cap that is asked for still
+    /// owes the count it hid.
+    #[serde(default)]
+    pub left_by_limit: usize,
     pub extracted: usize,
     /// The primary reader found no text and a fallback did. Worth its own figure: it is
     /// the measure of how much the primary is missing, and the number to watch after any
@@ -135,6 +145,7 @@ pub async fn extract(
         already_derived: 0,
         already_unextractable: 0,
         attempted: 0,
+        left_by_limit: 0,
         extracted: 0,
         recovered_by_fallback: 0,
         needs_ocr: 0,
@@ -182,6 +193,17 @@ pub async fn extract(
             if let Some(limit) = args.limit
                 && report.attempted >= limit
             {
+                // Counted rather than merely stopped. Everything still ahead of us that a
+                // full pass would have tried — skipping what is already derived or already
+                // given up on, so the figure is work outstanding and not documents seen.
+                report.left_by_limit += latest
+                    .values()
+                    .skip(i)
+                    .filter(|o| {
+                        args.refresh
+                            || (!derived.contains(&o.blob_sha) && !given_up.contains(&o.blob_sha))
+                    })
+                    .count();
                 break;
             }
             if !args.refresh && derived.contains(&obs.blob_sha) {
@@ -391,6 +413,17 @@ impl Render for ExtractReport {
                 (self.needs_ocr as u64, "need OCR"),
                 (self.unextractable as u64, "unextractable"),
             ])?;
+
+            // Before the OCR line, because "I stopped early" changes how every figure above
+            // should be read, and a reader who stops at the first warning should hit this one.
+            if self.left_by_limit > 0 {
+                p.blank()?;
+                let text = format!(
+                    "stopped at the limit; {} left underived",
+                    render::count(self.left_by_limit as u64)
+                );
+                p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+            }
 
             if self.ocr_pages_pending > 0 {
                 p.blank()?;
@@ -682,5 +715,65 @@ mod tests {
         assert_eq!(again.already_derived, 1);
         assert_eq!(again.already_unextractable, 0);
         assert_eq!(again.attempted, 0);
+    }
+
+    /// `boston.gov`, in miniature. A limit used to `break` in silence, so a report that
+    /// stopped a quarter of the way through read exactly like one that finished — which is
+    /// how 161 PDFs went underived under `extracted: 50 · unextractable: 0`.
+    #[tokio::test]
+    async fn a_limit_says_how_many_documents_it_left_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).await.unwrap();
+        let source = SourceId::new("boston").unwrap();
+        for i in 0..4 {
+            store
+                .record_observation(
+                    &Resource::new(source.clone(), format!("https://boston.test/{i}")),
+                    format!("<html><body><h1>Page {i}</h1><p>Real prose here.</p></body></html>")
+                        .as_bytes(),
+                    jiff::Timestamp::now(),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+        }
+        let ctx = Ctx::new(store);
+
+        let stopped = extract(
+            &ctx,
+            ExtractArgs {
+                limit: Some(1),
+                ..args()
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stopped.attempted, 1);
+        assert_eq!(stopped.left_by_limit, 3, "the three it never tried");
+
+        // And the figure is work outstanding, not documents seen: a second capped pass
+        // counts only what is still underived, so the number falls as the backlog clears.
+        let next = extract(
+            &ctx,
+            ExtractArgs {
+                limit: Some(1),
+                ..args()
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next.already_derived, 1);
+        assert_eq!(next.left_by_limit, 2);
+
+        // An uncapped pass leaves nothing, and says so by saying nothing.
+        let rest = extract(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
+        assert_eq!(rest.left_by_limit, 0);
+        assert_eq!(rest.extracted, 2);
     }
 }
