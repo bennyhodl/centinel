@@ -1358,10 +1358,63 @@ stage, and chrome that was extracted can be dropped by one.** Repeated sub-navig
 exactly what [`crate::boilerplate`] was written for, and it is now doing that job rather than
 compensating for a reader that picked the wrong region.
 
-**Where the verdict now over-fires.** `medinaco.org` still flags 50 of 50, and inspection
-says those pages now hold their real content — series, date, room — beside a block of
-calendar-export links that reads as 60%+ link text. The measure is not wrong about the
-links; it is wrong about what they mean. Recorded, not tuned.
+### The address is not content, and it was most of the corpus
+
+`medinaco.org` still flagged 50 of 50 poor reads after the marker change, and the reason
+turned out to be a defect in the measure rather than in the pages. `links_in` counts a whole
+`[text](url)` span, **address included**:
+
+```
+[Google Calendar](https://www.google.com/calendar/event?action=TEMPLATE&dates=…)
+ ^^^^^^^^^^^^^^^ 15 characters of content        ^^^^^^^^^^ 250 characters of address
+```
+
+Split across the derived text of five sites, what we were calling *link text* is mostly not
+text at all:
+
+| site | reported "link text" | anchor text | addresses in `<a>` | addresses in `<img>` |
+|---|---|---|---|---|
+| `medinaco.org` | 71% | 10% | 55% | 4% |
+| `clevelandohio.gov` | 34% | 7% | 13% | 12% |
+| `dunedin.gov` | 33% | 5% | 23% | 4% |
+| `clevelandcitycouncil.gov` | 8% | 2% | 5% | 1% |
+
+So an `<a>` inside a marked region is now reduced to its text and an `<img>` to its `alt`.
+The words are content — *Meeting Agendas*, *Andrew Mitermiler*, *Police Lights* — and the
+address beside them is machine addressing that nothing searches for and nothing should
+embed.
+
+**Nothing is lost, and that is a property of the store rather than a hope.** The derived text
+is derived; every `href` stays in the raw HTML blob, which is truth and immutable. Every
+consumer already reads the blob and not this text: `enclosure::documents` finds the PDFs a
+page encloses from the raw bytes — that is where Boston's 161 came from — and `crumbs_on`
+counts off-host hosts the same way. A crumb table rebuilds from the same blobs whenever it is
+built.
+
+| | poor reads | characters | markdown links left |
+|---|---|---|---|
+| `clevelandohio.gov` | 45 → **0** | 185k → 133k | 0 |
+| `medinaco.org` | 50 → **0** | 116k → **28k** | 0 |
+| `dunedin.gov` | 32 → **0** | 354k → 235k | 30 (PDF and unmarked readers) |
+| `clevelandcitycouncil.gov` | 2 → **0** | 149k → 139k | 0 |
+
+A Medina meeting page is now 528 characters — title, series, date, and `Administration
+Building (144 N Broadway St, Medina) Balcony Room B` — where it held 10,817 of menu, and it
+is searchable by venue and by series, which it never was.
+
+**The boundary is load-bearing.** The strip applies to a marked region and nowhere else,
+because stripping addresses everywhere makes a navigation menu stop *looking* like
+navigation — and the test `whole_page_is_better` uses to refuse a menu reads exactly that. A
+test caught it. It is also the right line on its own terms: `html_whole_page` exists so *a
+listing page with no article is still content worth having*, and there the links are the
+content.
+
+**And what that leaves unanswered.** A document read from a marked region now has no
+markdown links at all, so the link-share finding is structurally silent on it — the menu
+question has not been answered for those documents, it has stopped being askable in those
+terms. What remains are counts rather than judgements: a line repeated across the source, and
+a document that produced no chunk. If a marked region full of navigation proves to be a real
+shape, it needs its own measure and that measure needs validating.
 
 ### Left on the table
 

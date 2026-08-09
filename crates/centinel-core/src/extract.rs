@@ -629,6 +629,7 @@ pub(crate) fn region_converter(skip: &[&'static str]) -> htmd::HtmlToMarkdown {
         .skip_tags(tags)
         .add_handler(vec!["table"], table_to_markdown)
         .add_handler(vec!["a"], anchor_text_only)
+        .add_handler(vec!["img"], image_alt_only)
         .build()
 }
 
@@ -651,9 +652,7 @@ pub(crate) fn region_converter(skip: &[&'static str]) -> htmd::HtmlToMarkdown {
 /// `ops::investigate::crumbs_on` counts off-host hosts the same way. A crumb table, when it
 /// is built, rebuilds from the same blobs.
 ///
-/// Applies to `<a>` only. Image URLs are the same argument and are left alone here because
-/// they were not part of what was agreed — they are a further 12% on `clevelandohio.gov`
-/// and 4% elsewhere, and one line away.
+/// Its companion is [`image_alt_only`], which does the same for `<img>`.
 fn anchor_text_only(
     handlers: &dyn htmd::element_handler::Handlers,
     element: htmd::Element<'_>,
@@ -665,6 +664,33 @@ fn anchor_text_only(
         }
     }
     Some(out.into())
+}
+
+/// An `<img>` becomes its `alt`, by the same rule as [`anchor_text_only`].
+///
+/// The alt text is what a person would read aloud — *Police Lights*, *Cyber Security* — and
+/// the `src` beside it is an address for a file this corpus does not hold. On
+/// `clevelandohio.gov` those addresses are a further 12% of every derived character, and on
+/// `medinaco.org` every event page carried the URL of a loading spinner.
+///
+/// Kept rather than dropped whole, because alt text is the accessible description of the
+/// image and sometimes the only caption a page gives. Where it is empty this leaves nothing,
+/// which is the right answer for a decorative image that declared itself as one.
+///
+/// This also reaches the [`Extraction::strip_data_uris`] case at its source for any document
+/// read from a marked region: a base64 `data:` image never becomes text to begin with. That
+/// pass stays, because the readers outside this converter still need it.
+fn image_alt_only(
+    _handlers: &dyn htmd::element_handler::Handlers,
+    element: htmd::Element<'_>,
+) -> Option<htmd::element_handler::HandlerResult> {
+    let alt = element
+        .attrs
+        .iter()
+        .find(|a| a.name.local.as_ref() == "alt")
+        .map(|a| a.value.trim().to_string())
+        .unwrap_or_default();
+    Some(alt.into())
 }
 
 /// Every `<table>` as a markdown table, whether or not it declared a header.

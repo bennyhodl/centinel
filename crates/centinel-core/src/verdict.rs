@@ -53,6 +53,20 @@
 //! with no content marker falls to the whole-page reader, which keeps its links, and that
 //! is precisely the read this was measured against — 7 flagged, 0 false positives over 100
 //! documents.
+//!
+//! **But say plainly what that leaves.** A document read from a marked region has no
+//! markdown links at all — measured, 0 across 213 documents from three sites — so
+//! [`Self::link_share`] is structurally zero there and this finding can never fire on one.
+//! The menu question has not been answered for those documents; it has stopped being
+//! askable in these terms, because the addresses that made a menu legible as a menu are no
+//! longer in the text. A marked region that is genuinely navigation now reads as a short
+//! list of words, and nothing here objects to it.
+//!
+//! Two things still do, and they are counts rather than judgements: [`crate::boilerplate`]
+//! removes a line repeated across the source, and `ops::build_index` reports a document that
+//! produced no chunk. Both are reported per run. If a marked region full of navigation turns
+//! out to be a real shape in the field, it will need its own measure and that measure will
+//! need validating — this one cannot be stretched to cover it.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
