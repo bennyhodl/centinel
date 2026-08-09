@@ -1,7 +1,7 @@
 //! The two documents a site publishes about itself: `robots.txt` and `sitemap.xml`.
 //!
-//! Parsing only. Nothing here fetches — [`crate::strategies::sitemap`] owns the walk, and
-//! it fetches through [`crate::strategies::Crawl`] so that pacing and the request budget
+//! Parsing only. Nothing here fetches — [`crate::strategies::crawl::sitemap`] owns the walk, and
+//! it fetches through [`crate::strategies::crawl::Walk`] so that pacing and the request budget
 //! stay with the host.
 //!
 //! Discovery is deliberately **separate from fetching**. A run answers "what exists", and

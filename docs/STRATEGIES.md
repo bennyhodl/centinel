@@ -419,7 +419,7 @@ keys on a product, it needs a parse and not a scan, it carries a warning forward
 runs into the limit of §9's pure-function rule in a way worth seeing.
 
 ```rust
-// crates/centinel-core/src/strategies/onbase.rs
+// crates/centinel-core/src/strategies/crawl/onbase.rs
 //
 // Keyed on a PRODUCT — Hyland OnBase Agenda Online. Not on Tampa. Not on Florida.
 // At ONE sighting, so §5 says this does not merge. It is written here as the shape.
@@ -643,14 +643,35 @@ and `mod.rs` re-exports them.
 
 ```
 crates/centinel-core/src/strategies/
-├── mod.rs         BUILT  the trait, Seed, Crawl, Recognition, Keyed, the registry
-├── sitemap.rs     BUILT  a standard       — ported from the old Discoverer
-├── listing.rs     BUILT  a server default — an open directory index
-├── index.rs       —      the address set is on the page and not in a link (§10.3)
-└── none.rs        —      a query box, recognised and REFUSED (§7 rule 3)
+├── mod.rs             BUILT  Recognition, Keyed — the shared vocabulary, and only it
+├── crawl/                    WHERE ARE THE ADDRESSES
+│   ├── mod.rs         BUILT  the trait, Seed, Walk, the registry
+│   ├── sitemap.rs     BUILT  a standard       — ported from the old Discoverer
+│   ├── listing.rs     BUILT  a server default — an open directory index
+│   ├── index.rs       —      the address set is on the page, not in a link (§10.3)
+│   └── none.rs        —      a query box, recognised and REFUSED (§7 rule 3)
+└── read/                     WHAT DOES THIS DOCUMENT SAY
+    └── mod.rs         BUILT  the trait and the registry. **No strategy is registered.**
 ```
 
-**This is the target, not the directory.** Two of the four exist. `index` is build-order
+**`Strategy` was one word doing two jobs, and the split is a correction.** What was built
+recognises a *site* and returns *addresses*; nothing in it has an opinion about the bytes at
+those addresses. `hillsclerk.com` is the proof: recognised by `sitemap`, 177 addresses
+without a mistake, and 23,213 characters of navigation for a page whose content is one
+sentence. No crawl strategy could ever have caught that, so the read side is its own
+registry rather than a hook on this one.
+
+**`read/` is empty on purpose, and it is wired anyway.** Every extraction fault in
+`FIELD-NOTES.md` — the fused table, the spelled-out image, the `data:` URI, the
+octet-stream PDF — was a framework defect any site triggers, and each was fixed in the
+framework rather than per site. The two outstanding read faults are handled the same way:
+navigation-instead-of-article is removed corpus-wide by `boilerplate`, and a `var pdfURL` is
+an enclosure question. So nothing has earned a read strategy yet. `extract::derive` consults
+the registry on every document regardless, and a test registers one to prove it wins over
+the content kind's readers — an empty registry that is wired costs an `is_empty` check, and
+an unwired one costs a refactor at the moment somebody finally has a shape to add.
+
+**This is the target, not the directory.** Two of the four crawl strategies exist. `index` is build-order
 item 6; `none` is ten lines and still blocked, because *"no collection strategy"* answers a
 question nothing asks yet — dropped into a `discover` run it enumerates zero and reads as a
 failure. It wants `investigate` first.
@@ -673,7 +694,7 @@ does exactly this — `inventory::collect!(OpDef)`, with `centinel-macros` submi
 `OpDef` per op. A strategy registry is the same mechanism a second time:
 
 ```rust
-// strategies/mod.rs
+// strategies/crawl/mod.rs
 inventory::collect!(StrategyDef);
 
 /// Every strategy, in a stable order. The registry holds no `match` and no list literal.
@@ -681,7 +702,7 @@ pub fn all() -> Vec<&'static StrategyDef> { … }
 
 mod sitemap; mod listing; mod index; mod none; mod onbase;
 
-// strategies/onbase.rs
+// strategies/crawl/onbase.rs
 inventory::submit! { StrategyDef { name: "onbase-agenda", make: || Box::new(OnBaseAgenda) } }
 ```
 
@@ -821,6 +842,6 @@ Each of these is a rule an agent will otherwise break, and the entry that proves
 
 ### What it produces
 
-A `FIELD-NOTES.md` entry, a `strategies/<name>.rs`, and a test. The test's fixture is a blob
+A `FIELD-NOTES.md` entry, a `strategies/crawl/<name>.rs`, and a test. The test's fixture is a blob
 sha that is **already in the store** — §9 point 3 — because a strategy is a pure function
 over bytes and the bytes were kept.

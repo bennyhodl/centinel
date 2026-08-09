@@ -28,8 +28,9 @@ use std::collections::HashSet;
 use futures::future::BoxFuture;
 use url::Url;
 
-use super::{Addresses, Crawl, Enumerated, Keyed, Recognition, Seed, Strategy, StrategyDef};
+use super::{Addresses, Enumerated, Seed, Strategy, StrategyDef, Walk};
 use crate::domain::Note;
+use crate::strategies::{Keyed, Recognition};
 
 pub struct Listing;
 
@@ -92,7 +93,7 @@ impl Strategy for Listing {
     fn enumerate<'a>(
         &'a self,
         seed: &'a Seed,
-        crawl: &'a dyn Crawl,
+        crawl: &'a dyn Walk,
     ) -> BoxFuture<'a, anyhow::Result<Enumerated>> {
         Box::pin(async move {
             let start = seed
@@ -261,7 +262,7 @@ fn links_in(html: &str, page: &Url, root: &Url) -> Vec<Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategies::tests::{Fake, seed};
+    use crate::strategies::crawl::tests::{Fake, seed};
 
     /// The shape IIS emits, trimmed to what matters. Measured on
     /// `publicrec.hillsclerk.com`.

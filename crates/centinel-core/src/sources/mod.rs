@@ -72,7 +72,7 @@ pub fn from_config(
             let named = cfg
                 .strategy
                 .as_deref()
-                .map(crate::strategies::by_name)
+                .map(crate::strategies::crawl::by_name)
                 .transpose()?;
             Ok(Box::new(
                 SiteSource::new(id, url, policy, limits)?.with_strategy(named),
@@ -125,7 +125,7 @@ pub struct Inferred {
     /// `None` when this build does not have a strategy by that name, which is what an
     /// older store or a strategy since removed looks like. Not an error: the source is
     /// still collectable, it simply is not pinned to something that no longer exists.
-    pub strategy: Option<&'static crate::strategies::StrategyDef>,
+    pub strategy: Option<&'static crate::strategies::crawl::StrategyDef>,
 }
 
 impl Inferred {
@@ -188,7 +188,7 @@ pub async fn infer_from(store: &Store, replay: &Replay) -> anyhow::Result<Option
         target: keys.iter().find_map(|k| origin_of(k)),
         // The same `method` string that names the kind also names the strategy. A method
         // this build has no strategy for is simply not pinned — see [`Inferred::strategy`].
-        strategy: crate::strategies::by_name(replay.discovery_method()).ok(),
+        strategy: crate::strategies::crawl::by_name(replay.discovery_method()).ok(),
     }))
 }
 
