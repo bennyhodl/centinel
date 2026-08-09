@@ -37,11 +37,37 @@ const PDF_INSPECTOR_VERSION: &str = "0.1.7";
 const CALAMINE_VERSION: &str = "0.36.1";
 const ANYDOC_VERSION: &str = "0.1.3";
 
-/// Readability output shorter than this is treated as a failure to find an article.
+/// Readability output shorter than this is short enough to say so in a note.
 ///
-/// Listing and index pages are real `.gov` content but have no "article" for Readability
-/// to find, and it returns near-nothing on them. Falling back keeps those pages.
-const MIN_READABLE_CHARS: usize = 200;
+/// **It used to be a refusal, and that lost the answer.** The reasoning was that a listing
+/// page has no article for readability to find, so a thin result meant "try the whole
+/// page". Measured against 300 documents from six city and county sites, twelve fall below
+/// this line — and on eleven of them readability had found exactly the right thing:
+///
+/// ```text
+/// clevelandohio.gov/…/designated-landmarks/denison-cemetery   123 chars
+///
+///   ## Landmark Details
+///   1835
+///   W 23rd Street and Garden Avenue
+///   Architect  N/A
+/// ```
+///
+/// That is the entire record the page exists to publish. The floor threw it away and kept
+/// the whole page instead: 29,099 characters, 83% of it link text, of which three such
+/// pages supplied 105 of that corpus's 174 chunks and outranked the Police Division page on
+/// a search for `police`.
+///
+/// So a short article is now kept and **noted**. The fallback still exists for the case it
+/// was actually built for — readability finding nothing at all, where the whole page is the
+/// only text there is — and [`produced_text`] already routes that correctly, because empty
+/// text is not text.
+///
+/// What catches the other failure on this same template, where readability picks a *wrong*
+/// dense region rather than a small right one, is not a length at all. `czech-sokol-hall`
+/// yields 378 characters of City Hall's address and office hours, comfortably above any
+/// floor; [`crate::verdict`] calls it at 73% link text. Length was never the question.
+const SHORT_ARTICLE_CHARS: usize = 200;
 
 /// Text derived from a blob, with the provenance needed to explain it later.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -753,15 +779,25 @@ fn html_readability(bytes: &[u8], url: Option<&str>) -> Extracted {
             };
         }
     };
-    if md.chars().count() < MIN_READABLE_CHARS {
+    // Tested on the markdown rather than on the text below, because `with_title` would
+    // otherwise make a page with a title and no body look like a successful read of its own
+    // name — and the whole page, which is where the body would have to come from, would
+    // never be reached.
+    if md.trim().is_empty() {
         return Extracted::Unextractable {
-            reason: format!(
-                "readability found only {} chars; kept the full page instead",
-                md.chars().count()
-            ),
+            reason: "readability found no article; kept the full page instead".into(),
         };
     }
 
+    let chars = md.chars().count();
+    // A short article gives way to the whole page only when the whole page is worth
+    // having. See `SHORT_ARTICLE_CHARS` for why the length alone decided this once and
+    // lost eleven landmark records to do it.
+    if chars < SHORT_ARTICLE_CHARS && whole_page_is_better(bytes, &md) {
+        return Extracted::Unextractable {
+            reason: format!("readability found only {chars} chars; kept the full page instead"),
+        };
+    }
     let title = Some(article.title.to_string())
         .filter(|t| !t.is_empty())
         .or_else(|| html_title(&html));
@@ -770,8 +806,55 @@ fn html_readability(bytes: &[u8], url: Option<&str>) -> Extracted {
         title,
         tool: Reader::Readability.name().into(),
         version: format!("{DOM_SMOOTHIE_VERSION}+{HTMD_VERSION}"),
-        notes: vec![],
+        // Kept, and said out loud. A short article is sometimes the whole record a page
+        // publishes and sometimes a sign the reader landed in the wrong element; this note
+        // is what lets the two be told apart afterwards, on the document rather than by
+        // re-deriving it. See `SHORT_ARTICLE_CHARS`.
+        notes: match chars < SHORT_ARTICLE_CHARS {
+            true => vec![format!(
+                "readability found a short article — {chars} chars; kept it rather than \
+                 the whole page"
+            )],
+            false => vec![],
+        },
     })
+}
+
+/// Would keeping the whole page beat keeping the short article readability found?
+///
+/// **A fallback has to be an improvement.** It was assumed to be one, and on the Cleveland
+/// landmark template it was the opposite: readability's 123 characters are the landmark's
+/// year, street and architect, and the whole page is 29,099 characters of site navigation.
+/// Three such pages supplied 105 of 174 chunks in that corpus and outranked the page that
+/// actually is about the police on a search for `police`.
+///
+/// The test is [`crate::verdict`]'s link share, which is the measure that survived
+/// validation — 7 flagged, 0 false positives across 100 documents — rather than a new one
+/// invented for this decision. Applied to the *candidate*, not to the document: the
+/// question is what the whole page would put in the index if it won.
+///
+/// It answers yes for the case the fallback was built for. The CTTV caption index is a
+/// `<table>` of 2,606 transcripts with no `<th>`; readability finds no article in it, the
+/// whole page renders as rows of date and meeting name at well under half link text, and
+/// that is real content this must not throw away.
+///
+/// Costs one extra markdown conversion, and only on a short article — twelve documents in
+/// three hundred across the six sites this was measured on.
+fn whole_page_is_better(bytes: &[u8], article: &str) -> bool {
+    // Nothing to protect. A short article that is *itself* a list of links is a listing
+    // page seen from the other side, and on those the whole page is the better answer for
+    // the reason it always was: it renders the table. The rule is not "short text wins", it
+    // is "do not trade real text for navigation" — and here there is no real text to trade.
+    if crate::verdict::Verdict::on(bytes, article).link_share > crate::verdict::LINK_SHARE {
+        return true;
+    }
+
+    let whole = html_whole_page(bytes);
+    let Some(text) = whole.text().filter(|t| !t.trim().is_empty()) else {
+        // Nothing there either, so there is nothing to prefer it for.
+        return false;
+    };
+    crate::verdict::Verdict::on(bytes, text).link_share <= crate::verdict::LINK_SHARE
 }
 
 /// The whole page, minus scripts. Worse for search, but a listing page with no article is
@@ -1246,6 +1329,58 @@ mod tests {
         assert_eq!(stripped.text, "see ![x]() here");
         assert_eq!(stripped.count, 1);
         assert_eq!(stripped.removed, "data:image/png;base64,AAAA".len());
+    }
+
+    /// `clevelandohio.gov/explore/about-cleveland/designated-landmarks/denison-cemetery`,
+    /// reduced to its shape. 385 of that site's 1,098 addresses are this template.
+    ///
+    /// The details block is the whole reason the page exists, and it is 123 characters. The
+    /// old floor called that a failure and kept 29,099 characters of navigation instead —
+    /// so the corpus held the mayor's phone number and a search for `Mitermiler` returned
+    /// nothing.
+    #[test]
+    fn a_short_record_is_kept_rather_than_traded_for_the_navigation_around_it() {
+        let nav: String = (0..80)
+            .map(|i| format!("<li><a href=\"/dept/{i}\">Department of Everything {i}</a></li>"))
+            .collect();
+        let page = format!(
+            "<html><body><nav><ul>{nav}</ul></nav>\
+             <main><h2>Landmark Details</h2><p>1835</p>\
+             <p>W 23rd Street and Garden Avenue</p><p>Architect</p><p>N/A</p></main>\
+             </body></html>"
+        );
+
+        let out = extract(ContentKind::Html, page.as_bytes(), None, None);
+        let text = out.text().expect("the record is content").to_string();
+
+        assert!(text.contains("1835"), "the year was lost:\n{text}");
+        assert!(
+            text.contains("W 23rd Street"),
+            "the address was lost:\n{text}"
+        );
+        assert!(
+            !text.contains("Department of Everything"),
+            "the navigation replaced the record:\n{text}"
+        );
+        let (tool, _) = out.tool().unwrap();
+        assert_eq!(tool, "dom_smoothie+htmd", "the article reader kept it");
+    }
+
+    /// The other half of the same rule, and the reason it is a comparison rather than a
+    /// lowered floor: when the short article is *itself* links, there is no real text to
+    /// protect, and the whole page still wins — which is what renders the CTTV table.
+    #[test]
+    fn a_short_article_that_is_only_links_still_gives_way_to_the_whole_page() {
+        let page = r#"<html><body><h1>Transcripts</h1>
+            <div><a href="/1">One</a> <a href="/2">Two</a></div>
+            <table><tbody>
+              <tr><td><a href="/a">Transcript #1</a></td><td>8/3/2026</td><td>Council</td></tr>
+              <tr><td><a href="/b">Transcript #2</a></td><td>7/30/2026</td><td>Council</td></tr>
+            </tbody></table></body></html>"#;
+
+        let out = extract(ContentKind::Html, page.as_bytes(), None, None);
+        let text = out.text().expect("a listing page is content").to_string();
+        assert!(text.contains("| 8/3/2026 |"), "the table was lost:\n{text}");
     }
 
     #[test]

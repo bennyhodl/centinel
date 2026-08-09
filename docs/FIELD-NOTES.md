@@ -1226,13 +1226,71 @@ framework defect that any site triggers, which is why none of them earns a `read
 3. **Walk the fallback in `investigate`**, and label it a fallback rather than a recognition.
 4. **Surface the read verdict in `run`**, and count documents that index to nothing instead
    of dropping them.
-5. **Replace the readability floor with a retention ratio**, using the two yields the
-   fallback path already measures.
+5. **Make the fallback prove it is an improvement**, instead of triggering on a length.
 
-Item 5 is the one that addresses fault 3, which is the largest by content lost, and it is the
-one to be most careful about: `docs/STRATEGIES.md` §17 already records one read measure
-withdrawn after the corpus contradicted it. A ratio has to be measured against these six
-sites before it is trusted, not tuned until it looks right.
+#### Item 5, and the ratio that did not survive being measured
+
+The proposal was a **retention ratio** — readability's yield over the whole page's — as both
+the fallback trigger and a new bad-read signal. It was measured first, on all 300 documents,
+against the pages independently confirmed good and bad. It does not work:
+
+| | ratio range |
+|---|---|
+| confirmed good reads | 0.101 – 0.944 |
+| confirmed bad reads | 0.003 – 0.583 |
+
+They overlap across most of their span. `buffalony.gov/362/Common-Council` is a good read at
+0.101; five `medinaco.org` event pages are bad reads at 0.42–0.58. A threshold anywhere
+between them costs one to keep the other. **This is chars-per-KB again**, and it was caught
+the same way: by measuring before shipping rather than after.
+
+What the measurement did settle is narrower and firmer. Only **12 of 300** documents fall
+under the old character floor at all, and on eleven of them readability had found exactly the
+right thing:
+
+```
+clevelandohio.gov/…/designated-landmarks/denison-cemetery     123 chars
+
+  ## Landmark Details
+  1835
+  W 23rd Street and Garden Avenue
+  Architect  N/A
+```
+
+That is the record the page exists to publish, and the floor was throwing it away in favour
+of 29,099 characters of navigation. So the fix is not a better threshold on length — length
+was never the question. **A fallback has to be an improvement**, and the test is the link
+share that already survived validation: give way to the whole page unless the whole page is a
+menu, and unless the short article is itself only links, which is the listing page the
+fallback was built for and which still renders the CTTV table.
+
+Measured after the change, re-deriving each store:
+
+| Site | fell back before | after | poor reads now reported | empty documents now reported |
+|---|---|---|---|---|
+| `clevelandohio.gov` | 3 | **0** | 80 of 110 | 79 |
+| `dunedin.gov` | 2 | 2 | 15 of 66 | 5 |
+| `medinaco.org` | 0 | 0 | 50 of 50 | 0 |
+| `clevelandcitycouncil.gov` | 0 | 0 | 1 of 53 | 0 |
+
+`clevelandcitycouncil.gov` is the control: a healthy site, one flagged read, nothing lost.
+`medinaco.org` gained no characters and lost none — its 50 flagged reads are the verdict
+reporting a condition that was always there.
+
+And the search that started this:
+
+```
+$ centinel search police --source cleveohio      before → 5 chunks of cemetery navigation
+                                                 after  → Divisions, then Division of Police
+$ centinel search "Garden Avenue"                before → 0 results
+                                                 after  → Denison Cemetery: 1835, W 23rd Street
+```
+
+**What is still not fixed**, and is the honest limit of this change: on the landmark pages
+where readability picks City Hall's contact block rather than the details block, the record is
+still not extracted — `search Mitermiler` still returns nothing. That is the wrong-region
+failure, and no length or ratio reaches it. What changed is that 79 such pages now report
+themselves as producing nothing rather than filling the index with a phone number.
 
 ### Left on the table
 
@@ -1492,9 +1550,14 @@ navigation included. Both outcomes score as success.
 
 The two failures are the same decision seen from either side, and the deciding number is a
 fixed character floor. What the sightings add over one is that **the floor is the wrong kind
-of test**: 378 chars is plausible for a short page and catastrophic for a 132 KiB one. The
-comparison that separates them — readability's yield against the whole document's — is
-already computed on the path that reports *"readability found only 123 chars"*.
+of test**: 378 chars is plausible for a short page and catastrophic for a 132 KiB one.
+
+The direction they do *not* support is a ratio in its place — measured across 300 documents,
+readability's share of the whole page separates nothing, because good reads run 0.101–0.944
+and bad ones 0.003–0.583. What holds is weaker and true: **a fallback must be an
+improvement**, tested with the link share that already earned its place. Only the first of
+the two failures is fixed by it; picking the wrong dense region is untouched, and still has
+no test but a person reading the page.
 
 **A limit meant for one stage silently binds the others.** — *4 sightings:
 clevelandcitycouncil, clevelandohio, dunedin, boston*

@@ -82,6 +82,43 @@ pub struct IndexReport {
     pub boilerplate_chars: usize,
     /// Documents that lost at least one line to it.
     pub boilerplate_documents: usize,
+    /// Derived documents that produced no chunk, and so reached no search.
+    ///
+    /// These used to `continue` in silence, which made them the quietest way a document can
+    /// be lost: `list` still calls the address live, `extract` still counted it a success,
+    /// and only the gap between `documents_indexed` and `derivations` said otherwise — a
+    /// subtraction nobody performs. Five `dunedin.gov` pages went this way in one run.
+    #[serde(default)]
+    pub empty_documents: usize,
+    /// A sample of them, with the reason each produced nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub empty: Vec<EmptyDocument>,
+}
+
+/// A document that reached the index and left no trace in it.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct EmptyDocument {
+    pub url: String,
+    pub why: String,
+}
+
+/// Empty documents named before the list is cut off. See `POOR_SAMPLE` in `ops::extract`.
+const EMPTY_SAMPLE: usize = 5;
+
+/// Record one, up to the sample ceiling.
+///
+/// Takes the pending placements because the address is what an operator needs — the
+/// derivation hash identifies the text, and the text is precisely the thing that turned out
+/// to be nothing.
+fn note_empty(report: &mut IndexReport, pending: &[(String, jiff::Timestamp)], why: &str) {
+    if report.empty.len() < EMPTY_SAMPLE
+        && let Some((address, _)) = pending.first()
+    {
+        report.empty.push(EmptyDocument {
+            url: address.clone(),
+            why: why.to_string(),
+        });
+    }
 }
 
 /// Chunk extracted text into the search index.
@@ -133,6 +170,8 @@ pub async fn index(
         boilerplate_lines: 0,
         boilerplate_chars: 0,
         boilerplate_documents: 0,
+        empty_documents: 0,
+        empty: Vec::new(),
     };
 
     for source in &sources {
@@ -237,6 +276,8 @@ pub async fn index(
             let bytes = ctx.store.get_blob(&d.to_sha).await?;
             let text = String::from_utf8_lossy(&bytes);
             if text.trim().is_empty() {
+                report.empty_documents += 1;
+                note_empty(&mut report, &pending, "the derived text is empty");
                 continue;
             }
 
@@ -255,6 +296,22 @@ pub async fn index(
 
             let chunks = chunk_markdown(&stripped.text, &config);
             if chunks.is_empty() {
+                // Counted, not dropped. Five `dunedin.gov` pages each extracted to the same
+                // 361-character site-wide banner and nothing else; the chrome pass correctly
+                // recognised that banner and stripped it, which left nothing to chunk, and
+                // all five vanished. They still read `✓ live` in `list`, still reported a
+                // successful extraction, and no search could reach them.
+                //
+                // The stripping is right and stays. What was wrong is that a pass which
+                // removes text has to say when it removed all of it — a document that
+                // leaves the index empty is a fact about the *extraction*, surfaced one
+                // stage too late to be noticed any other way.
+                report.empty_documents += 1;
+                let why = match stripped.dropped_anything() {
+                    true => "chrome was stripped and nothing else was there",
+                    false => "the text produced no chunks",
+                };
+                note_empty(&mut report, &pending, why);
                 continue;
             }
             report.documents_indexed += 1;
@@ -416,6 +473,37 @@ impl Render for IndexReport {
                     render::plural(self.boilerplate_lines, "line", "lines"),
                 );
                 p.marked(Mark::Ok, chrome)?;
+            }
+
+            // Under the chrome line, deliberately: on `dunedin.gov` these are the same
+            // event seen twice — the chrome pass worked, and it worked on a document that
+            // was nothing but chrome. Reading them together is what makes that legible.
+            if self.empty_documents > 0 {
+                p.blank()?;
+                p.marked(
+                    Mark::Warn,
+                    format!(
+                        "{} produced no chunk and reached no search",
+                        render::plural(self.empty_documents, "document", "documents")
+                    ),
+                )?;
+                p.nest(|p| {
+                    for e in &self.empty {
+                        p.wrapped(
+                            &render::truncate(&e.url, p.width().saturating_sub(4)),
+                            Ink::Dim,
+                        )?;
+                        p.nest(|p| p.wrapped(&e.why, Ink::Dim))?;
+                    }
+                    if self.empty_documents > self.empty.len() {
+                        let more = self.empty_documents - self.empty.len();
+                        p.wrapped(
+                            &format!("… and {} more", render::count(more as u64)),
+                            Ink::Dim,
+                        )?;
+                    }
+                    Ok(())
+                })?;
             }
 
             p.blank()?;
@@ -802,6 +890,112 @@ mod tests {
         .unwrap();
         assert_eq!(again.documents_indexed, 0, "the second run redid work");
         assert_eq!(again.already_indexed, 2);
+    }
+
+    /// `dunedin.gov`. Five pages each extracted to the same site-wide emergency banner and
+    /// nothing else. The chrome pass correctly recognised the banner and stripped it, which
+    /// left nothing to chunk, and all five disappeared — while `list` still called every
+    /// one of them live and `extract` still counted five successes.
+    ///
+    /// The stripping is not the fault and is asserted to still happen. The fault was that a
+    /// document could leave the index empty without the report saying so.
+    #[tokio::test]
+    async fn a_document_that_is_nothing_but_chrome_is_counted_rather_than_dropped() {
+        use crate::store::Store;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).await.unwrap();
+        let id = SourceId::new("dunedin").unwrap();
+
+        // The banner, on every page, exactly as the real one repeats.
+        let banner = "The Southwest Florida Water Management District has declared a Phase 3 \
+                      water shortage. Effective 4/3, Dunedin water customers will be limited \
+                      to 4 hours of potable water irrigation on their assigned day.";
+
+        // Enough documents for the learner to call it chrome, most of them carrying real
+        // content beneath it — which is what makes the banner repeated rather than the
+        // whole corpus.
+        for i in 0..boilerplate::MIN_DOCUMENTS + 2 {
+            let text = format!(
+                "# Page {i}\n\n{banner}\n\n{}",
+                format!("Real content about topic {i} that belongs in the corpus. ").repeat(20)
+            );
+            add_page(&store, &id, &format!("https://dunedin.test/p{i}"), &text).await;
+        }
+        // And the one that is the banner and nothing else.
+        add_page(
+            &store,
+            &id,
+            "https://dunedin.test/After-the-Storm",
+            &format!("# City of Dunedin, FL\n\n{banner}"),
+        )
+        .await;
+
+        let ctx = Ctx::new(store);
+        let report = index(
+            &ctx,
+            IndexArgs::default(),
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+
+        assert!(report.boilerplate_lines > 0, "the banner was recognised");
+        assert_eq!(
+            report.empty_documents, 1,
+            "the page that was only the banner is counted"
+        );
+        assert_eq!(
+            report.empty.first().map(|e| e.url.as_str()),
+            Some("https://dunedin.test/After-the-Storm"),
+            "and named, so it can be looked at: {:?}",
+            report.empty
+        );
+        assert!(
+            report.empty[0].why.contains("chrome"),
+            "with the reason it produced nothing: {:?}",
+            report.empty[0].why
+        );
+        // The pages that had content beneath the banner are unaffected.
+        assert_eq!(report.documents_indexed, boilerplate::MIN_DOCUMENTS + 2);
+    }
+
+    async fn add_page(
+        store: &crate::store::Store,
+        id: &SourceId,
+        url: &str,
+        text: &str,
+    ) -> crate::domain::Observation {
+        use crate::domain::Derivation;
+        use crate::store::LogRecord;
+
+        let obs = store
+            .record_observation(
+                &Resource::new(id.clone(), url),
+                format!("<html>{url}</html>").as_bytes(),
+                jiff::Timestamp::now(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let to_sha = store.put_blob(text.as_bytes()).await.unwrap();
+        store
+            .append(
+                id,
+                &LogRecord::Derivation(Derivation {
+                    from_sha: obs.blob_sha.clone(),
+                    to_sha,
+                    tool: "dom_smoothie+htmd".into(),
+                    version: "0.18.0+0.5.5".into(),
+                    model_tier: None,
+                    at: jiff::Timestamp::now(),
+                    anchors: Vec::new(),
+                }),
+            )
+            .await
+            .unwrap();
+        obs
     }
 
     #[test]
