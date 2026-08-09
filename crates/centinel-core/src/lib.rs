@@ -29,6 +29,7 @@
 extern crate self as centinel_core;
 
 pub mod acquire;
+pub mod boilerplate;
 pub mod captions;
 pub mod chunk;
 pub mod config;
