@@ -888,7 +888,7 @@ mod staleness_tests {
     #[test]
     fn the_ninety_day_line_falls_where_yt_dlp_puts_it() {
         let now = at("2026-08-05T00:00:00Z");
-        assert!(staleness_days("2026.05.07", now).unwrap() as i64 == 90);
+        assert_eq!(staleness_days("2026.05.07", now), Some(90));
         assert!(staleness_days("2026.05.08", now).unwrap() < STALE_AFTER_DAYS);
         assert!(staleness_days("2026.05.06", now).unwrap() > STALE_AFTER_DAYS);
     }
