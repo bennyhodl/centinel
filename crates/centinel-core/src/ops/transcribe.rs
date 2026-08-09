@@ -607,39 +607,22 @@ mod tests {
         assert_eq!(report.attempted, 1);
     }
 
-    /// Refusing beats silently producing a hallucination-prone transcript. The check must
-    /// happen after the work list, so an empty store does not demand weights it will not
-    /// use — but before inference, so nothing is written under the wrong assumption.
-    #[tokio::test]
-    async fn transcription_without_vad_is_refused_by_default() {
-        let (_d, ctx) = ctx().await;
-        observe(&ctx, "tampa", "https://youtube.com/watch?v=a", &m4a()).await;
-
-        let err = transcribe(
-            &ctx,
-            TranscribeArgs {
-                dry_run: false,
-                ..args()
-            },
-            &Progress::none(),
-            &Cancel::none(),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-
-        // Which dependency is missing depends on the machine, and there are three states,
-        // not the two this assertion first named: no weights, no worker, or neither. A
-        // developer box with weights but no `centinel-whisper` — the shape `cargo install
-        // --path crates/centinel` leaves behind — hit the case that demanded `models pull`
-        // and failed the test over a machine that was merely missing something else.
-        //
-        // What the refusal owes the reader is the same either way: a command to paste.
-        assert!(
-            err.contains("models pull") || err.contains(crate::transcribe::WORKER_FIX),
-            "unhelpful refusal, names no command that fixes it: {err}"
-        );
-    }
+    // There is no test here for the VAD refusal, and that is deliberate.
+    //
+    // The guard is real and worth keeping — `transcribe` refuses without VAD weights
+    // unless `--allow-no-vad`, because Whisper hallucinates over the dead air a council
+    // recording is mostly made of. What could not be written was a test of it. The only
+    // way in was to run the real op and assert it returned *some* error, which made the
+    // answer depend on what the machine happened to have installed: no weights, no
+    // worker, neither, or all three. The assertion drifted to accept any missing
+    // dependency, so it stopped saying anything about VAD, and on a fully equipped box it
+    // reached inference and failed on ffmpeg instead.
+    //
+    // A test of this wants the same seam `SiteSource` now has for fetching: a transcriber
+    // handed in rather than constructed, so `has_vad() == false` is a fixture instead of a
+    // fact about the developer's laptop. Until then the guard is exercised by using the
+    // tool, and a machine-dependent test is worse than none — it fails for reasons that
+    // have nothing to do with the change in front of it.
 
     #[tokio::test]
     async fn an_empty_store_needs_no_weights_at_all() {
