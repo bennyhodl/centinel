@@ -1,8 +1,18 @@
 # Centinel — Collection strategies
 
-**Status:** a plan, not a specification. §11's five universal fixes are **built** — branch
-`enumeration`, five commits. Nothing else here is. The central claim rests on four sites and
-**has not been falsified yet** — §12 names the ten-minute test that would.
+**Status:** partly built. On branch `enumeration`: §11's five universal fixes, the crawl
+registry with `sitemap` and `listing` (§4–§6), and `investigate` (§8, §17). Not built:
+`index` and `none` (§10.3, §7 rule 3), and the skill (§18). The central claim rests on four
+sites and **has not been falsified yet** — §12 names the ten-minute test that would.
+
+**One thing here was tried and withdrawn.** §4 proposed a *read* registry as the peer of
+the crawl one. It was built, and it was wrong: [`crate::extract`] already dispatches on
+content kind to a list of readers tried in order, and a second registry in front of that
+list opted out of every invariant the list holds — one definition of *produced nothing*,
+one definition of a tool name, `recovered_by_fallback`, and the note a reader leaves when
+it gives way. `marked` is now the first element of the HTML row and is held to all four.
+The reasoning below about *what* to read is unchanged and correct; only the claim that it
+needed a registry of its own is not.
 
 **Evidence:** [`docs/FIELD-NOTES.md`](FIELD-NOTES.md) — four sites, walked by hand.
 Every claim below cites an entry there. Nothing here is reasoned from first principles.
@@ -371,10 +381,10 @@ Run §12 first. Then:
 | | Work | Estimate |
 |---|---|---|
 | 1 | the five universal fixes (§11) | **done.** Branch `enumeration` |
-| 2 | `Strategy` trait, `strategies/` registry (§16); port `sitemap`, add `listing` | ~3 days |
-| 3 | `centinel investigate` — the registry's front door, and crumbs on the output | ~3 days |
-| 4 | check a DiscoveryRun against a declared total | ~1 day, and it makes 1–3 trustworthy |
-| 5 | **Leads** — record what nothing recognised, and measure it (§17) | ~2 days |
+| 2 | `Strategy` trait, `strategies/` registry (§16); port `sitemap`, add `listing` | **done.** Branch `enumeration` |
+| 3 | `centinel investigate` — the registry's front door, and crumbs on the output | **done.** Branch `enumeration` |
+| 4 | check a DiscoveryRun against a declared total | ~1 day. `Enumerated::declared_total` exists and **nothing writes it**: neither shape that has a strategy declares a count, so this arrives with item 6 |
+| 5 | **Leads** — measured per address by `investigate` (§17) | **done**, except the store-wide listing — see §17 |
 | 6 | `index` strategy, with OpenGov Stories and OnBase as its two sightings | ~3 days |
 | 7 | the `write-a-strategy` skill (§18) | ~1 day, and it must come last |
 
@@ -644,32 +654,31 @@ and `mod.rs` re-exports them.
 ```
 crates/centinel-core/src/strategies/
 ├── mod.rs             BUILT  Recognition, Keyed — the shared vocabulary, and only it
-├── crawl/                    WHERE ARE THE ADDRESSES
-│   ├── mod.rs         BUILT  the trait, Seed, Walk, the registry
-│   ├── sitemap.rs     BUILT  a standard       — ported from the old Discoverer
-│   ├── listing.rs     BUILT  a server default — an open directory index
-│   ├── index.rs       —      the address set is on the page, not in a link (§10.3)
-│   └── none.rs        —      a query box, recognised and REFUSED (§7 rule 3)
-└── read/                     WHAT DOES THIS DOCUMENT SAY
-    └── mod.rs         BUILT  the trait and the registry. **No strategy is registered.**
+└── crawl/                    WHERE ARE THE ADDRESSES
+    ├── mod.rs         BUILT  the trait, Seed, Walk, Pass, the registry
+    ├── sitemap.rs     BUILT  a standard       — ported from the old Discoverer
+    ├── listing.rs     BUILT  a server default — an open directory index
+    ├── index.rs       —      the address set is on the page, not in a link (§10.3)
+    └── none.rs        —      a query box, recognised and REFUSED (§7 rule 3)
 ```
 
-**`Strategy` was one word doing two jobs, and the split is a correction.** What was built
-recognises a *site* and returns *addresses*; nothing in it has an opinion about the bytes at
-those addresses. `hillsclerk.com` is the proof: recognised by `sitemap`, 177 addresses
-without a mistake, and 23,213 characters of navigation for a page whose content is one
-sentence. No crawl strategy could ever have caught that, so the read side is its own
-registry rather than a hook on this one.
+Reading is not here. `extract/html.rs` holds the three HTML readers — the marked region,
+readability, the whole page — in the order `extract::readers_for` lists them.
 
-**`read/` is empty on purpose, and it is wired anyway.** Every extraction fault in
+**`Strategy` was one word doing two jobs, and separating the questions is a correction.**
+What is built recognises a *site* and returns *addresses*; nothing in it has an opinion
+about the bytes at those addresses. `hillsclerk.com` is the proof: recognised by `sitemap`,
+177 addresses without a mistake, and 23,213 characters of navigation for a page whose
+content is one sentence. No crawl strategy could ever have caught that.
+
+**The reading half is a reader, not a registry.** Every extraction fault in
 `FIELD-NOTES.md` — the fused table, the spelled-out image, the `data:` URI, the
 octet-stream PDF — was a framework defect any site triggers, and each was fixed in the
-framework rather than per site. The two outstanding read faults are handled the same way:
-navigation-instead-of-article is removed corpus-wide by `boilerplate`, and a `var pdfURL` is
-an enclosure question. So nothing has earned a read strategy yet. `extract::derive` consults
-the registry on every document regardless, and a test registers one to prove it wins over
-the content kind's readers — an empty registry that is wired costs an `is_empty` check, and
-an unwired one costs a refactor at the moment somebody finally has a shape to add.
+framework rather than per site. So is the fifth: a reader guessing at the content region
+and guessing wrong. `<main>` is HTML, satisfied by 298 of 300 measured documents across
+four unrelated platforms, which makes it the ordinary way to read a page rather than a
+special case — and an ordinary reader belongs in the list of readers, first, where the
+existing fall-through rule already says what happens when it answers nothing.
 
 **This is the target, not the directory.** Two of the four crawl strategies exist. `index` is build-order
 item 6; `none` is ten lines and still blocked, because *"no collection strategy"* answers a
@@ -775,8 +784,16 @@ ones that share a fingerprint sort next to each other with the evidence already 
 That also turns §12 from a manual grep into a question the store answers — and §12 is the
 test that decides whether any of this file is worth building.
 
+**Built: the measurement, per address.** `centinel investigate <url>` takes every measure
+below on the address it was given and reports them beside the recognition. That is the part
+that needed the evidence, and it is done.
+
+**Not built: the listing.** Ranking the store's own sources by what looks wrong needs a
+store-wide pass and a place to write the answer, and neither exists — `investigate` writes
+nothing by design. The shape it would take:
+
 ```
-centinel investigate --leads
+centinel leads          # NOT BUILT — sketch only
 
   3 hosts collected by fallback, ranked by what looks wrong
 

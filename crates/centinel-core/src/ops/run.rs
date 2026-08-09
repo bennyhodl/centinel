@@ -603,11 +603,16 @@ async fn run_acquisition(
                                 // figure so the journal reads it off the report rather
                                 // than recomputing a set difference from the log.
                                 ("vanished", r.vanished as u64),
+                                ("truncated", u64::from(r.truncated)),
                             ],
                         )
                         .and(r.figures),
                         format!(
-                            "{} {} \u{00b7} {} new",
+                            // "at least", when the pass stopped on a ceiling. A run's
+                            // summary is the only line most people read, and §4.3's rule
+                            // is not satisfied by a flag nobody is shown.
+                            "{}{} {} \u{00b7} {} new",
+                            if r.truncated { "at least " } else { "" },
                             render::count(r.found as u64),
                             noun(r.found as u64, "address", "addresses"),
                             render::count(r.new as u64)
@@ -645,6 +650,17 @@ async fn run_acquisition(
                             summary.push_str(&format!(
                                 " \u{00b7} {} blocked",
                                 render::count(r.blocked as u64)
+                            ));
+                        }
+                        // `collect` calls this "the only figure here that is an
+                        // instruction", and it reached the machine tally below and never
+                        // this line — so `run --limit 50` printed `50 acquired` against a
+                        // source with 4,210 addresses still uncollected. The same
+                        // conditional append `poor_reads` and `empty_documents` already get.
+                        if r.remaining > 0 {
+                            summary.push_str(&format!(
+                                " \u{00b7} {} left to collect",
+                                render::count(r.remaining as u64)
                             ));
                         }
                         StageRun::ran(

@@ -36,10 +36,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::content::ContentKind;
 use crate::extract::{self, Extracted};
-use crate::policy::{DEFAULT_USER_AGENT, HostPolicy};
+use crate::policy::HostPolicy;
 use crate::prelude::*;
 use crate::sources::SiteSource;
-use crate::verdict::Verdict;
+use crate::verdict::{Read, ReadQuality};
 
 /// Lines of extracted text shown inline before the paths.
 const DEFAULT_HEAD: usize = 20;
@@ -78,15 +78,9 @@ pub struct CheckArgs {
     #[serde(default = "default_head")]
     pub head: usize,
 
-    /// User-Agent header. A descriptive one measurably reduces WAF 403s.
-    #[arg(long, default_value = DEFAULT_USER_AGENT)]
-    #[serde(default = "default_ua")]
-    pub user_agent: String,
-
-    /// Per-request timeout in seconds.
-    #[arg(long, default_value_t = 30)]
-    #[serde(default = "default_timeout")]
-    pub timeout_secs: u64,
+    #[command(flatten)]
+    #[serde(default, flatten)]
+    pub net: crate::ops::probe::NetArgs,
 
     /// Also ask what **enumeration** would make of this address.
     ///
@@ -114,23 +108,8 @@ pub struct CheckArgs {
 /// `--strategy` with no name: ask the registry rather than naming one.
 const AUTO: &str = "auto";
 
-/// Requests one `check --strategy` may spend, and addresses it will keep.
-///
-/// Far below a real run's, because this is a probe. Pointing it at a directory index would
-/// otherwise walk the tree — `publicrec.hillsclerk.com` is ~1,500 files — to answer a
-/// question about the first page. A strategy that runs out says so in its own warning,
-/// which is printed, so a truncated probe never reads like a small site.
-const PROBE_REQUESTS: usize = 25;
-const PROBE_ADDRESSES: usize = 500;
-
 fn default_head() -> usize {
     DEFAULT_HEAD
-}
-fn default_ua() -> String {
-    DEFAULT_USER_AGENT.to_string()
-}
-fn default_timeout() -> u64 {
-    30
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -184,7 +163,7 @@ pub struct Checked {
     /// with a title and a tool, and every one of those facts was true of a page that is
     /// 84% navigation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verdict: Option<Verdict>,
+    pub verdict: Option<ReadQuality>,
     /// The primary reader found no text and the fallback did.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recovered_by_fallback: bool,
@@ -239,6 +218,12 @@ pub struct Enumerated {
     /// does not fit, or nothing recognising anything and the sitemap fallback running
     /// because it is the best available guess. The warnings say which.
     pub recognised: bool,
+    /// Whether the probe stopped on its own ceiling rather than on the end of the site.
+    ///
+    /// A probe is capped by `ops::probe`, so this is often
+    /// true and it is never a fault — it says the count below is a floor. Printing the
+    /// count without it is the §4.3 mistake at probe scale.
+    pub truncated: bool,
     /// How many addresses came back. A count, because the sample below is a sample.
     pub addresses: usize,
     /// The first few, to read.
@@ -384,7 +369,11 @@ pub async fn check(
         doc.tool = Some(format!("{} {}", extraction.tool, extraction.version));
         doc.title = extraction.title.clone();
         doc.chars = extraction.text.chars().count();
-        doc.verdict = Some(Verdict::on(&item.bytes, &extraction.text));
+        doc.verdict = Some(ReadQuality::on(
+            &item.bytes,
+            &extraction.text,
+            Read::of(kind),
+        ));
         doc.pages_needing_ocr = pages_needing_ocr.len();
         doc.notes = extraction.notes.clone();
         doc.preview = extraction
@@ -402,7 +391,9 @@ pub async fn check(
     // After extraction, because extraction is the question this command was built for and
     // a strategy that runs long should not delay the answer somebody asked for.
     let enumeration = match (&args.strategy, Target::of(&args.target)) {
-        (Some(name), Target::Url(url)) => Some(enumerate_with(name, &url, &args, progress).await?),
+        (Some(name), Target::Url(url)) => {
+            Some(enumerate_with(name, &url, &args, progress, cancel).await?)
+        }
         // A local file has no host to enumerate, and no address for a relative link to
         // resolve against. Saying so beats reporting an empty result.
         (Some(_), Target::File(_)) => {
@@ -438,42 +429,27 @@ async fn enumerate_with(
     url: &str,
     args: &CheckArgs,
     progress: &Progress,
+    cancel: &Cancel,
 ) -> anyhow::Result<Enumerated> {
     let named = match name {
         AUTO => None,
         other => Some(crate::strategies::crawl::by_name(other)?),
     };
-    let id = SourceId::new("check".to_string())?;
-    let policy = HostPolicy {
-        user_agent: args.user_agent.clone(),
-        timeout: std::time::Duration::from_secs(args.timeout_secs),
-        ..Default::default()
-    };
-    let site = SiteSource::new(
-        id,
-        url,
-        policy,
-        crate::discovery::DiscoveryLimits {
-            max_sitemaps: PROBE_REQUESTS,
-            max_urls: PROBE_ADDRESSES,
-        },
-    )?
-    .with_strategy(named);
+    let site = super::probe::site("check", url, &args.net)?
+        .with_strategy(named)
+        .with_cancel(cancel.clone());
 
     let found = site.enumerate(progress).await?;
-
-    // `enumerate` writes exactly one `strategy` note, and marks it `Warn` when nothing
-    // recognised the address. Reading the mark back is what keeps the two answers from
-    // drifting apart — there is no second place that decides what "recognised" means.
-    let recognised = found
-        .notes
-        .iter()
-        .find(|n| n.label == "strategy")
-        .is_some_and(|n| n.mark != Some(NoteMark::Warn));
+    // The walk stops itself between requests; this turns that stop into an error rather
+    // than a probe that quietly reports fewer addresses than it found.
+    cancel.check()?;
 
     Ok(Enumerated {
         strategy: site.method().to_string(),
-        recognised,
+        // Asked of the source, which decided it in `choose`. `enumerate` has run, so the
+        // answer is set; the fallback is the same "nothing spoke" the walk falls back to.
+        recognised: site.recognised().unwrap_or(false),
+        truncated: found.truncated,
         addresses: found.resources.len(),
         sample: found
             .resources
@@ -530,13 +506,11 @@ async fn acquire_url(
 ) -> anyhow::Result<(Vec<Item>, Vec<String>)> {
     let id = SourceId::new("check".to_string())?;
     let policy = HostPolicy {
-        user_agent: args.user_agent.clone(),
-        timeout: std::time::Duration::from_secs(args.timeout_secs),
         // One address, so no pacing is owed to anyone: the limiter exists to keep a
         // thousand-page crawl polite, and waiting a second before a single request buys a
         // host nothing.
         max_requests_per_second: 0.0,
-        ..Default::default()
+        ..args.net.policy()
     };
     let site = SiteSource::new(id.clone(), url, policy, Default::default())?;
     let resource = Resource::new(id.clone(), url.to_string());
@@ -786,8 +760,12 @@ impl Render for Enumerated {
                 mark,
                 p.paint(
                     &format!(
-                        "{} — {} address(es)",
+                        "{} — {}{} address(es)",
                         self.strategy,
+                        // "at least", never a bare count: the probe's ceiling is low
+                        // enough that most real sites hit it, and a floor printed as a
+                        // total is what §4.3 is written against.
+                        if self.truncated { "at least " } else { "" },
                         render::count(self.addresses as u64)
                     ),
                     Ink::Bold,
@@ -881,7 +859,7 @@ impl Render for Checked {
             }
             // A read with a finding against it is not a tick. This line printed `✓` over
             // a page that is 84% navigation, and the tick was the whole problem.
-            let poor = self.verdict.as_ref().is_some_and(Verdict::is_poor);
+            let poor = self.verdict.as_ref().is_some_and(ReadQuality::is_poor);
             let mark = match poor {
                 true => Mark::Warn,
                 false => Mark::Ok,
@@ -968,8 +946,7 @@ mod tests {
             out: None,
             print: false,
             head: default_head(),
-            user_agent: default_ua(),
-            timeout_secs: default_timeout(),
+            net: crate::ops::probe::NetArgs::default(),
             strategy: None,
         }
     }
@@ -1234,5 +1211,60 @@ mod tests {
         assert_eq!(address_extension("https://x.gov/view"), None);
         // Too long to be one — a path segment that merely contains a dot.
         assert_eq!(address_extension("https://x.gov/a.presentation"), None);
+    }
+
+    // ── rendering ─────────────────────────────────────────────────────────────────
+
+    fn enumerated() -> Enumerated {
+        Enumerated {
+            strategy: "sitemap".into(),
+            recognised: true,
+            truncated: false,
+            addresses: 12,
+            sample: vec!["https://x.gov/a".into()],
+            notes: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    fn render_to_string(e: &Enumerated) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut p = Painter::new(&mut buf, false, 100);
+            e.render(&mut p).unwrap();
+        }
+        String::from_utf8(buf).unwrap()
+    }
+
+    /// The probe ceiling is low enough that most real sites hit it, so a bare count here
+    /// is a floor printed as a total — §4.3 at probe scale.
+    #[test]
+    fn a_probe_that_filled_its_ceiling_reports_a_floor_and_says_so() {
+        let out = render_to_string(&Enumerated {
+            truncated: true,
+            addresses: 500,
+            ..enumerated()
+        });
+        assert!(out.contains("at least"), "{out}");
+        assert!(out.contains("500"), "{out}");
+    }
+
+    /// And a walk that finished says a number, without hedging it.
+    #[test]
+    fn a_complete_walk_reports_a_count() {
+        let out = render_to_string(&enumerated());
+        assert!(out.contains("12 address"), "{out}");
+        assert!(!out.contains("at least"), "{out}");
+    }
+
+    /// `recognised` is what marks the line, and it is now asked of the Source rather than
+    /// recovered from a note's mark — so a note label moving cannot change this answer.
+    #[test]
+    fn a_forced_strategy_that_does_not_fit_is_marked() {
+        let out = render_to_string(&Enumerated {
+            recognised: false,
+            ..enumerated()
+        });
+        assert!(out.contains('!') || out.contains('⚠'), "unmarked:\n{out}");
     }
 }

@@ -20,10 +20,40 @@ use crate::policy::HostPolicy;
 /// loop cannot exist while a refusal has two types.
 pub use crate::domain::Refusal as FetchFailure;
 
-/// An HTTP client configured by [`HostPolicy`].
+/// Somewhere bytes come from.
+///
+/// The seam a Source's tests substitute at, and the reason it exists: everything above the
+/// fetch in [`crate::sources::site`] — choosing a strategy, building a seed from a front
+/// door that refused, turning a strategy's addresses into Resources — was reachable only
+/// over a socket. So it went untested, and `docs/FIELD-NOTES.md` records what was wrong
+/// with it: a truncation flag dropped on the way out, a degraded seed nothing exercised,
+/// and an integration test that stood up a `TcpListener` and hand-wrote HTTP to get at any
+/// of it.
+///
+/// One method, because one method is all a Source ever asked for. `CONTEXT.md` states the
+/// rule this satisfies — *the interface is the test surface* — and the branch that wrote it
+/// down applied it to [`crate::strategies::crawl::Walk`] and not here.
+pub trait Fetch: Send + Sync + std::fmt::Debug {
+    /// GETs a URL, classifying any non-success status into a [`Liveness`].
+    fn get<'a>(
+        &'a self,
+        url: &'a str,
+    ) -> futures::future::BoxFuture<'a, Result<Fetched, FetchFailure>>;
+}
+
+/// An HTTP client configured by [`HostPolicy`]. The production [`Fetch`].
 #[derive(Clone, Debug)]
 pub struct Fetcher {
     client: reqwest::Client,
+}
+
+impl Fetch for Fetcher {
+    fn get<'a>(
+        &'a self,
+        url: &'a str,
+    ) -> futures::future::BoxFuture<'a, Result<Fetched, FetchFailure>> {
+        Box::pin(Fetcher::get(self, url))
+    }
 }
 
 impl Fetcher {

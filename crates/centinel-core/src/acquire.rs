@@ -59,9 +59,14 @@ pub struct Discovered {
     /// searchable. This is the first of the three subtractions in `docs/SCHEDULING.md`
     /// §7.2, and the only one discovery can see.
     pub vanished: usize,
-    /// The previous snapshot's size, for the delta. A large negative swing is the
-    /// signature of a truncated crawl rather than a shrinking source.
+    /// The previous snapshot's size, for the delta. A neutral figure: whether this pass
+    /// was truncated is answered by `truncated`, which the strategy knows and a delta
+    /// can only guess at.
     pub previous_run: Option<usize>,
+    /// Whether this pass stopped on a ceiling. Straight from
+    /// [`crate::domain::Enumeration`] — §4.3's rule is that the count means something
+    /// different when it is true, so it travels beside the count everywhere the count goes.
+    pub truncated: bool,
     pub notes: Vec<Note>,
     pub warnings: Vec<String>,
     pub figures: BTreeMap<String, u64>,
@@ -149,6 +154,7 @@ pub async fn discover(
         new,
         vanished,
         previous_run,
+        truncated: enumeration.truncated,
         notes: enumeration.notes,
         warnings: enumeration.warnings,
         figures: enumeration.figures,

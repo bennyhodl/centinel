@@ -178,6 +178,18 @@ wrote off 168 of 490 PDFs that had a text layer all along — an executive order
 minutes, a 315,000-character action plan. A fallback is not a second guess at the same
 question; it is the admission that the first tool's silence was never evidence.
 
+**Marked region** — the part of a page the page itself declares to be its content:
+`<main>`, `[role=main]`, `#main-content`, `.main-content`, `<article>`, widest first. The
+**first** reader for HTML, ahead of readability, because readability is a guess about where
+the content is and this is the page's own answer — 298 of 300 measured documents carry a
+marker. *Why it matters:* it is a rule about HTML, not about a vendor, so it is a `Reader`
+in the list and not a registry in front of it. It had its own registry for one commit, and
+that registry opted out of every invariant below: `recovered_by_fallback` was hardcoded
+false for the reader that handles 99% of HTML, a recognised-but-empty read left no note,
+and `extract` and `derive` returned different text for the same bytes because only one of
+them consulted it. A reader that answers nothing falls through, which is the same contract
+every other reader is held to and needed no new mechanism to state.
+
 **The order is data**, in `extract::readers_for`, and there is one definition of *produced
 nothing* (`produced_text`) for every pair. It was three mechanisms — a `bool` for PDF, a
 free-text note for HTML, a re-route for documents — which meant each pair decided for
@@ -353,6 +365,25 @@ page whose only variation is a rotated CSRF token moves the first and not the se
 is the discovery delta. *Why it matters:* a truncated snapshot looks exactly like a source
 that shrank, so nothing may silently cap one — which is why `run --limit` applies to
 collection and not to discovery.
+
+**Pass** — one enumeration in progress: the queue, the ceilings, and what has been kept.
+Held by `strategies::crawl`, handed to a strategy, and the reason a strategy carries only
+what makes it different from another strategy — how it parses a page and what it queues
+next. *Why it matters:* a strategy must not decide what a ceiling means. Written per
+strategy, that rule is wrong per strategy, and both copies had to learn separately that the
+address cap has to be re-tested *after* the loop, because a walk that fills its ceiling on
+its last iteration has no next iteration to notice. Distinct from `Walk`, which is the
+narrow trait the **host** implements — one paced GET and the bounds — and which a test
+substitutes.
+
+**Truncated** — an enumeration that stopped on a ceiling rather than on the end of the
+source. A field on `Enumeration`, answered by every Source, and the one caveat that
+changes what the count *means* rather than qualifying it — so a count is printed as *at
+least* n wherever it is true. *Why it matters:* it was inferred three ways and none of
+them worked. A shrinking delta cannot fire on a first run or on a source that genuinely
+grew past the cap; a `stopped at` substring in the warning list starts lying the day the
+wording changes; and the strategy that stopped early is the only thing that ever knew.
+`dunedin.gov` printed a checkmark beside 500 addresses against a real 1,625.
 
 ## Structure
 

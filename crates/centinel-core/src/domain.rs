@@ -561,6 +561,14 @@ pub struct Enumeration {
     pub notes: Vec<Note>,
     /// The same provenance for a machine, named as the Source names it.
     pub figures: BTreeMap<String, u64>,
+    /// Whether this pass stopped on a ceiling rather than on the end of the source.
+    ///
+    /// The one caveat that changes what the count *means* rather than qualifying it, so it
+    /// is a flag and not a warning: §4.3's rule is that a truncated snapshot looks exactly
+    /// like a source that shrank, and a reader that greps the warning list for `stopped at`
+    /// starts lying the day the wording changes. Every Source answers, because every
+    /// enumeration has a ceiling somewhere.
+    pub truncated: bool,
 }
 
 /// How a Source is acquired, as it appears in reports and on the wire.

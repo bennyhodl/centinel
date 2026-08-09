@@ -6,7 +6,8 @@
 //!
 //! Two things the crate deliberately leaves to the caller, both handled here:
 //!
-//! 1. **It does not fetch or cache.** Fetching lives in [`super::Discoverer`].
+//! 1. **It does not fetch or cache.** Fetching lives in
+//!    [`crate::strategies::crawl::Walk`].
 //! 2. **It does not strip a UTF-8 BOM.** A BOM before `User-agent:` becomes part of the
 //!    first token and silently voids the whole group, so it is stripped below.
 

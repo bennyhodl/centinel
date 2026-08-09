@@ -1,7 +1,7 @@
 //! `sitemap` — the standard, and the strategy every other one is measured against.
 //!
-//! A port rather than a new thing. The walk below is [`crate::discovery::Discoverer`]'s,
-//! moved behind [`Strategy`] so that the one hardcoded line in `SiteSource::enumerate`
+//! A port rather than a new thing. The walk below is the old `Discoverer`'s, moved behind
+//! [`Strategy`] so that the one hardcoded line in `SiteSource::enumerate`
 //! becomes a choice. Its behaviour is deliberately unchanged, because it is the strategy
 //! every existing source in the store was collected with.
 //!
@@ -22,11 +22,9 @@
 //! `Discoverer` fetched `robots.txt` itself. The [`Seed`] now carries it, because more
 //! than one recogniser wants it, so the walk starts from rules that are already in hand.
 
-use std::collections::HashSet;
-
 use futures::future::BoxFuture;
 
-use super::{Enumerated, Seed, Strategy, StrategyDef, Walk};
+use super::{Enumerated, Pass, Seed, Strategy, StrategyDef, Walk};
 use crate::discovery::{SitemapDoc, sitemap as doc};
 use crate::domain::Note;
 use crate::strategies::{Keyed, Recognition};
@@ -126,11 +124,11 @@ impl Strategy for Sitemap {
                 .final_url()
                 .ok_or_else(|| anyhow::anyhow!("the seed does not record where it was served"))?;
             let robots = &seed.robots;
-            let mut out = Enumerated::default();
+            let mut pass = Pass::new(crawl, "surface", MAX_DEPTH);
 
             // Everything that would explain a wrong count, stated as provenance rather
             // than left for the reader to reconstruct from a bare number.
-            out.notes.push(Note::ok_or_warn(
+            pass.note(Note::ok_or_warn(
                 "robots.txt",
                 match robots.declared {
                     true => "read",
@@ -139,7 +137,7 @@ impl Strategy for Sitemap {
                 robots.declared,
             ));
             if let Some(delay) = robots.crawl_delay() {
-                out.notes.push(Note::new(
+                pass.note(Note::new(
                     "crawl-delay",
                     format!("{}s declared by the host", delay.as_secs_f64()),
                 ));
@@ -149,133 +147,63 @@ impl Strategy for Sitemap {
             // Resolved first — see `resolve`. A declaration that will not resolve is
             // dropped with a warning rather than queued, because queuing it spends a
             // request to learn what the URL parser already knew.
-            let mut queue: Vec<(String, usize)> = Vec::new();
+            let mut declared_any = false;
             for declared in robots.sitemaps() {
                 match resolve(declared, &base) {
-                    Some(url) => queue.push((url.to_string(), 0)),
-                    None => out.warnings.push(format!(
+                    Some(url) => {
+                        pass.push(url.to_string(), 0);
+                        declared_any = true;
+                    }
+                    None => pass.warn(format!(
                         "robots.txt declares `{declared}`, which is not a usable address"
                     )),
                 }
             }
-            if queue.is_empty() {
+            if !declared_any {
                 let guess = base.join("/sitemap.xml")?;
-                out.warnings.push(format!(
+                pass.warn(format!(
                     "robots.txt declared no sitemap; trying {guess} by convention"
                 ));
-                queue.push((guess.to_string(), 0));
+                pass.push(guess.to_string(), 0);
             }
 
-            let mut visited: HashSet<String> = HashSet::new();
-            let mut seen: HashSet<String> = HashSet::new();
-            let mut fetched = 0usize;
-            let mut disallowed = 0u64;
+            while let Some((loc, depth)) = pass.next_to_visit() {
+                pass.visiting(format!("sitemap {loc}"));
 
-            while let Some((loc, depth)) = queue.pop() {
-                if !crawl.may_fetch() {
-                    out.truncated = true;
-                    out.warnings.push(format!(
-                        "stopped at the {}-request budget; the surface is larger than \
-                         this run captured",
-                        crawl.budget()
-                    ));
-                    break;
-                }
-                // Tested here rather than only where addresses are pushed, so a full run
-                // stops fetching instead of walking the remaining index to throw every
-                // urlset away — and so the warning is written once rather than once per
-                // document that arrived after the cap.
-                if out.addresses.len() >= crawl.max_addresses() {
-                    break;
-                }
-                // Loop protection. Self-referential indexes exist in the wild.
-                if !visited.insert(loc.clone()) {
-                    continue;
-                }
-                if depth > MAX_DEPTH {
-                    out.warnings
-                        .push(format!("depth limit reached, skipping {loc}"));
-                    continue;
-                }
-
-                crawl.progress().step(
-                    format!("sitemap {loc}"),
-                    fetched as u64,
-                    (fetched + queue.len() + 1) as u64,
-                );
-
-                let body = match crawl.get(&loc).await {
+                let body = match pass.walk().get(&loc).await {
                     Ok(f) => f.bytes,
                     Err(refusal) => {
-                        out.warnings.push(format!("{loc}: {refusal}"));
+                        pass.refused(&loc, &refusal);
                         continue;
                     }
                 };
-                fetched += 1;
-                out.notes.push(Note::new("sitemap", loc.clone()));
+                pass.note(Note::new("sitemap", loc.clone()));
 
                 match doc::parse(&body) {
                     Ok(SitemapDoc::Index(refs)) => {
                         for r in refs {
-                            queue.push((r.loc, depth + 1));
+                            pass.push(r.loc, depth + 1);
                         }
                     }
                     Ok(SitemapDoc::UrlSet(entries)) => {
                         for e in entries {
-                            // The loop above writes the warning and ends the walk.
-                            if out.addresses.len() >= crawl.max_addresses() {
+                            // `next` writes the warning and ends the walk; this only stops
+                            // filling past the ceiling.
+                            if pass.full() {
                                 break;
                             }
-                            if !robots.allowed(&e.loc) {
-                                disallowed += 1;
-                                continue;
-                            }
-                            // Dedup on the full URL *including* query string — stripping
-                            // it would collapse distinct .gov agenda pages into one.
-                            if seen.insert(e.loc.clone()) {
-                                out.addresses.push(e.loc);
-                            }
+                            pass.keep(e.loc, robots);
                         }
                     }
-                    Err(e) => out.warnings.push(format!("{loc}: {e}")),
+                    Err(e) => pass.warn(format!("{loc}: {e}")),
                 }
             }
 
-            // After the loop, not inside it, and this is the whole fix for `dunedin.gov`.
-            // The ceiling used to be reported from the top of the next iteration, which
-            // needs a next iteration to exist: one sitemap of 1,625 URLs fills past the cap
-            // on its only pass, the queue empties, and the walk exits clean. 500 addresses
-            // then printed with a checkmark beside them.
-            //
-            // A walk that ends holding exactly its ceiling cannot know whether the site
-            // stopped there or it did, so it says the cautious thing. That direction is
-            // forced: a truncated snapshot that reads as complete is the failure §4.3 is
-            // written against, and a complete one that reads as truncated costs a sentence.
-            if out.addresses.len() >= crawl.max_addresses() {
-                out.truncated = true;
-                out.warnings.push(format!(
-                    "stopped at {} addresses; the surface is larger than this run captured",
-                    crawl.max_addresses()
-                ));
-            }
+            let fetched = pass.visits();
+            pass.figure("sitemaps_fetched", fetched);
+            pass.figure("robots_declared", robots.declared as u64);
 
-            if disallowed > 0 {
-                out.notes.push(Note::marked(
-                    "disallowed",
-                    format!(
-                        "{} excluded by the site's own rules",
-                        crate::render::count(disallowed)
-                    ),
-                    crate::domain::NoteMark::Ok,
-                ));
-            }
-            out.figures.insert("disallowed".into(), disallowed);
-            out.figures
-                .insert("sitemaps_fetched".into(), fetched as u64);
-            out.figures
-                .insert("robots_declared".into(), robots.declared as u64);
-
-            Ok(out)
+            Ok(pass.finish())
         })
     }
 }

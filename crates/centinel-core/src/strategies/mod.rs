@@ -1,42 +1,43 @@
-//! Recognising a shape, and doing something with the shape recognised.
+//! Recognising a site, and walking it.
 //!
-//! Two stages recognise, and they are not the same question.
+//! [`crawl`] asks one question — **where are the addresses** — and answers with a walk: a
+//! sitemap index, a directory listing, a product that serves its records a particular way.
 //!
-//! - [`crawl`] asks **where are the addresses**. It answers with a walk: a sitemap index,
-//!   a directory listing, a product that serves its records a particular way.
-//! - [`read`] asks **what does this document say**. It answers with text.
+//! ## Reading is not a second registry here
 //!
-//! Keeping them apart is a correction. Everything under this module was once simply
-//! `Strategy`, which read as though recognising a site were the whole problem — and
-//! `hillsclerk.com` is recognised by `sitemap`, enumerates 177 addresses without a
-//! mistake, and hands back 23,213 characters of navigation for a page whose content is one
-//! sentence. Recognition tells you how to *find* the pages. It says nothing about reading
-//! them, and no crawl strategy ever could.
+//! It was, briefly, and that was a mistake worth recording. Recognition tells you how to
+//! *find* the pages and says nothing about reading them — `hillsclerk.com` is recognised by
+//! `sitemap`, enumerates 177 addresses without a mistake, and hands back 23,213 characters
+//! of navigation for a page whose content is one sentence. True, and it does not follow
+//! that the fix belongs beside a crawl strategy.
 //!
-//! ## What is shared, and why only this
-//!
-//! [`Recognition`] and [`Keyed`] live here because both stages answer the same way: with
-//! **evidence**, not a verdict. An operator accepts or rejects on what was seen, and
-//! `docs/FIELD-NOTES.md` entry 1 is what accepting a bare verdict costs — 75 Resources, 75
-//! successful acquisitions, liveness `live` on every one, and 75 copies of a navigation
-//! menu reading "Preview link expired".
-//!
-//! Nothing else is shared. The two stages have different inputs, different outputs and
-//! different budgets, and a common trait over them would exist only to make them look
-//! alike.
+//! It belongs in [`crate::extract`], which already dispatches on
+//! [`crate::content::ContentKind`] to a list of readers tried in order. A second registry
+//! in front of that list is a second answer to "how do we get text out of this", and it
+//! opted out of every invariant the list exists to hold: one definition of *produced
+//! nothing*, one definition of a tool name, `recovered_by_fallback`, and the notes a
+//! reader leaves when it gives way. `marked` — the page's own content region — is
+//! [`crate::extract::Reader::Marked`], the first element of the HTML row, and it is held to
+//! all four.
 //!
 //! ## The unit of contribution is a strategy, never a site
 //!
-//! On both sides. A strategy keys on a **product**, a **framework**, a **server default**,
-//! or a **standard** — never on a jurisdiction. Every one of those ships to many cities,
-//! which is what makes the work amortise: recognising Hyland OnBase collects every city
-//! running OnBase, where teaching it Tampa collects Tampa.
+//! A strategy keys on a **product**, a **framework**, a **server default**, or a
+//! **standard** — never on a jurisdiction. Every one of those ships to many cities, which
+//! is what makes the work amortise: recognising Hyland OnBase collects every city running
+//! OnBase, where teaching it Tampa collects Tampa.
 //!
 //! [`Keyed`] has no `Jurisdiction` variant, so the rule is enforced by the type rather
 //! than by review.
+//!
+//! ## Evidence, not a verdict
+//!
+//! [`Recognition`] carries what was seen, because an operator accepts or rejects on it.
+//! `docs/FIELD-NOTES.md` entry 1 is what accepting a bare verdict costs — 75 Resources, 75
+//! successful acquisitions, liveness `live` on every one, and 75 copies of a navigation
+//! menu reading "Preview link expired".
 
 pub mod crawl;
-pub mod read;
 
 use crate::domain::{Note, NoteMark};
 

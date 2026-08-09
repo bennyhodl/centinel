@@ -131,10 +131,17 @@ pub struct DiscoverReport {
     /// Addresses no previous snapshot contained. A **set difference**: a source that
     /// swapped fifty pages for fifty others moved by fifty while its count stood still.
     pub new: usize,
-    /// Counted against the previous run. A large negative swing usually means a
-    /// truncated pass, not a shrinking source.
+    /// Counted against the previous run. A neutral figure — `truncated` below is what
+    /// says whether this pass ran out, and it is asked of the strategy rather than
+    /// guessed from the sign of a delta.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_run: Option<usize>,
+    /// Whether this pass stopped on a ceiling rather than on the end of the source.
+    ///
+    /// §4.3: a truncated snapshot looks exactly like a source that shrank, so nothing may
+    /// silently cap one. `found` is a floor when this is true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
     /// What the Source wanted said about how it got here — sitemaps walked, tabs read,
     /// rules assumed rather than obeyed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -196,6 +203,7 @@ pub async fn discover(
         found: out.found,
         new: out.new,
         previous_run: out.previous_run,
+        truncated: out.truncated,
         notes: out.notes,
         figures: out.figures,
         warnings: out.warnings,
@@ -234,21 +242,34 @@ impl Render for DiscoverReport {
             );
             p.line(format!("{count} {label}"))?;
 
+            // The snapshot stopped on a ceiling, so the count above is a floor. Said
+            // before the delta, because it is what the delta means.
+            if self.truncated {
+                p.marked(
+                    Mark::Warn,
+                    p.paint(
+                        "this pass stopped on a ceiling — the source is larger than this",
+                        Ink::Dim,
+                    ),
+                )?;
+            }
+
             if let Some(previous) = self.previous_run {
                 let delta = self.found as i64 - previous as i64;
-                let text = format!(
-                    "{}{} against the previous run's {}",
-                    if delta >= 0 { "+" } else { "" },
-                    delta,
-                    render::count(previous as u64),
-                );
-                // A shrinking snapshot is the signature of a truncated one, so it is amber
-                // rather than a neutral figure.
-                if delta < 0 {
-                    p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
-                } else {
-                    p.line(p.paint(&text, Ink::Dim))?;
-                }
+                // A neutral figure, always. This used to be marked amber when it went
+                // negative, on the theory that a shrinking snapshot is the signature of a
+                // truncated one — which is true, and useless: it cannot fire on a first
+                // run, and it fires on every source that genuinely shrank. The strategy
+                // knows whether it stopped early, and now says so above.
+                p.line(p.paint(
+                    &format!(
+                        "{}{} against the previous run's {}",
+                        if delta >= 0 { "+" } else { "" },
+                        delta,
+                        render::count(previous as u64),
+                    ),
+                    Ink::Dim,
+                ))?;
             }
 
             p.blank()?;
@@ -328,6 +349,7 @@ mod tests {
             found,
             new,
             previous_run: previous,
+            truncated: false,
             notes: Vec::new(),
             figures: BTreeMap::new(),
             warnings: Vec::new(),
@@ -343,13 +365,25 @@ mod tests {
         assert!(out.contains("40 new"), "{out}");
     }
 
-    /// A shrinking snapshot is usually a truncated pass, so it must not read as a neutral
-    /// figure.
+    /// §4.3, and the whole reason the flag exists: the pass that ran out says so itself.
     #[test]
-    fn a_shrinking_snapshot_is_flagged() {
+    fn a_truncated_pass_is_flagged() {
+        let mut r = report(500, 500, None);
+        r.truncated = true;
+        let out = render_to_string(&r);
+        assert!(out.contains("ceiling"), "{out}");
+        assert!(out.contains('!') || out.contains('⚠'), "unmarked: {out}");
+    }
+
+    /// The delta used to carry the truncation warning, on the theory that a shrinking
+    /// snapshot is the signature of a truncated one. It is — and it is unusable as a
+    /// test: silent on a first run, and wrong on a source that really did shrink. It is
+    /// a figure again, and the flag above is the claim.
+    #[test]
+    fn a_shrinking_snapshot_is_a_neutral_figure() {
         let out = render_to_string(&report(400, 0, Some(12_000)));
         assert!(out.contains("-11600"), "{out}");
-        assert!(out.contains('!') || out.contains('⚠'), "unmarked: {out}");
+        assert!(!out.contains('!') && !out.contains('⚠'), "marked: {out}");
     }
 
     /// The renderer paints notes it does not understand — which is how a third Source
