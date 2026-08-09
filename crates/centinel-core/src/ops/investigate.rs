@@ -692,11 +692,15 @@ impl Render for Probe {
             if let Some((n, noun)) = across {
                 line.push_str(&format!(" across {} {noun}", render::count(*n)));
             }
-            // The word that stops a probe reading as a total.
+            // The word that stops a probe reading as a total. It does **not** name which
+            // ceiling stopped the walk, because this line does not know: the walk has two,
+            // and it used to blame the request budget for an address cap either way —
+            // `buffalony.gov` printed "STOPPED at 25 req" having actually filled 500
+            // addresses inside one sitemap. The warning below names the real one.
             match self.complete {
                 true => line.push_str(&format!("   (probe, {} req)", self.requests_allowed)),
                 false => line.push_str(&format!(
-                    "   (probe STOPPED at {} req — there is more)",
+                    "   (probe STOPPED, {} req allowed — there is more)",
                     self.requests_allowed
                 )),
             }
@@ -956,13 +960,13 @@ mod tests {
     /// unusual, and only the read is wrong.
     #[tokio::test]
     async fn a_page_that_reads_as_a_menu_is_a_lead_even_though_its_shape_is_ordinary() {
+        // No article at all, so the whole page is genuinely all there is to read and the
+        // menu is genuinely what came out. This used to carry one sentence of content as
+        // well — see the test below, which is what the reader now does with that.
         let nav: String = (0..60)
             .map(|i| format!("<li><a href=\"/services/{i}\">Service number {i}</a></li>"))
             .collect();
-        let body = format!(
-            "<html><body><nav><ul>{nav}</ul></nav>\
-             <article><p>Thanks! Your application was submitted.</p></article></body></html>"
-        );
+        let body = format!("<html><body><nav><ul>{nav}</ul></nav></body></html>");
         let lead = measure(&ordinary_seed(&body, "https://x.gov/"), true).await;
 
         assert!(lead.findings.is_empty(), "the shape is ordinary");
@@ -974,6 +978,36 @@ mod tests {
                 .any(|f| f.contains("This is a menu")),
             "{:?}",
             lead.read.findings
+        );
+    }
+
+    /// `hillsclerk.com/marriage-license-application-success-kiosk`, and the fix for it.
+    ///
+    /// One sentence of real content inside a large menu. This is the page that put 23,213
+    /// characters of navigation into the corpus, because the sentence fell under the old
+    /// character floor and the whole page replaced it. The sentence is now kept, the menu
+    /// is not, and so there is no longer a bad read here for the verdict to report.
+    #[tokio::test]
+    async fn one_sentence_of_content_beats_the_menu_that_surrounds_it() {
+        let nav: String = (0..60)
+            .map(|i| format!("<li><a href=\"/services/{i}\">Service number {i}</a></li>"))
+            .collect();
+        let body = format!(
+            "<html><body><nav><ul>{nav}</ul></nav>\
+             <article><p>Thanks! Your application was submitted.</p></article></body></html>"
+        );
+        let lead = measure(&ordinary_seed(&body, "https://x.gov/"), true).await;
+
+        assert!(
+            lead.read.findings.is_empty(),
+            "the read is good now: {:?}",
+            lead.read.findings
+        );
+        assert!(!lead.is_lead(), "so the page is not a lead at all");
+        assert!(
+            lead.read.chars < 200,
+            "and what was kept is the sentence, not the menu: {} chars",
+            lead.read.chars
         );
     }
 

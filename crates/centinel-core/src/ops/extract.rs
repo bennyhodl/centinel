@@ -84,6 +84,24 @@ pub struct Unreadable {
     pub reason: String,
 }
 
+/// A document that yielded text nothing should have wanted.
+///
+/// Both numbers, not the ratio: `614 chars of 191 KiB` is a sentence an operator can act
+/// on, and a percentage is one they have to unpack.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PoorRead {
+    pub url: String,
+    pub chars: usize,
+    pub bytes: usize,
+    pub findings: Vec<String>,
+}
+
+/// Poor reads named in the report before the list is cut off.
+///
+/// Small on purpose: on a site whose template is broken these run to hundreds, and the
+/// count above already carries the scale. This is here to be looked at, not read through.
+const POOR_SAMPLE: usize = 5;
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ExtractReport {
     pub sources: Vec<String>,
@@ -116,6 +134,16 @@ pub struct ExtractReport {
     /// Extracted, but some pages are scans needing OCR we cannot perform.
     pub needs_ocr: usize,
     pub unextractable: usize,
+    /// Documents that produced text the [`crate::verdict`] measures call bad.
+    ///
+    /// The figure that separates "this run collected 50 pages" from "this run collected 50
+    /// menus". Not a failure count — every one of these is stored, indexed and searchable,
+    /// which is precisely the problem with leaving it unsaid.
+    #[serde(default)]
+    pub poor_reads: usize,
+    /// A sample of them, to look at rather than infer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub poor: Vec<PoorRead>,
     pub chars_of_text: usize,
     /// Which pipeline handled how many documents.
     pub by_tool: BTreeMap<String, usize>,
@@ -146,6 +174,8 @@ pub async fn extract(
         already_unextractable: 0,
         attempted: 0,
         left_by_limit: 0,
+        poor_reads: 0,
+        poor: Vec::new(),
         extracted: 0,
         recovered_by_fallback: 0,
         needs_ocr: 0,
@@ -259,6 +289,16 @@ pub async fn extract(
             }
             let outcome = derived.outcome;
 
+            // What we think of the read, taken here rather than only in `check`.
+            //
+            // The measure already existed and was already right — on the Cleveland landmark
+            // pages `check` says *"73% of the text is link text. This is a menu, not a
+            // page"* — and `run` printed `html 135203 378ch 4ms` for the same document and
+            // moved on. 385 of that site's 1,098 addresses are that template. A verdict only
+            // the diagnostic command shows is a verdict for people who already suspect
+            // something, which is not who needs it.
+            let read = crate::verdict::Verdict::on(&bytes, outcome.text().unwrap_or_default());
+
             let item = |verdict, produced, detail| ItemOutcome {
                 address: resource.natural_key.clone(),
                 // The content kind, because it is what decides which reader ran and
@@ -329,7 +369,32 @@ pub async fn extract(
                     ));
                 }
                 Extracted::Text(e) => {
-                    progress.item(item(Verdict::Ok, Some(e.text.chars().count() as u64), None))
+                    let chars = Some(e.text.chars().count() as u64);
+                    match read.is_poor() {
+                        // Text came out and it is the wrong text. Distinct from
+                        // `Unextractable`, which produced nothing and is honest about it —
+                        // this arm is the one that used to look identical to a clean read.
+                        true => progress.item(item(
+                            Verdict::Warn,
+                            chars,
+                            Some(read.findings.join("; ")),
+                        )),
+                        false => progress.item(item(Verdict::Ok, chars, None)),
+                    }
+                }
+            }
+
+            // Counted after the match so `Partial` is judged too: a PDF that needed OCR can
+            // also be mostly menu, and the two facts are independent.
+            if read.is_poor() {
+                report.poor_reads += 1;
+                if report.poor.len() < POOR_SAMPLE {
+                    report.poor.push(PoorRead {
+                        url: resource.natural_key.clone(),
+                        chars: read.chars,
+                        bytes: read.bytes,
+                        findings: read.findings.clone(),
+                    });
                 }
             }
 
@@ -412,6 +477,7 @@ impl Render for ExtractReport {
                 (self.recovered_by_fallback as u64, "read by the fallback"),
                 (self.needs_ocr as u64, "need OCR"),
                 (self.unextractable as u64, "unextractable"),
+                (self.poor_reads as u64, "read poorly"),
             ])?;
 
             // Before the OCR line, because "I stopped early" changes how every figure above
@@ -453,6 +519,28 @@ impl Render for ExtractReport {
                 }
             }
 
+            // Above the sample, because the sample shows what a run got right and this
+            // shows what it got wrong while reporting success. A reader who stops here
+            // should stop on the bad news.
+            if !self.poor.is_empty() {
+                p.section("read poorly")?;
+                for item in &self.poor {
+                    item.render(p)?;
+                }
+                if self.poor_reads > self.poor.len() {
+                    p.nest(|p| {
+                        let more = self.poor_reads - self.poor.len();
+                        p.wrapped(
+                            &format!(
+                                "… and {} more. `centinel check <url>` for one of them",
+                                render::count(more as u64)
+                            ),
+                            Ink::Dim,
+                        )
+                    })?;
+                }
+            }
+
             if !self.sample.is_empty() {
                 p.section("sample")?;
                 for (i, item) in self.sample.iter().enumerate() {
@@ -476,6 +564,30 @@ impl Render for Unreadable {
         );
         p.marked(Mark::Bad, head)?;
         p.nest(|p| p.wrapped(&render::one_line(&self.reason), Ink::Dim))
+    }
+}
+
+impl Render for PoorRead {
+    fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
+        // `Warn`, not `Bad`: the document is stored and readable, and calling that a
+        // failure would put it beside the `.dwg` that has no text to give. What went wrong
+        // is that it is the wrong text, and an operator has to decide what to do about it.
+        p.marked(
+            Mark::Warn,
+            render::truncate(&self.url, p.width().saturating_sub(10)),
+        )?;
+        p.nest(|p| {
+            let size = format!(
+                "{} of text from {}",
+                render::count(self.chars as u64),
+                render::bytes(self.bytes as u64)
+            );
+            p.wrapped(&size, Ink::Dim)?;
+            for f in &self.findings {
+                p.wrapped(&render::one_line(f), Ink::Dim)?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -715,6 +827,58 @@ mod tests {
         assert_eq!(again.already_derived, 1);
         assert_eq!(again.already_unextractable, 0);
         assert_eq!(again.attempted, 0);
+    }
+
+    /// The Cleveland landmark pages, in miniature: text comes out, it is stored, it is
+    /// searchable, and it is a menu. `check` has always said so and `run` never did, so a
+    /// site that put 385 pages of navigation into the corpus reported 385 successes.
+    #[tokio::test]
+    async fn a_page_that_extracts_to_a_menu_is_counted_and_named() {
+        let links: String = (0..40)
+            .map(|i| format!("<li><a href=\"/dept/{i}\">Department of Everything {i}</a></li>"))
+            .collect();
+        let menu = format!("<html><body><nav><ul>{links}</ul></nav></body></html>");
+
+        let (_d, ctx) = store_with(menu.as_bytes(), "https://cleveland.test/landmarks/a").await;
+        let report = extract(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
+
+        assert_eq!(report.extracted, 1, "it did produce text");
+        assert_eq!(
+            report.unextractable, 0,
+            "so this is not the unreadable case"
+        );
+        assert_eq!(report.poor_reads, 1, "and the text is not worth having");
+        let named = report.poor.first().expect("named, not merely counted");
+        assert_eq!(named.url, "https://cleveland.test/landmarks/a");
+        assert!(
+            named.findings.iter().any(|f| f.contains("link text")),
+            "with the reason: {:?}",
+            named.findings
+        );
+    }
+
+    /// The other side, and the one that keeps the figure worth reading. A real article
+    /// must not be counted a poor read, or the number becomes noise and gets ignored —
+    /// which is how the withdrawn chars-per-KB measure failed.
+    #[tokio::test]
+    async fn an_ordinary_article_is_not_counted_a_poor_read() {
+        let html = "<html><body><article><h1>Division of Police</h1>\
+            <p>The mission of the Cleveland Division of Police is to serve as guardians of \
+            the Cleveland community. Guided by the Constitution, we shall enforce the law, \
+            maintain order, and protect the lives, property, and rights of all people.</p>\
+            <p>Chief Todd began in public safety as a traffic controller and rose through \
+            the ranks to sergeant, lieutenant and commander before her appointment.</p>\
+            </article></body></html>";
+
+        let (_d, ctx) = store_with(html.as_bytes(), "https://cleveland.test/police").await;
+        let report = extract(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
+
+        assert_eq!(report.extracted, 1);
+        assert_eq!(report.poor_reads, 0, "{:?}", report.poor);
     }
 
     /// `boston.gov`, in miniature. A limit used to `break` in silence, so a report that

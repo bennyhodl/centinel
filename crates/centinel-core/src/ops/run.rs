@@ -785,16 +785,28 @@ async fn run_derivation(
                             ("chars_of_text", r.chars_of_text as u64),
                             ("unextractable", r.unextractable as u64),
                             ("ocr_pages_pending", r.ocr_pages_pending as u64),
+                            // The figure this stage exists to stop hiding. A run that reads
+                            // fifty menus and a run that reads fifty pages both said
+                            // "50 documents" until this was carried up.
+                            ("poor_reads", r.poor_reads as u64),
                         ],
                     ))
                 },
                 |t, _| {
-                    format!(
+                    let mut line = format!(
                         "{} {} \u{00b7} {} chars",
                         render::count(t.new),
                         noun(t.new, "document", "documents"),
                         render::count(t.get("chars_of_text"))
-                    )
+                    );
+                    // Only when it fired, so a healthy run stays one clean line.
+                    if t.get("poor_reads") > 0 {
+                        line.push_str(&format!(
+                            " \u{00b7} {} read poorly",
+                            render::count(t.get("poor_reads"))
+                        ));
+                    }
+                    line
                 },
             )
             .await
@@ -873,18 +885,31 @@ async fn run_derivation(
                             ("documents_indexed", r.documents_indexed as u64),
                             ("chunks_written", r.chunks_written as u64),
                             ("chunks_deduplicated", r.chunks_deduplicated as u64),
+                            // Carried for the same reason as `poor_reads` above: the gap
+                            // between what was extracted and what became searchable is the
+                            // one number that says a document entered the corpus and
+                            // reached nothing, and subtracting for it is not a thing
+                            // anybody does.
+                            ("empty_documents", r.empty_documents as u64),
                         ],
                     )
                     // The size of the whole index, not of this call's work.
                     .total("total_chunks", r.total_chunks as u64))
                 },
                 |t, _| {
-                    format!(
+                    let mut line = format!(
                         "{} {} \u{00b7} {} chunks",
                         render::count(t.new),
                         noun(t.new, "document", "documents"),
                         render::count(t.get("chunks_written"))
-                    )
+                    );
+                    if t.get("empty_documents") > 0 {
+                        line.push_str(&format!(
+                            " \u{00b7} {} produced nothing",
+                            render::count(t.get("empty_documents"))
+                        ));
+                    }
+                    line
                 },
             )
             .await
