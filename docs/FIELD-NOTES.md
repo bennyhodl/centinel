@@ -37,9 +37,15 @@ lever.
 | 2 | Hyland OnBase Agenda Online (`*.hylandcloud.com`) | search caps at 100 in silence; error pages answer 200; the HTML view is 84% base64 while a clean PDF sits at a derivable address | enumerate, collect **and** extract | every city running OnBase; every ASP.NET site that answers 200 on error; every site at all, for the base64 |
 | 3 | CTTV captions (`apps.tampagov.net/cttv_cc_webapp`) | table cells fuse into one run-on line; 2,606 transcripts behind a `__doPostBack` pager | extract **and** enumerate | **every HTML page with a table**; every ASP.NET WebForms grid |
 | 4 | Hillsborough Clerk (`hillsclerk.com`) | ~6 GB of open bulk files nobody looked for; every `.csv` unextractable because IIS says `octet-stream` | collect | every server that defaults to `octet-stream`; every open directory listing |
+| 5 | Six ordinary city and county sites | five of six enumerate perfectly and still lose most of their content; one loses all 579 addresses to a relative `Sitemap:` line | **extract and report** — not enumerate | every CMS site, which is most of them |
 
-**Outcome of this session:** four entries produced one agreed feature — **crumbs**. See
+**Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
+
+**Outcome of the second:** entry 5 inverts the file. Entries 1–4 are exotic systems and all
+four fail at `enumerate`; six ordinary sites enumerate cleanly and fail *after*, at the
+boundary between what the pipeline measures and what it reports. Five framework fixes fall
+out, all of them defects any site triggers and none of them a strategy.
 
 ---
 
@@ -971,6 +977,282 @@ Deliberately **not** built: anything that drives HOVER. See system B.
 
 ---
 
+## 5. Six ordinary city and county sites — the sweep that inverted this file
+
+*Seen 2026-08-08. `clevelandcitycouncil.gov`, `clevelandohio.gov`, `dunedin.gov`,
+`boston.gov`, `medinaco.org`, `buffalony.gov`. One full run each: `investigate`, then
+`source add`, then `run --skip embed --limit 50`, each into its own store.*
+
+### The premise, tested
+
+Entries 1–4 are exotic systems, and all four fail at **enumerate**. That agreement is what
+[Left on the table](#left-on-the-table-3) proposed testing against "a county that is neither
+Tampa nor Hillsborough". These six are that test: ordinary CMS sites, no viewer shells, no
+postback pagers, no bulk trees. Four different platforms — Drupal, WordPress, CivicPlus,
+Granicus — across five states.
+
+The premise did not survive.
+
+| Site | Declared | Discovered | Collected | Extracted | Reached the index |
+|---|---|---|---|---|---|
+| `buffalony.gov` | 579 | **0** | 0 | 0 | 0 |
+| `clevelandcitycouncil.gov` | 1,309 | 1,309 | 53 | 50 | 135 chunks |
+| `clevelandohio.gov` | 1,098 | 1,098 | 50 | 50 | 21 of ~100 documents |
+| `dunedin.gov` | 1,625 | 1,625 | 72 | 50 | 45 of 50 documents |
+| `boston.gov` | 4,260 | 4,260 | 211 | 50 | **0 of 161 PDFs** |
+| `medinaco.org` | 9,939 | 9,915 | 50 | 50 | 95 chunks |
+
+**Five of six enumerate perfectly.** Every discovered count matches the live sitemap,
+checked by hand with `curl`. Medina's 24-address gap is a live site changing between two
+fetches, not drift in the walk.
+
+So the stage this file has spent four entries blaming is the one stage that works on an
+ordinary site. Everything below happens **after** the addresses are correct — which is the
+inversion, and it is worth stating plainly: *a site can enumerate flawlessly and still put
+almost nothing in the corpus.*
+
+### Fault 1 — `--limit` starves extract, and on one site it cost every PDF
+
+*4 sightings of 6.* `--limit` is documented against collection only: *"Stop collection after
+this many addresses, per source."* `ops/run.rs` passes the same number into `ExtractArgs`,
+`TranscribeArgs` and `EmbedArgs`.
+
+`boston.gov` shows what that costs, and the mechanism is ugly:
+
+```
+HTML pages   → boston.gov/...
+PDFs         → www.boston.gov/...
+```
+
+Addresses sort alphabetically, `boston.gov` sorts before `www.boston.gov`, so a budget of 50
+was spent entirely on HTML before extraction reached a single enclosure. 211 items
+collected, 161 of them PDFs, and **not one PDF was read**. The report:
+
+```
+extract   50 documents · 301,798 chars
+unextractable: 0
+```
+
+Re-running `extract` with no limit recovered 146 documents and 3,812,298 more characters —
+including a 127-page fire prevention code that read cleanly first try. The extractor was
+never the problem. Nothing in the report said anything was missing.
+
+The other three: `clevelandcitycouncil` left 3 enclosures underived, `clevelandohio` left 60
+documents, `dunedin` left 21.
+
+### Fault 2 — the read verdict is computed, is correct, and never reaches `run`
+
+*4 sightings of 6.* `check` prints a verdict on every read. On the Cleveland landmark pages:
+
+```
+! dom_smoothie+htmd 0.18.0+0.5.5  ·  378 of text  ·  73% link text
+  ! 73% of the text is link text — 4 links in 378 chars. This is a menu, not a page.
+```
+
+`run` printed `html 135203 378ch 4ms` for the same document and moved on. A full Medina run
+log contains no `!` marker at all. The measure works; only `check` shows it, and `check` is
+the command an operator runs when they already suspect something.
+
+### Fault 3 — readability picks the wrong region, or the fallback keeps everything
+
+*4 sightings of 6, and this is the one that matches the complaint that started the work:
+collecting repeatable junk pollutes the corpus.*
+
+Two opposite failures, one cause — `MIN_READABLE_CHARS`, a fixed floor, decides between
+"keep what readability chose" and "keep the whole page".
+
+| Page | Kept | What happened |
+|---|---|---|
+| `clevelandohio…/czech-sokol-hall` | 378 | picked City Hall's contact block |
+| `clevelandohio…/denison-cemetery` | 29,099 | found 123 chars, kept the **whole page** |
+| `boston…/black-history-boston` | 614 of 191 KiB | dropped 30 named figures with bios |
+| `dunedin…/After-the-Storm` | 361 | picked the site-wide emergency banner |
+| `medinaco…/commissioners-meeting/2026-10-13` | 255 | dropped the pointer to the agenda |
+
+**385 of `clevelandohio.gov`'s 1,098 addresses are that landmark template** — 35% of the
+site. The live page carries `1890`, `4314 Clark Avenue`, `Architect: Andrew Mitermiler`. The
+corpus carries the mayor's phone number and City Hall's office hours. `search Mitermiler`
+returns nothing. The page's own title is not searchable.
+
+And the two directions compound. The three Cleveland pages that kept the whole page supplied
+**105 of that corpus's 174 chunks**. So:
+
+```
+$ centinel search police --source cleveohio -n 5
+1  Denison Cemetery                0.7554  "...Recycling & Composting...Seniors..."
+2  Euclid Beach Park Gateway Arch  0.7509  (the same nav menu)
+3  Denison Cemetery                0.6793
+4  Euclid Beach Park Gateway Arch  0.6752
+5  Fine Arts Building              0.6734
+```
+
+Five chunks of navigation from a cemetery, a park arch and an office building. The Police
+Division page, which extracted perfectly, is nowhere. Confident, high-scoring, and about the
+wrong thing.
+
+`black-history-boston` is the case that decides the fix. It fires **no** verdict — `✓`, 614
+chars, few links, so link share cannot see it. Chars-per-KB puts it at 3.2, inside the range
+`docs/STRATEGIES.md` §17 recorded for healthy pages when that measure was withdrawn. What
+separates it is a number the pipeline already computes and then throws away: the fallback
+path prints *"readability found only 123 chars; kept the full page instead"*. It compares
+readability's yield against the whole-page yield, and then decides with a fixed floor
+instead of a ratio.
+
+### Fault 4 — a document that indexes to nothing disappears without a word
+
+*2 sightings.* `ops/build_index.rs`:
+
+```rust
+let chunks = chunk_markdown(&stripped.text, &config);
+if chunks.is_empty() {
+    continue;           // no counter, no note, no line in the report
+}
+```
+
+Five `dunedin.gov` pages each extracted to the same 361-character water-shortage banner and
+nothing else. The boilerplate pass correctly recognised that banner as chrome and stripped
+it, which left nothing, and the indexer dropped all five. They still read `✓ live` in
+`list`, still report a successful extraction, and no search can reach them. That is the
+50 → 45 gap in the table above.
+
+The stripping is right. The silence is not — and it is a consequence of the boilerplate pass
+itself, which is exactly the class of thing that has to be counted rather than assumed.
+
+### Fault 5 — `investigate` and `run` disagree about the same address
+
+*3 sightings.* On `boston.gov`, `clevelandohio.gov` and `clevelandcitycouncil.gov`,
+`investigate` said:
+
+```
+recognised
+  ! nothing
+measured
+  sitemap       none declared
+  ! a lead
+  no sitemap declared, so there is no surface to walk
+
+no `source add` line: nothing here knows how to enumerate this address, so collecting it
+would store a front page and little else.
+```
+
+All three serve `/sitemap.xml` at the conventional address. `run`, seconds later, collected
+4,260, 1,098 and 1,309 addresses from those files.
+
+The cause is that `crawl::Sitemap::recognise` answers `None` unless `robots.txt` *declares* a
+sitemap — deliberately, so that a recognition and a fallback stay distinguishable in the
+store — while `enumerate` guesses `/sitemap.xml` anyway. `run` reaches the guess through
+`crawl::fallback()`. `investigate` probes only when something recognised the seed, so it
+never reaches it.
+
+The design is right and the report is wrong. This is the same gate that once made
+`hillsclerk.com`'s bad reads invisible, one field over: the Lead was un-gated from
+`hits.is_empty()`, the probe was left on it.
+
+### Fault 6 — a capped probe can print a checkmark
+
+*1 sighting, kept because the mechanism is general.* The `stopped at N addresses` warning is
+written at the **top** of the walk loop, so it needs a next iteration to fire. `dunedin.gov`
+declares exactly one sitemap: the loop runs once, fills past the 500 cap, the queue empties,
+and no next iteration happens. `complete` is then computed by looking for that warning:
+
+```
+✓ 500 address(es) across 1 sitemaps   (probe, 25 req)
+```
+
+The real figure is 1,625. Any site whose sitemap is a single file larger than the cap gets a
+confident wrong total, and the checkmark is what makes it wrong rather than merely partial.
+
+### Fault 7 — a relative `Sitemap:` line loses the whole site
+
+*1 sighting, kept because it is total.* `buffalony.gov`'s `robots.txt` says:
+
+```
+Sitemap: /sitemap.xml
+```
+
+A path, not the absolute URL the spec recommends — and the file is real: 200,
+`application/xml`, 579 `<url>` entries, every one same-host. The declared string is pushed
+into the fetch queue untouched and handed to `reqwest`, which cannot build a request from a
+path with no host. 579 addresses became **0**.
+
+The same unresolved string is then compared against the page origin to decide cross-host, so
+the report also warns *"at least one sitemap is on another host"* — false, and it points an
+operator away from the real cause. `collect` then said *"no discovery run for buffalo — run
+`centinel discover` first"*, which is wrong twice: discovery did run, and running it again
+reproduces the same empty result.
+
+### Smaller, recorded not ranked
+
+- **`history` shows nothing after a manual run.** *2 sightings.* `centinel history` reports
+  "No runs recorded" immediately after a run that printed a full tally, while the log holds
+  1.3 MB of records. The discover-to-collect ratio — 9,915 against 50 on Medina — survives
+  only in terminal scrollback.
+- **The boilerplate floor is one character too high for Boston's own chrome.**
+  `MIN_LINE_CHARS` is 12; `Toggle Menu` is 11, so the site's most repeated navigation line is
+  filtered out before it is ever counted, and it leads nearly every search snippet.
+- **A shared footer document is re-fetched per page.** Dunedin fetched one `.docx` **42
+  times** in a 50-page run. Content addressing means no disk was wasted; the requests were.
+- **79% of `medinaco.org` is plugin stub pages.** 7,841 of 9,939 addresses are one
+  auto-generated `venue/` page per distinct location string ever typed into an event, many
+  near-duplicates. Worth knowing before committing to the full site.
+- **One HTTP 520 that `curl` cannot reproduce.** Dunedin's `Code-of-Ordinances` fails in
+  `collect` and in `check`; `curl` gets 302 → 302 → 200 to `municode.com` every time. Recorded
+  as `✗ error` rather than as a refusal, which is the distinction the vocabulary exists for.
+
+### Against the three levers
+
+| Lever | Verdict |
+|---|---|
+| **Content kind** | Clean on all six. HTML, PDF, DOCX, PPTX all classified correctly, including Boston's 161 enclosures and Buffalo's `DocumentCenter` PDFs. |
+| **Reader list** | **The fault line.** PDF reading is genuinely good — a 127-page code, a 15-page budget statement with real tables, an agenda with a correctly rendered meeting table, and an honest "6 pages are scans no reader here can read". HTML reading is where four of six sites lose their content, and always at the same seam: which region of the page is the document. |
+| **Enclosure** | Works, and works well — Boston followed 161, Medina followed 25 agenda PDFs, `clevelandcitycouncil` picked up a `.docx`/`.pdf`/`.pptx` set. Every one of them was then starved by fault 1. |
+
+So this entry fails **none** of the three levers as they are written, and still loses most of
+its content. That is the same warning the file's preamble gives — *a site that fails none of
+these but still yields nothing has failed somewhere else* — except the somewhere else is not
+`enumerate` this time. It is the boundary between a reader and a report: every fault above is
+either a number the pipeline computes and discards, or a limit it applies and does not
+mention.
+
+### What would be built
+
+Nothing site-specific, and nothing new in the strategy registry. Every fault here is a
+framework defect that any site triggers, which is why none of them earns a `read::Strategy`
+— see that module's own doc comment. In the order the evidence ranks them:
+
+1. **Scope `--limit` to collection**, as its help already promises.
+2. **Resolve a declared sitemap against the base URL** before fetching it and before testing
+   it for cross-host.
+3. **Walk the fallback in `investigate`**, and label it a fallback rather than a recognition.
+4. **Surface the read verdict in `run`**, and count documents that index to nothing instead
+   of dropping them.
+5. **Replace the readability floor with a retention ratio**, using the two yields the
+   fallback path already measures.
+
+Item 5 is the one that addresses fault 3, which is the largest by content lost, and it is the
+one to be most careful about: `docs/STRATEGIES.md` §17 already records one read measure
+withdrawn after the corpus contradicted it. A ratio has to be measured against these six
+sites before it is trusted, not tuned until it looks right.
+
+### Left on the table
+
+- **A second sighting of "the extractor picked a different region than the page's own
+  template implies".** All four sightings here are readability guessing. A site that marks its
+  content region explicitly — `<main>`, `role="main"`, a schema.org `articleBody` — would say
+  whether the fix is a better ratio or a better region test. None of these six was checked for
+  that.
+- **CivicPlus as a product recognition.** `buffalony.gov` is CivicPlus by three independent
+  signals: a `frame-ancestors` CSP naming `*.civicplus.com`, the literal string in the page,
+  and the `AgendaCenter`/`DocumentCenter` modules. Centinel names only `sitemap`, a standard.
+  That is one sighting; a second CivicPlus city would promote it.
+- **The `.org` question, answered.** `medinaco.org` is a county government on a non-government
+  domain and nothing behaved differently. Recognition is evidence-based throughout; no code
+  path tests the suffix. Recorded so it is not asked again.
+- **Re-fetching a footer enclosure once per page.** Cheap to fix at 50 pages, not at 1,625.
+  Left because it is a politeness and time cost, not a corpus cost.
+
+---
+
 ## Recurring shapes
 
 A shape is promoted here when **two** sites show it.
@@ -978,6 +1260,11 @@ A shape is promoted here when **two** sites show it.
 ### The one every entry shows
 
 **A source is a tree of systems, and the tree crosses hosts.** — *4 sightings of 4*
+
+*Entry 5 does not test this and does not contradict it. Those six were run as whole sites,
+not investigated for handoffs; the one that was checked, `buffalony.gov`, dropped five
+plausible crumbs — a meeting vendor, a records vendor, an open-data portal, an assessment
+vendor, and CivicPlus's own portal. The claim below still rests on entries 1–4.*
 
 Not one entry in this file lives where its `.gov` domain does. Every single one is a
 different host, reached by a link, invisible to any sitemap:
@@ -1179,6 +1466,45 @@ Hillsborough before anything is built.
 
 ### Promoted
 
+**The pipeline measures the fault and does not report it.** — *4 sightings: clevelandohio,
+medina, dunedin, buffalony — and it is the shape entry 5 is really about*
+
+Every large fault in entry 5 is a number that already exists somewhere in the process and
+never reaches the person running it. `check` computes a link-share verdict and `run` drops it.
+The fallback measures readability's yield against the whole page's, uses it once for a
+threshold, and discards it. `build_index` knows a document produced no chunks and returns
+`continue`. `investigate` knows its probe hit a cap and prints a checkmark anyway.
+
+This is a sharper version of what `CONTEXT.md` already forbids for a truncated DiscoveryRun —
+*a truncated snapshot looks exactly like a source that shrank* — and the four sightings say
+the rule was written too narrowly. It is not only snapshots. **Any stage that stops early,
+strips something, or scores a read badly owes that fact to its report.** A silent success is
+worse than a loud failure, because only one of the two gets investigated.
+
+**The extractor chooses a region, and on a sparse page it chooses wrong in both
+directions.** — *4 sightings: clevelandohio (385 pages), medina, dunedin, boston*
+
+Readability picks a content region by scoring. On a page with a real article it is right and
+the output is clean. On a page whose content is a short fact block — a landmark's year and
+architect, a meeting's date and venue — it either picks a *different* dense block (a contact
+panel, a site-wide banner) or finds too little and hands the whole page to the fallback,
+navigation included. Both outcomes score as success.
+
+The two failures are the same decision seen from either side, and the deciding number is a
+fixed character floor. What the sightings add over one is that **the floor is the wrong kind
+of test**: 378 chars is plausible for a short page and catastrophic for a 132 KiB one. The
+comparison that separates them — readability's yield against the whole document's — is
+already computed on the path that reports *"readability found only 123 chars"*.
+
+**A limit meant for one stage silently binds the others.** — *4 sightings:
+clevelandcitycouncil, clevelandohio, dunedin, boston*
+
+`--limit` is documented as a collection cap and is threaded into extract, transcribe and
+embed. On `boston.gov` this made every one of 161 PDFs invisible while the report read clean,
+because address ordering put HTML first. The general shape: **a cap applied to a stage that
+does no fetching is not a politeness bound, it is data loss**, and the stage that inherited
+it had no reason to.
+
 **The address set lives on the page, and not in a link.** — *2 sightings: OpenGov Stories,
 OnBase Agenda Online*
 
@@ -1277,6 +1603,25 @@ would invent a corpus rather than observe one.
 
 ### Candidates, at one sighting each
 
+- **A relative `Sitemap:` line is never resolved, and the site is total loss.** Legal, common,
+  and it takes 579 addresses to zero while blaming another host. (5: `buffalony.gov`)
+- **A capped walk over a single sitemap reports itself complete.** The cap warning needs a
+  next iteration that a one-document queue never has. (5: `dunedin.gov` — 500 printed against
+  1,625)
+- **Boilerplate stripping can empty a document, and the empty one vanishes.** The strip is
+  correct; the page had nothing else. Kin to *the pipeline measures and does not report*, but
+  distinct — here the fault is created by a pass that is working. (5: `dunedin.gov` — 5 pages)
+- **A chrome line shorter than the floor is never counted.** `Toggle Menu` is 11 characters
+  against a 12-character minimum, and leads nearly every snippet on the site. (5: `boston.gov`)
+- **A manual run leaves no record in `history`.** Only the scheduler writes the journal, so the
+  discover-to-collect ratio survives in scrollback and nowhere else. (5: medina, dunedin — two
+  sightings of the same missing write, one defect)
+- **A shared enclosure is re-fetched once per referring page.** One `.docx` fetched 42 times in
+  a 50-page run. Content addressing absorbs the storage; the requests are still made.
+  (5: `dunedin.gov`)
+- **A plugin generates most of the site.** 7,841 of 9,939 addresses are auto-generated venue
+  stubs, many near-duplicates. Changes what "collect the whole site" is worth.
+  (5: `medinaco.org`)
 - **`application/octet-stream` defeats classification.** A `.csv` served with the one header
   that asserts nothing reaches `other`, and no reader claims it. (4: Hillsborough — 2.2 GB)
 - **Both signals honest, both wrong about shape.** A `.txt` served `text/plain` whose first
