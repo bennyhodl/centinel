@@ -273,6 +273,52 @@ mod tests {
         assert!(!text.contains(']'), "the link markup survived:\n{text}");
     }
 
+    /// The same rule for `<img>`: the description a person would read is content, the file
+    /// it points at is an address for something this corpus does not hold.
+    #[tokio::test]
+    async fn an_image_keeps_its_description_and_loses_its_file() {
+        let html = "<html><body><main><p>The chief spoke.</p>\
+                    <img src=\"https://x.gov/sites/files/2026/police-lights-banner.png\" \
+                    alt=\"Police Lights\">\
+                    <img src=\"https://x.gov/spacer.gif\" alt=\"\"></main></body></html>";
+        let text = Marked
+            .read(&doc(html))
+            .await
+            .text()
+            .expect("text")
+            .to_string();
+
+        assert!(
+            text.contains("Police Lights"),
+            "the description went:\n{text}"
+        );
+        assert!(
+            !text.contains(".png"),
+            "the file reached the corpus:\n{text}"
+        );
+        assert!(!text.contains("spacer"), "{text}");
+        assert!(!text.contains("!["), "the image markup survived:\n{text}");
+    }
+
+    /// A `data:` image inside a marked region never becomes text at all, which is the
+    /// `strip_data_uris` case answered one stage earlier. One OnBase document was 43%
+    /// base64 by this route.
+    #[tokio::test]
+    async fn a_base64_image_never_reaches_the_text() {
+        let html = "<html><body><main><p>Minutes of the meeting.</p>\
+                    <img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB\" \
+                    alt=\"seal\"></main></body></html>";
+        let text = Marked
+            .read(&doc(html))
+            .await
+            .text()
+            .expect("text")
+            .to_string();
+        assert!(!text.contains("base64"), "{text}");
+        assert!(!text.contains("iVBOR"), "{text}");
+        assert!(text.contains("Minutes of the meeting"), "{text}");
+    }
+
     /// The boundary that keeps the whole-page fallback working.
     ///
     /// Stripping addresses everywhere would make a navigation menu stop looking like
