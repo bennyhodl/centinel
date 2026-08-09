@@ -602,30 +602,69 @@ fn without_data_uris(text: &str) -> Option<Stripped> {
 
 /// Skipping these matters: htmd otherwise serialises inline JSON-LD and drupalSettings
 /// into the markdown, tripling the output with machine noise.
-pub(crate) fn markdown_converter() -> htmd::HtmlToMarkdown {
-    markdown_converter_skipping(&[])
-}
-
-/// The same converter, dropping more tags.
-///
-/// Exists for [`crate::strategies::read::marked`], which has already narrowed the document
-/// to its own content region and can therefore discard `nav`, `header` and `footer`
-/// outright — inside a marked region those are sub-navigation, not the document.
-///
-/// **Not** applied to the readers below. Readability strips navigation by its own scoring,
-/// and the whole-page fallback deliberately keeps everything, because a listing page with no
-/// article is still content worth having and its links are the content. Widening the skip
-/// list globally would quietly change both.
-pub(crate) fn markdown_converter_skipping(extra: &[&'static str]) -> htmd::HtmlToMarkdown {
-    let mut skip = vec!["script", "style", "noscript", "svg", "form"];
-    skip.extend_from_slice(extra);
+fn markdown_converter() -> htmd::HtmlToMarkdown {
     htmd::HtmlToMarkdown::builder()
-        .skip_tags(skip)
-        // The headerless-table handler travels with it. A marked region is exactly where a
-        // `.gov` table lives — budget lines, salary schedules, election returns — so a
-        // converter without this would undo the widest-reaching fix in the field notes.
+        .skip_tags(vec!["script", "style", "noscript", "svg", "form"])
         .add_handler(vec!["table"], table_to_markdown)
         .build()
+}
+
+/// The converter [`crate::strategies::read::marked`] uses: chrome dropped, and an `<a>`
+/// reduced to its text.
+///
+/// **Scoped to the marked region on purpose, and the reason is a fallback it would break.**
+/// Stripping addresses everywhere makes a navigation menu stop looking like navigation —
+/// `[Department](/d/1)` becomes `Department`, so the link-share test that
+/// [`whole_page_is_better`] uses to refuse a menu sees an innocent bulleted list and takes
+/// it. The measure and the markup are coupled, and only a region the page itself has
+/// declared to be content is somewhere that coupling can be given up.
+///
+/// It is also the right boundary on its own terms. [`html_whole_page`] exists so that *a
+/// listing page with no article is still content worth having*, and on such a page the
+/// links **are** the content; inside a marked region they are addressing beside it.
+pub(crate) fn region_converter(skip: &[&'static str]) -> htmd::HtmlToMarkdown {
+    let mut tags = vec!["script", "style", "noscript", "svg", "form"];
+    tags.extend_from_slice(skip);
+    htmd::HtmlToMarkdown::builder()
+        .skip_tags(tags)
+        .add_handler(vec!["table"], table_to_markdown)
+        .add_handler(vec!["a"], anchor_text_only)
+        .build()
+}
+
+/// An `<a>` becomes its text. The address does not reach the corpus.
+///
+/// The anchor text is content — *Meeting Agendas*, *Andrew Mitermiler* — and the URL beside
+/// it is machine addressing that nothing searches for and nothing should embed. Measured
+/// over the derived text of five sites, the URLs inside `<a>` are **55%** of every character
+/// `medinaco.org` produced, 23% of `dunedin.gov`, 13% of `clevelandohio.gov`:
+///
+/// ```text
+/// [Google Calendar](https://www.google.com/calendar/event?action=TEMPLATE&dates=…)
+///  ^^^^^^^^^^^^^^^ 15 characters of content   ^^^^^^^^^^ 250 characters of noise
+/// ```
+///
+/// **Nothing is lost, and that is a property of the store rather than a hope.** The derived
+/// text is derived; every `href` stays in the raw HTML blob, which is truth and immutable.
+/// Every consumer of those links already reads the blob and not this text:
+/// `enclosure::documents` finds the PDFs a page encloses from the raw bytes, and
+/// `ops::investigate::crumbs_on` counts off-host hosts the same way. A crumb table, when it
+/// is built, rebuilds from the same blobs.
+///
+/// Applies to `<a>` only. Image URLs are the same argument and are left alone here because
+/// they were not part of what was agreed — they are a further 12% on `clevelandohio.gov`
+/// and 4% elsewhere, and one line away.
+fn anchor_text_only(
+    handlers: &dyn htmd::element_handler::Handlers,
+    element: htmd::Element<'_>,
+) -> Option<htmd::element_handler::HandlerResult> {
+    let mut out = String::new();
+    for child in element.node.children.borrow().iter() {
+        if let Some(result) = handlers.handle(child) {
+            out.push_str(&result.content);
+        }
+    }
+    Some(out.into())
 }
 
 /// Every `<table>` as a markdown table, whether or not it declared a header.

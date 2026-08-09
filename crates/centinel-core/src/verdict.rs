@@ -32,6 +32,27 @@
 //! evidence: 87.5 KB of script in a 93.8 KB page. So the number is still reported here,
 //! because it costs nothing and someone may yet find the shape it belongs to, and it
 //! raises nothing.
+//!
+//! ## Link share counts the address as well as the anchor text
+//!
+//! [`links_in`] measures a whole `[text](url)` span, URL included, and that is worth knowing
+//! before reading a figure from it:
+//!
+//! ```text
+//! [Google Calendar](https://www.google.com/calendar/event?action=TEMPLATE&dates=…)
+//!  ^^^^^^^^^^^^^^^ 15 characters of anchor text     ^^^^^^^^^^ 250 characters of address
+//! ```
+//!
+//! On `medinaco.org` that put the figure at 71% — of which 10% was anchor text and 59% was
+//! addresses — and it flagged 50 documents of 50, wrongly. The fix was not to reweigh this:
+//! it was to stop putting addresses in the corpus at all.
+//! [`crate::strategies::read::marked`] reduces an `<a>` inside a marked region to its text,
+//! so those documents now measure what the words say rather than how long the URLs are.
+//!
+//! The judgement is kept, because the case it was validated on is still reachable. A page
+//! with no content marker falls to the whole-page reader, which keeps its links, and that
+//! is precisely the read this was measured against — 7 flagged, 0 false positives over 100
+//! documents.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
