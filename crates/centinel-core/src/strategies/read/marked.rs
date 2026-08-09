@@ -110,7 +110,7 @@ fn marker_in(html: &str) -> Option<&'static str> {
 /// The outermost marked region, as markdown, and the selector that found it.
 fn read_region(html: &str) -> Option<(String, &'static str)> {
     let doc = dom_query::Document::from(html);
-    let converter = crate::extract::markdown_converter_skipping(CHROME);
+    let converter = crate::extract::region_converter(CHROME);
 
     for selector in MARKERS {
         let Some(node) = doc
@@ -241,6 +241,58 @@ mod tests {
             .expect("text")
             .to_string();
         assert!(text.contains("| 8/3/2026 |"), "the table fused:\n{text}");
+    }
+
+    /// The address does not reach the corpus; the words do.
+    ///
+    /// Measured over five sites, the URLs inside `<a>` were 55% of every character
+    /// `medinaco.org` produced. None of it is searched and none of it should be embedded —
+    /// and every consumer of those links reads the raw blob instead, so nothing is lost.
+    #[tokio::test]
+    async fn an_anchor_keeps_its_words_and_loses_its_address() {
+        let html = "<html><body><main><p>Visit \
+                    <a href=\"https://www.medinaco.org/county-commissioners/meeting-agendas/\">\
+                    the agenda page</a> for details.</p></main></body></html>";
+        let text = Marked
+            .read(&doc(html))
+            .await
+            .text()
+            .expect("text")
+            .to_string();
+
+        assert!(
+            text.contains("the agenda page"),
+            "the words went too:\n{text}"
+        );
+        assert!(text.contains("Visit"), "{text}");
+        assert!(text.contains("for details"), "{text}");
+        assert!(
+            !text.contains("medinaco.org"),
+            "the address reached the corpus:\n{text}"
+        );
+        assert!(!text.contains(']'), "the link markup survived:\n{text}");
+    }
+
+    /// The boundary that keeps the whole-page fallback working.
+    ///
+    /// Stripping addresses everywhere would make a navigation menu stop looking like
+    /// navigation, and `extract`'s test for *is the whole page a menu* reads exactly that.
+    /// So this applies to a marked region and to nothing else — asserted here because the
+    /// two are a page apart in the source and the coupling is easy to miss.
+    #[test]
+    fn the_readers_outside_this_strategy_still_see_addresses() {
+        let listing = "<html><body><ul><li><a href=\"/a.pdf\">Budget A</a></li></ul></body></html>";
+        let out = crate::extract::extract(
+            crate::content::ContentKind::Html,
+            listing.as_bytes(),
+            None,
+            None,
+        );
+        let text = out.text().unwrap_or_default();
+        assert!(
+            text.contains("/a.pdf"),
+            "the fallback lost the addresses it exists to keep:\n{text}"
+        );
     }
 
     #[test]
