@@ -293,7 +293,16 @@ pub async fn investigate(
     // navigation into the corpus for a page whose content is one sentence — so the gate
     // made the tool structurally unable to report the only thing wrong with it.
     // Recognition says how to find the pages. It says nothing about reading them.
-    let lead = Some(measure(&seed).await);
+    //
+    // What recognition *does* say is whether the seed resembles what will be collected. A
+    // strategy naming documents was pointed at an index, and an index is a page of links
+    // on purpose — `publicrec.hillsclerk.com/Civil/` reads as 62% link text and is working
+    // perfectly. Its text is not the corpus; the files it lists are.
+    let seed_is_collected = hits
+        .first()
+        .and_then(|r| crawl::by_name(r.strategy).ok())
+        .is_none_or(|def| !matches!(def.it.addresses_are(), crawl::Addresses::Documents));
+    let lead = Some(measure(&seed, seed_is_collected).await);
 
     let promote = hits
         .first()
@@ -327,9 +336,14 @@ pub async fn investigate(
 ///
 /// Runs the **real** extractor for the character count, for the same reason `check` does:
 /// a number produced by a second, simpler reader would answer a question nobody asked.
-async fn measure(seed: &Seed) -> Lead {
+async fn measure(seed: &Seed, seed_is_collected: bool) -> Lead {
     let kind = ContentKind::classify(&seed.page.meta, &seed.page.bytes);
-    let read = Verdict::on(&seed.page.bytes, &extracted_text(kind, seed).await);
+    let mut read = Verdict::on(&seed.page.bytes, &extracted_text(kind, seed).await);
+    // The numbers stay; only the judgement is withdrawn. Nothing is gained by telling an
+    // operator that the directory index they pointed at is a list of links.
+    if !seed_is_collected {
+        read.findings.clear();
+    }
 
     let html = seed.text();
     let scan = crate::html::Scan::new(&html);
@@ -776,7 +790,7 @@ mod tests {
             "<html><body><a href=/a>nav</a><a href=/b>nav</a><p>Welcome.</p><script>{}</script></body></html>",
             "showSearchResults(new SearchResults({\"Meetings\":[]}));".repeat(400)
         );
-        let lead = measure(&seed_of(&body, "https://x.gov/")).await;
+        let lead = measure(&seed_of(&body, "https://x.gov/"), true).await;
 
         assert_eq!(lead.anchors, 2, "a real page has navigation");
         assert!(lead.script_bytes * 2 > body.len());
@@ -800,7 +814,7 @@ mod tests {
             "<html><body><article><h1>Council</h1>{prose}</article>\
              <script>var analytics = 1;</script></body></html>"
         );
-        let lead = measure(&seed_of(&body, "https://x.gov/")).await;
+        let lead = measure(&seed_of(&body, "https://x.gov/"), true).await;
         assert!(
             !lead
                 .findings
@@ -821,12 +835,40 @@ mod tests {
              and the item may be pulled for discussion by any member.</p>"
                 .repeat(40)
         );
-        let lead = measure(&ordinary_seed(&body, "https://x.gov/")).await;
+        let lead = measure(&ordinary_seed(&body, "https://x.gov/"), true).await;
         assert!(
             !lead.is_lead(),
             "an ordinary page must not be a lead: {:?} {:?}",
             lead.read.findings,
             lead.findings
+        );
+    }
+
+    /// A directory index is a page of links on purpose.
+    ///
+    /// `publicrec.hillsclerk.com/Civil/` reads as 62% link text and is working perfectly:
+    /// what gets collected there are the files it lists, not its own text. Telling an
+    /// operator their working listing "is a menu, not a page" is the kind of noise that
+    /// teaches people to ignore findings.
+    #[tokio::test]
+    async fn an_index_page_is_not_judged_on_text_nobody_collects() {
+        let links: String = (0..40)
+            .map(|i| format!("<a href=\"file{i}.pdf\">Filing number {i}.pdf</a><br>"))
+            .collect();
+        let body = format!("<html><body><h1>Index of /Civil/</h1>{links}</body></html>");
+        let seed = ordinary_seed(&body, "https://x.gov/Civil/");
+
+        let collected = measure(&seed, true).await;
+        assert!(
+            collected.read.is_poor(),
+            "the measurement itself still fires"
+        );
+
+        let index = measure(&seed, false).await;
+        assert!(!index.read.is_poor(), "{:?}", index.read.findings);
+        assert!(
+            index.read.link_share > 0.5,
+            "the number is kept, only the judgement is withdrawn"
         );
     }
 
@@ -843,7 +885,7 @@ mod tests {
             "<html><body><nav><ul>{nav}</ul></nav>\
              <article><p>Thanks! Your application was submitted.</p></article></body></html>"
         );
-        let lead = measure(&ordinary_seed(&body, "https://x.gov/")).await;
+        let lead = measure(&ordinary_seed(&body, "https://x.gov/"), true).await;
 
         assert!(lead.findings.is_empty(), "the shape is ordinary");
         assert!(lead.is_lead(), "but the read is not");
