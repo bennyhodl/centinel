@@ -31,7 +31,7 @@ use crate::content::ContentKind;
 /// Manually synced with `Cargo.toml` — a wart, but a deliberate one: deriving them at
 /// build time needs a build script, and being wrong here only costs an unnecessary
 /// re-extraction, never a wrong answer.
-const HTMD_VERSION: &str = "0.5.5";
+pub(crate) const HTMD_VERSION: &str = "0.5.5";
 const DOM_SMOOTHIE_VERSION: &str = "0.18.0";
 const PDF_INSPECTOR_VERSION: &str = "0.1.7";
 const CALAMINE_VERSION: &str = "0.36.1";
@@ -602,9 +602,28 @@ fn without_data_uris(text: &str) -> Option<Stripped> {
 
 /// Skipping these matters: htmd otherwise serialises inline JSON-LD and drupalSettings
 /// into the markdown, tripling the output with machine noise.
-fn markdown_converter() -> htmd::HtmlToMarkdown {
+pub(crate) fn markdown_converter() -> htmd::HtmlToMarkdown {
+    markdown_converter_skipping(&[])
+}
+
+/// The same converter, dropping more tags.
+///
+/// Exists for [`crate::strategies::read::marked`], which has already narrowed the document
+/// to its own content region and can therefore discard `nav`, `header` and `footer`
+/// outright — inside a marked region those are sub-navigation, not the document.
+///
+/// **Not** applied to the readers below. Readability strips navigation by its own scoring,
+/// and the whole-page fallback deliberately keeps everything, because a listing page with no
+/// article is still content worth having and its links are the content. Widening the skip
+/// list globally would quietly change both.
+pub(crate) fn markdown_converter_skipping(extra: &[&'static str]) -> htmd::HtmlToMarkdown {
+    let mut skip = vec!["script", "style", "noscript", "svg", "form"];
+    skip.extend_from_slice(extra);
     htmd::HtmlToMarkdown::builder()
-        .skip_tags(vec!["script", "style", "noscript", "svg", "form"])
+        .skip_tags(skip)
+        // The headerless-table handler travels with it. A marked region is exactly where a
+        // `.gov` table lives — budget lines, salary schedules, election returns — so a
+        // converter without this would undo the widest-reaching fix in the field notes.
         .add_handler(vec!["table"], table_to_markdown)
         .build()
 }
@@ -890,7 +909,7 @@ fn html_whole_page(bytes: &[u8]) -> Extracted {
 ///
 /// As an `# H1` it becomes the chunker's heading path, so every chunk of the document
 /// carries it — which is worth more than the title field, since only the text is searched.
-fn with_title(title: Option<&str>, body: &str) -> String {
+pub(crate) fn with_title(title: Option<&str>, body: &str) -> String {
     let Some(title) = title.map(str::trim).filter(|t| !t.is_empty()) else {
         return body.to_string();
     };
@@ -913,7 +932,7 @@ fn with_title(title: Option<&str>, body: &str) -> String {
 /// only the first half is the document. Readability strips that suffix itself when it can
 /// match the `<h1>`; this runs where it could not, so it prefers the tag that never
 /// carries the suffix over guessing at a separator.
-fn html_title(html: &str) -> Option<String> {
+pub(crate) fn html_title(html: &str) -> Option<String> {
     crate::html::Scan::new(html).title()
 }
 

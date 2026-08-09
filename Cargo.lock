@@ -865,6 +865,7 @@ dependencies = [
  "calamine",
  "centinel-macros",
  "clap",
+ "dom_query",
  "dom_smoothie",
  "flate2",
  "futures",

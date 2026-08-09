@@ -38,6 +38,11 @@ htmd = "0.5.5"
 # the handler is handed htmd's `Rc<Node>` and would be reading a second crate's.
 markup5ever_rcdom = "=0.38.0"
 dom_smoothie = "0.18.0"
+# CSS selectors, for the `marked` read strategy to find a page's own content region.
+# Already in the tree as dom_smoothie's own dependency, so this adds no crate — it is
+# declared because `strategies::read::marked` uses it directly, and an undeclared
+# transitive dependency breaks the day dom_smoothie changes its mind.
+dom_query = "0.28.0"
 pdf-inspector = "0.1.7"
 # Office formats, and only those. PDFs stay on `pdf-inspector` directly: anydoc wraps the
 # same crate but collapses its result to a `String`, and `pages_needing_ocr` is the whole
