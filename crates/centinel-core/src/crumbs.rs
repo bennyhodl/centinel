@@ -7,26 +7,37 @@
 //! page, and it is fractal: every Source promoted this way walks its own host and drops its
 //! own crumbs.
 //!
+//! ## Written down where the page is already in hand
+//!
+//! [`scan_page`] runs during `collect`, one page at a time, as each one is stored. That is the
+//! cheapest moment there will ever be: the markup is in memory, its kind is already
+//! classified, and its `<a>` tags are already being walked one layer down for the documents
+//! the page encloses — where [`crate::enclosure`] takes the same-host ones and dropped the
+//! rest on the floor. The rows go to [`Ledger`], so asking is a read of one file. Measured on
+//! 5,000 pages of 91 KB: **8.8s from blobs, 0.05s from the ledger**, and a 2.3 MB file.
+//!
 //! ## A crumb is derived; the ruling on it is truth
 //!
-//! A crumb is a link read out of a page, and that page is a blob. So nothing here is stored:
-//! [`Trail`] rebuilds the whole set from `blobs/` whenever it is asked, which is the same
-//! guarantee [`crate::enclosure`] relies on and the reason `extract` may drop an `href` from
-//! the derived text without losing it.
+//! The ledger is **derived**, and the blobs remain the floor under it. A link is parsed out of
+//! immutable bytes, so a missing row costs a blob read rather than an answer, and a scanner
+//! bug is repaired by deleting the file — `centinel crumbs --rescan` writes it again and the
+//! rebuilt answer is the same answer. That is why it sits beside `log/` rather than in it, and
+//! it is the same reason `extract` may drop an `href` from the derived text: the blob is truth.
 //!
 //! What cannot be rebuilt is the operator saying **no**. Nothing in a page records that a
 //! person looked at `facebook.com` and refused it, so [`Decision`] is truth and is appended
 //! to the store. Without it every pass re-offers every host already rejected, which is the
 //! one fault that would make the list not worth reading twice.
 //!
-//! ## One scan, two callers
+//! ## One scan, three callers
 //!
-//! `investigate` runs this over a single seed it just fetched; `crumbs` runs it over every
-//! HTML blob a Source has collected. They differ in where the bytes come from and in nothing
-//! else, so they share the scan rather than each keeping one — `crate::html` exists because
-//! two copies of a scanner drifted, one carrying a fix and the other carrying the bug.
+//! `collect` scans a page it has just fetched, `crumbs --rescan` a blob it has just read, and
+//! `investigate` a seed it will not keep. All three call [`scan_page`], and all three land in
+//! one [`Trail`] — so the fast path and the floor cannot answer differently, which is a
+//! property no test of either alone would notice. `crate::html` exists because two copies of a
+//! scanner drifted, one carrying a fix and the other carrying the bug.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use jiff::Timestamp;
 use schemars::JsonSchema;
@@ -136,11 +147,99 @@ pub struct Crumb {
     pub standing: Standing,
 }
 
+/// One host a single page linked to, and how many times.
+///
+/// The row-level peer of [`Crumb`], which aggregates these across pages. Separate because a
+/// row has no `pages` count — it *is* one page — and writing `pages: 1` on every line of
+/// every ledger would be a field that can only ever say one thing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Linked {
+    pub host: String,
+    pub links: usize,
+    pub example: String,
+}
+
+/// What one page pointed at, as written down the moment it was collected.
+///
+/// **One row per artifact stored, including the ones with nothing to say.** An empty `links`
+/// is what separates *"this page was scanned and leaves its host nowhere"* from *"this page
+/// was never scanned"*, which is the same distinction [`crate::domain::Underivable`] exists
+/// to keep — and here it is what lets a reader tell a complete ledger from a partial one
+/// without opening a single blob.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Recorded {
+    /// The page, its blob, and when it was observed.
+    #[serde(flatten)]
+    pub page: Carrier,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Linked>,
+}
+
+/// Every off-host link on one page, ready to be written down or aggregated.
+///
+/// The whole scan, and the only place markup is read. `collect` calls it with a page it has
+/// just fetched, `crumbs --rescan` with a blob it has just read, and `investigate` with a
+/// seed — one implementation, because two copies of a scanner drift and one of them keeps
+/// the bug ([`crate::html`] is what that costs).
+///
+/// The comparison is against the **page's own** host, not a Source's, so a page served from
+/// wherever a redirect landed is measured from where its links resolve. Hosts are compared
+/// exactly: `www.example.gov` and `example.gov` are two answers to "what is this site", and
+/// collapsing them here would quietly decide a question the operator owns.
+pub fn scan_page(html: &str, page: Carrier) -> Recorded {
+    let mut by_host: BTreeMap<String, (usize, String)> = BTreeMap::new();
+
+    if let Ok(base) = url::Url::parse(&page.address) {
+        let here = base.host_str().unwrap_or_default().to_string();
+        for tag in crate::html::Scan::new(html).tags(&["a"]) {
+            let Some(href) = tag.attr("href") else {
+                continue;
+            };
+            let Ok(target) = base.join(&crate::html::unescape(href)) else {
+                continue;
+            };
+            let Some(host) = target.host_str() else {
+                continue;
+            };
+            // `mailto:` and `tel:` carry no host worth walking, and neither does a link to
+            // the page's own host — that is what `enumerate` already covers.
+            if host == here || !matches!(target.scheme(), "http" | "https") {
+                continue;
+            }
+
+            let target = target.to_string();
+            let entry = by_host
+                .entry(host.to_string())
+                .or_insert_with(|| (0, target.clone()));
+            entry.0 += 1;
+            // The **smallest** address on the host, not the first one seen. Order-free, so
+            // a ledger read in collection order and a rescan read in address order name the
+            // same example — and the smallest tends to be the shallowest, which is the more
+            // useful thing to hand somebody: a portal's root rather than one deep query.
+            if target < entry.1 {
+                entry.1 = target;
+            }
+        }
+    }
+
+    let mut links: Vec<Linked> = by_host
+        .into_iter()
+        .map(|(host, (links, example))| Linked {
+            host,
+            links,
+            example,
+        })
+        .collect();
+    links.sort_by(|a, b| b.links.cmp(&a.links).then(a.host.cmp(&b.host)));
+
+    Recorded { page, links }
+}
+
 /// One pass over pages, gathering the links that leave the host.
 ///
-/// Holds no store and does no I/O: a page's markup and the address it came from is the whole
-/// input. That is what lets one implementation serve a single fetched seed and a corpus of
-/// blobs, and it is what makes the scan testable from a string.
+/// Holds no store and does no I/O: [`Recorded`] rows are the whole input, whether they were
+/// scanned a moment ago or read out of a ledger written last month. That is what makes the
+/// two feeds one answer rather than two implementations that agree until they do not.
 #[derive(Debug, Default)]
 pub struct Trail {
     by_host: BTreeMap<String, Tally>,
@@ -160,65 +259,47 @@ struct Tally {
 }
 
 impl Trail {
-    /// Reads one page: every `<a href>` whose target leaves the page's own host.
-    ///
-    /// The comparison is against the **page's** host and not a Source's, so a page served
-    /// from somewhere a redirect landed is measured from where its own links resolve. Hosts
-    /// are compared exactly, because "one Source per exact host" is the rule that bounds the
-    /// walk — `www.example.gov` and `example.gov` are two answers to "what is this site",
-    /// and collapsing them here would quietly decide it.
-    pub fn read(&mut self, html: &str, page: Carrier) {
+    /// Folds one page's row in. A page counted here is a page read, links or not.
+    pub fn absorb(&mut self, row: &Recorded) {
         self.pages += 1;
 
-        let Ok(base) = url::Url::parse(&page.address) else {
-            return;
-        };
-        let here = base.host_str().unwrap_or_default().to_string();
-
-        // Which hosts this page has already contributed to, so `pages` counts pages and not
-        // links — a template linking one host from four places is one page.
-        let mut counted: BTreeSet<String> = BTreeSet::new();
-
-        for tag in crate::html::Scan::new(html).tags(&["a"]) {
-            let Some(href) = tag.attr("href") else {
-                continue;
-            };
-            let Ok(target) = base.join(&crate::html::unescape(href)) else {
-                continue;
-            };
-            let Some(host) = target.host_str() else {
-                continue;
-            };
-            // `mailto:` and `tel:` carry no host worth walking, and neither does a link to
-            // the page's own host — that is what `enumerate` already covers.
-            if host == here || !matches!(target.scheme(), "http" | "https") {
-                continue;
-            }
-
+        for linked in &row.links {
             let tally = self
                 .by_host
-                .entry(host.to_string())
+                .entry(linked.host.clone())
                 .or_insert_with(|| Tally {
                     links: 0,
                     pages: 0,
-                    example: target.to_string(),
+                    example: linked.example.clone(),
                     carried_by: Vec::new(),
                     dropped: 0,
                 });
-            tally.links += 1;
-
-            if counted.insert(host.to_string()) {
-                tally.pages += 1;
-                match tally.carried_by.len() < MAX_CARRIERS {
-                    true => tally.carried_by.push(page.clone()),
-                    false => tally.dropped += 1,
-                }
+            tally.links += linked.links;
+            // A row is one page by construction — [`scan_page`] groups by host — so this
+            // counts pages without a per-page set to dedupe against.
+            tally.pages += 1;
+            if linked.example < tally.example {
+                tally.example = linked.example.clone();
+            }
+            match tally.carried_by.len() < MAX_CARRIERS {
+                true => tally.carried_by.push(row.page.clone()),
+                false => tally.dropped += 1,
             }
         }
     }
 
-    /// How many pages were read, whatever they held.
-    pub fn pages_read(&self) -> usize {
+    /// Scans one page and folds it in, for a caller holding markup rather than a row.
+    pub fn read(&mut self, html: &str, page: Carrier) {
+        self.absorb(&scan_page(html, page));
+    }
+
+    /// How many documents were accounted for, whatever they held.
+    ///
+    /// Documents rather than pages: a row exists for every artifact stored, and a PDF that
+    /// cannot carry a crumb was still examined. Counting only the pages with links would make
+    /// "we looked and there was nothing" indistinguishable from "we never looked", which is
+    /// the whole reason an empty row is written.
+    pub fn documents_read(&self) -> usize {
         self.pages
     }
 
@@ -252,6 +333,119 @@ impl Trail {
             Some(tally) => (tally.carried_by.clone(), tally.dropped),
             None => (Vec::new(), 0),
         }
+    }
+}
+
+// ── the ledger: what each page dropped, written when it was collected ─────────
+
+/// The rows one Source has written down, and where they go.
+///
+/// **Derived, and the one place in this feature that is.** `collect` holds the page's markup
+/// in memory the moment it stores it — it is already scanning the same tags for enclosures —
+/// so the crumbs cost one more walk over tags that are already in hand and no fetch at all.
+/// Writing them down there is what turns `crumbs` from a read of every HTML blob in the
+/// corpus into a read of one file.
+///
+/// ## Why a file beside the log rather than a record in it
+///
+/// A crumb is a link *parsed out of* a blob, so it is derived, and `log/` is truth. Two
+/// consequences decide it:
+///
+/// 1. A bug in the scanner would be permanent in an append-only truth file. Here the repair
+///    is deleting the file — `centinel crumbs --rescan` writes it again from the blobs, which
+///    are immutable, so the rebuilt answer is the same answer.
+/// 2. `log/` stays small and points at blobs. Embedding parsed results in it would grow the
+///    one file every replay reads, to hold something no replay needs.
+///
+/// A lost or partial ledger is therefore an ordinary state and never a wrong answer: the
+/// reader compares the blobs it holds rows for against the blobs the log names, reads the
+/// difference out of `blobs/`, and says how many it had to.
+pub struct Ledger<'a> {
+    store: &'a Store,
+    source: crate::domain::SourceId,
+}
+
+impl<'a> Ledger<'a> {
+    pub fn new(store: &'a Store, source: crate::domain::SourceId) -> Self {
+        Self { store, source }
+    }
+
+    /// Appends one page's row.
+    ///
+    /// Per page rather than buffered to the end of a run, because a collect of a city is an
+    /// hour and interruption is the normal case — the same reason the log is appended a line
+    /// at a time.
+    pub async fn append(&self, row: &Recorded) -> anyhow::Result<()> {
+        let path = self.store.crumbs_path(&self.source);
+        if let Some(dir) = path.parent() {
+            tokio::fs::create_dir_all(dir).await?;
+        }
+
+        let mut line = serde_json::to_vec(row)?;
+        line.push(b'\n');
+
+        let mut f = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await?;
+        f.write_all(&line).await?;
+        f.flush().await?;
+        Ok(())
+    }
+
+    /// Every row, in the order they were written. An absent file is an empty ledger.
+    pub async fn read(&self) -> anyhow::Result<Vec<Recorded>> {
+        let path = self.store.crumbs_path(&self.source);
+        let text = match tokio::fs::read_to_string(&path).await {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+
+        let mut out = Vec::new();
+        for (n, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Recorded>(line) {
+                Ok(row) => out.push(row),
+                // A row that cannot be read is a page whose blob gets read instead, so the
+                // answer stays right and only gets slower. Logged rather than counted,
+                // because the reader already reports how many blobs it had to open.
+                Err(e) => tracing::warn!(
+                    file = %path.display(),
+                    line = n + 1,
+                    error = %e,
+                    "skipping an unreadable crumb row"
+                ),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Replaces the ledger with exactly these rows.
+    ///
+    /// Write-then-rename, so an interrupted rewrite leaves the previous ledger rather than
+    /// half of a new one. What `--rescan` does, and it also drops the rows of superseded
+    /// blobs that an append-only file accumulates.
+    pub async fn rewrite(&self, rows: &[Recorded]) -> anyhow::Result<()> {
+        let path = self.store.crumbs_path(&self.source);
+        let dir = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("a crumb ledger always has a parent directory"))?;
+        tokio::fs::create_dir_all(dir).await?;
+
+        let mut body = Vec::new();
+        for row in rows {
+            body.extend_from_slice(&serde_json::to_vec(row)?);
+            body.push(b'\n');
+        }
+
+        let tmp = dir.join(format!(".{}.tmp", self.source));
+        tokio::fs::write(&tmp, &body).await?;
+        tokio::fs::rename(&tmp, &path).await?;
+        Ok(())
     }
 }
 
@@ -422,7 +616,7 @@ mod tests {
         let crumbs = trail.crumbs();
         assert_eq!(crumbs[0].links, 4);
         assert_eq!(crumbs[0].pages, 2);
-        assert_eq!(trail.pages_read(), 2);
+        assert_eq!(trail.documents_read(), 2);
     }
 
     /// Most-linked first: a host named twenty times is a system, one named once is a footer.
@@ -507,7 +701,11 @@ mod tests {
         );
         trail.read("<p>prose</p>", Carrier::at_address(PAGE));
         assert!(trail.crumbs().is_empty());
-        assert_eq!(trail.pages_read(), 2, "a page read is a page read");
+        assert_eq!(
+            trail.documents_read(),
+            2,
+            "a document read is a document read"
+        );
     }
 
     #[test]

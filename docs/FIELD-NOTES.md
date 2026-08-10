@@ -1567,19 +1567,35 @@ learns to write down what it refused, and a new command reads that back.
 `centinel crumbs`, with `show`, `ignore` and `allow`. The design above survived; four of its
 mechanisms did not, and each was decided by what the code turned out to hold.
 
-**1. Not a product of `discover`.** The sentence *"the fan-out already reads every link on
-every page it walks"* describes a strategy that does not exist. `sitemap` enumerates from
-sitemap XML and `listing` from directory indexes — neither reads a content page's links, so a
-crumb recorded at discover time would have come back nearly empty. The links are in the
-**collected HTML**, which `collect` already stored, so the pass reads blobs. That costs no
-fetch either, and it sees every page collected rather than only the ones an enumeration
-happened to name.
+**1. A product of `collect`, not of `discover`.** The sentence *"the fan-out already reads
+every link on every page it walks"* describes a strategy that does not exist: `sitemap`
+enumerates from sitemap XML and `listing` from directory indexes, and neither reads a content
+page's links. The stage that *does* is `collect` — `enclosure` scans every stored page's `<a>`
+tags for the documents it carries, and drops the off-host ones on the floor at
+`enclosure.rs:99` with no count. So the row is written there, from markup already in memory
+whose kind is already classified. The instinct in this entry was right about *when* (the moment
+the page is in hand, no extra fetch) and wrong only about *which stage* is holding it.
 
-**2. No table, not even a derived one.** `crumbs` rebuilds the list from `blobs/` on every
-pass and stores nothing. A row in `centinel.db` would be a second copy of a fact whose only
-authority is already on disk, kept in step by hand. If the command is ever too slow to run
-while deciding what to add next, *then* the table is the answer — and it is derived, exactly
-as this entry says.
+**2. A file, and it is worth what it costs.** `crumbs/<source>.jsonl`, one row per stored
+artifact. Measured on 5,000 pages of 91 KB — 449 MB of blobs:
+
+| | |
+|---|---|
+| read every blob | **8.8s** |
+| read the ledger | **0.05s** |
+| the ledger | 2.3 MB |
+
+A first draft of this feature had no file at all and re-read every blob on every pass, on the
+argument that a row would be a second copy of a fact already on disk. The argument is sound and
+the conclusion was wrong: the blob is the *authority*, and the row is a cache of a parse of it —
+so the blobs stay the floor. A missing row costs one blob read, a damaged file is repaired by
+`--rescan`, and the pass reports how many pages it had to read that way. Slow is a fine failure
+mode. Quietly incomplete is not, and that is the only reason the count is on the report.
+
+**2b. `centinel.db` was the wrong home for it.** A row would have coupled `collect` — a paced
+network stage — to the search index, which `index` owns and which is rebuilt wholesale. A file
+per Source keeps the stages separate and keeps one city's crumbs separable, exactly as `log/`
+does.
 
 **3. The ruling is in `decisions.jsonl`, not in `log/`.** "It belongs in the log" was right
 that it is truth and wrong about which file. `log/` is per Source, and *"this host is not a

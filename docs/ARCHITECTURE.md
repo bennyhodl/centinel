@@ -287,6 +287,7 @@ centinel list
 # What does it point at that it does not collect? The next source is on this list.
 centinel crumbs
 centinel crumbs ignore facebook.com     # refuse one, for the life of the corpus
+centinel crumbs --rescan                # only for a corpus collected before v0.3
 
 # Serve it
 centinel serve          # HTTP + MCP over HTTP

@@ -281,6 +281,11 @@ pub async fn collect(
         "no discovery run for `{id}` — run `centinel discover --source {id}` first"
     );
 
+    // Written to as each artifact is stored, from markup already in hand. See
+    // [`crate::crumbs::Ledger`] — this is the whole reason `crumbs` is a file read rather
+    // than a pass over every HTML blob in the corpus.
+    let ledger = crate::crumbs::Ledger::new(store, id.clone());
+
     let mut seen: HashMap<Resource, Fingerprint> = HashMap::new();
     let mut statuses: BTreeMap<Resource, ResourceStatus> = BTreeMap::new();
     for rec in replay.records() {
@@ -382,6 +387,8 @@ pub async fn collect(
                         )
                         .await?;
 
+                    record_crumbs(store, &ledger, &artifact.resource, bytes, kind, &obs).await;
+
                     // Against the preloaded map, not a fresh log scan per address.
                     if seen.get(&artifact.resource) != Some(&obs.fingerprint) {
                         changed_here = true;
@@ -469,6 +476,59 @@ fn part_of(parent: &Resource, acquired: &Resource) -> String {
         .unwrap_or_else(|| WHOLE.to_string())
 }
 
+/// Writes down what one stored artifact points at, off its own host.
+///
+/// **The cheapest moment there will ever be.** The bytes are in memory, the kind is already
+/// classified, and a page's `<a>` tags are already being walked one layer down for the
+/// documents it encloses. Off-host links were dropped there — `enclosure` takes same-host
+/// documents and returns `None` for everything else — so this is the same information, kept
+/// instead of discarded.
+///
+/// **A row for every artifact, including the ones with nothing to say.** An empty row is what
+/// separates *scanned and points nowhere* from *never scanned*, which is what lets `crumbs`
+/// tell a complete ledger from a partial one without opening a blob.
+///
+/// **A failure here never fails a collection.** The ledger is derived: a missing row costs the
+/// reader one blob read, which it already knows how to do and already reports. A run of a
+/// city is an hour of paced requests, and losing it to a write error on a rebuildable file
+/// would be the wrong trade in the wrong direction.
+async fn record_crumbs(
+    store: &Store,
+    ledger: &crate::crumbs::Ledger<'_>,
+    resource: &Resource,
+    bytes: &[u8],
+    kind: crate::content::ContentKind,
+    obs: &crate::domain::Observation,
+) {
+    let page = crate::crumbs::Carrier {
+        address: resource.natural_key.clone(),
+        at: Some(obs.at.to_string()),
+        blob: Some(crate::render::short_sha(obs.blob_sha.as_str())),
+    };
+
+    // Only markup holds links. A PDF still gets its row, so the ledger accounts for every
+    // blob the log names — it just has nothing in it.
+    let row = match kind {
+        crate::content::ContentKind::Html => {
+            crate::crumbs::scan_page(&String::from_utf8_lossy(bytes), page)
+        }
+        _ => crate::crumbs::Recorded {
+            page,
+            links: Vec::new(),
+        },
+    };
+
+    if let Err(e) = ledger.append(&row).await {
+        tracing::warn!(
+            source = %resource.source,
+            page = %resource.natural_key,
+            path = %store.crumbs_path(&resource.source).display(),
+            error = %e,
+            "could not write a crumb row; `centinel crumbs` will read this page's blob instead"
+        );
+    }
+}
+
 /// Keeps the failure list bounded. A wholesale block would otherwise produce thousands of
 /// identical lines and bury the count that matters.
 fn push_failure(report: &mut Collected, max: usize, failure: Failure) {
@@ -502,6 +562,8 @@ mod tests {
         /// natural key → what acquiring it does.
         script: HashMap<String, Outcome>,
         marker_part: Option<String>,
+        /// What every artifact is served as. `None` leaves classification to the bytes.
+        content_type: Option<String>,
         calls: Mutex<Vec<String>>,
     }
 
@@ -513,8 +575,16 @@ mod tests {
                 id,
                 script: HashMap::new(),
                 marker_part: None,
+                content_type: None,
                 calls: Mutex::new(Vec::new()),
             }
+        }
+
+        /// A host that declares a content-type, which is what decides whether a stored
+        /// artifact is markup worth scanning for the links that leave it.
+        fn served_as(mut self, mime: &str) -> Self {
+            self.content_type = Some(mime.to_string());
+            self
         }
 
         /// One artifact at the address itself.
@@ -604,7 +674,12 @@ mod tests {
                             ),
                             fetched: Fetched {
                                 bytes: bytes.clone(),
-                                meta: BTreeMap::new(),
+                                meta: match &self.content_type {
+                                    Some(mime) => {
+                                        BTreeMap::from([("content-type".to_string(), mime.clone())])
+                                    }
+                                    None => BTreeMap::new(),
+                                },
                             },
                         })
                         .collect()),
@@ -1194,6 +1269,108 @@ mod tests {
         assert_eq!(out.failed, 10);
         assert_eq!(out.failures.len(), 3);
         assert_eq!(out.failures_truncated, Some(7));
+    }
+
+    /// The links that leave the host are written down as the page is stored.
+    ///
+    /// This is where the crumb ledger comes from, and the reason `crumbs` is a file read
+    /// rather than a pass over every HTML blob in the corpus: the markup is already in hand
+    /// and its `<a>` tags are already being walked for the documents the page encloses.
+    #[tokio::test]
+    async fn collecting_a_page_writes_down_the_links_that_leave_its_host() {
+        let (_d, store) = store().await;
+        let src = Scripted::new(
+            "tampa",
+            &[
+                "https://www.tampa.gov/clerk",
+                "https://www.tampa.gov/budget",
+            ],
+        )
+        .served_as("text/html; charset=utf-8")
+        .yields(
+            "https://www.tampa.gov/clerk",
+            r#"<a href="https://publicrec.hillsclerk.com/Civil/">records</a>
+               <a href="https://publicrec.hillsclerk.com/Probate/">probate</a>
+               <a href="/clerk/agendas">ours</a>"#,
+        )
+        .yields("https://www.tampa.gov/budget", r#"<p>no links at all</p>"#);
+
+        discover(&store, &src, &DiscoverOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+        collect(&store, &src, &CollectOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+
+        let rows = crate::crumbs::Ledger::new(&store, src.id().clone())
+            .read()
+            .await
+            .unwrap();
+
+        // A row per artifact, including the page with nothing to say — that empty row is
+        // what separates "scanned and points nowhere" from "never scanned".
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let empty = rows
+            .iter()
+            .find(|r| r.page.address.ends_with("/budget"))
+            .expect("the page with no links still has a row");
+        assert!(empty.links.is_empty());
+
+        let clerk = rows
+            .iter()
+            .find(|r| r.page.address.ends_with("/clerk"))
+            .expect("the page with links has a row");
+        assert_eq!(clerk.links.len(), 1, "one host, however many links");
+        assert_eq!(clerk.links[0].host, "publicrec.hillsclerk.com");
+        assert_eq!(clerk.links[0].links, 2);
+        // The blob, so the page a link was read out of can be opened by what this printed.
+        assert!(clerk.page.blob.is_some());
+        assert!(clerk.page.at.is_some());
+
+        // A second collect stores nothing, so it writes no second row: the ledger tracks the
+        // corpus rather than the number of times it was asked for.
+        collect(&store, &src, &CollectOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::crumbs::Ledger::new(&store, src.id().clone())
+                .read()
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// Something that is not markup cannot carry a link, and must not be scanned as if it
+    /// could — but it is still accounted for, or the ledger could not be told apart from a
+    /// partial one.
+    #[tokio::test]
+    async fn a_document_that_is_not_markup_gets_an_empty_row() {
+        let (_d, store) = store().await;
+        let src = Scripted::new("tampa", &["https://www.tampa.gov/a.pdf"])
+            .served_as("application/pdf")
+            .yields(
+                "https://www.tampa.gov/a.pdf",
+                "%PDF-1.7\n<a href=\"https://pdf.example.com/\">not a page</a>",
+            );
+
+        discover(&store, &src, &DiscoverOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+        collect(&store, &src, &CollectOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+
+        let rows = crate::crumbs::Ledger::new(&store, src.id().clone())
+            .read()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].links.is_empty(),
+            "a PDF's bytes are not markup: {rows:?}"
+        );
     }
 
     #[test]
