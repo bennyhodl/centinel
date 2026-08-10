@@ -15,6 +15,7 @@
 
 - [The machine](operate/doctor.md)
 - [Investigate and check](operate/investigate.md)
+- [Crumbs](operate/crumbs.md)
 - [Sources](operate/sources.md)
 - [The run](operate/run.md)
 - [Schedules](operate/schedules.md)

@@ -107,8 +107,12 @@ attributable to a government.
 
 So an off-host link is *recorded* as a crumb and the operator promotes it — or does not.
 That refusal is the whole reason recursion never runs away here. Each crumb you accept is
-its own `source add`, with its own investigation first. See
-[Acquisition](../internals/acquire.md).
+its own `source add`, with its own investigation first.
+
+What `investigate` shows here is one page's worth. The interesting crumbs are not on a
+front page but on the four hundred agenda pages behind it, and `centinel crumbs` reads
+those off the whole corpus — with a ruling you can record once per host. See
+[Crumbs](crumbs.md).
 
 ### Three possible answers, all useful
 
