@@ -176,7 +176,7 @@ network path out of a machine that nothing is supposed to leave.
 | a query, cold CLI | **11 s measured** with the reranker alone; the embedder adds its own load |
 
 The last row is worth knowing, and the measurement is honest about what it covers: 11.35 s
-on the Tampa corpus with no vector table, so only the 0.6B reranker was loaded. A query
+on the Agartha corpus with no vector table, so only the 0.6B reranker was loaded. A query
 that also builds the 4B embedder pays more. `centinel serve` and `centinel mcp` load both
 once; a short CLI invocation pays on every query.
 

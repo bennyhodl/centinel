@@ -81,7 +81,7 @@ else. A path spelled out by a caller is a second, unenforced copy of that module
 | | |
 |---|---|
 | `--root DIR`, or `$CENTINEL_ROOT` | somebody typed a path — an instruction |
-| `root = "~/corpora/tampa"` in `centinel.toml` | the standing preference |
+| `root = "~/corpora/agartha"` in `centinel.toml` | the standing preference |
 | `~/.centinel` | the default |
 
 `store` does not answer *which* store. It is handed a root, and `config` decides it. The

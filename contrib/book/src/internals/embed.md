@@ -138,4 +138,4 @@ rows, which is a threshold to measure rather than a number to trust.
 of a stored vector rather than a re-embed. A reversible decision, deferred until something
 measures a need for it.
 
-Next: [Search](search.md).
+Next: [Models](models.md).

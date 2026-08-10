@@ -72,11 +72,11 @@ Output format defaults to the destination: prose to a terminal, JSON to a pipe.
 ## Flags worth knowing
 
 ```bash
-centinel run --source tampa --limit 50 --skip embed
-centinel collect --source tampa --match /assets/ --rps 5
+centinel run --source agartha --limit 50 --skip embed
+centinel collect --source agartha --match /assets/ --rps 5
 centinel embed --dry-run
 centinel embed --limit 100
-centinel search "budget" --source tampa -n 20 --snippet-chars 0
+centinel search "budget" --source agartha -n 20 --snippet-chars 0
 centinel schedules --check
 centinel history --failed --since 2026-08-01T00:00:00Z
 centinel history --run 8f3c

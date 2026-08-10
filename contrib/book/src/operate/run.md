@@ -2,7 +2,7 @@
 
 ```bash
 centinel run                      # every source: discover → collect → extract → index → embed
-centinel run --source tampa       # one of them
+centinel run --source agartha       # one of them
 centinel run --limit 50           # bound collection, to try a site before committing an hour
 centinel run --skip embed         # stop before the hours-long stage
 ```
@@ -57,7 +57,7 @@ looks exactly like a source that shrank, and the archive would record that as a 
 `--limit` applies to how much gets fetched, never to how much gets enumerated.
 
 Where an enumeration *does* stop on a ceiling, it says so, and the count is printed as *at
-least* n. `dunedin.gov` once printed a checkmark beside 500 addresses against a real 1,625
+least* n. `valhalla.gov` once printed a checkmark beside 500 addresses against a real 1,625
 because that caveat was inferred rather than reported.
 
 ## Failure is partial, and it is reported
@@ -94,8 +94,8 @@ would report the index as three times its size.
 `run` performs these in order; each is also its own command, for when you want one:
 
 ```bash
-centinel discover --source tampa --site https://www.tampa.gov --rps 3
-centinel collect  --source tampa --limit 50 --rps 5
+centinel discover --source agartha --site https://www.agartha.gov --rps 3
+centinel collect  --source agartha --limit 50 --rps 5
 centinel extract
 centinel transcribe
 centinel index

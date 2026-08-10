@@ -1,25 +1,23 @@
 # Summary
 
 [Centinel](README.md)
+[Install](start/install.md)
 
-# Start here
+# Usage
 
-- [What it does](start/tldr.md)
-- [Install](start/install.md)
+- [Operator](start/operator.md)
+- [User](start/user.md)
 - [Your first corpus](start/first-corpus.md)
-
-# Use it
-
 - [Searching](use/search.md)
 - [Reading a result](use/read.md)
-- [From an agent](use/agents.md)
 
 # Operate it
 
+- [The machine](operate/doctor.md)
+- [Investigate and check](operate/investigate.md)
 - [Sources](operate/sources.md)
 - [The run](operate/run.md)
 - [Schedules](operate/schedules.md)
-- [Models](operate/models.md)
 - [When something is wrong](operate/troubleshooting.md)
 
 # How it works
@@ -33,6 +31,7 @@
 - [Transcription](internals/transcribe.md)
 - [Chunking and the index](internals/index.md)
 - [Embeddings](internals/embed.md)
+- [Models](internals/models.md)
 - [Search](internals/search.md)
 - [Ops](internals/ops.md)
 
@@ -42,3 +41,7 @@
 - [Models in the registry](reference/models.md)
 - [Glossary](reference/glossary.md)
 - [The deeper docs](reference/further-reading.md)
+
+---
+
+[Contributing](contributing.md)

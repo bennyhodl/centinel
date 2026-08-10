@@ -2,7 +2,7 @@
 
 ```bash
 centinel search "stormwater drainage fee"
-centinel search "budget" --source tampa -n 20
+centinel search "budget" --source agartha -n 20
 centinel search "lobbyist" --snippet-chars 0        # whole chunk, not an excerpt
 ```
 

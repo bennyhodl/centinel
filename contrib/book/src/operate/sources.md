@@ -6,12 +6,12 @@ config.
 
 ```toml
 [[source]]
-id   = "tampa"
-site = "https://www.tampa.gov"
+id   = "agartha"
+site = "https://www.agartha.gov"
 
 [[source]]
-id                   = "tampa-council"
-channel              = "https://www.youtube.com/@CityofTampa"
+id                   = "agartha-council"
+channel              = "https://www.youtube.com/@CityofAgartha"
 audio_if_no_captions = true
 ```
 
@@ -24,19 +24,19 @@ For a website, `site` is any URL on it; only the origin is used.
 ## Adding one
 
 ```bash
-centinel source add tampa --site https://www.tampa.gov
-centinel source add tampa-council --channel https://www.youtube.com/@CityofTampa
+centinel source add agartha --site https://www.agartha.gov
+centinel source add agartha-council --channel https://www.youtube.com/@CityofAgartha
 centinel source list
-centinel source remove tampa
+centinel source remove agartha
 ```
 
 `source add` writes into whichever config file was found, and into
 `~/.centinel/centinel.toml` when none was — beside the store the same command collects
 into.
 
-Before adding a host you have not collected before, run `centinel investigate <url>`. It
-reports what recognises the host, on what evidence, and roughly how much is behind it.
-See [Strategies](../internals/strategies.md).
+Before adding a host you have not collected before, investigate it — see
+[Investigate and check](investigate.md). Nothing here is expensive to undo except the hour
+a wrong strategy spends.
 
 ## Where the config lives
 
@@ -72,7 +72,7 @@ source rather than corpus-wide.
 | | |
 |---|---|
 | `--root DIR`, or `$CENTINEL_ROOT` | somebody typed a path — an instruction |
-| `root = "~/corpora/tampa"` in `centinel.toml` | the standing preference; `~/` is expanded |
+| `root = "~/corpora/agartha"` in `centinel.toml` | the standing preference; `~/` is expanded |
 | `~/.centinel` | the default |
 
 It is in `$HOME` because a store is a corpus you keep, not an artefact of the directory
@@ -85,7 +85,7 @@ visible until a search from one directory up came back empty.
 
 They can disagree, and that disagreement is a real state you will hit.
 
-Running `centinel discover --source hillsborough --site …` by hand collects a source the
+Running `centinel discover --source valhalla --site …` by hand collects a source the
 config never named. `run` then ignores it — correctly, because nothing declared it. Left
 alone, that is an invisible corpus: collected, indexed, searchable, and never refreshed.
 
@@ -93,9 +93,9 @@ So `source list` reports the **union** and marks what the config does not name:
 
 ```console
 $ centinel source list
-   source        kind  resources             target
-✓  tampa         site      1,847             https://www.tampa.gov
-   hillsborough  site        412  untracked  https://www.hillsboroughcounty.org
+   source    kind  resources             target
+✓  agartha   site      1,847             https://www.agartha.gov
+   valhalla  site        412  untracked  https://www.valhallacounty.org
 
 1 source is in the store but not in the config — `centinel run` skips it.
   centinel source adopt
@@ -108,7 +108,7 @@ the archived `yt-dlp -J` document beside each recording carries `uploader_url`.
 
 ```bash
 centinel source adopt          # write every recoverable one into the config
-centinel source add hillsborough    # the same, for one, with no --site needed
+centinel source add valhalla    # the same, for one, with no --site needed
 ```
 
 A source whose address cannot be recovered is **named and skipped**, rather than written
