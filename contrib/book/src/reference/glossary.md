@@ -39,7 +39,14 @@ filename. Both feed classification and only the first is evidence.
 **Note** — a line of provenance a Source wants shown, and how it should read.
 
 **Crumb** — an off-host link recorded, not followed. One Source per exact host; the
-operator promotes crumbs, and that is what bounds the recursion.
+operator promotes crumbs, and that is what bounds the recursion. A crumb is *derived* — a
+link read out of a blob, rebuildable — while the **ruling** on it (`ignore` / `allow`) is
+truth, because nothing in a page records that a person refused a host. See
+[Crumbs](../operate/crumbs.md).
+
+**Standing** — whether a crumb still wants a person: open, `ignored`, or `already a
+source`. Already a source beats already refused, because a host that became a Source is
+answered by the corpus and an old refusal on it is stale rather than binding.
 
 ## The store
 

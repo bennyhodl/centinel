@@ -38,6 +38,7 @@ Each is what `run` does for you, available on its own.
 | `list` | List sources in the store with resource counts and liveness. |
 | `check` | See what extraction makes of one link or file. Nothing is stored. |
 | `investigate` | Ask the registry what it makes of an address. Nothing is stored. |
+| `crumbs` | The off-host hosts this corpus links to, and the rulings on them. |
 | `schedules` | Show configured schedules, when each next fires, and how the last one went. |
 | `history` | Show what scheduled and manual runs did, newest first. |
 
