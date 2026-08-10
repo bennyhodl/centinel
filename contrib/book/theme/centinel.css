@@ -1,0 +1,34 @@
+/* Small adjustments. The rest is mdBook's default theme. */
+
+/*
+ * Set the variable, not `main`'s width: the header and the nav arrows read the
+ * same one, so overriding only `main` would leave them misaligned.
+ *
+ * Never size this in `rem`. mdBook sets `html { font-size: 62.5% }`, so 1rem is
+ * 10px here and a figure that looks like a sensible measure is 60% of one.
+ */
+:root {
+  --content-max-width: 860px;
+}
+
+/* Tables here are mostly two-column definition lists. Let them breathe. */
+.content table {
+  width: 100%;
+  margin: 1.25em 0;
+}
+
+.content table td:first-child {
+  white-space: nowrap;
+}
+
+/* The pipeline diagrams are wide. Never let one push the page sideways. */
+.content pre {
+  overflow-x: auto;
+}
+
+.content blockquote {
+  border-inline-start: 3px solid var(--quote-border);
+  background: none;
+  padding-inline-start: 1em;
+  opacity: 0.9;
+}

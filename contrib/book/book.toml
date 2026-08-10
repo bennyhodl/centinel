@@ -1,0 +1,30 @@
+[book]
+title = "Centinel"
+description = "How Centinel collects a city's public record, and how to use it."
+authors = ["Centinel contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "ayu"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/bennyhodl/centinel"
+edit-url-template = "https://github.com/bennyhodl/centinel/edit/master/contrib/book/{path}"
+additional-css = ["theme/centinel.css"]
+no-section-label = false
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 20
+use-boolean-and = true
+
+[output.html.playground]
+runnable = false
