@@ -284,6 +284,10 @@ centinel search "lobbyist meeting log"
 # What is in the store, and what state is it in?
 centinel list
 
+# What does it point at that it does not collect? The next source is on this list.
+centinel crumbs
+centinel crumbs ignore facebook.com     # refuse one, for the life of the corpus
+
 # Serve it
 centinel serve          # HTTP + MCP over HTTP
 centinel mcp            # MCP over stdio

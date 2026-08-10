@@ -41,6 +41,30 @@ level, same host.** The page's own HTML is scanned and what comes back is not, b
 second level makes acquisition a recursive crawler with no snapshot to bound it — and that
 is `enumerate`'s job, which is where a *complete* address set comes from.
 
+**Crumb** — an off-host link **recorded and not followed**: the host, how many links point
+at it, how many pages carried them, and one address to look at. The other half of the
+enclosure rule above — a link that leaves the host is not fetched, it is *named*. *Why it
+matters:* one Source per exact host is what bounds the walk, and following an off-host link
+automatically is how the walk of one site becomes a walk of the internet. The recursion is
+cut by a person, one time per host rather than once per page, and it is fractal: every
+crumb promoted becomes a Source that drops its own.
+
+**A crumb is derived; the ruling on it is truth.** A crumb is a link read out of a blob, so
+`crumbs` rebuilds the whole set from `blobs/` on every pass and stores nothing — the same
+guarantee that lets `extract` drop an `href` from the derived text. Nothing in a page,
+though, records that a person looked at `facebook.com` and refused it, so a **Ruling**
+(`ignore` / `allow`) is appended to `decisions.jsonl` as truth. Without it every pass
+re-offers every host already rejected, which is the one fault that would make the list not
+worth reading twice. Rulings are **corpus-wide**, which is why they are not `LogRecord`s:
+"this host is not a Source" is not a fact about Tampa, and filed per Source the hosts every
+city links would need refusing once per city.
+
+**Standing** — whether a crumb still wants a person: `open`, `ignored`, or `collected`.
+Already collected beats already refused, because a host that became a Source is answered by
+the corpus and an old `ignore` on it is stale rather than binding. `open` is the honest
+default: `investigate` reads no store, so every crumb it names is one nothing has said
+anything about yet.
+
 **Marker** — the address whose presence in the log proves a Resource was acquired. The
 page itself for a site; the *metadata* sub-resource for a video. The single line on which
 resumption varies. *Why it matters:* keying resumption on captions would re-fetch a whole
@@ -99,9 +123,13 @@ and edits no renderer.
 
 ## The store
 
-**Truth vs derived** — only `blobs/` and `log/` are truth. `current/`, `centinel.db` and
-`vectors.lance/` are derived and can be rebuilt from them. *Why it matters:* it is what
-makes the index disposable and the corpus something you can hand to somebody with `rsync`.
+**Truth vs derived** — four things are truth, and each is a fact no replay of the others can
+recover: `blobs/` and `log/` are what the world served, `runs/` is what this machine
+attempted (a quiet run writes nothing to `log/`, so "the schedule fired and everything was
+current" lives only here), and `decisions.jsonl` is what the operator decided. `current/`,
+`centinel.db` and `vectors.lance/` are derived and can be rebuilt from them. *Why it
+matters:* it is what makes the index disposable and the corpus something you can hand to
+somebody with `rsync`.
 
 **Derived is not the same as cheap.** Everything derived is rebuildable; only some of it
 is rebuildable over a coffee. `centinel.db` is minutes. `vectors.lance/` is **a day** on a

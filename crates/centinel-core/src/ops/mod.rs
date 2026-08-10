@@ -18,6 +18,7 @@
 mod build_index;
 mod check;
 mod collect;
+mod crumbs;
 mod discover;
 mod doctor;
 mod embed;
@@ -48,13 +49,14 @@ pub use read::{ReadArgs, ReadReport, read};
 
 pub use build_index::{IndexArgs, IndexReport, index};
 pub use collect::{CollectArgs, CollectFailure, CollectReport, collect};
+pub use crumbs::{CrumbsAction, CrumbsArgs, CrumbsReport, RuleArgs, ShowArgs, crumbs};
 pub use discover::{DiscoverArgs, DiscoverReport, discover};
 pub use doctor::{Binary, DoctorArgs, DoctorReport, GateStatus, Weights, doctor};
 pub use embed::{EmbedArgs, EmbedReport, Skipped, embed};
 pub use extract::{ExtractArgs, ExtractReport, ExtractSample, Unreadable, extract};
 pub use ingest::{IngestArgs, IngestOutcome, IngestReport, ingest};
 pub use investigate::{
-    Crumb, InvestigateArgs, InvestigateReport, Lead, Probe, Recognised, SeedSummary, investigate,
+    InvestigateArgs, InvestigateReport, Lead, Probe, Recognised, SeedSummary, investigate,
 };
 pub use list::{ListArgs, ListReport, Problem, SourceSummary, list};
 pub use run::{RunArgs, RunReport, SourceRun, Stage, StageRun, StageStatus, run};

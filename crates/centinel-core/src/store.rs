@@ -4,13 +4,17 @@
 //! <root>/
 //!   blobs/ab/cd/abcd1234…      TRUTH    immutable, content-addressed, pooled across Sources
 //!   log/<source>/YYYY-MM.jsonl TRUTH    append-only
+//!   runs/YYYY-MM.jsonl         TRUTH    what this machine attempted
+//!   decisions.jsonl            TRUTH    what the operator decided
 //!   current/<source>/…         DERIVED  URL-mirroring tree. Regenerable.
 //!   centinel.db                DERIVED  SQLite: metadata + FTS5   — the BM25 arm
 //!   vectors.lance/             DERIVED  LanceDB: chunk vectors    — the vector arm
 //! ```
 //!
-//! Only `blobs/` and `log/` are truth. Everything else is rebuildable from them, which
-//! is what makes the index disposable and the corpus `rsync`-able (§5.4).
+//! The four above are truth; everything else is rebuildable from them, which is what makes
+//! the index disposable and the corpus `rsync`-able (§5.4). The two that are neither bytes
+//! nor a log of them say why in their own accessor — [`Store::runs_dir`] and
+//! [`Store::decisions_path`] — because each holds a fact no replay of `log/` can recover.
 //!
 //! Blobs are **pooled across Sources** — the same PDF on two `.gov` sites stores once.
 //! Logs and trees are **per-Source**, so a single city's corpus stays separable.
@@ -221,6 +225,21 @@ impl Store {
         let zoned = at.to_zoned(TimeZone::UTC);
         self.runs_dir()
             .join(format!("{:04}-{:02}.jsonl", zoned.year(), zoned.month()))
+    }
+
+    /// `decisions.jsonl` — what the operator decided. **Truth, and the fourth thing that
+    /// is.**
+    ///
+    /// `log/` is what the world served and `runs/` is what this machine did; neither records
+    /// that a person looked at a host and refused it. See [`crate::crumbs::Decision`] for why
+    /// that fact cannot be derived and why it is corpus-wide rather than per Source.
+    ///
+    /// Flat rather than month-partitioned, unlike its two neighbours. The partition exists to
+    /// keep a file that grows with the *corpus* small enough to read by hand; this one grows
+    /// with the operator's patience, and a directory of files holding two lines each is
+    /// harder to read than the one file.
+    pub fn decisions_path(&self) -> PathBuf {
+        self.root.join("decisions.jsonl")
     }
 
     /// `run.lock` — the run in flight, if any.
@@ -1007,6 +1026,8 @@ mod tests {
 
         assert!(s.blobs_dir().ends_with("blobs"));
         assert!(s.current_dir().ends_with("current"));
+        assert!(s.runs_dir().ends_with("runs"));
+        assert!(s.decisions_path().ends_with("decisions.jsonl"));
         assert!(s.index_path().ends_with("centinel.db"));
         assert!(s.vectors_path().ends_with("vectors.lance"));
         assert!(
