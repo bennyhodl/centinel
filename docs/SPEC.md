@@ -4,7 +4,7 @@
 
 **Map:** [MAP: Centinel v2 — data-collection toolkit spec](https://github.com/bennyhodl/centinel/issues/1)
 **Evidence:** `docs/research/` — ~3,850 lines, ~450 cited primary sources
-**Last updated:** 2026-08-02
+**Last updated:** 2026-08-10
 
 ---
 
@@ -470,6 +470,28 @@ The **`centinel.toml` schema** is now partly settled, and its decision is record
 What that does **not** settle is scheduling. `centinel run` walks the sources and every stage skips work it has already done, so a cron entry is enough for cadence — but *when* to recrawl, when `Live` becomes `Gone`, and whether a vendor `LastModifiedUtc` can be trusted instead of a crawl all still belong to [#7](https://github.com/bennyhodl/centinel/issues/7).
 
 Also unspecified: server access control, and the teardown plan for the v1 codebase.
+
+### 8.1 Specified and unbuilt
+
+Three gaps between the settled sections and the code, found by reading §3–§6 back against the store. Two of them are **not new decisions**: the spec already requires the thing and nothing builds it. §10 asks for exactly this to be said out loud rather than left to drift, and tracking is in [#7](https://github.com/bennyhodl/centinel/issues/7).
+
+**`ChangeEvent` is materialized nowhere.** §4.5 requires the table and gives the reason — VersionRAG at 0% on *what was removed* unless change is an indexed object. `domain.rs` defines the type and `lib.rs` exports it. Nothing constructs one. There is no table in `centinel.db`, no log record, and no verb.
+
+The evidence is already on disk: a `Fingerprint` is written on every Observation, and `store::observe` returns the previous one for exactly this comparison. What is absent is the materializer and something that reads it. `Vanished` is likewise computable from two `DiscoveryRun` snapshots, and equally uncomputed. So the corpus retains every version and cannot answer a question about the difference between two of them — which is the tracking claim in §1's locked scope.
+
+#7 owns the *normalization rules* that decide when a fingerprint should differ. Materializing is downstream of that answer and is build work, not a decision.
+
+**A result cannot say which version it is.** §6.6 puts `version` on a hit. `SearchResult` carries `blob_sha`, `derived_sha`, `observed_at` and `tool`, and no version.
+
+The index retains every version by construction — `placement`'s primary key includes `derived_sha`, so a page that changes writes rows beside the old ones and nothing removes them. **That retention is correct and stays.** What is missing is the mark. Both arms therefore rank last year's text beside this year's, and the two results read identically. `observed_at` does not rescue it: it holds the *earliest* time those bytes were seen at that address, which is first-seen and not currency.
+
+It is the same error shape as `pages_needing_ocr` and the vector share (§6.4, §6.6): a fact about what has been *processed* presented where a reader will take it for a fact about the world. The fix is currency written at index time, `search` defaulting to current, and `--as-of` / `--all-versions` to reach the rest. Deletion is not on the table.
+
+**A judgement about a blob has no record.** This one is genuinely unspecified, and it is the gap the §4.4 pair leaves. `Derivation` is bytes from bytes; `Underivable` is a derivation attempted with nothing to show. Neither can hold **an assertion about a blob that is not derived from its bytes** — *this read is mostly menu*, *this page is a wrapper*, *this address is a crumb worth promoting*.
+
+Measured: `verdict::ReadQuality` is computed at three call sites — `ops/check.rs`, `ops/extract.rs`, `ops/investigate.rs` — reported to the operator, and stored nowhere. Every run judges the same documents again and forgets. `investigate`'s crumbs and leads are the same shape.
+
+A third record kind fits what is already there. It carries tool and version like the other two, so a judgement belongs to one pipeline at one version and a better judge gets another go — the §4.4 argument unchanged. *The cost to weigh:* it puts an opinion in a log that holds evidence. The tool-and-version stamp is what keeps the two apart, and the log already carries `Underivable`, which is a verdict rather than a fact about the world.
 
 ---
 
