@@ -6,6 +6,7 @@
 //!   log/<source>/YYYY-MM.jsonl TRUTH    append-only
 //!   runs/YYYY-MM.jsonl         TRUTH    what this machine attempted
 //!   decisions.jsonl            TRUTH    what the operator decided
+//!   crumbs/<source>.jsonl      DERIVED  the off-host links each page dropped
 //!   current/<source>/…         DERIVED  URL-mirroring tree. Regenerable.
 //!   centinel.db                DERIVED  SQLite: metadata + FTS5   — the BM25 arm
 //!   vectors.lance/             DERIVED  LanceDB: chunk vectors    — the vector arm
@@ -225,6 +226,24 @@ impl Store {
         let zoned = at.to_zoned(TimeZone::UTC);
         self.runs_dir()
             .join(format!("{:04}-{:02}.jsonl", zoned.year(), zoned.month()))
+    }
+
+    /// `crumbs/` — the off-host links each page dropped, written as it was collected.
+    ///
+    /// **Derived**, and safe to delete: every row is a link parsed out of a blob, and
+    /// `centinel crumbs --rescan` writes it again from the same immutable bytes. See
+    /// [`crate::crumbs::Ledger`] for why it sits beside `log/` rather than in it.
+    pub fn crumbs_dir(&self) -> PathBuf {
+        self.root.join("crumbs")
+    }
+
+    /// `crumbs/<source>.jsonl` — per Source, as the log is, so one city stays separable.
+    ///
+    /// Flat rather than month-partitioned: a row supersedes the row for the same page, so
+    /// this file grows with the *size* of a corpus rather than with its history, and
+    /// `--rescan` compacts it back to one row per address.
+    pub fn crumbs_path(&self, source: &SourceId) -> PathBuf {
+        self.crumbs_dir().join(format!("{source}.jsonl"))
     }
 
     /// `decisions.jsonl` — what the operator decided. **Truth, and the fourth thing that
@@ -1028,6 +1047,10 @@ mod tests {
         assert!(s.current_dir().ends_with("current"));
         assert!(s.runs_dir().ends_with("runs"));
         assert!(s.decisions_path().ends_with("decisions.jsonl"));
+        assert!(
+            s.crumbs_path(&SourceId::new("tampa").unwrap())
+                .ends_with("crumbs/tampa.jsonl")
+        );
         assert!(s.index_path().ends_with("centinel.db"));
         assert!(s.vectors_path().ends_with("vectors.lance"));
         assert!(

@@ -49,10 +49,19 @@ automatically is how the walk of one site becomes a walk of the internet. The re
 cut by a person, one time per host rather than once per page, and it is fractal: every
 crumb promoted becomes a Source that drops its own.
 
-**A crumb is derived; the ruling on it is truth.** A crumb is a link read out of a blob, so
-`crumbs` rebuilds the whole set from `blobs/` on every pass and stores nothing — the same
-guarantee that lets `extract` drop an `href` from the derived text. Nothing in a page,
-though, records that a person looked at `facebook.com` and refused it, so a **Ruling**
+**Written where the page is in hand.** `collect` scans each page as it stores it and appends a
+row to `crumbs/<source>.jsonl` — the markup is in memory and its `<a>` tags are already being
+walked for enclosures, where the off-host ones were dropped uncounted. *Why it matters:*
+asking becomes a read of one file. Measured on 5,000 pages: 0.05s from the ledger against 8.8s
+from the blobs.
+
+**A crumb is derived; the ruling on it is truth.** The ledger is derived and the blobs stay the
+floor beneath it: a link is parsed out of immutable bytes, so a missing row costs a blob read
+rather than an answer, and a scanner bug is repaired by deleting the file. `crumbs` reports how
+many pages it had to read that way, because a slow answer is a fine failure and a quietly
+incomplete one is not. It is the same guarantee that lets `extract` drop an `href` from the
+derived text. Nothing in a page, though, records that a person looked at `facebook.com` and
+refused it, so a **Ruling**
 (`ignore` / `allow`) is appended to `decisions.jsonl` as truth. Without it every pass
 re-offers every host already rejected, which is the one fault that would make the list not
 worth reading twice. Rulings are **corpus-wide**, which is why they are not `LogRecord`s:
