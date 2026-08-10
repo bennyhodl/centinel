@@ -77,6 +77,11 @@ pub struct CrumbsArgs {
     #[arg(long)]
     #[serde(default)]
     pub rescan: bool,
+
+    /// Config file to read the `[[source]]` list from. Defaults to the usual search path.
+    #[arg(long, value_name = "FILE")]
+    #[serde(default)]
+    pub config: Option<String>,
 }
 
 /// Hand-written, because a derived one would set `max` to zero — and a list that silently
@@ -89,6 +94,7 @@ impl Default for CrumbsArgs {
             all: false,
             max: default_max(),
             rescan: false,
+            config: None,
         }
     }
 }
@@ -209,7 +215,15 @@ async fn list(
     cancel: &Cancel,
 ) -> anyhow::Result<CrumbsReport> {
     let started = std::time::Instant::now();
-    let field = survey(ctx, args.source.as_deref(), args.rescan, p, cancel).await?;
+    let field = survey(
+        ctx,
+        args.source.as_deref(),
+        args.config.as_deref(),
+        args.rescan,
+        p,
+        cancel,
+    )
+    .await?;
 
     let mut crumbs = field.trail.crumbs();
     for crumb in &mut crumbs {
@@ -250,7 +264,7 @@ async fn show(
     let started = std::time::Instant::now();
     let host = as_host(&which.host)?;
     let source = which.source.as_deref().or(args.source.as_deref());
-    let field = survey(ctx, source, args.rescan, p, cancel).await?;
+    let field = survey(ctx, source, args.config.as_deref(), args.rescan, p, cancel).await?;
 
     let crumb = field.trail.crumbs().into_iter().find(|c| c.host == host);
     let (carried_by, dropped) = field.trail.carriers_of(&host);
@@ -302,8 +316,8 @@ async fn rule(ctx: &Ctx, args: RuleArgs, ruling: Ruling) -> anyhow::Result<Crumb
 struct Field {
     sources: Vec<String>,
     trail: Trail,
-    /// Hosts this store already collects, so a crumb pointing at one is not a candidate.
-    collected: BTreeSet<String>,
+    /// Hosts a Source already covers, so a crumb pointing at one is not a candidate.
+    promoted: BTreeSet<String>,
     decisions: BTreeMap<String, Decision>,
     /// Pages whose links had to be read out of a blob because no row recorded them.
     from_blobs: usize,
@@ -311,17 +325,38 @@ struct Field {
 }
 
 impl Field {
-    /// Already collected beats already refused: a host that became a Source is answered by
-    /// the corpus, and an old `ignore` on it is stale rather than binding.
+    /// Already a Source beats already refused: a host that was promoted is answered, and an
+    /// old `ignore` on it is stale rather than binding.
     fn standing_of(&self, host: &str) -> Standing {
-        if self.collected.contains(host) {
-            return Standing::Collected;
+        if self.promoted.contains(host) {
+            return Standing::Promoted;
         }
         match self.decisions.get(host).map(|d| d.ruling) {
             Some(Ruling::Ignore) => Standing::Ignored,
             _ => Standing::Open,
         }
     }
+}
+
+/// The hosts the operator's own `[[source]]` blocks claim.
+///
+/// The **intent** half of "already a Source"; [`survey`] adds the evidence half out of the
+/// logs it is reading anyway. A block for a host nothing has collected yet still answers the
+/// question — offering it back would ask the operator to decide something they decided an hour
+/// ago — and one that is `enabled = false` answers it too: they chose the host and then chose
+/// not to run it, and neither of those decisions was "ask me again".
+///
+/// **A channel claims no host.** `youtube.com` holds every channel there is, so a source for
+/// one of them says nothing about a crumb pointing at another. Marking the host answered would
+/// hide it; leaving it open costs one `crumbs ignore youtube.com` and hides nothing. The config
+/// knows a channel by which field is set, and the store by
+/// [`crate::sources::channel::claims`].
+fn claimed_hosts(config: &crate::config::Config) -> BTreeSet<String> {
+    config
+        .sources
+        .iter()
+        .filter_map(|s| s.site.as_deref().and_then(host_of))
+        .collect()
 }
 
 /// Every page of the selected Sources, from the ledger where there is a row and from the
@@ -335,12 +370,13 @@ impl Field {
 /// them is reported: a number that quietly falls short is the failure this codebase is most
 /// consistently written against.
 ///
-/// **One replay per Source, whatever was selected.** The hosts already collected are a
-/// corpus-wide question — a crumb Tampa dropped may be a Source somebody added last week — so
-/// every log is read. Only the selected Sources' pages are looked up.
+/// Whether a host is **already a Source** is a corpus-wide question, so it is asked of the
+/// config and of every log rather than only of the selected Sources — a crumb Tampa dropped
+/// may be a Source somebody added last week. See [`claimed_hosts`] for the config half.
 async fn survey(
     ctx: &Ctx,
     source: Option<&str>,
+    config_path: Option<&str>,
     rescan: bool,
     p: &Progress,
     cancel: &Cancel,
@@ -367,20 +403,26 @@ async fn survey(
         None => known.clone(),
     };
 
-    let mut collected = BTreeSet::new();
+    // The config first, so a malformed one fails before an hour of blob reads rather than
+    // after them.
+    let (config, _) = super::load_config(config_path)?;
+    let mut promoted = claimed_hosts(&config);
+
+    // One replay per Source and one loop, because both questions are answered from it: what
+    // every Source has already collected, and what the selected ones have to say.
     let mut work: Vec<(SourceId, Vec<Observation>)> = Vec::new();
     for id in &known {
         let replay = ctx.store.replay(id).await?;
-        // The newest Observation per Resource, never the history: one page holds one set of
-        // links, and an older version of it holds the links the site has since dropped.
-        let observations = replay.latest_observations();
-        for resource in observations.keys() {
-            if let Some(host) = host_of(&resource.natural_key) {
-                collected.insert(host);
-            }
+
+        let observed: Vec<&str> = replay.observed().into_iter().collect();
+        if !crate::sources::channel::claims(replay.discovery_method(), &observed) {
+            promoted.extend(observed.iter().filter_map(|key| host_of(key)));
         }
+
         if selected.contains(id) {
-            let mut pages: Vec<Observation> = observations.into_values().collect();
+            // The newest Observation per Resource, never the history: one page holds one set
+            // of links, and an older version of it holds the links the site has since dropped.
+            let mut pages: Vec<Observation> = replay.latest_observations().into_values().collect();
             // Deterministic order, so two passes over one store read the same.
             pages.sort_by(|a, b| a.resource.natural_key.cmp(&b.resource.natural_key));
             work.push((id.clone(), pages));
@@ -441,7 +483,7 @@ async fn survey(
     Ok(Field {
         sources: selected.iter().map(|s| s.to_string()).collect(),
         trail,
-        collected,
+        promoted,
         decisions: Decisions::new(&ctx.store).current().await?,
         from_blobs,
         unread,
@@ -783,10 +825,30 @@ mod tests {
         stored(ctx, source, address, html.as_bytes(), "text/html").await;
     }
 
+    /// Runs the op against **this** store's config and never the machine's.
+    ///
+    /// Without the substitution `Config::locate` would find `./centinel.toml` or
+    /// `~/.centinel/centinel.toml`, and every assertion about which hosts are already Sources
+    /// would depend on whose laptop ran it. A test that reads the machine is not a test of the
+    /// code.
     async fn run(ctx: &Ctx, args: CrumbsArgs) -> CrumbsReport {
+        let args = match args.config {
+            Some(_) => args,
+            None => CrumbsArgs {
+                config: Some(config_with(ctx, "")),
+                ..args
+            },
+        };
         crumbs(ctx, args, &Progress::none(), &Cancel::none())
             .await
             .unwrap()
+    }
+
+    /// A config file inside the store, holding whatever the test wants to say.
+    fn config_with(ctx: &Ctx, body: &str) -> String {
+        let path = ctx.store.root().join("centinel.toml");
+        std::fs::write(&path, body).unwrap();
+        path.display().to_string()
     }
 
     fn listed(report: &CrumbsReport) -> &Vec<Crumb> {
@@ -930,6 +992,87 @@ mod tests {
         );
     }
 
+    /// A `[[source]]` block answers the question on its own, before a single page of it has
+    /// been collected. `source add` therefore needs no crumb-related code at all: standing is
+    /// derived on every read, so the crumb stops being a candidate the moment the block exists
+    /// and there is nothing to keep in step.
+    #[tokio::test]
+    async fn a_host_the_config_already_claims_is_not_offered_as_a_candidate() {
+        let (_d, ctx) = ctx().await;
+        page(
+            &ctx,
+            "tampa",
+            "https://www.tampa.gov/x",
+            r#"<a href="https://publicrec.hillsclerk.com/Civil/">records</a>
+               <a href="https://www.facebook.com/CityofTampa">social</a>"#,
+        )
+        .await;
+
+        let before = run(&ctx, CrumbsArgs::default()).await;
+        assert!(
+            listed(&before).iter().all(|c| c.standing.is_open()),
+            "nothing claims either host yet"
+        );
+
+        // What `centinel source add hillsclerk --site …` writes. Nothing has been collected
+        // from it, and `enabled = false` on top of that: the operator decided twice.
+        let config = config_with(
+            &ctx,
+            "[[source]]\nid = \"hillsclerk\"\n\
+             site = \"https://publicrec.hillsclerk.com/Civil/\"\nenabled = false\n",
+        );
+        let after = run(
+            &ctx,
+            CrumbsArgs {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let promoted: Vec<&Crumb> = listed(&after)
+            .iter()
+            .filter(|c| c.standing == Standing::Promoted)
+            .collect();
+        assert_eq!(promoted.len(), 1, "{:?}", listed(&after));
+        assert_eq!(promoted[0].host, "publicrec.hillsclerk.com");
+    }
+
+    /// A channel is not a host. One source for `@CityofTampa` says nothing about a crumb
+    /// pointing at a different channel, and marking the host answered would hide it.
+    #[tokio::test]
+    async fn a_channel_source_does_not_answer_for_its_whole_host() {
+        let (_d, ctx) = ctx().await;
+        page(
+            &ctx,
+            "tampa",
+            "https://www.tampa.gov/x",
+            r#"<a href="https://www.youtube.com/@CityofTampa">watch</a>"#,
+        )
+        .await;
+
+        let config = config_with(
+            &ctx,
+            "[[source]]\nid = \"tampa-tv\"\n\
+             channel = \"https://www.youtube.com/@CityofTampa\"\n",
+        );
+        let report = run(
+            &ctx,
+            CrumbsArgs {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let crumbs = listed(&report);
+        assert_eq!(crumbs[0].host, "www.youtube.com");
+        assert!(
+            crumbs[0].standing.is_open(),
+            "a channel claimed the whole of youtube.com"
+        );
+    }
+
     /// The promotion already happened, so the crumb is not one — whatever an old ruling
     /// says about it.
     #[tokio::test]
@@ -953,7 +1096,7 @@ mod tests {
         let report = run(&ctx, CrumbsArgs::default()).await;
         let crumbs = listed(&report);
         assert_eq!(crumbs[0].host, "publicrec.hillsclerk.com");
-        assert_eq!(crumbs[0].standing, Standing::Collected);
+        assert_eq!(crumbs[0].standing, Standing::Promoted);
 
         // And the other direction: the second source's own page holds no off-host link.
         let one = run(

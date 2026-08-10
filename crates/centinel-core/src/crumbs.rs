@@ -98,8 +98,13 @@ pub enum Standing {
     Open,
     /// The operator refused it. Out of the list unless the list is asked for all of them.
     Ignored,
-    /// A Source in this store already collects this host, so the promotion has happened.
-    Collected,
+    /// A Source already covers this host, so the promotion has happened.
+    ///
+    /// From the config or from the log, and **either is enough**. A `[[source]]` block is the
+    /// operator saying this host is theirs to collect; an Observation is proof that it
+    /// happened. Offering a host somebody added an hour ago would be asking for a decision
+    /// they have already made, and whether a run has followed is `list`'s question.
+    Promoted,
 }
 
 impl Standing {
@@ -114,7 +119,7 @@ impl Standing {
         match self {
             Self::Open => Mark::None,
             Self::Ignored => Mark::None,
-            Self::Collected => Mark::Ok,
+            Self::Promoted => Mark::Ok,
         }
     }
 
@@ -123,7 +128,7 @@ impl Standing {
         match self {
             Self::Open => "",
             Self::Ignored => "ignored",
-            Self::Collected => "already a source",
+            Self::Promoted => "already a source",
         }
     }
 }
