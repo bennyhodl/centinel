@@ -4,21 +4,48 @@ You need Rust 1.91+ and a C++ toolchain. Two dependencies compile `llama.cpp` an
 `whisper.cpp` from source, so expect a long first build.
 
 ```bash
-git clone https://github.com/bennyhodl/centinel
-cd centinel
-./install.sh
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://raw.githubusercontent.com/bennyhodl/centinel/master/install.sh | sh
 ```
 
 The script checks the host before it builds anything, and names the command for whatever
-is missing rather than installing a toolchain behind your back.
+is missing rather than installing a toolchain behind your back. There is no prebuilt binary
+to download: both packages compile a C++ library from source, so the binary correct for a
+host is the one built on it.
+
+Flags go after `-s --`, which is how a piped shell is handed arguments:
+
+```bash
+curl -sSf https://raw.githubusercontent.com/bennyhodl/centinel/master/install.sh \
+  | sh -s -- --accel cuda --deps
+```
 
 | Flag | Effect |
 |---|---|
 | `--accel auto\|none\|cuda\|vulkan\|rocm` | override the detected GPU backend |
 | `--portable` | build for the baseline CPU, so the binary can be copied elsewhere |
 | `--bin-dir <dir>` | somewhere other than `~/.cargo/bin` |
+| `--tag <tag>` | build a released tag rather than the default branch |
 | `--deps` | install `ffmpeg` and `yt-dlp` too, with this host's package manager |
 | `--no-doctor` | skip the closing `centinel doctor` |
+
+`--accel`, `--bin-dir` and `--tag` are also `CENTINEL_ACCEL`, `CENTINEL_BIN_DIR` and
+`CENTINEL_TAG`; `CENTINEL_NATIVE=0` is `--portable`. Nothing is prompted, so an unattended
+run behaves the same as an attended one.
+
+## From a clone
+
+The same script, run from a checkout, installs **the checkout** — so a contributor testing
+a change installs the change rather than the default branch.
+
+```bash
+git clone https://github.com/bennyhodl/centinel
+cd centinel
+./install.sh
+```
+
+It decides which of the two it is doing by whether it is a file on disk beside a workspace.
+Piped, `$0` is the shell and there is no clone to find, so the sources come from git.
 
 ## What the script does that `cargo install` cannot
 
@@ -68,18 +95,18 @@ all it needs.
 
 ## By hand
 
-`cargo` cannot take two `--path` arguments, and the workspace root is a virtual manifest,
-so from a clone it is two commands:
+One command does both:
+
+```bash
+cargo install --git https://github.com/bennyhodl/centinel centinel centinel-whisper
+```
+
+From a clone it is two, because `cargo` cannot take two `--path` arguments and the
+workspace root is a virtual manifest:
 
 ```bash
 cargo install --path crates/centinel
 cargo install --path crates/centinel-whisper
-```
-
-Without a clone, one command does both:
-
-```bash
-cargo install --git https://github.com/bennyhodl/centinel centinel centinel-whisper
 ```
 
 Any GPU backend other than Metal is a `--features` flag on **each** of the two commands.
@@ -111,6 +138,6 @@ centinel models pull    # weights for search and transcription
 ```
 
 Run `doctor` first and after every step. It names the fix beside each gap it finds. See
-[Models](../operate/models.md) for what `models pull` fetches and how much disk it wants.
+[Models](../internals/models.md) for what `models pull` fetches and how much disk it wants.
 
-Next: [Your first corpus](first-corpus.md).
+Next: [Operator](operator.md).

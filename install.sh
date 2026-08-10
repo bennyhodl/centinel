@@ -1,10 +1,15 @@
 #!/bin/sh
 #
-# Centinel installer. Run it from a clone:
+# Centinel installer. Either way round:
 #
-#   git clone https://github.com/bennyhodl/centinel
-#   cd centinel
-#   ./install.sh
+#   curl --proto '=https' --tlsv1.2 -sSf \
+#       https://raw.githubusercontent.com/bennyhodl/centinel/master/install.sh | sh
+#
+#   git clone https://github.com/bennyhodl/centinel && cd centinel && ./install.sh
+#
+# Piped, the sources come from git. Run from a clone, they come from the clone — so a
+# contributor testing a change installs the change, not master. The check is whether this
+# script is a file on disk beside a workspace, because `$0` is the shell when it is piped.
 #
 # Centinel is TWO executables and needs both. `centinel` links llama.cpp and
 # `centinel-whisper` links whisper.cpp; linked into one binary they resolve to one copy of
@@ -28,9 +33,16 @@ MSRV="1.91"
 PKG_MAIN="centinel"
 PKG_WORKER="centinel-whisper"
 
+REPO="https://github.com/bennyhodl/centinel"
+
 # The clone this script was run from, not the working directory — `../centinel/install.sh`
-# has to install the same thing `./install.sh` does.
-SRC=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# has to install the same thing `./install.sh` does. Empty when there is no clone, which
+# is the piped case: `$0` is then the shell, so there is no path to take a dirname of.
+SRC=""
+if [ -f "$0" ]; then
+    _dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+    if [ -f "$_dir/crates/$PKG_MAIN/Cargo.toml" ]; then SRC=$_dir; fi
+fi
 
 # ---------------------------------------------------------------- output
 
@@ -68,10 +80,15 @@ usage() {
     cat >&2 <<EOF
 ${B}Centinel installer${N} — builds and installs both binaries into one directory.
 
-  ./install.sh
-  ./install.sh --accel cuda --deps
+  curl --proto '=https' --tlsv1.2 -sSf $REPO/raw/master/install.sh | sh
+  curl ... | sh -s -- --accel cuda --deps      ${D}flags, through the pipe${N}
+  ./install.sh --accel cuda --deps             ${D}from a clone${N}
+
+Sources come from the clone this script sits in, or from git when there is none.
 
 ${B}Options${N}
+  --tag <tag>        Build this git tag instead of the default branch. Only for a git
+                     build — a clone builds whatever is checked out.
   --accel <auto|none|cuda|vulkan|rocm>
                      GPU backend. Default auto: Metal on macOS (built in, no flag),
                      CUDA or ROCm on Linux when the toolchain is on PATH, else none.
@@ -86,7 +103,7 @@ ${B}Options${N}
   -h, --help         This text.
 
 ${B}Environment${N}
-  CENTINEL_ACCEL, CENTINEL_BIN_DIR — same as the flags above.
+  CENTINEL_ACCEL, CENTINEL_BIN_DIR, CENTINEL_TAG — same as the flags above.
   CENTINEL_NATIVE=0 — same as --portable.
 
 ${B}What it does not do${N}
@@ -99,6 +116,7 @@ EOF
 ACCEL="${CENTINEL_ACCEL:-auto}"
 BIN_DIR="${CENTINEL_BIN_DIR:-}"
 NATIVE="${CENTINEL_NATIVE:-1}"
+TAG="${CENTINEL_TAG:-}"
 WITH_DEPS=0
 RUN_DOCTOR=1
 
@@ -106,6 +124,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --accel)   [ $# -ge 2 ] || die "--accel needs a value"; ACCEL=$2; shift 2 ;;
         --bin-dir) [ $# -ge 2 ] || die "--bin-dir needs a value"; BIN_DIR=$2; shift 2 ;;
+        --tag)     [ $# -ge 2 ] || die "--tag needs a value"; TAG=$2; shift 2 ;;
         --portable)  NATIVE=0; shift ;;
         --deps)      WITH_DEPS=1; shift ;;
         --no-doctor) RUN_DOCTOR=0; shift ;;
@@ -114,12 +133,12 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-[ -f "$SRC/crates/$PKG_MAIN/Cargo.toml" ] ||
-    die "$SRC is not a Centinel clone. Run this script from inside one:
-
-      git clone https://github.com/bennyhodl/centinel
-      cd centinel
-      ./install.sh"
+# A tag names a revision of the repository, so it cannot mean anything against a working
+# tree. Saying so beats building the checkout and reporting the tag that was ignored.
+if [ -n "$SRC" ] && [ -n "$TAG" ]; then
+    die "--tag applies to a git build, and this is a clone at $SRC.
+      \`git checkout $TAG\` first, or run the installer without a clone beside it."
+fi
 
 # ---------------------------------------------------------------- the host
 
@@ -265,9 +284,17 @@ fi
 
 # ---------------------------------------------------------------- install
 
+if [ -n "$SRC" ]; then
+    SOURCE_NOTE="$SRC"
+elif [ -n "$TAG" ]; then
+    SOURCE_NOTE="$REPO @ $TAG"
+else
+    SOURCE_NOTE="$REPO"
+fi
+
 say ""
 step "installing centinel"
-note "from         $SRC"
+note "from         $SOURCE_NOTE"
 note "accelerator  $ACCEL_NOTE"
 note "cpu tuning   $TUNING"
 note "into         $BIN_DIR"
@@ -276,7 +303,16 @@ say ""
 install_pkg() {
     pkg=$1
 
-    set -- install --locked --force --path "$SRC/crates/$pkg"
+    # `--path` against a clone, `--git` against the repository. Both take `--locked`, so
+    # either way the build uses the Cargo.lock that was tested rather than resolving fresh.
+    set -- install --locked --force
+    if [ -n "$SRC" ]; then
+        set -- "$@" --path "$SRC/crates/$pkg"
+    else
+        set -- "$@" --git "$REPO"
+        if [ -n "$TAG" ]; then set -- "$@" --tag "$TAG"; fi
+        set -- "$@" "$pkg"
+    fi
     if [ -n "$CARGO_ROOT" ]; then set -- "$@" --root "$CARGO_ROOT"; fi
     if [ -n "$FEATURE" ]; then set -- "$@" --features "$FEATURE"; fi
 

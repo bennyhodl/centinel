@@ -70,22 +70,35 @@ Light the candle.
 Rust 1.91+ and a C++ toolchain — two of the dependencies compile `llama.cpp` and `whisper.cpp`.
 
 ```bash
-git clone https://github.com/bennyhodl/centinel
-cd centinel
-./install.sh
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/bennyhodl/centinel/master/install.sh | sh
 ```
 
-The script checks this host before it builds anything and names the command for whatever is missing, rather than installing a toolchain behind your back. Expect a long first build.
+The script checks this host before it builds anything and names the command for whatever is missing, rather than installing a toolchain behind your back. Expect a long first build — there is no prebuilt binary to download, because both packages compile a C++ library from source and the binary correct for a host is the one built on it.
 
 Three things it does that a `cargo install` line cannot. It selects the GPU backend for the host — Metal on macOS, CUDA or ROCm on Linux when their toolchains are present. It tunes for the CPU it is building on, which matters more than it sounds like (below). And it puts **both** binaries in one directory, which is the thing transcription does not work without.
+
+Flags go after `-s --`:
+
+```bash
+curl -sSf https://raw.githubusercontent.com/bennyhodl/centinel/master/install.sh | sh -s -- --accel cuda --deps
+```
 
 | | |
 |---|---|
 | `--accel auto\|none\|cuda\|vulkan\|rocm` | override the detected backend |
 | `--portable` | build for the baseline CPU, so the binary can be copied to another machine |
 | `--bin-dir <dir>` | somewhere other than `~/.cargo/bin` |
+| `--tag <tag>` | build a released tag rather than the default branch |
 | `--deps` | install `ffmpeg` and `yt-dlp` too, with this host's package manager |
 | `--no-doctor` | skip the closing `centinel doctor` |
+
+From a clone it installs **the clone**, so a contributor testing a change installs the change:
+
+```bash
+git clone https://github.com/bennyhodl/centinel
+cd centinel
+./install.sh
+```
 
 ### Why it tunes for your CPU
 
@@ -101,17 +114,17 @@ RUSTFLAGS="-C target-cpu=x86-64-v3" ./install.sh --portable
 
 ### By hand
 
-**Centinel is two binaries, and you need both.** From the clone, install each package in turn — cargo cannot take two `--path` arguments, and the workspace root is a virtual manifest:
+**Centinel is two binaries, and you need both.** Without a clone, one command does both:
+
+```bash
+cargo install --git https://github.com/bennyhodl/centinel centinel centinel-whisper
+```
+
+From a clone it is two commands — cargo cannot take two `--path` arguments, and the workspace root is a virtual manifest:
 
 ```bash
 cargo install --path crates/centinel
 cargo install --path crates/centinel-whisper
-```
-
-Without a clone, one command does both:
-
-```bash
-cargo install --git https://github.com/bennyhodl/centinel centinel centinel-whisper
 ```
 
 Both packages compile a C++ library from source, so the first build is long either way. Any GPU backend other than Metal is a `--features` flag on **each** of the two commands: passing `--features cuda` to one binary and not the other leaves half the pipeline on the CPU.
