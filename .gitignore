@@ -9,6 +9,9 @@
 # Local model weights, pulled by `centinel models pull`.
 /models/
 
+# The rendered book. Source is contrib/book/src/; `just book` builds this.
+/contrib/book/book/
+
 # env / secrets
 .env
 .env.local
