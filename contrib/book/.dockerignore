@@ -1,0 +1,7 @@
+# The rendered book. The image builds its own copy, and a local one is the
+# largest thing in this directory.
+book/
+
+# The recipe, not an input to it.
+Dockerfile
+.dockerignore
