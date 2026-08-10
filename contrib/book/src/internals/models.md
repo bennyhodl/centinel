@@ -106,4 +106,4 @@ Because everything runs locally, **output quality varies by machine**. So the mo
 that produced an artifact is part of its provenance — every derivation records the tool,
 the version and the tier that made it.
 
-Next: [When something is wrong](troubleshooting.md).
+Next: [Search](search.md).

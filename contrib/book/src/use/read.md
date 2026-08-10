@@ -72,4 +72,4 @@ The store mirrors the URLs under `current/<source>/`, so a corpus is browsable w
 ordinary tools. That tree is **derived** — it is rebuildable from `blobs/` and `log/`, and
 deleting it costs minutes. The evidence is the blob pool and the log.
 
-Next: [From an agent](agents.md).
+Next: [The machine](../operate/doctor.md).

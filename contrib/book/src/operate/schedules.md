@@ -4,7 +4,7 @@ A schedule is a **saved `run` and a cadence** — nothing more. It has no argume
 own that `run` does not have. If you can type it, you can schedule it.
 
 ```bash
-centinel schedule set tampa-daily --cron "0 3 * * *" --source tampa
+centinel schedule set agartha-daily --cron "0 3 * * *" --source agartha
 centinel schedules
 centinel history
 centinel serve
@@ -87,8 +87,8 @@ that was off for a week does not wake up owing seven runs.
 centinel schedules                  # what is configured, when each next fires, how the last went
 centinel history                    # every attempt, newest first
 centinel history --failed
-centinel history --schedule tampa-daily
-centinel history --source tampa
+centinel history --schedule agartha-daily
+centinel history --source agartha
 centinel history --since 2026-08-01T00:00:00Z
 centinel history --run 8f3c         # one run, by id or unambiguous prefix — the whole report
 ```
@@ -112,4 +112,4 @@ The counts are in the record; the addresses are in the log. That split is delibe
 run record that listed every address would be a second copy of the log, and the second
 copy is the one that goes stale.
 
-Next: [Models](models.md).
+Next: [When something is wrong](troubleshooting.md).

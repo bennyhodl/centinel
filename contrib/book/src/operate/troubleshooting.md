@@ -1,41 +1,26 @@
 # When something is wrong
 
-Start with `centinel doctor`. It prints the store root it opened, the config file that
-named it, the corpus size, which binaries are present, and which pipeline gates are
-blocked by missing weights. It names the fix beside each gap.
+Start with `centinel doctor` — it prints the store root it opened, the config file that
+named it, which binaries are present, and which pipeline gates are blocked. Reading that
+report is [The machine](doctor.md); it also covers the two-stores mistake, where searches
+come back empty from one directory and full from another.
 
-## Read the readiness report correctly
-
-A missing binary carries a **need**, and the three are not the same:
-
-| Need | Meaning |
-|---|---|
-| `required` | code calls it and a stage stops |
-| `optional` | code calls it and a stage degrades |
-| `planned` | nothing calls it yet, and the pipeline that will is not built |
-
-`pdftoppm` and `tesseract` are `planned`. They were once reported as required with zero
-call sites between them, so a correctly installed machine was told it was not ready. A
-readiness check that is wrong pessimistically is the kind people learn to ignore.
-
-`yt-dlp` is the one dependency that reports **staleness**, because its breakage is
-predictable rather than surprising — YouTube changes and it ships releases in emergency
-clusters. `doctor` warns at ninety days.
+The symptoms below are the ones the readiness report cannot see.
 
 ## The corpus looks collected and holds nothing
 
-This is the failure mode to watch for, and it is silent. Every symptom looks like success:
-resources found, acquisitions succeeded, liveness `live` on all of them, every address
-indexed. The corpus gains hundreds of copies of a navigation menu.
+The silent one. Every symptom looks like success — resources found, acquisitions
+succeeded, liveness `live` on all of them, every address indexed — and the corpus gains
+hundreds of copies of a navigation menu.
 
-Three real shapes of it:
+[Investigate and check](investigate.md) is the page for this, because the cure is a check
+run *before* the hour rather than a diagnosis after it. In short, three real shapes:
 
-**The page is a wrapper.** On `tampa.gov`, 915 of 1005 pages held their text in a
-JavaScript `var pdfURL`, and the HTML we kept was a print notice. The document was at an
-address nothing had fetched. This is what **enclosure** scanning exists for — see
-[Reading a document](../internals/extract.md).
+**The page is a wrapper.** On `agartha.gov`, 915 of 1,005 pages held their text in a
+JavaScript `var pdfURL`, and the HTML kept was a print notice. What **enclosure** scanning
+exists for — see [Reading a document](../internals/extract.md).
 
-**The reader took the whole page.** `hillsclerk.com` enumerates 177 addresses without a
+**The reader took the whole page.** `valhallaclerk.com` enumerates 177 addresses without a
 mistake and hands back 23,213 characters of navigation for a page whose content is one
 sentence. The fix is the page's own **marked region** — `<main>`, `<article>` — read
 before anything guesses.
@@ -43,17 +28,6 @@ before anything guesses.
 **The strategy was wrong and confident.** 75 Resources, 75 successful acquisitions, 75
 copies of a menu reading "Preview link expired", and not one budget figure. This is why
 `investigate` prints the evidence for a recognition rather than the verdict alone.
-
-The check, before you commit an hour:
-
-```bash
-centinel investigate https://host/       # who recognises this, and on what evidence
-centinel check https://host/some/page    # what would extraction make of this one document
-centinel run --limit 50                  # then look at what came back
-centinel read <handle>
-```
-
-`investigate` and `check` both store nothing.
 
 ## A search returns nothing you expected
 
@@ -107,13 +81,6 @@ A verdict of "nothing could be derived from this" is recorded as an **Underivabl
 carrying the pipeline version that reached it. Bumping that version is how a better
 extractor gets another go at what an older one gave up on. `--refresh` re-derives
 everything, which is expensive and deliberate.
-
-## The store is in two places
-
-If searches come back empty from one directory and full from another, you have two stores.
-The root defaults to `~/.centinel` for exactly this reason. `centinel doctor` prints which
-root it opened and which config file named it — compare those two lines between the
-directories.
 
 ## Things that are safe to delete
 

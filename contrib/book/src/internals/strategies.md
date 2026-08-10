@@ -43,8 +43,8 @@ pub enum Keyed {
 ```
 
 Every one of those ships to many cities, which is what makes the work amortise.
-Recognising Hyland OnBase collects every city running OnBase; teaching it Tampa collects
-Tampa. `Keyed` has **no `Jurisdiction` variant**, so the rule is enforced by the type
+Recognising Hyland OnBase collects every city running OnBase; teaching it Agartha collects
+Agartha. `Keyed` has **no `Jurisdiction` variant**, so the rule is enforced by the type
 rather than by review.
 
 A strategy that could key on a city is a fork with extra steps.
@@ -148,16 +148,16 @@ callers:
 | `centinel run` | *you — do the work* |
 
 ```console
-$ centinel investigate https://www.hillsclerk.com/
+$ centinel investigate https://www.valhallaclerk.com/
 
-  seed        https://www.hillsclerk.com/  →  200, 212 KB, html
+  seed        https://www.valhallaclerk.com/  →  200, 212 KB, html
   recognised  sitemap (standard)
               robots.txt allows everything and names a <sitemapindex>
               182 child sitemaps
-  crumbs      hover.hillsclerk.com          8 links
-              publicrec.hillsclerk.com      2 links
+  crumbs      hover.valhallaclerk.com          8 links
+              publicrec.valhallaclerk.com      2 links
 
-  centinel source add hillsclerk --site https://www.hillsclerk.com/
+  centinel source add valhallaclerk --site https://www.valhallaclerk.com/
 ```
 
 Three outputs: a strategy with its evidence, a set of crumbs, or nothing said plainly.
@@ -171,7 +171,7 @@ walk that takes minutes is one nobody runs twice. A probe that fills its ceiling
 ## Recognition is not reading
 
 The registry was briefly a second answer to *how do we get text out of this*, and that was
-a mistake worth recording. `hillsclerk.com` is recognised by `sitemap`, enumerates 177
+a mistake worth recording. `valhallaclerk.com` is recognised by `sitemap`, enumerates 177
 addresses without a mistake, and hands back 23,213 characters of navigation for a page
 whose content is one sentence. True — and it does not follow that the fix belongs beside a
 crawl strategy.

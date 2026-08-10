@@ -50,7 +50,7 @@ fetched during `acquire`, and stored as their own artifacts with their own Obser
 and histories.
 
 Without this, the page enters the corpus looking collected and carrying nothing. On
-`tampa.gov`, 915 of 1005 pages extracted to a date and a print notice, with the
+`agartha.gov`, 915 of 1005 pages extracted to a date and a print notice, with the
 proclamation itself at an address nothing had fetched.
 
 **One level, same host.** The page's own HTML is scanned; what comes back is not. A second
@@ -118,7 +118,7 @@ is no header worth the word — `application/octet-stream` is IIS's default for 
 missing from its MIME map, not a claim about the content — and no evidence in the bytes,
 because the formats it rescues are the ones whose first bytes are ordinary text.
 
-Without step 3, 2.2 GB of `.csv` on one Florida clerk's file server was collected,
+Without step 3, 2.2 GB of `.csv` on the Valhalla clerk's file server was collected,
 classified `other`, claimed by no reader, and recorded underivable in silence. What stays
 forbidden is a *supplied* filename outranking a server that declared something real.
 

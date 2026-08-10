@@ -18,20 +18,13 @@ resumes on a later run — but a missing `yt-dlp` stops a channel dead.
 Point `investigate` at a host and it will tell you whether anything recognises it, and on
 what evidence.
 
-```console
-$ centinel investigate https://www.hillsclerk.com/
-
-  seed        https://www.hillsclerk.com/  →  200, 212 KB, html
-  recognised  sitemap (standard)
-              robots.txt allows everything and names a <sitemapindex>
-              182 child sitemaps
-  crumbs      hover.hillsclerk.com          8 links
-              publicrec.hillsclerk.com      2 links
-
-  centinel source add hillsclerk --site https://www.hillsclerk.com/
+```bash
+centinel investigate https://www.valhallaclerk.com/
 ```
 
-Nothing is stored. It is a question, and it costs a couple of dozen requests.
+Nothing is stored. It is a question, and it costs a couple of dozen requests. The last line
+it prints is the `source add` command, already filled in. A full transcript, read block by
+block, is on [Operator](operator.md).
 
 Three answers are possible: a strategy with its evidence; a set of **crumbs**, meaning the
 system you want is on another host; or nothing, said plainly. All three are useful. See
@@ -44,14 +37,14 @@ To ask a narrower question — *what would extraction make of this one document*
 ## 3. Name a source
 
 ```bash
-centinel source add tampa --site https://www.tampa.gov
+centinel source add agartha --site https://www.agartha.gov
 ```
 
 That writes a `[[source]]` block into your config file. A YouTube channel is the same
 command with a different key:
 
 ```bash
-centinel source add tampa-council --channel https://www.youtube.com/@CityofTampa
+centinel source add agartha-council --channel https://www.youtube.com/@CityofAgartha
 ```
 
 `site` versus `channel` is the **whole** of the website/YouTube difference. The two kinds
@@ -112,7 +105,7 @@ Both take the handle by prefix. See [Reading a result](../use/read.md).
 ## 7. Keep it running
 
 ```bash
-centinel schedule set tampa --cron "0 3 * * *"
+centinel schedule set agartha --cron "0 3 * * *"
 centinel serve
 ```
 
@@ -122,5 +115,5 @@ either way, because it comes from the store rather than from the runner.
 
 ---
 
-Next: [Searching](../use/search.md) for the user's path, or
-[Sources](../operate/sources.md) for the operator's.
+Next: [Searching](../use/search.md) — what to put in the query, and how to read what comes
+back.

@@ -16,6 +16,7 @@ change with the code.
 | [`docs/RETRIEVAL.md`](https://github.com/bennyhodl/centinel/blob/master/docs/RETRIEVAL.md) | How a question becomes a cited passage. Chunking, the two stores, the local embedder and reranker, and what a result tells you about how much of the corpus it could see. |
 | [`docs/STRATEGIES.md`](https://github.com/bennyhodl/centinel/blob/master/docs/STRATEGIES.md) | Collection strategies. What a strategy is, what it may key on, and the worked examples the rules came from. |
 | [`docs/SCHEDULING.md`](https://github.com/bennyhodl/centinel/blob/master/docs/SCHEDULING.md) | The scheduling specification. Reach, the single lane, the run journal, and what a schedule is allowed to be. |
+| [`docs/FEDERATION.md`](https://github.com/bennyhodl/centinel/blob/master/docs/FEDERATION.md) | Sharing between city nodes. Partial — three of twelve decisions locked, each hole naming the ticket that fills it. See [Contributing](../contributing.md). |
 | [`docs/FIELD-NOTES.md`](https://github.com/bennyhodl/centinel/blob/master/docs/FIELD-NOTES.md) | QA findings from real hosts. Where most of the rules in this book came from. |
 | [`docs/research/`](https://github.com/bennyhodl/centinel/tree/master/docs/research) | The evidence underneath. ~3,850 lines, ~450 primary-source citations. |
 
