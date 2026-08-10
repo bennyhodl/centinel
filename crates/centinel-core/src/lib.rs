@@ -34,6 +34,7 @@ pub mod captions;
 pub mod chunk;
 pub mod config;
 pub mod content;
+pub mod crumbs;
 pub mod discovery;
 pub mod domain;
 pub mod embed;

@@ -1562,6 +1562,43 @@ it costs one row and no extra fetch.
 This keeps `CONTEXT.md`'s rule that stages stay separate. Nothing new runs. `discover`
 learns to write down what it refused, and a new command reads that back.
 
+##### What was built, and the four places it diverged (2026-08-10)
+
+`centinel crumbs`, with `show`, `ignore` and `allow`. The design above survived; four of its
+mechanisms did not, and each was decided by what the code turned out to hold.
+
+**1. Not a product of `discover`.** The sentence *"the fan-out already reads every link on
+every page it walks"* describes a strategy that does not exist. `sitemap` enumerates from
+sitemap XML and `listing` from directory indexes — neither reads a content page's links, so a
+crumb recorded at discover time would have come back nearly empty. The links are in the
+**collected HTML**, which `collect` already stored, so the pass reads blobs. That costs no
+fetch either, and it sees every page collected rather than only the ones an enumeration
+happened to name.
+
+**2. No table, not even a derived one.** `crumbs` rebuilds the list from `blobs/` on every
+pass and stores nothing. A row in `centinel.db` would be a second copy of a fact whose only
+authority is already on disk, kept in step by hand. If the command is ever too slow to run
+while deciding what to add next, *then* the table is the answer — and it is derived, exactly
+as this entry says.
+
+**3. The ruling is in `decisions.jsonl`, not in `log/`.** "It belongs in the log" was right
+that it is truth and wrong about which file. `log/` is per Source, and *"this host is not a
+Source"* is not a fact about Tampa: filed per Source, `facebook.com` would need refusing once
+per city, and a Source added next year would re-offer every host already rejected. So the
+rulings are corpus-wide, append-only, latest-wins — which is what lets `allow` reverse an
+`ignore` without erasing the record that it was made.
+
+**4. `promoted` needs no record at all.** The three states are `open`, `ignored` and
+`collected`, and only the second is stored. The third is read off the log: an Observation on
+that host **is** the promotion, so nothing has to be written and nothing can disagree with
+the corpus. Collected also beats ignored, because a host that became a Source is answered and
+an old refusal on it is stale rather than binding.
+
+The link count did the job it was given. Three pages of one city's site produced five hosts
+sorted by link count, and the two at the bottom were a font CDN and a social network — the
+list is scanned, not studied. A **page** count sits beside it: one page linking a host twenty
+times is a widget in a template, and twenty pages linking it once each is a system.
+
 #### The shape, sharpened (Ben, 2026-08-07)
 
 Within a source, keep the fan-out — follow same-host links. Links that leave the host are

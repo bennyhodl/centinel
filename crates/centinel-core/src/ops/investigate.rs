@@ -43,6 +43,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::content::ContentKind;
+use crate::crumbs::{self, Crumb};
 use crate::prelude::*;
 use crate::strategies::crawl::{self, Seed};
 use crate::verdict::{Read, ReadQuality};
@@ -161,19 +162,6 @@ impl Lead {
     pub fn is_lead(&self) -> bool {
         !self.findings.is_empty() || self.read.is_poor()
     }
-}
-
-/// An off-host link, recorded and **not followed**.
-///
-/// One Source per exact host is the rule the field notes arrived at — a domain is not a
-/// Source — and following these automatically is how one address becomes a crawl of the
-/// internet. So they are counted, named, and left for the operator to promote.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-pub struct Crumb {
-    pub host: String,
-    pub links: usize,
-    /// One of them, to look at.
-    pub example: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -440,44 +428,23 @@ async fn extracted_text(kind: ContentKind, seed: &Seed) -> String {
 }
 
 /// Every off-host link on the seed, grouped by host.
+///
+/// The scan itself is [`crate::crumbs`], which `crumbs` runs over a corpus of blobs and this
+/// runs over one page that was just fetched. There used to be a second copy of it here, and
+/// two copies of a scan is what [`crate::html`] was assembled out of.
+///
+/// The standing on each stays [`crumbs::Standing::Open`], because this command reads no store:
+/// whether a host has already been refused or already collected is a question `crumbs`
+/// answers, and answering it from here would need a corpus this command does not open.
 fn crumbs_on(seed: &Seed) -> Vec<Crumb> {
     let Some(base) = seed.final_url() else {
         return Vec::new();
     };
-    let here = base.host_str().unwrap_or_default().to_string();
 
-    let html = seed.text();
-    let mut by_host: BTreeMap<String, (usize, String)> = BTreeMap::new();
-    for tag in crate::html::Scan::new(&html).tags(&["a"]) {
-        let Some(href) = tag.attr("href") else {
-            continue;
-        };
-        let Ok(target) = base.join(&crate::html::unescape(href)) else {
-            continue;
-        };
-        let Some(host) = target.host_str() else {
-            continue;
-        };
-        if host == here || !matches!(target.scheme(), "http" | "https") {
-            continue;
-        }
-        let entry = by_host
-            .entry(host.to_string())
-            .or_insert_with(|| (0, target.to_string()));
-        entry.0 += 1;
-    }
+    let mut trail = crumbs::Trail::default();
+    trail.read(&seed.text(), crumbs::Carrier::at_address(base.to_string()));
 
-    let mut out: Vec<Crumb> = by_host
-        .into_iter()
-        .map(|(host, (links, example))| Crumb {
-            host,
-            links,
-            example,
-        })
-        .collect();
-    // Most-linked first: a host named twenty times is a system, and one named once is a
-    // footer link to the state portal.
-    out.sort_by(|a, b| b.links.cmp(&a.links).then(a.host.cmp(&b.host)));
+    let mut out = trail.crumbs();
     out.truncate(MAX_CRUMBS);
     out
 }
