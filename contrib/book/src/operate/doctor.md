@@ -7,7 +7,7 @@ interpret.
 ```console
 $ centinel doctor
 
-ready  /data/agartha · 394 blobs · 3 sources
+ready  /data/agartha · 3 sources
 config /Users/you/.centinel/centinel.toml
 
 binaries
@@ -38,7 +38,7 @@ Four blocks, and each answers a different question.
 ## The first two lines answer *which corpus*
 
 ```
-ready  /data/agartha · 394 blobs · 3 sources
+ready  /data/agartha · 3 sources
 config /Users/you/.centinel/centinel.toml
 ```
 
@@ -56,6 +56,13 @@ directory you were standing in.
 
 Compare those two lines between the directories before believing anything else. The
 resolution order for both is in [Sources](sources.md).
+
+**What is not on this report is how much is in that store.** `doctor` asks the machine, and
+it answers at the speed of a `command -v`, because it is the first thing you type when
+something is already wrong and often the thing you type before everything else. Counting
+the corpus was the one line here that grew with the corpus — a walk of the whole blob pool,
+every time, to print a number nobody ran `doctor` to see. `centinel status` counts it, off
+the log, by source and content kind, and says what it occupies.
 
 ---
 

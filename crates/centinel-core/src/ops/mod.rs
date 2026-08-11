@@ -35,6 +35,7 @@ mod schedule;
 mod schedules;
 mod search;
 mod source;
+mod status;
 mod target;
 mod transcribe;
 
@@ -69,6 +70,7 @@ pub use source::{
     AddArgs, AdoptArgs, ConfiguredSource, RemoveArgs as SourceRemoveArgs, SourceAction, SourceArgs,
     SourceReport, source,
 };
+pub use status::{SourceCount, StatusArgs, StatusReport, status};
 pub use transcribe::{
     TranscribeArgs, TranscribeFailure, TranscribeReport, TranscribedItem, transcribe,
 };

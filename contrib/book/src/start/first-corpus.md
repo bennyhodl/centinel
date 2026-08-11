@@ -65,9 +65,15 @@ whether the text coming out is the page's content or the page's navigation menu.
 Look at what came back:
 
 ```bash
+centinel status
 centinel list
 centinel search "budget"
 ```
+
+`status` counts what is stored, by source and content kind, and what it takes on disk — the
+fifty above should be fifty documents across `html` and `pdf`. A column you did not expect,
+or a size that is a hundred kilobytes when you asked for fifty PDFs, is worth a look before
+you collect ten thousand more of them.
 
 If the extracted text is a cookie banner and a menu, stop and read
 [Reading a document](../internals/extract.md). Collecting ten thousand copies of a

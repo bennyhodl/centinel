@@ -35,6 +35,7 @@ Each is what `run` does for you, available on its own.
 | `search` | Search the corpus for a passage. |
 | `read` | Read the extracted text of a collected document. |
 | `open` | Open a collected document in an application. *(host)* |
+| `status` | Count what is stored, by source and content kind, and what it occupies on disk. |
 | `list` | List sources in the store with resource counts and liveness. |
 | `check` | See what extraction makes of one link or file. Nothing is stored. |
 | `investigate` | Ask the registry what it makes of an address. Nothing is stored. |
@@ -46,7 +47,7 @@ Each is what `run` does for you, available on its own.
 
 | Command | What it does |
 |---|---|
-| `doctor` | Report host readiness: required binaries, store location, corpus size. |
+| `doctor` | Report host readiness: required binaries, model weights, store location. |
 | `models` | Inspect, fetch, verify and remove model weights. |
 
 ## Servers
