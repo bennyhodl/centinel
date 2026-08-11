@@ -39,7 +39,7 @@
 //! more than one: reading a single page out of a five-source store cost eleven full log
 //! reads before anything opened.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use jiff::Timestamp;
@@ -291,9 +291,13 @@ impl Store {
     /// Counts blobs in the pool.
     ///
     /// Knows that a `.<sha>.tmp` file is a write in flight rather than a blob, because
-    /// [`Self::put_blob`] is what creates them. `doctor` used to re-derive that rule from
-    /// the other side of the module, which meant a change to the write convention would
-    /// have silently mis-counted rather than failed.
+    /// [`Self::put_blob`] is what creates them. A caller re-deriving that rule from the
+    /// other side of the module would silently mis-count rather than fail.
+    ///
+    /// **O(corpus)**, and the only count here that is. It answers a question about the
+    /// *pool* — where derived text sits beside collected bytes — which is why no report
+    /// reaches for it to say how much has been collected; that is
+    /// [`crate::ops::status`], and it reads the log.
     pub async fn count_blobs(&self) -> Result<u64> {
         let blobs = self.blobs_dir();
         let mut count = 0u64;
@@ -375,6 +379,39 @@ impl Store {
     /// Exposed so `current/` can hardlink into the pool rather than copying.
     pub fn blob_path_of(&self, sha: &BlobSha) -> PathBuf {
         self.blob_path(sha)
+    }
+
+    /// What each of these blobs occupies on disk.
+    ///
+    /// One `stat` per blob and not a byte read, which is what makes "how much disk is this
+    /// corpus" answerable at all: [`Self::get_blob`] would read and hash every file to
+    /// answer a question the directory entry already holds.
+    ///
+    /// A blob the pool does not hold is **left out of the map** rather than counted as
+    /// zero. The two are different facts — a log naming bytes that are not there is a
+    /// corpus with a hole in it — and a caller summing the values would otherwise report a
+    /// smaller number with nothing to say about why. Comparing the map's length against
+    /// the set's is how that hole is noticed.
+    pub async fn blob_sizes(&self, shas: &BTreeSet<BlobSha>) -> Result<BTreeMap<BlobSha, u64>> {
+        let paths: Vec<(BlobSha, PathBuf)> = shas
+            .iter()
+            .map(|sha| (sha.clone(), self.blob_path(sha)))
+            .collect();
+
+        // One hop to the blocking pool for the whole batch. A corpus has tens of thousands
+        // of these, and taking each one's turn through the async runtime individually
+        // costs more than the syscalls it is scheduling.
+        tokio::task::spawn_blocking(move || {
+            paths
+                .into_iter()
+                .filter_map(|(sha, path)| std::fs::metadata(&path).ok().map(|m| (sha, m.len())))
+                .collect()
+        })
+        .await
+        .map_err(|e| StoreError::Io {
+            path: self.blobs_dir(),
+            source: std::io::Error::other(e),
+        })
     }
 
     pub async fn has_blob(&self, sha: &BlobSha) -> Result<bool> {

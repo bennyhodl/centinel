@@ -849,7 +849,7 @@ mod render_path_tests {
         // `doctor` is the one that actually broke: `GateStatus::missing` is skipped when
         // empty, so a machine with every model installed produced JSON that would not
         // deserialize back.
-        let out = render_op("doctor", serde_json::json!({"skip_blob_count": true})).await;
+        let out = render_op("doctor", serde_json::json!({})).await;
         assert!(out.contains("binaries") && out.contains("gates"), "{out:?}");
     }
 
@@ -857,7 +857,7 @@ mod render_path_tests {
     /// `--pretty > file` and `NO_COLOR` honest.
     #[tokio::test]
     async fn rendering_without_colour_stays_plain_text() {
-        let out = render_op("doctor", serde_json::json!({"skip_blob_count": true})).await;
+        let out = render_op("doctor", serde_json::json!({})).await;
         assert!(!out.contains('\x1b'), "escape codes leaked with colour off");
     }
 

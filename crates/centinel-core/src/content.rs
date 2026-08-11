@@ -232,6 +232,46 @@ impl ContentKind {
     /// `application/octet-stream` — so a declared type that means nothing falls through
     /// to the bytes rather than being believed.
     pub fn classify(meta: &BTreeMap<String, String>, bytes: &[u8]) -> Self {
+        if let Some(kind) = Self::from_declared(meta) {
+            // The one declared type that cannot be trusted on its own: a caption track is
+            // served as ordinary JSON, so the header cannot tell it apart from a vendor
+            // API response.
+            return match kind {
+                Json if crate::captions::looks_like_json3(bytes) => Captions,
+                kind => kind,
+            };
+        }
+        if let Some(kind) = Self::from_magic(bytes) {
+            return kind;
+        }
+
+        // Both signals came back empty. The served address's own name is the last thing
+        // left, and it is better than [`Other`].
+        Self::from_served_name(meta).unwrap_or(Other)
+    }
+
+    /// The kind a **stored record** names, with the bytes out of reach.
+    ///
+    /// [`Self::classify`] minus the magic-byte step, for the census questions — *how much
+    /// of this corpus is PDF?* — where the metadata is already in memory and the blob is a
+    /// file open away. Reading a 4 KB head per address to answer them would turn a log read
+    /// into one open per document, which is the difference between an instant answer and a
+    /// walk of the whole pool.
+    ///
+    /// What is given up is exactly what the bytes settle and the record does not: a blob
+    /// mislabelled `application/octet-stream` at an address with no useful extension reads
+    /// as [`Other`] here where `classify` would have seen `%PDF-`, and a caption track reads
+    /// as [`Json`], since json3 is a shape rather than a content-type. Both are what the
+    /// record says, and a count that says so is honest; a count that re-reads the corpus to
+    /// improve on it is a different command.
+    pub fn from_record(meta: &BTreeMap<String, String>) -> Self {
+        Self::from_declared(meta)
+            .or_else(|| Self::from_served_name(meta))
+            .unwrap_or(Other)
+    }
+
+    /// The kind the `content-type` header names, where it names one.
+    fn from_declared(meta: &BTreeMap<String, String>) -> Option<Self> {
         let declared = meta
             .get("content-type")
             .map(|s| {
@@ -243,25 +283,10 @@ impl ContentKind {
             })
             .unwrap_or_default();
 
-        if let Some(kind) = Self::from_mime(&declared) {
-            // The one declared type that cannot be trusted on its own: a caption track is
-            // served as ordinary JSON, so the header cannot tell it apart from a vendor
-            // API response.
-            return match kind {
-                Json if crate::captions::looks_like_json3(bytes) => Captions,
-                kind => kind,
-            };
-        }
-        if declared.starts_with("audio/") {
-            return Audio;
-        }
-        if let Some(kind) = Self::from_magic(bytes) {
-            return kind;
-        }
-
-        // Both signals came back empty. The served address's own name is the last thing
-        // left, and it is better than [`Other`].
-        Self::from_served_name(meta).unwrap_or(Other)
+        Self::from_mime(&declared)
+            // `audio/*` is what this codebase records for a stream it deliberately does
+            // not name a container for, and every `audio/…` a server declares is audio.
+            .or_else(|| declared.starts_with("audio/").then_some(Audio))
     }
 
     /// The kind the served address's filename names, for bytes that proved nothing.
@@ -661,6 +686,45 @@ mod tests {
         ] {
             assert_eq!(classify(ct, b""), Spreadsheet, "{ct}");
         }
+    }
+
+    /// The census path. It sees what the record holds — the declared type, then the
+    /// address it was served from — and never opens the blob.
+    #[test]
+    fn a_record_is_classified_without_its_bytes() {
+        let record = |url: &str, ct: &str| {
+            let mut meta = meta(ct);
+            meta.insert("final_url".into(), url.into());
+            ContentKind::from_record(&meta)
+        };
+
+        assert_eq!(record("https://x.gov/minutes.pdf", "application/pdf"), Pdf);
+        assert_eq!(
+            record("https://x.gov/index", "text/html;charset=UTF-8"),
+            Html
+        );
+        assert_eq!(record("https://x.gov/talk", "audio/*"), Audio);
+        // The 2.2 GB case again, and the reason the address is consulted at all: no
+        // header worth the word, and no bytes here to fall back on.
+        assert_eq!(
+            record(
+                "https://publicrec.hillsclerk.com/Probate/dailyfilings/ProbateFiling_20260806.csv",
+                "application/octet-stream",
+            ),
+            Csv
+        );
+    }
+
+    /// What the missing bytes cost, stated rather than discovered. A count that reads
+    /// `other` here is reporting what the record says; `classify`, holding the blob, sees
+    /// the signature.
+    #[test]
+    fn a_record_gives_up_exactly_what_the_bytes_would_have_settled() {
+        let mut meta = meta("application/octet-stream");
+        meta.insert("final_url".into(), "https://x.gov/download?id=91".into());
+
+        assert_eq!(ContentKind::from_record(&meta), Other);
+        assert_eq!(ContentKind::classify(&meta, b"%PDF-1.7\n"), Pdf);
     }
 
     #[test]

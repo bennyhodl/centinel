@@ -1,5 +1,3 @@
-# Centinel
-
 <p align="center">
   <img src="assets/centinel-watchman.jpg" alt="Centinel — a 1787-era ink etching of a lone watchman on the rampart with candle, scroll, and quill, gazing over a sleeping colonial town" width="600">
 </p>

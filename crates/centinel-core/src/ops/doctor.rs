@@ -10,8 +10,18 @@
 //! matters remotely: [`crate::ops::models`] is host-local, so `doctor` is the only way an
 //! agent or an HTTP caller can learn that search is about to fail for want of a model.
 //!
-//! Presence is judged by file size, never by re-hashing — `doctor` runs before commands
-//! and must stay instant. `models verify` is the op that reads every byte.
+//! ## Nothing here walks the corpus
+//!
+//! `doctor` is a question about the **machine**, and it must answer at the speed of a
+//! `command -v`: it is the first thing typed when something is already wrong, and often
+//! the thing typed before every other command. So presence is judged by file size, never
+//! by re-hashing; the probes run at once rather than in a queue behind a Python
+//! interpreter's start-up; and the store is asked only what one `readdir` answers.
+//!
+//! Counting the pool used to happen here, and it is the one thing on this report that grows
+//! with the corpus — a second of directory walking, every time, to print a number nobody
+//! ran `doctor` to see. `models verify` is the op that reads every byte, and
+//! [`crate::ops::status`] is the one that counts what is stored.
 
 use std::path::PathBuf;
 
@@ -146,9 +156,9 @@ pub struct DoctorReport {
     /// Where a config file is looked for, nearest first. Shown only when none was found.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_searched: Vec<PathBuf>,
-    /// Blobs in the pool. Counted by walking `blobs/`, so this is O(corpus) — fine at
-    /// spine scale, and a reason to move it behind a flag before the corpus is large.
-    pub blob_count: u64,
+    /// The Sources the store holds a log for — one `readdir`, and the cheapest evidence
+    /// that the root above is the one being collected into. **How much** is in it is
+    /// [`crate::ops::status`]'s question, and answering it here cost a walk of the pool.
     pub sources: Vec<String>,
     pub binaries: Vec<Binary>,
     /// Where weights live. Outside the store, because they are neither corpus nor
@@ -168,17 +178,16 @@ pub struct DoctorReport {
 }
 
 #[derive(Clone, Debug, Default, clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct DoctorArgs {
-    /// Skip counting blobs, which walks the whole pool.
-    #[arg(long)]
-    #[serde(default)]
-    pub skip_blob_count: bool,
-}
+pub struct DoctorArgs {}
 
-/// Report host readiness: required binaries, store location, corpus size.
+/// Report host readiness: required binaries, model weights, store location.
 #[op(group = "host")]
-pub async fn doctor(ctx: &Ctx, args: DoctorArgs) -> anyhow::Result<DoctorReport> {
-    let mut binaries = vec![
+pub async fn doctor(ctx: &Ctx, _args: DoctorArgs) -> anyhow::Result<DoctorReport> {
+    // At once, not in turn. Every probe is a process spawn and they wait on nothing but
+    // each other — and `yt-dlp` is a Python program whose interpreter takes longer to
+    // start than the other five answer in together, so a queue behind it is most of what
+    // this op used to cost.
+    let mut binaries: Vec<Binary> = futures::future::join_all([
         // Both of these are §3.1 requirements for a pipeline nobody has written. `extract`
         // counts `pages_needing_ocr` and stops there; neither binary has a call site.
         // Reporting them as required told a working machine it was broken, every time.
@@ -186,14 +195,12 @@ pub async fn doctor(ctx: &Ctx, args: DoctorArgs) -> anyhow::Result<DoctorReport>
             "pdftoppm",
             Need::Planned,
             "will rasterise PDF pages for OCR — ticket #12",
-        )
-        .await,
+        ),
         probe(
             "tesseract",
             Need::Planned,
             "will OCR scanned documents — ticket #12",
-        )
-        .await,
+        ),
         // Optional, not planned: `extract` calls this one. Without it a PDF whose text
         // layer `pdf-inspector` cannot decode yields nothing instead of its text — a
         // degraded stage, which is exactly what Optional means.
@@ -201,17 +208,16 @@ pub async fn doctor(ctx: &Ctx, args: DoctorArgs) -> anyhow::Result<DoctorReport>
             "pdftotext",
             Need::Optional,
             "second reader for PDFs the primary makes nothing of",
-        )
-        .await,
-        probe("yt-dlp", Need::Required, "YouTube acquisition").await,
+        ),
+        probe("yt-dlp", Need::Required, "YouTube acquisition"),
         probe(
             "ffmpeg",
             Need::Required,
             "decodes audio to 16kHz mono PCM for transcription",
-        )
-        .await,
-        worker_probe(),
-    ];
+        ),
+    ])
+    .await;
+    binaries.push(worker_probe());
     binaries.sort_by(|a, b| a.need.cmp(&b.need).then(a.name.cmp(&b.name)));
 
     let models_dir = models::models_dir()?;
@@ -232,12 +238,6 @@ pub async fn doctor(ctx: &Ctx, args: DoctorArgs) -> anyhow::Result<DoctorReport>
         .map(|s| s.to_string())
         .collect();
 
-    let blob_count = if args.skip_blob_count {
-        0
-    } else {
-        ctx.store.count_blobs().await?
-    };
-
     let config = crate::config::Config::locate();
     let config_searched = match config {
         Some(_) => Vec::new(),
@@ -248,7 +248,6 @@ pub async fn doctor(ctx: &Ctx, args: DoctorArgs) -> anyhow::Result<DoctorReport>
         store_root: ctx.store.root().to_path_buf(),
         config,
         config_searched,
-        blob_count,
         sources,
         binaries,
         models_dir,
@@ -490,9 +489,8 @@ impl Render for DoctorReport {
             p.paint("not ready", Ink::Red)
         };
         let corpus = format!(
-            "{} · {} · {}",
+            "{} · {}",
             self.store_root.display(),
-            render::plural(self.blob_count as usize, "blob", "blobs"),
             render::plural(self.sources.len(), "source", "sources"),
         );
         p.line(format!("{verdict}  {}", p.paint(&corpus, Ink::Dim)))?;
@@ -770,7 +768,6 @@ mod tests {
             store_root: "/tmp/store".into(),
             config: Some("/tmp/centinel.toml".into()),
             config_searched: vec![],
-            blob_count: 0,
             sources: vec![],
             binaries: vec![bin],
             models_dir: "/tmp/models".into(),
@@ -803,7 +800,6 @@ mod tests {
                 "centinel.toml".into(),
                 "/home/x/.centinel/centinel.toml".into(),
             ],
-            blob_count: 0,
             sources: vec![],
             binaries: vec![],
             models_dir: "/tmp/models".into(),
@@ -1003,14 +999,7 @@ mod tests {
     async fn the_report_separates_binary_readiness_from_model_readiness() {
         let store = tempfile::tempdir().unwrap();
         let ctx = Ctx::new(crate::store::Store::open(store.path()).await.unwrap());
-        let report = doctor(
-            &ctx,
-            DoctorArgs {
-                skip_blob_count: true,
-            },
-        )
-        .await
-        .unwrap();
+        let report = doctor(&ctx, DoctorArgs {}).await.unwrap();
 
         // Both models are in the registry and both are required.
         assert_eq!(report.models.len(), models::REGISTRY.len());

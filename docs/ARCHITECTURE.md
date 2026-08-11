@@ -281,6 +281,9 @@ centinel run --limit 50
 # Ask it something
 centinel search "lobbyist meeting log"
 
+# How much is in the store, by kind and by disk?
+centinel status
+
 # What is in the store, and what state is it in?
 centinel list
 
