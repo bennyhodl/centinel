@@ -187,7 +187,7 @@ That is what makes this the cron command. Twice a day costs one sitemap walk per
 An op is an ordinary async function. Annotating it puts it on the CLI, in the MCP tool list, and at an HTTP route — with **no central registration list to update**:
 
 ```rust
-/// List sources in the store with resource counts and liveness.
+/// List every source — configured or collected — with resource counts and liveness.
 #[op]
 pub async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<ListReport> { … }
 ```

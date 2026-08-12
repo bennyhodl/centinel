@@ -4,7 +4,7 @@ An op is an ordinary async function. Annotating it puts it on the CLI, in the MC
 list, and at an HTTP route — with **no central registration list to update**.
 
 ```rust
-/// List sources in the store with resource counts and liveness.
+/// List every source — configured or collected — with resource counts and liveness.
 #[op(group = "corpus")]
 pub async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<ListReport> { … }
 ```
