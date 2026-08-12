@@ -728,6 +728,30 @@ impl Replay {
         map
     }
 
+    /// Every address this Source's log knows about — discovered, observed, or marked.
+    ///
+    /// Wider than [`Self::statuses`], deliberately: a DiscoveryRun says an address
+    /// exists, not what state it is in, so an address enumerated and never fetched has
+    /// no status and is still a Resource. Either record type alone under-counts — an
+    /// address can be observed with no discovery ever run, or discovered and never
+    /// fetched, and "1 resource · 0 observations" is a state `list` has to report.
+    pub fn resources(&self) -> std::collections::BTreeSet<&Resource> {
+        let mut out = std::collections::BTreeSet::new();
+        for rec in &self.records {
+            match rec {
+                LogRecord::Observation(o) => {
+                    out.insert(&o.resource);
+                }
+                LogRecord::Status(s) => {
+                    out.insert(&s.resource);
+                }
+                LogRecord::DiscoveryRun(d) => out.extend(&d.resources),
+                LogRecord::Derivation(_) | LogRecord::Underivable(_) => {}
+            }
+        }
+        out
+    }
+
     /// The most recent Observation per Resource, by timestamp then log order.
     pub fn latest_observations(&self) -> BTreeMap<Resource, Observation> {
         let mut map: BTreeMap<Resource, Observation> = BTreeMap::new();
