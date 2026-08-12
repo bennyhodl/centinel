@@ -234,12 +234,19 @@ centinel investigate https://www.hillsclerk.com/
               publicrec.hillsclerk.com      2 links
 
   centinel source add hillsclerk --site https://www.hillsclerk.com/
+
+✔ Add `hillsclerk` to /Users/you/centinel.toml? · yes
 ```
 
 Three outputs, and the shape of each is settled by §7: a strategy with its evidence; a set
 of crumbs; or nothing, said plainly.
 
-Promotion needs no new command. `source add` already does it.
+Promotion needs no new command. `source add` already does it, and the CLI offers to run it
+— `y`, or `-y` to answer in advance. The offer is a **CLI-side** layer above the op, beside
+the `schedule set` wizard: the op still writes nothing and still prompts nobody, because one
+that prompted would block an MCP call until the client timed out. So the report carries the
+*arguments* `source add` takes rather than a line of shell, and printing them is one
+rendering of that record — the other is the offer.
 
 ---
 

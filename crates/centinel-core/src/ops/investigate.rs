@@ -20,10 +20,17 @@
 //!
 //! ## It writes nothing, and that is a property worth keeping
 //!
-//! There is no `--add`. Promotion is `centinel source add`, which already exists, and the
-//! line to run is printed ready to paste. Keeping the two apart is what makes this command
-//! safe to point at an address nobody has vetted: reading the evidence and acting on it
-//! stay separate decisions, and the second one is always yours.
+//! There is no `--add`. Promotion is `centinel source add`, which already exists, and this
+//! report carries the arguments it would be given — see [`Promote`] — with the line to run
+//! printed ready to paste. Keeping the two apart is what makes this command safe to point
+//! at an address nobody has vetted: reading the evidence and acting on it stay separate
+//! decisions, and the second one is always yours.
+//!
+//! The CLI offers to run that second command for you, once, after the evidence is on
+//! screen. That offer lives **above** the op, beside the `schedule set` wizard, for the
+//! reason that module gives: an op that prompts blocks an MCP call until the client times
+//! out and hangs a script forever. So what changed is where the keystroke goes — `y`
+//! rather than a line to copy — and not what this function does, which is still nothing.
 //!
 //! ## The three answers
 //!
@@ -164,6 +171,39 @@ impl Lead {
     }
 }
 
+/// The `source add` this address earns, as arguments rather than as a line of shell.
+///
+/// A string was enough while the only thing anyone could do with it was read it and retype
+/// it. The CLI now offers to run it, and a caller that has to parse a command line back
+/// into arguments is a second and worse definition of what `source add` takes — so the
+/// fields are the record and [`Self::command`] is one rendering of them.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Promote {
+    /// The id it would be filed under — [`suggest_id`], which is what a person would have
+    /// typed.
+    pub id: String,
+    /// The address, as given. `source add` keeps the path, because a strategy that walks a
+    /// directory bounds itself by the one it was pointed at.
+    pub site: String,
+    /// Pinned only where a strategy **recognised** the address, never where the fallback
+    /// merely walked it: pinning is the operator saying they saw the evidence and accepted
+    /// it, and there is no evidence in a guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+}
+
+impl Promote {
+    /// The command that writes this block, ready to paste — and the one the CLI's offer
+    /// runs, so what is printed and what would happen cannot drift apart.
+    pub fn command(&self) -> String {
+        let pin = match &self.strategy {
+            Some(name) => format!(" --strategy={name}"),
+            None => String::new(),
+        };
+        format!("centinel source add {} --site {}{pin}", self.id, self.site)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct InvestigateReport {
     pub address: String,
@@ -177,10 +217,10 @@ pub struct InvestigateReport {
     pub lead: Option<Lead>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub crumbs: Vec<Crumb>,
-    /// The command that would add this, ready to paste. Absent when nothing recognised it,
-    /// because suggesting it would be suggesting a corpus of one front page.
+    /// What adding this would take. Absent when nothing recognised it and no walk found
+    /// anything, because offering it would be offering a corpus of one front page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub promote: Option<String>,
+    pub promote: Option<Promote>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     pub elapsed_secs: f64,
@@ -313,12 +353,10 @@ pub async fn investigate(
     // `source.rs` carried a comment saying this command would write it, while this command
     // is documented as writing nothing, so pinning meant hand-editing `centinel.toml`.
     let promote =
-        (!hits.is_empty() || probe.as_ref().is_some_and(|p| p.addresses > 0)).then(|| {
-            let pin = match recognition.is_some() {
-                true => format!(" --strategy={}", chosen.name),
-                false => String::new(),
-            };
-            format!("centinel source add {} --site {url}{pin}", suggest_id(&url))
+        (!hits.is_empty() || probe.as_ref().is_some_and(|p| p.addresses > 0)).then(|| Promote {
+            id: suggest_id(&url),
+            site: url.to_string(),
+            strategy: recognition.is_some().then(|| chosen.name.to_string()),
         });
 
     Ok(InvestigateReport {
@@ -540,7 +578,10 @@ impl Render for InvestigateReport {
 
             p.blank()?;
             match &self.promote {
-                Some(line) => p.wrapped(line, Ink::Bold),
+                // Printed even where the CLI is about to offer to run it. The offer needs
+                // a terminal and this line does not, so a piped or scripted investigation
+                // still ends with the command that acts on it.
+                Some(promote) => p.wrapped(&promote.command(), Ink::Bold),
                 // Reworded with the gate. The old text claimed nothing knew how to
                 // enumerate the address, which was said of `boston.gov` moments before
                 // `run` enumerated 4,260 of it. Now this line is only reached when a walk
@@ -796,6 +837,28 @@ mod tests {
         );
         // Anything a SourceId would refuse becomes something typeable, never an error.
         assert_eq!(id("https://a_b.gov/"), "a-b");
+    }
+
+    /// The printed line and the offer the CLI makes are one thing, so the command has to
+    /// be derived from the fields rather than written beside them.
+    #[test]
+    fn the_command_is_the_fields_and_the_pin_is_only_there_when_something_recognised_it() {
+        let promote = Promote {
+            id: "publicrec".into(),
+            site: "https://publicrec.hillsclerk.com/Civil/".into(),
+            strategy: Some("listing".into()),
+        };
+        assert_eq!(
+            promote.command(),
+            "centinel source add publicrec --site https://publicrec.hillsclerk.com/Civil/ \
+             --strategy=listing"
+        );
+
+        let guessed = Promote {
+            strategy: None,
+            ..promote
+        };
+        assert!(!guessed.command().contains("--strategy"), "{guessed:?}");
     }
 
     /// Recorded, never followed. One Source per exact host is the rule, so a link to
@@ -1085,6 +1148,25 @@ mod tests {
         let out = render_to_string(&r);
         assert!(out.contains("fallback"), "{out}");
         assert!(out.contains("`run` would do the same"), "{out}");
+    }
+
+    /// The offer the CLI makes needs a terminal; this line does not. A piped or scripted
+    /// investigation has to end with the command that acts on it.
+    #[test]
+    fn the_line_that_adds_it_is_printed_from_the_promotion_itself() {
+        let mut r = report();
+        r.promote = Some(Promote {
+            id: "agartha".into(),
+            site: "https://www.agartha.gov/".into(),
+            strategy: Some("sitemap".into()),
+        });
+
+        let out = render_to_string(&r);
+        assert!(
+            out.contains("centinel source add agartha --site https://www.agartha.gov/"),
+            "{out}"
+        );
+        assert!(out.contains("--strategy=sitemap"), "{out}");
     }
 
     /// A recognised walk is not a guess and must not be labelled one.

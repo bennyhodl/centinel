@@ -36,7 +36,7 @@ Each is what `run` does for you, available on its own.
 | `read` | Read the extracted text of a collected document. |
 | `open` | Open a collected document in an application. *(host)* |
 | `status` | Count what is stored, by source and content kind, and what it occupies on disk. |
-| `list` | List sources in the store with resource counts and liveness. |
+| `list` | List every source — configured or collected — with resource counts and liveness. |
 | `check` | See what extraction makes of one link or file. Nothing is stored. |
 | `investigate` | Ask the registry what it makes of an address. Nothing is stored. |
 | `crumbs` | The off-host hosts this corpus links to, and the rulings on them. |
@@ -67,6 +67,7 @@ Each is what `run` does for you, available on its own.
 | `--config FILE` | config file. Also `$CENTINEL_CONFIG`. |
 | `--json` | force JSON output on a terminal |
 | `--pretty` | force rendered prose into a pipe |
+| `-y`, `--yes` | answer yes to any confirmation — today, `investigate` offering to add the source it found, and the `schedule set` write |
 | `--color auto\|always\|never` | override colour. `NO_COLOR` is honoured. |
 
 Output format defaults to the destination: prose to a terminal, JSON to a pipe.

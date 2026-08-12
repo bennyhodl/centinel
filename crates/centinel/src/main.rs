@@ -9,6 +9,7 @@ mod http;
 mod logging;
 mod mcp;
 mod progress;
+mod promote;
 mod schedule;
 mod wizard;
 
@@ -75,6 +76,17 @@ fn build_cli() -> Command {
                 .global(true)
                 .action(ArgAction::SetTrue)
                 .help("Render the report for a human (the default when stdout is a terminal)"),
+        )
+        .arg(
+            // The answer to a question, not an instruction to an op: nothing downstream of
+            // here sees it, and every prompt it answers is drawn by this crate. See
+            // [`promote`] and [`wizard`], which is where the rule that ops never ask lives.
+            Arg::new("yes")
+                .long("yes")
+                .short('y')
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .help("Answer yes to any confirmation instead of asking (e.g. `investigate` offering to add a source)"),
         )
         .arg(
             Arg::new("color")
@@ -436,12 +448,13 @@ async fn run_op(
 ) -> Result<()> {
     let def = op::find(name).with_context(|| format!("unknown op `{name}`"))?;
     let mut args = (def.args_from_matches)(matches)?;
+    let assume_yes = matches.get_flag("yes");
 
     // The interactive layer sits *above* the op and fills in what was not typed. The op
     // itself never prompts: one that did would block an MCP call until the client timed
     // out and hang a script forever. See [`wizard`].
     if wizard::should_prompt(name, &args) {
-        args = wizard::schedule_set(&ctx, args).await?;
+        args = wizard::schedule_set(&ctx, args, assume_yes).await?;
     }
 
     // Progress goes to stderr so stdout stays a clean JSON stream for piping. Which
@@ -455,7 +468,7 @@ async fn run_op(
 
     let printer = rx.map(progress::spawn);
 
-    let result = logging::invoke("cli", def, ctx, args, Some(progress)).await;
+    let result = logging::invoke("cli", def, Arc::clone(&ctx), args, Some(progress)).await;
 
     if let Some(handle) = printer {
         // The sink was dropped with `progress`, so the printer terminates on its own.
@@ -466,7 +479,7 @@ async fn run_op(
 
     if output.json {
         println!("{}", serde_json::to_string_pretty(&value)?);
-        return Ok(());
+        return promote::offer(&ctx, name, &value, output, assume_yes).await;
     }
 
     // Rendered through a lock and flushed once: a report is one screen of output and
@@ -480,7 +493,12 @@ async fn run_op(
     }
     writeln!(handle)?;
     handle.flush()?;
-    Ok(())
+    drop(handle);
+
+    // After the evidence, not before it: the one question an investigation leaves you
+    // with, asked here rather than printed as a line to retype. A no-op for every other
+    // op, and for a terminal there is nobody sitting at. See [`promote`].
+    promote::offer(&ctx, name, &value, output, assume_yes).await
 }
 
 #[cfg(test)]
@@ -516,6 +534,25 @@ mod tests {
             m.get_one::<String>("root").map(String::as_str),
             Some("/srv/corpus")
         );
+    }
+
+    /// `-y` answers a prompt this crate draws *after* the op it belongs to, so it has to
+    /// parse on the subcommand rather than only ahead of it — `centinel investigate <url>
+    /// -y` is where a hand puts it.
+    #[test]
+    fn yes_is_global_and_arrives_with_the_subcommand() {
+        let flag = |argv: &[&str]| {
+            let m = build_cli().try_get_matches_from(argv).unwrap();
+            m.subcommand().unwrap().1.get_flag("yes")
+        };
+        assert!(flag(&["centinel", "investigate", "https://x.gov/", "-y"]));
+        assert!(flag(&[
+            "centinel",
+            "--yes",
+            "investigate",
+            "https://x.gov/"
+        ]));
+        assert!(!flag(&["centinel", "investigate", "https://x.gov/"]));
     }
 
     /// The nesting `--config` actually has: on `run` at one level, on `source list` at

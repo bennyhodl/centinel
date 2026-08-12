@@ -57,7 +57,7 @@ pub use embed::{EmbedArgs, EmbedReport, Skipped, embed};
 pub use extract::{ExtractArgs, ExtractReport, ExtractSample, Unreadable, extract};
 pub use ingest::{IngestArgs, IngestOutcome, IngestReport, ingest};
 pub use investigate::{
-    InvestigateArgs, InvestigateReport, Lead, Probe, Recognised, SeedSummary, investigate,
+    InvestigateArgs, InvestigateReport, Lead, Probe, Promote, Recognised, SeedSummary, investigate,
 };
 pub use list::{ListArgs, ListReport, Problem, SourceSummary, list};
 pub use run::{RunArgs, RunReport, SourceRun, Stage, StageRun, StageStatus, run};
