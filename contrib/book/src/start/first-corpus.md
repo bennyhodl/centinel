@@ -23,8 +23,10 @@ centinel investigate https://www.valhallaclerk.com/
 ```
 
 Nothing is stored. It is a question, and it costs a couple of dozen requests. The last line
-it prints is the `source add` command, already filled in. A full transcript, read block by
-block, is on [Operator](operator.md).
+it prints is the `source add` command, already filled in — and then it offers to run that
+line for you. Enter accepts, `n` declines, `-y` answers in advance. Adding is not
+collecting, so step 4 is still yours to type. A full transcript, read block by block, is on
+[Operator](operator.md).
 
 Three answers are possible: a strategy with its evidence; a set of **crumbs**, meaning the
 system you want is on another host; or nothing, said plainly. All three are useful. See

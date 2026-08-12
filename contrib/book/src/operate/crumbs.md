@@ -231,6 +231,11 @@ centinel investigate https://aca-prod.accela.com/AGARTHA/Default.aspx
 centinel source add agartha-permits --site https://aca-prod.accela.com/AGARTHA/
 ```
 
+In practice it is one command and a keystroke: `investigate` ends by offering to run that
+second line for you, with the id and any recognised strategy already filled in. Answer `y`,
+or pass `-y` to skip the question. Type the `source add` yourself when you want a different
+id than the host suggests — as above, where `agartha-permits` says what the host is for.
+
 Investigate first — a crumb tells you a host is linked, not that anything can enumerate it.
 See [Investigate and check](investigate.md).
 

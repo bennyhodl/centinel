@@ -82,7 +82,11 @@ fn set_args(args: &Value) -> Option<&serde_json::Map<String, Value>> {
 }
 
 /// Asks, and returns the argument set the op would have been given.
-pub async fn schedule_set(ctx: &Ctx, mut args: Value) -> Result<Value> {
+///
+/// `assume_yes` is the global `--yes`, and it answers the one *confirmation* here — the
+/// write. It does not answer the questions above it: a wizard that invented an id and a
+/// cadence because somebody typed `-y` would write a schedule nobody chose.
+pub async fn schedule_set(ctx: &Ctx, mut args: Value, assume_yes: bool) -> Result<Value> {
     let theme = ColorfulTheme::default();
 
     let config_path = set_args(&args)
@@ -152,11 +156,12 @@ pub async fn schedule_set(ctx: &Ctx, mut args: Value) -> Result<Value> {
     // ── the preview that earns the feature ────────────────────────────────────
     preview(ctx, &id, &cron, &tz)?;
 
-    if !Confirm::with_theme(&theme)
-        .with_prompt(format!("Write this to {}?", config_path.display()))
-        .default(true)
-        .interact()?
-    {
+    let write = assume_yes
+        || Confirm::with_theme(&theme)
+            .with_prompt(format!("Write this to {}?", config_path.display()))
+            .default(true)
+            .interact()?;
+    if !write {
         anyhow::bail!("nothing was written");
     }
 

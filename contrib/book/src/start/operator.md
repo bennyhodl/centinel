@@ -63,6 +63,8 @@ https://www.agartha.gov  3.6s
     ! stopped at 500 addresses; the surface is larger than this run captured
 
   centinel source add agartha --site https://www.agartha.gov/ --strategy=sitemap
+
+✔ Add `agartha` to /Users/you/centinel.toml? · yes
 ```
 
 Read it block by block.
@@ -85,7 +87,10 @@ exact host. `www.agarthaconnect.com` is a different system with a different stra
 promoting it to a source is your call, not the crawler's. That refusal is the whole reason
 recursion never runs away here. See [Acquisition](../internals/acquire.md).
 
-**The last line is the command, already filled in.** Copy it.
+**The last line is the command, already filled in — and then the offer to run it.** Enter
+accepts, `n` declines and leaves the command on screen, `-y` answers it in advance. It adds
+the block and nothing else: collecting is still step 3, and a host already in your config is
+not offered again.
 
 Three answers are possible: a strategy with its evidence, a set of crumbs meaning the
 system you want lives elsewhere, or nothing — said plainly. All three are useful.
@@ -99,6 +104,9 @@ Deeper: [Investigate and check](../operate/investigate.md).
 ---
 
 ## 2. Name the source
+
+Answering `y` above ran exactly this, and typing it is how you name a source you did not
+just investigate — or file one under an id of your own.
 
 ```console
 $ centinel source add agartha --site https://www.agartha.gov/ --strategy=sitemap
@@ -236,10 +244,22 @@ agartha  213 resources · 237 observations
   ✗ gone    https://www.youtube.com/watch?v=UCLzohJmEgvfJOEd4YJNIHbg
     4 failures since 2026-08-04 00:18 · ERROR: [generic] 'cookies-from-browser=brave'
     is not a valid URL
+
+agartha-permits  in centinel.toml, nothing collected yet
+
+1 source holds nothing yet.
+  centinel run --source agartha-permits
 ```
 
 `213 resources · 237 observations` is the versioning: 213 addresses, seen 237 times,
 because 24 of them changed and both versions are kept.
+
+**The rows are your config's sources first, then anything else the store holds.** A source
+you added five minutes ago has no directory under `log/` yet, and listing the store alone
+would leave it out — which reads as an add that did not work. The two gaps this makes
+visible point opposite ways: *in the config, nothing collected* is a run waiting to happen,
+and a row that says *not in centinel.toml* is a source `centinel run` will skip. The second
+is `centinel source adopt`; see [Sources](../operate/sources.md).
 
 A failure is printed with **the reason and the count**, not as a gap. That is load-bearing:
 a WAF 403 and a 404 are the same `Err` in most crawlers and completely different facts

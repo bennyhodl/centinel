@@ -56,7 +56,31 @@ https://www.agartha.gov  3.6s
     ! stopped at 500 addresses; the surface is larger than this run captured
 
   centinel source add agartha --site https://www.agartha.gov/ --strategy=sitemap
+
+✔ Add `agartha` to /Users/you/.config/centinel/centinel.toml? · yes
+
+✓ agartha site https://www.agartha.gov/
+  written to /Users/you/.config/centinel/centinel.toml
+
+  centinel run --source agartha
 ```
+
+### The last line is a question, not a line to retype
+
+Press enter — the default is yes — and the `source add` above it runs. Answer `n` and
+nothing happens; the command stays on screen for later. `centinel investigate -y <url>`
+answers it in advance, which is the form for a session where you are working through a list
+of hosts.
+
+Three things the offer deliberately does not do. It does not **collect**: adding is one
+`[[source]]` block, and `centinel run` is still a command you type. It does not appear
+without a terminal, so `centinel investigate … | tee log` and any scheduled investigation
+print the command and stop. And it is not part of the op — `investigate` itself still writes
+nothing, on every surface, which is what keeps it safe to point at an address nobody has
+vetted. The prompt lives in the CLI, beside the `schedule set` wizard.
+
+A host your config already names is not offered again; the line above still prints, so you
+can add it under a second id if that is really what you meant.
 
 ### `recognised` prints evidence, not a verdict
 
@@ -118,7 +142,7 @@ those off the whole corpus — with a ruling you can record once per host. See
 
 | Answer | What to do |
 |---|---|
-| a strategy, with evidence | read the evidence, then run the printed `source add` |
+| a strategy, with evidence | read the evidence, then answer `y` to the offer |
 | crumbs and no strategy | the system you want is on another host — investigate that one |
 | nothing, said plainly | there is no lever here yet; record it in field notes |
 
@@ -206,7 +230,7 @@ See [Reading a document](../internals/extract.md) for the reader ladder and what
 centinel doctor                          # is this machine ready
 centinel investigate https://host/       # who recognises this, and on what evidence
 centinel check https://host/some/page    # what would extraction make of one document
-centinel source add … --strategy=…       # the line investigate printed
+                                         # …then `y` at the offer investigate makes
 centinel run --limit 50                  # then look at what actually came back
 centinel read <handle>
 ```
