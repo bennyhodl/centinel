@@ -108,6 +108,10 @@ cd centinel
 ./install.sh
 ```
 
+Afterwards, `centinel update` is the same decision run backwards: it asks the clone this
+binary was built from, then GitHub's latest release, and installs through `install.sh`
+whichever way you installed. `--check` reports and stops.
+
 ### Why it tunes for your CPU
 
 `llama-cpp-sys-2` reads `target-cpu` back out of the Rust flags and, when it is not `native`, sets `GGML_NATIVE=OFF` and derives ggml's instruction-set flags from the *baseline* target features instead. On `x86_64-unknown-linux-gnu` those are `fxsr,sse,sse2,x87` — so a plain `cargo install` compiles llama.cpp's CPU kernels with **no AVX, no AVX2 and no FMA**, and nothing recovers it at runtime, because the runtime dispatch that would (`GGML_CPU_ALL_VARIANTS`) ships with a feature this build does not enable. On Linux `aarch64` the same build script pins `GGML_CPU_ARM_ARCH=armv8-a` and drops dotprod.
