@@ -65,15 +65,22 @@ Light the candle.
 
 ## Install
 
-Rust 1.91+ and a C++ toolchain — two of the dependencies compile `llama.cpp` and `whisper.cpp`.
-
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/bennyhodl/centinel/master/install.sh | sh
 ```
 
-The script checks this host before it builds anything and names the command for whatever is missing, rather than installing a toolchain behind your back. Expect a long first build — there is no prebuilt binary to download, because both packages compile a C++ library from source and the binary correct for a host is the one built on it.
+The same command installs and updates. It downloads a release binary when the latest release carries one this host can run, and builds from source when it does not — which is most hosts, and every host until binary releases are switched on. A download needs no Rust and no C++ toolchain; a build checks for both, plus `libclang` and `protoc`, and names the command for whatever is missing rather than installing a toolchain behind your back.
 
-Three things it does that a `cargo install` line cannot. It selects the GPU backend for the host — Metal on macOS, CUDA or ROCm on Linux when their toolchains are present. It tunes for the CPU it is building on, which matters more than it sounds like (below). And it puts **both** binaries in one directory, which is the thing transcription does not work without.
+A release carries two binaries, and both are GPU builds. Embedding is the stage measured in days, so a CPU-only download would be the slow half of Centinel handed over as an install:
+
+| Asset | Wants |
+|---|---|
+| `aarch64-apple-darwin` | an Apple Silicon Mac. Metal is compiled in, shaders and all |
+| `x86_64-unknown-linux-gnu`, CUDA 12 | an NVIDIA driver, the CUDA runtime, and AVX2 |
+
+Nothing about the download is load-bearing. No asset, no release, a checksum that does not match, a binary that will not start on this host — each falls back to the build, so the worst a bad release does is cost one request. The one exception is a checksum that is published and wrong, which stops instead: that is somebody handing you a different file.
+
+Three things the script does that a `cargo install` line cannot. It selects the GPU backend for the host — Metal on macOS, CUDA or ROCm on Linux when their toolchains are present. It tunes a build for the CPU it is building on, which matters more than it sounds like (below). And it puts **both** binaries in one directory, which is the thing transcription does not work without.
 
 Flags go after `-s --`:
 
@@ -83,11 +90,14 @@ curl -sSf https://raw.githubusercontent.com/bennyhodl/centinel/master/install.sh
 
 | | |
 |---|---|
+| `--build` | build from source even where a release binary would fit |
+| `--download` | download, and fail rather than quietly build when this host has no asset |
+| `--force` | install again when the release is the version already here |
 | `--accel auto\|none\|cuda\|vulkan\|rocm` | override the detected backend |
 | `--portable` | build for the baseline CPU, so the binary can be copied to another machine |
 | `--bin-dir <dir>` | somewhere other than `~/.cargo/bin` |
-| `--tag <tag>` | build a released tag rather than the default branch |
-| `--deps` | install `ffmpeg` and `yt-dlp` too, with this host's package manager |
+| `--tag <tag>` | a released tag rather than the latest release or the default branch |
+| `--deps` | install what is missing with this host's package manager: `ffmpeg` and `yt-dlp`, and the C++ toolchain when building |
 | `--no-doctor` | skip the closing `centinel doctor` |
 
 From a clone it installs **the clone**, so a contributor testing a change installs the change:
@@ -109,6 +119,8 @@ The cost is that the binary is then built for the CPU that built it and must not
 ```bash
 RUSTFLAGS="-C target-cpu=x86-64-v3" ./install.sh --portable
 ```
+
+The release binaries are built exactly that way: `x86-64-v3` on Linux, and on macOS the apple-m1 baseline every Apple Silicon Mac already shares. Both are hosts where the GPU does the embedding, so what a native build would win back lands on stages that were never the slow ones. On a CPU-only host it is the other way round, which is why no release carries a CPU-only binary.
 
 ### By hand
 

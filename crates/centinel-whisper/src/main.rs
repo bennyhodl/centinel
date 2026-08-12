@@ -32,8 +32,14 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 const SAMPLE_RATE: u32 = 16_000;
 
 #[derive(Parser, Debug)]
+// `version` is not decoration. The two binaries are a matched pair — `centinel` finds this
+// one beside itself, and an installer that replaces one and not the other leaves a pair
+// that does not agree. Asking is how anything checks. It is also the cheapest proof that a
+// downloaded binary runs at all on the host it landed on: the process starts, the dynamic
+// linker resolves whisper.cpp's libraries, and it prints a string.
 #[command(
     name = "centinel-whisper",
+    version = env!("CARGO_PKG_VERSION"),
     about = "Transcribe 16kHz mono f32 PCM from stdin. Internal to centinel."
 )]
 struct Args {

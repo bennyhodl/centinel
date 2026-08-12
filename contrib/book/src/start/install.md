@@ -1,17 +1,41 @@
 # Install
 
-You need Rust 1.91+ and a C++ toolchain. Two dependencies compile `llama.cpp` and
-`whisper.cpp` from source, so expect a long first build.
-
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf \
   https://raw.githubusercontent.com/bennyhodl/centinel/master/install.sh | sh
 ```
 
-The script checks the host before it builds anything, and names the command for whatever
-is missing rather than installing a toolchain behind your back. There is no prebuilt binary
-to download: both packages compile a C++ library from source, so the binary correct for a
-host is the one built on it.
+One command installs and updates. It downloads a release binary when the latest release
+carries one this host can run, and builds from source when it does not — which is most
+hosts, and every host until binary releases are switched on.
+
+A download needs no Rust and no C++ toolchain. A build needs Rust 1.91+, a C++ compiler,
+`cmake`, `libclang` and `protoc`; the script checks for each before it starts, and names
+the command for whatever is missing rather than installing a toolchain behind your back.
+
+## What a release carries
+
+Two binaries, and both are GPU builds. Embedding is the stage measured in days, so a
+CPU-only download would be the slow half of Centinel handed over as an install.
+
+| Asset | Wants |
+|---|---|
+| `aarch64-apple-darwin` | an Apple Silicon Mac. Metal is compiled in, shaders and all |
+| `x86_64-unknown-linux-gnu`, CUDA 12 | an NVIDIA driver, the CUDA runtime, and AVX2 |
+
+`centinel` links cuBLAS statically and needs only the driver. `centinel-whisper` does not,
+so the CUDA asset wants the runtime present — `cuda-runtime-12-4` is about 150 MB and
+carries no compiler. Bundling those libraries into the asset would be most of a gigabyte.
+
+Nothing about the download is load-bearing. No asset for this host, no release, a checksum
+that does not match, a binary that will not start — each falls back to the build, so the
+worst a bad release does is cost one request. The exception is a checksum that is published
+and does not match, which stops: that is somebody handing you a different file.
+
+Before it downloads, the script asks the latest release which version it is and stops early
+when that is the one already installed. `--force` installs it again.
+
+## Flags
 
 Flags go after `-s --`, which is how a piped shell is handed arguments:
 
@@ -22,16 +46,20 @@ curl -sSf https://raw.githubusercontent.com/bennyhodl/centinel/master/install.sh
 
 | Flag | Effect |
 |---|---|
+| `--build` | build from source even where a release binary would fit |
+| `--download` | download, and fail rather than quietly build when there is no asset |
+| `--force` | install again when the release is the version already here |
 | `--accel auto\|none\|cuda\|vulkan\|rocm` | override the detected GPU backend |
 | `--portable` | build for the baseline CPU, so the binary can be copied elsewhere |
 | `--bin-dir <dir>` | somewhere other than `~/.cargo/bin` |
-| `--tag <tag>` | build a released tag rather than the default branch |
-| `--deps` | install `ffmpeg` and `yt-dlp` too, with this host's package manager |
+| `--tag <tag>` | a released tag rather than the latest release or the default branch |
+| `--deps` | install what is missing with this host's package manager |
 | `--no-doctor` | skip the closing `centinel doctor` |
 
 `--accel`, `--bin-dir` and `--tag` are also `CENTINEL_ACCEL`, `CENTINEL_BIN_DIR` and
-`CENTINEL_TAG`; `CENTINEL_NATIVE=0` is `--portable`. Nothing is prompted, so an unattended
-run behaves the same as an attended one.
+`CENTINEL_TAG`; `CENTINEL_METHOD=download|build` is `--download` and `--build`;
+`CENTINEL_NATIVE=0` is `--portable`. Nothing is prompted, so an unattended run behaves the
+same as an attended one.
 
 ## From a clone
 
@@ -46,6 +74,10 @@ cd centinel
 
 It decides which of the two it is doing by whether it is a file on disk beside a workspace.
 Piped, `$0` is the shell and there is no clone to find, so the sources come from git.
+
+A clone always builds. Downloading a release over the change somebody is testing would be
+the wrong answer to the question they asked, so a clone downloads only when told to in as
+many words: `./install.sh --download`.
 
 ## What the script does that `cargo install` cannot
 
@@ -68,6 +100,12 @@ is:
 ```bash
 RUSTFLAGS="-C target-cpu=x86-64-v3" ./install.sh --portable
 ```
+
+The release binaries are built exactly that way: `x86-64-v3` on Linux, and on macOS the
+apple-m1 baseline every Apple Silicon Mac already shares. Both are hosts where the GPU
+does the embedding, so what a native build would win back lands on stages that were never
+the slow ones. On a CPU-only host it is the other way round, which is why no release
+carries a CPU-only binary.
 
 **It installs both binaries into one directory.** Which is the thing transcription does
 not work without.
