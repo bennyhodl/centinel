@@ -49,6 +49,7 @@ Each is what `run` does for you, available on its own.
 |---|---|
 | `doctor` | Report host readiness: required binaries, model weights, store location. |
 | `models` | Inspect, fetch, verify and remove model weights. |
+| `update` | Check the repo and GitHub for a newer Centinel, and install it. *(host)* |
 
 ## Servers
 

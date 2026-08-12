@@ -79,6 +79,50 @@ A clone always builds. Downloading a release over the change somebody is testing
 the wrong answer to the question they asked, so a clone downloads only when told to in as
 many words: `./install.sh --download`.
 
+## Updating
+
+```bash
+centinel update
+```
+
+It asks two things, in that order: **the repo, then GitHub**. The repo is the clone this
+binary was built from — the build stamps which directory that was, so the answer is about
+the binary you are running rather than about whichever checkout you happen to be standing
+in. GitHub is the latest published release, and it is asked either way: a clone that has
+not been fetched from in a month still wants to be told a release happened.
+
+Both answers are true at once and neither cancels the other. A contributor's checkout ahead
+of the last tag is the ordinary state of a clone, so `update` reports the commits *and* the
+release and leaves the reading to you.
+
+```text
+centinel 0.5.0  clone · /home/ben/centinel
+
+repo
+  master a56c1ea2a92c
+  ! 7 commits in this checkout that this binary was not built from
+  ! 2 commits behind origin
+
+github
+  ! v0.6.0  released 2026-08-09
+    https://github.com/bennyhodl/centinel/releases/tag/v0.6.0
+```
+
+Then it installs, by running `install.sh` — the same script this page opens with, because
+the accelerator, the CPU tuning and the two-binaries-in-one-directory rule are all decided
+there and a second copy of that logic would be wrong the first time the real one changed. A
+clone pulls (fast-forward only) and runs its own copy; anything else fetches the script
+**at the release tag** and prints the address it came from before running it.
+
+| Flag | Effect |
+|---|---|
+| `--check` | report and stop, without building anything |
+
+Nothing is built when nothing is newer, and nothing is pulled into a working tree with
+uncommitted changes — `update` says so and stops rather than touching your work. If neither
+authority could be reached, it says *that*: an unreachable GitHub never reads as "up to
+date".
+
 ## What the script does that `cargo install` cannot
 
 **It selects the GPU backend.** Metal on macOS, CUDA or ROCm on Linux when their

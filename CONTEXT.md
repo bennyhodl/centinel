@@ -355,6 +355,34 @@ rather than surprising. Only `yt-dlp` answers, because it is the one dependency 
 staleness is a *predictable* failure: it warns at ninety days and ships releases in
 emergency clusters.
 
+## This build
+
+**Origin** — which authority says what a newer Centinel is for *this* binary: a **clone**
+somebody made, cargo's own **checkout** (`cargo install --git`, which is what the curl pipe
+leaves behind), or nothing. It is `install.sh`'s opening decision — *a curl pipe installs
+from git, a clone installs the clone* — read back at the other end of the binary's life.
+*Why it matters:* cargo's checkout carries the same workspace and the same `.git` a clone
+does, and its `origin` is a bare mirror in `$CARGO_HOME` pinned to one revision. Classified
+as a clone, every pipe install would be told to `git pull` a copy of itself and would find
+nothing, forever.
+
+**Stamped, not looked for.** The origin is a build-time record — `build.rs` writes the
+source directory and the commit into the binary — because the alternative, hunting for a
+checkout beside the working directory, answers about *a* clone rather than *the* clone. Two
+checkouts on one machine, or a checkout moved after installing, and the report is about
+sources that never produced the program running.
+
+**Answered vs newer** — whether either authority spoke, against what it said. A separate
+field for the same reason **Truncated** is one: an unreachable GitHub and a current install
+both leave `newer: false`, and only one of them means *up to date*. The report says
+`nothing answered` rather than assuring somebody of something nobody said.
+
+**The installer is the installer, at both ends.** `update` decides *which* sources and
+*where*, and `install.sh` decides everything else — the GPU backend, `target-cpu`, and both
+binaries into one directory. Reproducing any of that in Rust would be a second copy of the
+installer, wrong the first time the real one changed, and its failure is the quiet kind:
+`transcribe` silently mute, or `embed` measured in days instead of hours.
+
 ## External programs
 
 **Tool** — one invocation of an external program: `yt-dlp`, `ffmpeg`, the whisper worker,
