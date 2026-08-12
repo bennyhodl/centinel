@@ -432,6 +432,18 @@ just book                  # this book, rebuilt on every save
 
 Those first three are CI, exactly as written. Warnings are errors.
 
+**Releases decide themselves.** A green push to master runs `Release`, which reads the
+conventional commits, bumps the workspace version, writes the changelog with `git cliff`,
+tags, and publishes. There is nothing to do by hand.
+
+Prebuilt binaries are a second workflow, `Binaries`, and it is **off**. It builds two GPU
+assets — Metal for Apple Silicon, CUDA 12 for x86_64 Linux — and uploads them to the tag,
+which is what turns an install from half an hour of C++ into a download. It is off because
+a macOS runner bills at 10x while this repository is private, so one release is about 400
+minutes of the monthly allowance. Set the repository variable `RELEASE_BINARIES` to `true`
+to turn it on, or start it by hand against any existing tag from the Actions tab. A release
+without assets is not broken: `install.sh` asks, does not find, and builds.
+
 **Commits are conventional**, because the changelog is read off them by `git cliff` — the
 commit subject *is* the release note, and anything without a prefix is dropped rather than
 guessed at. Edit the commit, not `CHANGELOG.md`.
