@@ -380,6 +380,22 @@ impl Index {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Every chunk hash, shortest text first.
+    ///
+    /// The order `embed` wants its work list in. A batch decodes as physical passes of
+    /// whole sequences, so texts of one length pack them evenly — and the oversized
+    /// tail, each of which forces its whole group through a bespoke context, arrives
+    /// together at the end instead of taxing every group it would otherwise visit.
+    /// The order is free to vary: resumability is a set difference against the vector
+    /// table, not a cursor into this list.
+    pub fn chunk_hashes_by_length(&self) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT chunk_hash FROM chunk ORDER BY chars, id")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// The text of specific chunks, in the order requested.
     ///
     /// Batched deliberately — `embed` walks the corpus a batch at a time so that only a
@@ -716,6 +732,33 @@ mod tests {
             }
         }
         idx
+    }
+
+    /// The work-list order `embed` batches by: texts of one length ride together, and
+    /// the long tail comes last.
+    #[test]
+    fn hashes_by_length_run_shortest_first() {
+        let long = "A much longer passage. ".repeat(20);
+        let idx = indexed(&[
+            ("https://example.gov/long", long.as_str()),
+            ("https://example.gov/short", "Tiny."),
+            (
+                "https://example.gov/mid",
+                "A middling passage about drainage.",
+            ),
+        ]);
+
+        let ordered = idx.chunk_hashes_by_length().unwrap();
+        let texts = idx.chunk_texts(&ordered).unwrap();
+        let lengths: Vec<usize> = texts.iter().map(String::len).collect();
+        let mut sorted = lengths.clone();
+        sorted.sort_unstable();
+        assert_eq!(lengths, sorted, "not shortest-first: {lengths:?}");
+        assert_eq!(
+            ordered.len(),
+            idx.chunk_hashes().unwrap().len(),
+            "an order must never drop a chunk"
+        );
     }
 
     #[test]
