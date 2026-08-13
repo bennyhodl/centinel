@@ -23,22 +23,28 @@
 //!
 //! ## Batching is not optional
 //!
-//! A batch is one forward pass over many chunks: one `llama.cpp` context, one `decode`,
-//! every chunk in it as its own sequence (see [`crate::embed::Embedder`]). Two costs
-//! collapse into it. The context and its KV cache are built per call rather than per
-//! text — measured on an M1 Max, one chunk per call gave 6.1 chunks/sec against 18.5 for
-//! groups of 32, when that amortisation was all a group bought. And a single ~300-token
-//! chunk leaves a GPU almost entirely idle, which is what the packed pass now claims.
+//! A batch is one `decode` call over many chunks: one `llama.cpp` context, every chunk
+//! its own sequence, the call run as bounded physical passes (see
+//! [`crate::embed::EmbedSession`]). Two costs collapse into it. The context and its KV
+//! cache are built per call rather than per text — measured on an M1 Max, one chunk per
+//! call gave 6.1 chunks/sec against 18.5 for groups of 32, when that amortisation was
+//! all a group bought. And a single ~300-token chunk leaves a GPU almost entirely idle,
+//! which is what the packed call now claims.
 //!
 //! So the batch is the unit of work here rather than the chunk, and how wide it should be
 //! is a property of the *machine* rather than of the corpus — see [`BatchSize`].
+//!
+//! The context stands for the whole run, and I/O rides beside the decode rather than
+//! between decodes: a reader thread keeps the next batch's text ready and a writer task
+//! appends the last batch's vectors, so the GPU waits on neither SQLite nor Lance — see
+//! [`run`].
 
 use std::time::Instant;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::embed::Embedder;
+use crate::embed::{Embedder, SessionOptions};
 use crate::index::Index;
 use crate::models;
 use crate::prelude::*;
@@ -234,8 +240,10 @@ pub async fn embed(
     let zero = Some(BatchSize::Fixed(0));
     anyhow::ensure!(args.batch != zero, "--batch must be at least 1");
 
+    // Shortest first, so batches carry texts of one kind and the oversized tail — the
+    // chunks that force a bespoke context — arrives together at the end of the run.
     let index = Index::open(ctx.store.require_index()?)?;
-    let indexed = index.chunk_hashes()?;
+    let indexed = index.chunk_hashes_by_length()?;
 
     // Dimensions come from the registry so the table can be opened — and the outstanding
     // work computed — before a multi-gigabyte model is loaded. A dry run never loads one.
@@ -378,7 +386,23 @@ struct Host {
     handle: tokio::runtime::Handle,
 }
 
-/// The blocking loop: batch → embed → append, until the work list is exhausted.
+/// Batches either side of the decode may run ahead: the reader keeps this many read,
+/// the writer this many not yet committed. One would do; two absorbs jitter. More buys
+/// nothing and widens the gap between the progress bar and the table.
+const PIPELINE_SLACK: usize = 2;
+
+/// The pipeline: read → decode → append, each on its own thread.
+///
+/// The GPU must never wait on SQLite or on Lance. A reader thread keeps the next
+/// window's text ready, this thread decodes through one standing session, and a writer
+/// task appends what the last decode produced — the seconds of inference overlap the
+/// milliseconds of I/O instead of following them.
+///
+/// The durable count is the writer's. Lance commits a version per append, chunk identity
+/// is the hash of its text, and the next run subtracts what is stored — so stopping
+/// mid-corpus costs nothing but what was in flight. The progress bar runs at most
+/// [`PIPELINE_SLACK`] batches ahead of the table; the report's `embedded` is what
+/// actually landed.
 fn run(
     embedder: Embedder,
     index: Index,
@@ -394,60 +418,106 @@ fn run(
     } = host;
     let total = todo.len() as u64;
     let started = Instant::now();
-    let mut embedded = 0usize;
-    let mut skipped: Vec<Skipped> = Vec::new();
     progress.step("embedding", 0, total);
 
-    for window in todo.chunks(batch_size) {
-        // The item boundary is one batch, which is also what `table.append` commits.
-        // Chunk identity is the hash of its text, so what was stored stays stored and
-        // the next run subtracts it — stopping mid-corpus costs nothing but the batch
-        // that never started.
-        cancel.check()?;
-
-        let texts = index.chunk_texts(window)?;
-
-        match embedder.embed_documents(&texts) {
-            Ok(vectors) => {
-                let entries: Vec<(String, Vec<f32>)> =
-                    window.iter().cloned().zip(vectors).collect();
-                // Written before the counter moves: the table is the only record of
-                // progress, so a crash between the two must lose work, never invent it.
-                handle.block_on(table.append(&entries))?;
-                embedded += entries.len();
+    // The reader owns the index: a SQLite connection does not share across threads, and
+    // nothing else needs it once the work list exists.
+    let (feed_tx, feed_rx) =
+        std::sync::mpsc::sync_channel::<anyhow::Result<(Vec<String>, Vec<String>)>>(PIPELINE_SLACK);
+    let reader = std::thread::spawn(move || {
+        for window in todo.chunks(batch_size) {
+            let texts = index.chunk_texts(window);
+            let failed = texts.is_err();
+            // A send fails only when the decode side hung up, and that side already
+            // carries whatever error stopped it.
+            if feed_tx.send(texts.map(|t| (window.to_vec(), t))).is_err() || failed {
+                return;
             }
-            // A batch fails as a unit, so it is retried one at a time. Otherwise a single
-            // bad chunk costs the other 31, and on a corpus this size that compounds.
-            //
-            // The outward behaviour is unchanged now that the group shares one `decode`,
-            // but the failure it recovers from is a wider one. It used to be a chunk that
-            // would not tokenize; it is now also a group the machine could not hold — one
-            // `new_context` for a KV cache too large, or one `decode` out of memory. Both
-            // come back here, and one chunk at a time is the right answer to both.
-            Err(batch_error) => {
-                tracing::debug!(%batch_error, "batch failed; retrying individually");
-                for hash in window {
-                    let text = index.chunk_texts(std::slice::from_ref(hash))?;
-                    match embedder.embed_documents(&text) {
-                        Ok(mut v) => {
-                            handle.block_on(table.append(&[(hash.clone(), v.remove(0))]))?;
-                            embedded += 1;
+        }
+    });
+
+    let (write_tx, mut write_rx) =
+        tokio::sync::mpsc::channel::<Vec<(String, Vec<f32>)>>(PIPELINE_SLACK);
+    let writer = handle.spawn({
+        let table = table.clone();
+        async move {
+            let mut written = 0usize;
+            while let Some(entries) = write_rx.recv().await {
+                table.append(&entries).await?;
+                written += entries.len();
+            }
+            anyhow::Ok(written)
+        }
+    });
+
+    let mut sent = 0usize;
+    let mut skipped: Vec<Skipped> = Vec::new();
+    let mut session = embedder.session(SessionOptions {
+        batch: batch_size,
+        ..SessionOptions::default()
+    })?;
+
+    let decoded: anyhow::Result<()> = (|| {
+        let writer_gone = || anyhow::anyhow!("the writer stopped; its error follows");
+        for item in feed_rx.iter() {
+            cancel.check()?;
+            let (window, texts) = item?;
+
+            match session.embed(&texts) {
+                Ok(vectors) => {
+                    let entries: Vec<(String, Vec<f32>)> =
+                        window.iter().cloned().zip(vectors).collect();
+                    sent += entries.len();
+                    write_tx.blocking_send(entries).map_err(|_| writer_gone())?;
+                }
+                // A batch fails as a unit, so it is retried one at a time. Otherwise a
+                // single bad chunk costs the other 31, and on a corpus this size that
+                // compounds. The failures that arrive here: a chunk that will not
+                // tokenize, a group the machine could not hold, and a sequence the
+                // backend failed on numerically — one chunk at a time is the right
+                // answer to all three, and the chunk that still fails alone is skipped
+                // with its reason on the report rather than allowed to end the run.
+                Err(batch_error) => {
+                    tracing::debug!(%batch_error, "batch failed; retrying individually");
+                    for (hash, text) in window.iter().zip(&texts) {
+                        match session.embed(std::slice::from_ref(text)) {
+                            Ok(mut v) => {
+                                sent += 1;
+                                write_tx
+                                    .blocking_send(vec![(hash.clone(), v.remove(0))])
+                                    .map_err(|_| writer_gone())?;
+                            }
+                            Err(e) => skipped.push(Skipped {
+                                chunk_hash: hash.clone(),
+                                reason: format!("{e:#}"),
+                            }),
                         }
-                        Err(e) => skipped.push(Skipped {
-                            chunk_hash: hash.clone(),
-                            reason: format!("{e:#}"),
-                        }),
                     }
                 }
             }
+
+            let done = (sent + skipped.len()) as u64;
+            let rate = sent as f64 / started.elapsed().as_secs_f64().max(f64::EPSILON);
+            progress.step(format!("embedding ({rate:.1}/sec)"), done, total);
         }
+        Ok(())
+    })();
 
-        let done = (embedded + skipped.len()) as u64;
-        let rate = embedded as f64 / started.elapsed().as_secs_f64().max(f64::EPSILON);
-        progress.step(format!("embedding ({rate:.1}/sec)"), done, total);
+    // Wind down in dependency order: hang up on the reader, let the writer drain what
+    // is in flight, then ask it what landed. Every batch it confirms is durable however
+    // this run ended.
+    drop(feed_rx);
+    drop(write_tx);
+    let written = handle.block_on(writer)?;
+    let _ = reader.join();
+
+    // The writer's error outranks the decode error, because a dead writer is *why* the
+    // decode side's `blocking_send` failed.
+    match (written, decoded) {
+        (Err(append_error), _) => Err(append_error),
+        (_, Err(decode_error)) => Err(decode_error),
+        (Ok(written), Ok(())) => Ok((written, skipped)),
     }
-
-    Ok((embedded, skipped))
 }
 
 /// Loads the model off the async runtime — it is seconds of blocking file and GPU work.

@@ -434,8 +434,12 @@ async fn render_bars(mut rx: UnboundedReceiver<ProgressEvent>) {
         }
     }
 
+    // The channel closing says the op *ended*, not that it finished — an error lands
+    // here too. `abandon` freezes each bar at its true position, where `finish` would
+    // jump it to 100%: a run that died on its first batch used to sign off with a full
+    // bar over an empty table.
     for (_, bar) in bars {
-        bar.finish();
+        bar.abandon();
     }
 }
 
