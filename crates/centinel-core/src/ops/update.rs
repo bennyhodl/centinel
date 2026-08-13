@@ -16,12 +16,13 @@
 //!
 //! ## It installs, and it installs the way you installed
 //!
-//! `centinel update` rebuilds unless `--check` says otherwise, and what it runs is
-//! `install.sh` — the same script for a clone as for a pipe, because Centinel is **two
-//! binaries that must land in one directory** and the accelerator and CPU tuning are
-//! chosen per host. Reproducing any of that here would be a second copy of the installer,
-//! wrong the first time the real one changed. So this op decides *which* sources and
-//! *where*, and the script decides everything else.
+//! `centinel update` installs unless `--check` says otherwise, and what it runs is
+//! `install.sh` — the same script for a clone as for a pipe, because everything an
+//! install decides is decided there: a release binary or a build, the accelerator, the
+//! CPU tuning, and Centinel's **two binaries into one directory**. Reproducing any of
+//! that here would be a second copy of the installer, wrong the first time the real one
+//! changed. So this op decides *which* sources and *where*, and the script decides
+//! everything else.
 //!
 //! The clone case runs the script that is already on disk. The pipe case fetches the one
 //! **at the release tag** — the copy that shipped with the thing being installed, at an
@@ -56,8 +57,11 @@ pub enum InstalledFrom {
     /// A clone on this machine.
     Clone,
     /// Cargo's checkout of the repository — `cargo install --git`, which is what the curl
-    /// pipe does.
+    /// pipe leaves behind when it builds.
     Git,
+    /// A prebuilt binary — a release asset, which is what the curl pipe leaves behind
+    /// when a release carries one this host can run.
+    Release,
     /// Neither could be found. The repository still answers; nothing local does.
     Unknown,
 }
@@ -605,6 +609,10 @@ fn provenance(origin: &Origin, build: &Build) -> Provenance {
             InstalledFrom::Git,
             Some("cargo's own checkout of the repository — pinned, and not a clone to pull".into()),
         ),
+        Origin::Release { .. } => (
+            InstalledFrom::Release,
+            Some("a prebuilt binary off a release — no sources here, and none needed".into()),
+        ),
         Origin::Unknown { reason, .. } => (InstalledFrom::Unknown, Some(reason.clone())),
     };
     Provenance {
@@ -691,6 +699,9 @@ impl Provenance {
         match self.installed_from {
             InstalledFrom::Clone => format!("clone · {}", self.path),
             InstalledFrom::Git => "installed from git".to_string(),
+            // No path on purpose: the stamp is the runner's directory, which names
+            // nothing on this machine and reads as a place to go looking.
+            InstalledFrom::Release => "release binary".to_string(),
             InstalledFrom::Unknown => format!("unknown · {}", self.path),
         }
     }
@@ -804,6 +815,7 @@ mod tests {
             version: "0.5.0",
             src: PathBuf::from("/home/ben/centinel"),
             commit: Some("3f2b19c0000000000000000000000000000000".to_string()),
+            ci: false,
         };
         let newer = repo.as_ref().is_some_and(|r| r.pending() > 0)
             || release.as_ref().is_some_and(|r| r.newer);
@@ -904,6 +916,34 @@ mod tests {
         // Nothing newer: the line still has to be one somebody can paste.
         let fix = fix_command(&origin, None, Some(&release("v0.5.0", false))).unwrap();
         assert!(fix.contains("/master/install.sh"), "{fix}");
+    }
+
+    /// A downloaded release binary stamps the runner's directory, which exists on no
+    /// machine it lands on. The report names what the binary *is* rather than pointing
+    /// at `/home/runner` and calling the sources lost — and its update is the pipe at
+    /// the tag, like every install with no clone behind it.
+    #[test]
+    fn a_release_binary_names_itself() {
+        let runner = PathBuf::from("/home/runner/work/centinel/centinel");
+        let origin = Origin::Release {
+            path: runner.clone(),
+        };
+        let build = Build {
+            version: "0.7.0",
+            src: runner,
+            commit: Some("3f2b19c0000000000000000000000000000000".to_string()),
+            ci: true,
+        };
+        let p = provenance(&origin, &build);
+        assert!(matches!(p.installed_from, InstalledFrom::Release));
+        assert_eq!(p.line(), "release binary");
+
+        let fix = fix_command(&origin, None, Some(&release("v0.8.0", true))).unwrap();
+        assert!(
+            fix.contains("/bennyhodl/centinel/v0.8.0/install.sh"),
+            "{fix}"
+        );
+        assert!(fix.ends_with("--tag v0.8.0"), "{fix}");
     }
 
     /// An install would replace the two binaries, so the destination must be a directory

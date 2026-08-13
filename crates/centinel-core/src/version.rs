@@ -23,6 +23,7 @@ pub const REPO: &str = env!("CARGO_PKG_REPOSITORY");
 /// Where the sources were when this binary was built, and what they were. See `build.rs`.
 const BUILD_SRC: &str = env!("CENTINEL_BUILD_SRC");
 const BUILD_COMMIT: &str = env!("CENTINEL_BUILD_COMMIT");
+const BUILD_CI: &str = env!("CENTINEL_BUILD_CI");
 
 /// What this build knows about itself.
 #[derive(Clone, Debug)]
@@ -34,6 +35,11 @@ pub struct Build {
     /// The commit those sources were at. `None` when git could not say — a tarball, or a
     /// machine with no git on it.
     pub commit: Option<String>,
+    /// Whether a GitHub runner built this. Meaningless while the sources still resolve —
+    /// a build on the runner itself sits beside its own checkout — and decisive once they
+    /// do not: the runner's directory exists on no machine a binary lands on, so *built
+    /// in CI, sources gone* is a prebuilt binary that travelled, not sources lost.
+    pub ci: bool,
 }
 
 impl Build {
@@ -43,11 +49,17 @@ impl Build {
             version: VERSION,
             src: PathBuf::from(BUILD_SRC),
             commit: (!BUILD_COMMIT.is_empty()).then(|| BUILD_COMMIT.to_string()),
+            ci: !BUILD_CI.is_empty(),
         }
     }
 
     pub fn origin(&self) -> Origin {
-        origin(&self.src)
+        match origin(&self.src) {
+            // The runner's directory is gone from every machine an asset lands on, and
+            // that is not sources lost — it is how a prebuilt binary arrives.
+            Origin::Unknown { path, .. } if self.ci => Origin::Release { path },
+            other => other,
+        }
     }
 }
 
@@ -63,6 +75,12 @@ pub enum Origin {
     /// `$CARGO_HOME`, so a `git pull` there fetches from this machine and finds what this
     /// machine already had. The repository is this build's authority, not the directory.
     Cargo { path: PathBuf },
+    /// A prebuilt binary off a GitHub runner — a release asset, or a workflow artifact
+    /// that travelled the same way. The stamped directory is the runner's and exists
+    /// nowhere else, which is not sources lost: there was never anything local to
+    /// consult, and the repository is this build's authority, exactly as for
+    /// [`Origin::Cargo`].
+    Release { path: PathBuf },
     /// Nothing on this machine to point at: the sources were moved, deleted, or were
     /// never a checkout. The repository answers, and the path is kept so the report can
     /// say which directory it looked for.
@@ -73,7 +91,10 @@ impl Origin {
     /// The directory this origin names, whatever it turned out to be.
     pub fn path(&self) -> &Path {
         match self {
-            Self::Clone { path } | Self::Cargo { path } | Self::Unknown { path, .. } => path,
+            Self::Clone { path }
+            | Self::Cargo { path }
+            | Self::Release { path }
+            | Self::Unknown { path, .. } => path,
         }
     }
 }
@@ -235,6 +256,30 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A release asset stamps the runner's directory, which exists on no machine it
+    /// lands on. Without the CI stamp that reads as sources lost for the whole of the
+    /// binary's life; with it, the report can say what the binary is. The stamp never
+    /// overrides sources that resolve — a build on the runner itself is beside its own
+    /// checkout, and tests running there must keep answering as a clone.
+    #[test]
+    fn a_ci_build_whose_sources_are_gone_is_a_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("work/centinel/centinel");
+        let build = |ci| Build {
+            version: "0.7.0",
+            src: src.clone(),
+            commit: None,
+            ci,
+        };
+        assert!(matches!(build(true).origin(), Origin::Release { .. }));
+        assert!(matches!(build(false).origin(), Origin::Unknown { .. }));
+
+        std::fs::create_dir_all(src.join("crates/centinel")).unwrap();
+        std::fs::write(src.join("crates/centinel/Cargo.toml"), "[package]").unwrap();
+        std::fs::create_dir_all(src.join(".git")).unwrap();
+        assert!(matches!(build(true).origin(), Origin::Clone { .. }));
     }
 
     #[test]
