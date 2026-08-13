@@ -109,10 +109,13 @@ github
 ```
 
 Then it installs, by running `install.sh` — the same script this page opens with, because
-the accelerator, the CPU tuning and the two-binaries-in-one-directory rule are all decided
-there and a second copy of that logic would be wrong the first time the real one changed. A
-clone pulls (fast-forward only) and runs its own copy; anything else fetches the script
-**at the release tag** and prints the address it came from before running it.
+whether this host downloads or builds, the accelerator, the CPU tuning and the
+two-binaries-in-one-directory rule are all decided there and a second copy of that logic
+would be wrong the first time the real one changed. A clone pulls (fast-forward only) and
+runs its own copy; anything else fetches the script **at the release tag** and prints the
+address it came from before running it — so a binary that arrived as a download updates
+through the same pipe that installed it, and reports itself as `release binary` rather
+than as a clone it never had.
 
 | Flag | Effect |
 |---|---|

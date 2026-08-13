@@ -358,13 +358,16 @@ emergency clusters.
 ## This build
 
 **Origin** — which authority says what a newer Centinel is for *this* binary: a **clone**
-somebody made, cargo's own **checkout** (`cargo install --git`, which is what the curl pipe
-leaves behind), or nothing. It is `install.sh`'s opening decision — *a curl pipe installs
+somebody made, cargo's own **checkout** (`cargo install --git`, which is the curl pipe when
+it builds), a prebuilt **release binary** (the curl pipe when a release carries one this
+host can run), or nothing. It is `install.sh`'s opening decision — *a curl pipe installs
 from git, a clone installs the clone* — read back at the other end of the binary's life.
 *Why it matters:* cargo's checkout carries the same workspace and the same `.git` a clone
 does, and its `origin` is a bare mirror in `$CARGO_HOME` pinned to one revision. Classified
 as a clone, every pipe install would be told to `git pull` a copy of itself and would find
-nothing, forever.
+nothing, forever. A release binary stamps the runner's directory, which exists on no
+machine it lands on — a third stamp says CI built it, so the report reads *release binary*
+rather than pointing at `/home/runner` and calling the sources lost.
 
 **Stamped, not looked for.** The origin is a build-time record — `build.rs` writes the
 source directory and the commit into the binary — because the alternative, hunting for a

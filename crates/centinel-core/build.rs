@@ -38,6 +38,18 @@ fn main() {
         git(&src, &["rev-parse", "HEAD"]).unwrap_or_default()
     );
 
+    // Whether a GitHub runner built this. A binary built there leaves with the runner's
+    // directory stamped above, and that directory exists on no machine the binary lands
+    // on — so without this third stamp, every downloaded release asset would read as
+    // "sources lost" for the whole of its life. `version::origin` uses it only once the
+    // source directory stops resolving; a checkout on the runner itself still answers as
+    // the checkout it is.
+    println!(
+        "cargo::rustc-env=CENTINEL_BUILD_CI={}",
+        std::env::var("GITHUB_ACTIONS").map_or("", |v| if v == "true" { "1" } else { "" })
+    );
+    println!("cargo::rerun-if-env-changed=GITHUB_ACTIONS");
+
     // Emitting any `rerun-if-changed` replaces cargo's default — rerun when a file in
     // this package changes — and that is what is wanted here: nothing above reads the
     // sources. What the stamps depend on is the git ref, so the git ref is what is
