@@ -12,6 +12,9 @@
 # Requests per second, per host. Deliberately slow.
 rps = 1.0
 embed_model = "qwen3-embedding-4b"
+# Chunks per forward pass. "auto" sizes it to this machine's free memory; a number
+# fixes it. Bigger is faster until the memory runs out. `--batch` overrides it.
+embed_batch = "auto"
 transcribe_model = "whisper-large-v3-turbo"
 lang = "en"
 

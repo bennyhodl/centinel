@@ -42,15 +42,29 @@ on shapes.
 
 ## Batching is not optional
 
-A `llama.cpp` context and its KV cache are built per **call**, not per text.
+A batch is **one forward pass over many chunks**: one `llama.cpp` context, one `decode`,
+every chunk in it as its own `seq_id`. Two costs collapse into that.
+
+The context and its KV cache are built per **call**, not per text:
 
 | | chunks/sec (M1 Max, Metal) |
 |---|---|
 | one chunk per call | 6.1 |
 | batches of 32 | **18.5** (0.6B) / **3.8** (4B) |
 
-So the batch is the unit of work, not the chunk. A batch that fails as a unit — usually
-one over-long chunk — is retried individually, so one bad chunk cannot cost the other 31.
+And a single ~300-token chunk leaves a GPU almost entirely idle, which is what packing the
+whole group into one pass claims. The table above measured only the first of the two — it
+predates the packed decode and has not been re-run against it.
+
+So the batch is the unit of work, not the chunk. A batch that fails as a unit — an
+over-long chunk, or a group the machine cannot hold — is retried individually, so one bad
+chunk cannot cost the other 31.
+
+How wide is a property of the machine rather than of the corpus. `[defaults] embed_batch`
+in the config states it, `--batch N` overrides it for one run, and `auto` — the default —
+sizes it from the free memory the backend reports once the weights are loaded, capped at
+128. The context is sized to the group in hand, so a batch costs what its chunks actually
+need rather than a fixed reservation.
 
 An over-long text is **refused, not truncated.** A silently shortened chunk would be
 stored under a `chunk_hash` covering text that was never embedded, which makes the record

@@ -33,6 +33,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ops::BatchSize;
+
 /// The sentinel meaning "let the operating system decide".
 pub const SYSTEM_DEFAULT: &str = "system";
 
@@ -175,6 +177,20 @@ pub struct Defaults {
     #[serde(default = "default_embed_model")]
     pub embed_model: String,
 
+    /// Chunks per forward pass when embedding — a count, or `"auto"`.
+    ///
+    /// Here because the right number is a property of the machine rather than of the
+    /// corpus: the same store embedded on a laptop and on a box with 128 GB of unified
+    /// memory wants two different widths, and neither operator should have to type theirs
+    /// on every invocation. `--batch` overrides it for one run.
+    ///
+    /// `"auto"` reads the backend's free memory when the model loads. It is the default
+    /// because the alternative is one fixed number that fits the smallest machine anyone
+    /// might run this on and leaves every larger one idle — which is the whole complaint
+    /// [`crate::ops::embed`] exists to answer.
+    #[serde(default = "default_embed_batch")]
+    pub embed_batch: BatchSize,
+
     /// The Whisper model `run` uses for sources that produce audio.
     #[serde(default = "default_transcribe_model")]
     pub transcribe_model: String,
@@ -190,6 +206,9 @@ fn default_rps() -> f64 {
 fn default_embed_model() -> String {
     "qwen3-embedding-4b".to_string()
 }
+fn default_embed_batch() -> BatchSize {
+    BatchSize::Auto
+}
 fn default_transcribe_model() -> String {
     "whisper-large-v3-turbo".to_string()
 }
@@ -202,6 +221,7 @@ impl Default for Defaults {
         Self {
             rps: default_rps(),
             embed_model: default_embed_model(),
+            embed_batch: default_embed_batch(),
             transcribe_model: default_transcribe_model(),
             lang: default_lang(),
         }
@@ -840,6 +860,9 @@ pub const EXAMPLE: &str = r#"# Centinel configuration.
 # Requests per second, per host. Deliberately slow.
 rps = 1.0
 embed_model = "qwen3-embedding-4b"
+# Chunks per forward pass. "auto" sizes it to this machine's free memory; a number
+# fixes it. Bigger is faster until the memory runs out. `--batch` overrides it.
+embed_batch = "auto"
 transcribe_model = "whisper-large-v3-turbo"
 lang = "en"
 
@@ -1648,6 +1671,28 @@ mod tests {
         let c = parse("[defaults]\nrps = 0.5\n");
         assert_eq!(c.defaults.rps, 0.5);
         assert_eq!(c.defaults.lang, "en");
+        assert_eq!(
+            c.defaults.embed_batch,
+            BatchSize::Auto,
+            "a machine that has said nothing gets one sized to it"
+        );
+    }
+
+    /// A count and the word, both written the way TOML would have them written.
+    #[test]
+    fn the_embed_batch_takes_a_number_or_auto() {
+        let batch = |text: &str| parse(text).defaults.embed_batch;
+        assert_eq!(
+            batch("[defaults]\nembed_batch = 64\n"),
+            BatchSize::Fixed(64)
+        );
+        assert_eq!(
+            batch("[defaults]\nembed_batch = \"auto\"\n"),
+            BatchSize::Auto
+        );
+        // Refused at the file, not hours later at the first empty pass.
+        assert!(Config::parse("[defaults]\nembed_batch = 0\n").is_err());
+        assert!(Config::parse("[defaults]\nembed_batch = \"most\"\n").is_err());
     }
 
     #[test]

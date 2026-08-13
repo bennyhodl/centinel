@@ -933,6 +933,9 @@ async fn run_derivation(
 
         Stage::Embed => {
             let model = &config.defaults.embed_model;
+            // Read out here, beside the model, so the closure below carries the value
+            // rather than the whole config.
+            let batch = config.defaults.embed_batch;
             if let Some(reason) = missing_model(model, crate::models::ModelRole::Embedding) {
                 return Ok(StageRun::skipped(stage, reason));
             }
@@ -946,6 +949,10 @@ async fn run_derivation(
                         ctx,
                         EmbedArgs {
                             model: model.clone(),
+                            // Passed rather than left unset: the config is already open
+                            // here, and `embed` would otherwise read the same file again
+                            // to find the same number.
+                            batch: Some(batch),
                             // No `limit`: see `RunArgs::limit`. `--skip embed` is how a run
                             // stops short of this stage, and `centinel embed --limit` is
                             // how it is bounded deliberately.

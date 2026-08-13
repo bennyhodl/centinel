@@ -369,7 +369,7 @@ Measured on an M1 Max, 1,200-character chunks, **same model on both sides** so t
 
 **3.4×, and only with batching.** Unbatched the same path gives 6.1 chunks/sec — barely better than CPU — because a context and its KV cache are built per *call*, not per text. Embedding one chunk at a time measures allocation, not inference. Any consumer of [`crate::embed`] that loops one text at a time is leaving two thirds of the throughput on the floor.
 
-*Known headroom:* the batched path still decodes sequences one at a time inside a shared context. True multi-sequence batching — several `seq_id`s in one `LlamaBatch` — is not implemented.
+*Headroom, since taken:* the batched path used to decode sequences one at a time inside a shared context, so a batch amortised context creation and nothing else — which is what the 18.5 above measures. It now packs the group into one `LlamaBatch`, one `seq_id` per chunk, one `decode`, with `n_ctx`/`n_batch`/`n_ubatch` sized to the group rather than to a fixed 4,096. How wide the group is became a property of the machine at the same time: `[defaults] embed_batch`, `--batch`, or `auto` from the backend's free memory. **Not re-measured** — the table above is the old mechanism's.
 
 *Accepted cost:* a C++ build enters `cargo build`. Ticket [#11](https://github.com/bennyhodl/centinel/issues/11) already tracked this for `whisper-rs`; both are now present, and §3.6 explains why they cannot share a binary — so #11 decides packaging for **two** C++ builds producing **two** executables.
 

@@ -32,6 +32,8 @@ use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::token::LlamaToken;
+use llama_cpp_2::{LlamaBackendDeviceType, list_llama_ggml_backend_devices};
 
 use crate::models::{self, ModelRole, ModelSpec};
 
@@ -44,10 +46,43 @@ use crate::models::{self, ModelRole, ModelSpec};
 pub const QUERY_INSTRUCTION: &str =
     "Given a web search query, retrieve relevant passages that answer the query";
 
-/// Context window. Chunks target 1,200 characters (~300 tokens), so this is generous
-/// while staying far below the model's 32K — a full-size context would allocate a KV
-/// cache far larger than any chunk needs.
-const DEFAULT_CONTEXT_TOKENS: u32 = 4096;
+/// The longest a single text may tokenize to.
+///
+/// A validation bound, not a context size — the context is sized to the group being
+/// embedded (see [`Embedder::decode_group`]). Chunks target 1,200 characters (~300
+/// tokens), so this is generous while staying far below the model's 32K.
+const MAX_CHUNK_TOKENS: u32 = 4096;
+
+/// Cells llama.cpp rounds a per-sequence context up to (`GGML_PAD(n_ctx_seq, 256)` in
+/// `llama-context.cpp`). Stated here so the arithmetic below asks for what it will be
+/// charged: a smaller request is rounded up and paid for anyway.
+const CTX_PAD: u32 = 256;
+
+/// llama.cpp's `LLAMA_MAX_SEQ`. A batch wider than this is refused by
+/// `llama_batch_allocr::init`, so a longer list of texts is split rather than passed on.
+const MAX_SEQUENCES: usize = 256;
+
+/// What one sequence in an auto-sized batch is assumed to reserve, in context cells.
+///
+/// A batch size has to be chosen before any text is tokenized, so this stands in for the
+/// real length: chunks target 1,200 characters (~300 tokens) and [`CTX_PAD`] rounds that
+/// up, which is what a typical chunk actually costs.
+const NOMINAL_SEQ_CELLS: u64 = 512;
+
+/// The share of free device memory an auto-sized batch may plan on.
+///
+/// Half, because the KV cache is not all a decode allocates — the graph's compute buffers
+/// and the attention mask come out of the same pool — and because the CPU backend answers
+/// the free-memory question with the machine's *whole* RAM ("free is ill-defined, assume
+/// all of it is free" — `ggml-cpu.cpp`), not the part nothing else wants.
+const MEMORY_FRACTION: f64 = 0.5;
+
+/// Ceiling on an auto-sized batch.
+///
+/// Well under llama.cpp's 256-sequence limit, because the gain flattens once the GPU is
+/// saturated and the cost of a failure does not: `ops::embed` retries a failed group one
+/// chunk at a time, so a wide group turns one bad chunk into a long serial retry.
+const AUTO_MAX_BATCH: usize = 128;
 
 /// Offload everything the backend will take. Ignored on a CPU-only build.
 const GPU_LAYERS: u32 = 1000;
@@ -77,7 +112,6 @@ pub struct Embedder {
     model: LlamaModel,
     spec: &'static ModelSpec,
     variant: &'static str,
-    context_tokens: u32,
 }
 
 impl std::fmt::Debug for Embedder {
@@ -115,7 +149,6 @@ impl Embedder {
                 .variant(Some(&found.variant))
                 .expect("a resolved variant is a spec variant")
                 .name,
-            context_tokens: DEFAULT_CONTEXT_TOKENS,
         })
     }
 
@@ -146,12 +179,15 @@ impl Embedder {
 
     /// The single inference path. Both public entry points route through here so a query
     /// and a document can never be embedded by subtly different code.
+    ///
+    /// Split at [`MAX_SEQUENCES`] rather than refused above it, so the public contract
+    /// stays "any number of texts, order preserved" whatever llama.cpp's batch limit is.
     fn embed_batch(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
 
-        let tokenized: Vec<Vec<_>> = texts
+        let tokenized: Vec<Vec<LlamaToken>> = texts
             .iter()
             .map(|t| {
                 self.model
@@ -163,20 +199,53 @@ impl Embedder {
         // Refused rather than truncated. A silently shortened chunk would be indexed
         // under a `chunk_hash` covering text that was never embedded, which makes the
         // cache lie about what it holds.
-        if let Some(long) = tokenized
-            .iter()
-            .find(|t| t.len() > self.context_tokens as usize)
-        {
-            anyhow::bail!(
-                "a text tokenizes to {} tokens, over the {} context. Chunk it smaller.",
-                long.len(),
-                self.context_tokens
-            );
+        let longest = tokenized.iter().map(Vec::len).max().unwrap_or(0);
+        anyhow::ensure!(
+            longest <= MAX_CHUNK_TOKENS as usize,
+            "a text tokenizes to {longest} tokens, over the {MAX_CHUNK_TOKENS} a chunk \
+             may be. Chunk it smaller."
+        );
+
+        let mut out = Vec::with_capacity(texts.len());
+        for group in tokenized.chunks(MAX_SEQUENCES) {
+            out.extend(self.decode_group(group)?);
         }
+        Ok(out)
+    }
+
+    /// One context, one batch, one `decode` — the group is the unit of inference.
+    ///
+    /// Each text enters as its own sequence and its vector is read back by `seq_id`, so a
+    /// group of 32 is **one** forward pass over 32 chunks rather than 32 passes. That is
+    /// the whole of the throughput story: a single ~300-token chunk leaves a GPU almost
+    /// entirely idle, so the passes this replaces were mostly waiting.
+    ///
+    /// The context is sized to the group in hand. llama.cpp gives every sequence its own
+    /// KV stream of `n_ctx / n_seq_max` cells rounded up to [`CTX_PAD`], so `n_ctx` is
+    /// stated as that product and the per-sequence share follows the longest text. A
+    /// fixed [`MAX_CHUNK_TOKENS`] would make every sequence reserve eight times what a
+    /// chunk uses — for a group of 128, 77 GB of KV cache that nothing reads.
+    ///
+    /// One long text therefore inflates its whole group. That is affordable because
+    /// chunks are cut to a target length ([`crate::chunk`]) and so arrive near-uniform,
+    /// and because a group too large for the machine fails at `new_context` or `decode`
+    /// and is retried a chunk at a time by [`crate::ops::embed`] — the same recovery as
+    /// before, now reached by a group that will not fit as well as by a chunk that will
+    /// not tokenize.
+    fn decode_group(&self, group: &[Vec<LlamaToken>]) -> anyhow::Result<Vec<Vec<f32>>> {
+        let sequences = group.len() as u32;
+        let tokens: usize = group.iter().map(Vec::len).sum();
+        let longest = group.iter().map(Vec::len).max().unwrap_or(0).max(1) as u32;
+        let per_sequence = longest.div_ceil(CTX_PAD) * CTX_PAD;
 
         let params = LlamaContextParams::default()
-            .with_n_ctx(std::num::NonZeroU32::new(self.context_tokens))
-            .with_n_batch(self.context_tokens)
+            .with_n_ctx(std::num::NonZeroU32::new(per_sequence * sequences))
+            // `n_batch` bounds one `decode` and `n_ubatch` the slice of it the graph runs
+            // at once. Left at their defaults (2,048 and 512) llama.cpp would split the
+            // group back into several passes — the exact cost this exists to remove.
+            .with_n_batch(tokens as u32)
+            .with_n_ubatch(tokens as u32)
+            .with_n_seq_max(sequences)
             // Last-token pooling. Set explicitly rather than trusting GGUF metadata,
             // because the wrong pooling yields usable-looking vectors and no error.
             .with_pooling_type(LlamaPoolingType::Last)
@@ -187,25 +256,84 @@ impl Embedder {
             .new_context(backend()?, params)
             .map_err(|e| anyhow::anyhow!("creating context: {e}"))?;
 
-        let mut out = Vec::with_capacity(texts.len());
-        for tokens in &tokenized {
-            let mut batch = LlamaBatch::new(self.context_tokens as usize, 1);
+        let mut batch = LlamaBatch::new(tokens, sequences as i32);
+        for (seq, text) in group.iter().enumerate() {
             batch
-                .add_sequence(tokens, 0, false)
+                .add_sequence(text, seq as i32, false)
                 .map_err(|e| anyhow::anyhow!("building batch: {e}"))?;
-
-            ctx.clear_kv_cache();
-            ctx.decode(&mut batch)
-                .map_err(|e| anyhow::anyhow!("decode failed: {e}"))?;
-
-            let raw = ctx
-                .embeddings_seq_ith(0)
-                .map_err(|e| anyhow::anyhow!("reading embeddings: {e}"))?;
-            out.push(normalize(raw));
         }
+        ctx.decode(&mut batch)
+            .map_err(|e| anyhow::anyhow!("decode failed: {e}"))?;
 
-        Ok(out)
+        // Read back by `seq_id`, which is the order the texts arrived in — the caller
+        // zips this against its chunk hashes, so the order is not cosmetic.
+        (0..sequences as i32)
+            .map(|seq| {
+                ctx.embeddings_seq_ith(seq)
+                    .map(normalize)
+                    .map_err(|e| anyhow::anyhow!("reading embeddings: {e}"))
+            })
+            .collect()
     }
+
+    /// A batch size for this machine, or `None` where no backend device will say how much
+    /// memory it has.
+    ///
+    /// What a batch costs is KV cache: each sequence reserves its own stream of context
+    /// cells, and a cell holds K and V for every layer. Both halves are numbers the loaded
+    /// model states exactly, so this is arithmetic rather than a table of machines.
+    ///
+    /// Asked *after* the weights are loaded, because a GPU's free figure then already has
+    /// them subtracted — Metal reports `recommendedMaxWorkingSetSize −
+    /// currentAllocatedSize`, CUDA reports `cudaMemGetInfo` — so nothing here needs the
+    /// model's size on disk or a guess at what the backend did with it.
+    pub fn auto_batch(&self) -> Option<usize> {
+        Some(batch_for_budget(
+            free_device_memory()?,
+            self.kv_bytes_per_cell(),
+        ))
+    }
+
+    /// Bytes of KV cache one context cell costs.
+    fn kv_bytes_per_cell(&self) -> u64 {
+        let heads = u64::from(self.model.n_head().max(1));
+        let head_width = self.model.n_embd().max(0) as u64 / heads;
+        // K and V, two bytes apiece — the cache defaults to f16.
+        u64::from(self.model.n_layer()) * u64::from(self.model.n_head_kv()) * head_width * 2 * 2
+    }
+}
+
+/// Free memory on the device inference will run on, or `None` where nothing reports any.
+///
+/// GPUs first, because [`GPU_LAYERS`] puts the model on one wherever there is one, and
+/// the CPU device would answer with the whole machine's RAM. Zero is read as "will not
+/// say" rather than "has none": a backend that does not implement the query reports zero,
+/// and so does a card with nothing left — neither is a number to size a run from, and the
+/// caller has a measured default to fall back on.
+fn free_device_memory() -> Option<u64> {
+    use LlamaBackendDeviceType::{Cpu, Gpu, IntegratedGpu};
+
+    let devices = list_llama_ggml_backend_devices();
+    let most_free = |kinds: &[LlamaBackendDeviceType]| {
+        devices
+            .iter()
+            .filter(|d| kinds.contains(&d.device_type))
+            .map(|d| d.memory_free as u64)
+            .max()
+    };
+    most_free(&[Gpu, IntegratedGpu])
+        .or_else(|| most_free(&[Cpu]))
+        .filter(|&free| free > 0)
+}
+
+/// The batch a memory budget affords. Separate from the device query so the shape of the
+/// curve is testable on a machine with no weights and no GPU.
+fn batch_for_budget(free_bytes: u64, kv_bytes_per_cell: u64) -> usize {
+    let budget = (free_bytes as f64 * MEMORY_FRACTION) as u64;
+    let per_sequence = kv_bytes_per_cell.max(1) * NOMINAL_SEQ_CELLS;
+    usize::try_from(budget / per_sequence)
+        .unwrap_or(AUTO_MAX_BATCH)
+        .clamp(1, AUTO_MAX_BATCH)
 }
 
 /// L2 normalization, so cosine similarity is a plain dot product.
@@ -247,6 +375,32 @@ mod tests {
     #[test]
     fn normalizing_a_zero_vector_does_not_divide_by_zero() {
         assert_eq!(normalize(&[0.0, 0.0]), vec![0.0, 0.0]);
+    }
+
+    /// `qwen3-embedding-4b`: 36 layers, 8 KV heads, 2,560 wide over 20 heads — 128 per
+    /// head. K and V at two bytes each is 147,456 bytes a cell, which is what makes a
+    /// batch expensive enough to be worth sizing.
+    const QWEN3_4B_KV_CELL: u64 = 147_456;
+
+    /// The point of `auto`: a machine with memory to spare uses it, and one without does
+    /// not pretend to.
+    #[test]
+    fn an_auto_batch_follows_the_memory_it_is_given() {
+        let for_gib = |gib: u64| batch_for_budget(gib << 30, QWEN3_4B_KV_CELL);
+        assert_eq!(for_gib(4), 28);
+        assert_eq!(for_gib(16), 113);
+        assert_eq!(
+            for_gib(128),
+            AUTO_MAX_BATCH,
+            "a big machine stops at the ceiling, not at what it could hold"
+        );
+    }
+
+    /// A batch of zero embeds nothing and would loop forever asking for it.
+    #[test]
+    fn an_auto_batch_never_reaches_zero() {
+        assert_eq!(batch_for_budget(0, QWEN3_4B_KV_CELL), 1);
+        assert_eq!(batch_for_budget(1 << 20, QWEN3_4B_KV_CELL), 1);
     }
 
     #[test]
@@ -334,5 +488,42 @@ mod tests {
     fn an_empty_batch_is_not_an_error() {
         let Some(embedder) = embedder() else { return };
         assert!(embedder.embed_documents::<&str>(&[]).unwrap().is_empty());
+    }
+
+    /// The failure a packed batch makes possible: every text now shares one `decode`, and
+    /// a crossed `seq_id` would hand chunk 3 the vector for chunk 1 — right shape, right
+    /// norm, wrong document, and nothing in the run would say so. So each text is embedded
+    /// in a group and again alone, and the two must be the same vector.
+    ///
+    /// Not `assert_eq`: a group and a lone text take different paths through the graph, so
+    /// the last bits of the floats differ. That is harmless — a chunk is embedded once and
+    /// stored under its hash, never compared against a second embedding of itself.
+    #[test]
+    fn a_group_gives_each_text_its_own_vector() {
+        let Some(embedder) = embedder() else {
+            eprintln!("skipping: set CENTINEL_TEST_MODELS=1 with weights pulled");
+            return;
+        };
+
+        let texts = [
+            "The Board approved the stormwater appropriation.",
+            "Solid waste collection occurs weekly on Tuesdays.",
+            "The lobbyist meeting log reports $48,000 in expenditures.",
+        ];
+        let grouped = embedder.embed_documents(&texts).unwrap();
+        assert_eq!(
+            grouped.len(),
+            texts.len(),
+            "order and count are the contract"
+        );
+
+        for (i, text) in texts.iter().enumerate() {
+            let alone = embedder.embed_documents(&[*text]).unwrap().remove(0);
+            let same = cosine(&grouped[i], &alone);
+            assert!(
+                same > 0.999,
+                "text {i} came back as another sequence: {same}"
+            );
+        }
     }
 }

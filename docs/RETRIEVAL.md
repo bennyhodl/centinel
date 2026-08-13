@@ -132,15 +132,22 @@ shapes.
 
 ### Batching is not optional
 
-A `llama.cpp` context and its KV cache are built per **call**, not per text.
+A batch is **one forward pass over many chunks**: one context, one `decode`, every chunk
+as its own `seq_id`. Two costs collapse into it. First, a `llama.cpp` context and its KV
+cache are built per **call**, not per text:
 
 | | chunks/sec (M1 Max, Metal) |
 |---|---|
 | one chunk per call | 6.1 |
 | batches of 32 | **18.5** (0.6B) / **3.8** (4B) |
 
-So the batch is the unit of work, not the chunk. A batch that fails as a unit — usually
-one over-long chunk — is retried individually, so one bad chunk cannot cost the other 31.
+Second, one ~300-token chunk leaves a GPU almost entirely idle. The table measures only
+the first — it predates the packed decode and has not been re-run against it.
+
+So the batch is the unit of work, not the chunk. A batch that fails as a unit — an
+over-long chunk, or a group the machine cannot hold — is retried individually, so one bad
+chunk cannot cost the other 31. How wide is a property of the machine: `[defaults]
+embed_batch`, `--batch N`, or `auto`.
 
 An over-long text is **refused, not truncated**. A silently shortened chunk would be
 stored under a `chunk_hash` covering text that was never embedded, which makes the record

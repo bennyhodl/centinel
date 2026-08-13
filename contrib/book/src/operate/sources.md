@@ -58,12 +58,20 @@ There is a starting point at [`contrib/centinel.toml.example`](https://github.co
 [defaults]
 rps = 1.0                                  # requests per second, per host
 embed_model = "qwen3-embedding-4b"
+embed_batch = "auto"                       # chunks per forward pass, or a number
 transcribe_model = "whisper-large-v3-turbo"
 lang = "en"
 ```
 
 `rps` is deliberately slow. Politeness is per host, which is also why acquisition runs per
 source rather than corpus-wide.
+
+`embed_batch` is here because the right number is a property of **this machine**, not of
+the corpus: a laptop and a box with 128 GB of unified memory want different widths for the
+same store. `"auto"` reads the backend's free memory when the model loads; a number fixes
+it; `centinel embed --batch N` overrides it for one run. Wider is faster until the memory
+runs out — `cargo run --release --example embed_bench` shows where this host's curve
+flattens.
 
 ## Where the store lives
 
