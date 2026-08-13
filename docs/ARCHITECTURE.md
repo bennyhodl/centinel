@@ -474,11 +474,17 @@ at 40,001. Lance commits a version per append, so what landed before the kill is
 is cheap: identical text has an identical `chunk_hash`, so only genuinely new chunks reach
 the model (§6.1).
 
-**Batching is not optional.** A `llama.cpp` context and its KV cache are built per *call*,
-not per text: one chunk per call gives 6.1 chunks/sec on an M1 Max, batches of 32 give
-18.5. The batch is the unit of work here, not the chunk. A batch that fails as a unit —
-usually one over-long chunk — is retried individually, so one bad chunk cannot cost the
-other 31.
+**Batching is not optional.** A batch is one forward pass over many chunks: one context,
+one `decode`, every chunk as its own `seq_id`. Two costs collapse into it. A `llama.cpp`
+context and its KV cache are built per *call*, not per text — one chunk per call gave 6.1
+chunks/sec on an M1 Max against 18.5 for batches of 32, when that amortisation was all a
+batch bought. And one ~300-token chunk leaves a GPU almost entirely idle, which is what
+the packed pass claims. The batch is the unit of work here, not the chunk. A batch that
+fails as a unit — an over-long chunk, or a group the machine cannot hold — is retried
+individually, so one bad chunk cannot cost the other 31.
+
+How wide is a property of the machine: `[defaults] embed_batch`, `--batch N` for one run,
+or `auto` from the backend's free memory once the weights are on it.
 
 The whole run goes into a single `spawn_blocking`. Inference would otherwise stall the
 async runtime, which matters more than usual here because an HTTP caller's connection has

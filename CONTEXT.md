@@ -244,6 +244,15 @@ text. Changing it produces a wholly different set of hashes, so the old chunks s
 index and every vector in the cache is orphaned. The index records the geometry its hashes
 were built with, and refuses a change that is not a rebuild.
 
+**Embedding batch** — the chunks `embed` puts through **one forward pass**: one
+`llama.cpp` context, one `decode`, each chunk its own `seq_id`. Not the same word as the
+row below: a write batch is chosen by what must commit together, an embedding batch by
+what the machine can hold at once. Wider is faster — a lone ~300-token chunk leaves a GPU
+idle — until the KV cache stops fitting, and each sequence reserves its own. So the width
+is a property of the **machine** rather than of the corpus, which is why it is stated in
+`[defaults] embed_batch` and why `auto` reads the backend's free memory instead of
+shipping one number for laptops and 128 GB boxes alike.
+
 **Write batch** — the rows `index` commits as a unit, and it is **one document**, because
 that is the unit the row above subtracts. A batch is chosen by the skip predicate, not by
 what makes the writer fastest: widen it to span documents and a crash mid-batch leaves

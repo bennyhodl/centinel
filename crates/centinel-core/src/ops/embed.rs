@@ -23,10 +23,15 @@
 //!
 //! ## Batching is not optional
 //!
-//! A `llama.cpp` context — and its KV cache — is built per call, not per text. Measured
-//! on an M1 Max: one chunk per call gives 6.1 chunks/sec, batches of 32 give 18.5. A
-//! naive loop would spend two thirds of a multi-hour run on allocation, so the batch is
-//! the unit of work here rather than the chunk.
+//! A batch is one forward pass over many chunks: one `llama.cpp` context, one `decode`,
+//! every chunk in it as its own sequence (see [`crate::embed::Embedder`]). Two costs
+//! collapse into it. The context and its KV cache are built per call rather than per
+//! text — measured on an M1 Max, one chunk per call gave 6.1 chunks/sec against 18.5 for
+//! groups of 32, when that amortisation was all a group bought. And a single ~300-token
+//! chunk leaves a GPU almost entirely idle, which is what the packed pass now claims.
+//!
+//! So the batch is the unit of work here rather than the chunk, and how wide it should be
+//! is a property of the *machine* rather than of the corpus — see [`BatchSize`].
 
 use std::time::Instant;
 
@@ -39,9 +44,93 @@ use crate::models;
 use crate::prelude::*;
 use crate::vectors::VectorTable;
 
-/// Large enough to amortise context creation, small enough that a batch of long chunks
-/// does not blow past the embedder's context window in aggregate.
+/// The batch to fall back on when the machine will not say what it can hold. Measured,
+/// on an M1 Max, back when a group only amortised context creation.
 const DEFAULT_BATCH: usize = 32;
+
+/// The word for "size it to this machine", in the config file and on the flag alike.
+pub const AUTO: &str = "auto";
+
+/// How wide a batch to embed in: a count of chunks, or [`AUTO`].
+///
+/// A sentinel beside the real values, as [`crate::config::SYSTEM_DEFAULT`] already does
+/// for "let something else decide" — one idiom for that question rather than two. It
+/// reads the same in either place it is written:
+///
+/// ```toml
+/// embed_batch = "auto"   # or embed_batch = 64
+/// ```
+/// ```console
+/// centinel embed --batch auto   # or --batch 64
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchSize {
+    /// Settled when the model loads, from the free memory the backend reports.
+    Auto,
+    /// Exactly this many chunks per forward pass.
+    Fixed(usize),
+}
+
+impl BatchSize {
+    /// The one parse, so the flag and the config file cannot disagree about what is legal.
+    ///
+    /// Zero is refused here rather than clamped: `--batch 0` and `embed_batch = 0` are
+    /// both somebody meaning something, and neither means "one".
+    fn parse(text: &str) -> Result<Self, String> {
+        if text.eq_ignore_ascii_case(AUTO) {
+            return Ok(Self::Auto);
+        }
+        match text.parse::<usize>() {
+            Ok(0) => Err("a batch of 0 embeds nothing; give a count or `auto`".into()),
+            Ok(n) => Ok(Self::Fixed(n)),
+            Err(_) => Err(format!(
+                "expected a count of chunks or `{AUTO}`, got `{text}`"
+            )),
+        }
+    }
+}
+
+/// Written back as it was written: a number stays a number, so a config file this tool
+/// prints is a config file it would accept.
+impl Serialize for BatchSize {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Auto => s.serialize_str(AUTO),
+            Self::Fixed(n) => s.serialize_u64(*n as u64),
+        }
+    }
+}
+
+/// Both TOML spellings, and both JSON ones. TOML hands integers over as `i64` and JSON as
+/// `u64`, so a field that accepts `64` has to answer to both or accept it in only one of
+/// the two places it can be written.
+impl<'de> Deserialize<'de> for BatchSize {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Either;
+
+        impl serde::de::Visitor<'_> for Either {
+            type Value = BatchSize;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "a count of chunks or `{AUTO}`")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<BatchSize, E> {
+                BatchSize::parse(text).map_err(E::custom)
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<BatchSize, E> {
+                BatchSize::parse(&n.to_string()).map_err(E::custom)
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<BatchSize, E> {
+                BatchSize::parse(&n.to_string()).map_err(E::custom)
+            }
+        }
+
+        d.deserialize_any(Either)
+    }
+}
 
 #[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct EmbedArgs {
@@ -56,10 +145,15 @@ pub struct EmbedArgs {
     #[serde(default)]
     pub variant: Option<String>,
 
-    /// Chunks per forward pass.
-    #[arg(long, default_value_t = DEFAULT_BATCH)]
-    #[serde(default = "default_batch")]
-    pub batch: usize,
+    /// Chunks per forward pass — a count, or `auto` for what this machine can hold.
+    ///
+    /// Unset means "nobody said here", which falls through to `[defaults] embed_batch` in
+    /// the config file and from there to `auto`. Typing it is how one run departs from a
+    /// machine's standing preference, not how the preference gets stated.
+    #[arg(long, value_name = "N|auto", value_parser = BatchSize::parse)]
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub batch: Option<BatchSize>,
 
     /// Stop after this many chunks. The way to sample a corpus before committing hours.
     #[arg(long)]
@@ -76,18 +170,15 @@ fn default_model() -> String {
     "qwen3-embedding-4b".to_string()
 }
 
-fn default_batch() -> usize {
-    DEFAULT_BATCH
-}
-
-/// So [`crate::ops::run`] batches as the CLI does — the measured 6.1 vs 18.5 chunks/sec
-/// difference documented above is not something a second default should be able to lose.
+/// `batch: None` is not "do not batch" — it is "nobody said", which resolves through the
+/// config file to `auto`. Keeping [`crate::ops::run`] and the CLI on the same unset value
+/// is what stops a second default from quietly reintroducing a number nobody measured.
 impl Default for EmbedArgs {
     fn default() -> Self {
         Self {
             model: default_model(),
             variant: None,
-            batch: default_batch(),
+            batch: None,
             limit: None,
             dry_run: false,
         }
@@ -118,6 +209,14 @@ pub struct EmbedReport {
     pub elapsed_secs: f64,
     /// Sustained rate, for planning the rest of a corpus.
     pub chunks_per_sec: f64,
+    /// Chunks per forward pass, once the three tiers settled it. Reported because it is
+    /// what makes `chunks_per_sec` mean anything — the same corpus and the same model
+    /// give different rates at different widths.
+    ///
+    /// Absent on a dry run, which never loads the weights `auto` reads the machine
+    /// through, and so never chooses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<Skipped>,
 }
@@ -130,7 +229,10 @@ pub async fn embed(
     progress: &Progress,
     cancel: &Cancel,
 ) -> anyhow::Result<EmbedReport> {
-    anyhow::ensure!(args.batch > 0, "--batch must be at least 1");
+    // `BatchSize::parse` refuses a zero typed on the flag or written in the config, so
+    // this catches only the third way in: a caller building `EmbedArgs` in code.
+    let zero = Some(BatchSize::Fixed(0));
+    anyhow::ensure!(args.batch != zero, "--batch must be at least 1");
 
     let index = Index::open(ctx.store.require_index()?)?;
     let indexed = index.chunk_hashes()?;
@@ -180,6 +282,7 @@ pub async fn embed(
         remaining: outstanding,
         elapsed_secs: 0.0,
         chunks_per_sec: 0.0,
+        batch: None,
         skipped: Vec::new(),
     };
 
@@ -205,13 +308,17 @@ pub async fn embed(
         embedder.dims()
     );
 
+    // After the load, not before it: `auto` asks the loaded model what a sequence costs
+    // and asks the backend how much memory is left once the weights are on it.
+    let batch_size = resolve_batch(args.batch, &embedder)?;
+    progress.say(format!("{batch_size} chunks per pass"));
+
     // The whole run goes into one blocking task rather than one per batch. Inference is
     // CPU/GPU-bound and would stall the async runtime — which matters here more than
     // usual, because an HTTP caller's connection has to stay responsive across hours.
     // One task also means the model is moved once instead of round-tripping per batch.
     let started = Instant::now();
     let (embedded, skipped) = {
-        let batch_size = args.batch;
         let table = table.clone();
         let host = Host {
             progress: progress.clone(),
@@ -232,8 +339,32 @@ pub async fn embed(
         remaining: outstanding - embedded,
         elapsed_secs: elapsed,
         chunks_per_sec: embedded as f64 / elapsed.max(f64::EPSILON),
+        batch: Some(batch_size),
         skipped,
         ..base
+    })
+}
+
+/// The flag, else the config file's standing preference, else what the machine affords.
+///
+/// Three tiers because the right batch size is a property of the *machine*: a laptop and
+/// a box with 128 GB of unified memory want different numbers for the same corpus, and
+/// neither operator should have to remember theirs on every invocation. So the config
+/// file is where it is stated, the flag is how one run departs from it, and `auto` is what
+/// a machine that has never said anything gets — a number read off it, rather than the
+/// same 32 as everything else.
+fn resolve_batch(flag: Option<BatchSize>, embedder: &Embedder) -> anyhow::Result<usize> {
+    let chosen = match flag {
+        Some(explicit) => explicit,
+        // Read here rather than passed in, so `centinel embed` typed by hand honours the
+        // preference too. `run` has the file open already and passes its value down.
+        None => crate::config::Config::load()?.defaults.embed_batch,
+    };
+    Ok(match chosen {
+        BatchSize::Fixed(n) => n,
+        // A backend that will not say how much memory it has gets the measured default
+        // rather than a guess built on nothing.
+        BatchSize::Auto => embedder.auto_batch().unwrap_or(DEFAULT_BATCH),
     })
 }
 
@@ -285,9 +416,14 @@ fn run(
                 handle.block_on(table.append(&entries))?;
                 embedded += entries.len();
             }
-            // A batch fails as a unit — usually because one chunk is over-long — so it
-            // is retried one at a time. Otherwise a single bad chunk costs the other 31,
-            // and on a corpus this size that compounds.
+            // A batch fails as a unit, so it is retried one at a time. Otherwise a single
+            // bad chunk costs the other 31, and on a corpus this size that compounds.
+            //
+            // The outward behaviour is unchanged now that the group shares one `decode`,
+            // but the failure it recovers from is a wider one. It used to be a chunk that
+            // would not tokenize; it is now also a group the machine could not hold — one
+            // `new_context` for a KV cache too large, or one `decode` out of memory. Both
+            // come back here, and one chunk at a time is the right answer to both.
             Err(batch_error) => {
                 tracing::debug!(%batch_error, "batch failed; retrying individually");
                 for hash in window {
@@ -348,11 +484,16 @@ impl Render for EmbedReport {
             ])?;
 
             p.blank()?;
-            let rate = format!(
+            // The batch beside the rate, because it is what the rate is a rate *at* —
+            // two runs of the same corpus are only comparable at the same width.
+            let mut rate = format!(
                 "{} at {:.1} chunks/sec",
                 render::duration(self.elapsed_secs),
                 self.chunks_per_sec,
             );
+            if let Some(batch) = self.batch {
+                rate.push_str(&format!(" \u{00b7} {batch} per pass"));
+            }
             p.line(p.paint(&rate, Ink::Dim))?;
 
             // Only when there is something to estimate, and only when a rate exists to
@@ -424,7 +565,7 @@ mod tests {
             EmbedArgs {
                 model: default_model(),
                 variant: None,
-                batch: DEFAULT_BATCH,
+                batch: None,
                 limit: None,
                 dry_run: true,
             },
@@ -451,7 +592,7 @@ mod tests {
             EmbedArgs {
                 model: default_model(),
                 variant: None,
-                batch: 8,
+                batch: Some(BatchSize::Fixed(8)),
                 limit: None,
                 dry_run: true,
             },
@@ -470,7 +611,7 @@ mod tests {
             EmbedArgs {
                 model: default_model(),
                 variant: None,
-                batch: DEFAULT_BATCH,
+                batch: None,
                 limit: None,
                 dry_run: false,
             },
@@ -505,7 +646,7 @@ mod tests {
             EmbedArgs {
                 model: default_model(),
                 variant: None,
-                batch: DEFAULT_BATCH,
+                batch: None,
                 limit: None,
                 dry_run: true,
             },
@@ -530,7 +671,7 @@ mod tests {
             EmbedArgs {
                 model: default_model(),
                 variant: None,
-                batch: 8,
+                batch: Some(BatchSize::Fixed(8)),
                 limit: None,
                 dry_run: true,
             },
@@ -550,7 +691,7 @@ mod tests {
             EmbedArgs {
                 model: default_model(),
                 variant: None,
-                batch: 0,
+                batch: Some(BatchSize::Fixed(0)),
                 limit: None,
                 dry_run: true,
             },
@@ -563,6 +704,43 @@ mod tests {
         assert!(err.contains("--batch"), "{err}");
     }
 
+    /// The two spellings, and the three ways of writing neither.
+    #[test]
+    fn a_batch_size_is_a_count_or_the_word_auto() {
+        assert_eq!(BatchSize::parse(AUTO), Ok(BatchSize::Auto));
+        assert_eq!(BatchSize::parse("AUTO"), Ok(BatchSize::Auto));
+        assert_eq!(BatchSize::parse("64"), Ok(BatchSize::Fixed(64)));
+        assert!(BatchSize::parse("0").is_err(), "0 embeds nothing");
+        assert!(BatchSize::parse("-8").is_err());
+        assert!(BatchSize::parse("lots").is_err());
+    }
+
+    /// The MCP path, where args arrive as JSON rather than as typed words. A client
+    /// following the schema sends a string; one reading the TOML sends a number. Both are
+    /// the same request and neither should be the one that fails.
+    #[test]
+    fn args_accept_the_batch_as_a_string_or_a_number() {
+        let parse = |json: &str| serde_json::from_str::<EmbedArgs>(json).unwrap().batch;
+        assert_eq!(parse(r#"{"batch": "auto"}"#), Some(BatchSize::Auto));
+        assert_eq!(parse(r#"{"batch": 64}"#), Some(BatchSize::Fixed(64)));
+        assert_eq!(parse("{}"), None, "unset falls through to the config");
+    }
+
+    /// Round-tripped as it was written, so a number survives as a number — `run` and the
+    /// scheduler both serialize their args and read them back.
+    #[test]
+    fn a_batch_size_survives_a_round_trip() {
+        for size in [BatchSize::Auto, BatchSize::Fixed(64)] {
+            let json = serde_json::to_string(&size).unwrap();
+            assert_eq!(serde_json::from_str::<BatchSize>(&json).unwrap(), size);
+        }
+        assert_eq!(
+            serde_json::to_string(&BatchSize::Auto).unwrap(),
+            r#""auto""#
+        );
+        assert_eq!(serde_json::to_string(&BatchSize::Fixed(64)).unwrap(), "64");
+    }
+
     #[tokio::test]
     async fn a_reranker_is_refused_as_an_embedding_model() {
         let (_d, ctx) = indexed_store(1).await;
@@ -571,7 +749,7 @@ mod tests {
             EmbedArgs {
                 model: "qwen3-reranker-0.6b".into(),
                 variant: None,
-                batch: 8,
+                batch: Some(BatchSize::Fixed(8)),
                 limit: None,
                 dry_run: true,
             },
@@ -599,7 +777,7 @@ mod tests {
             EmbedArgs {
                 model: "qwen3-embedding-0.6b".into(),
                 variant: None,
-                batch: 8,
+                batch: Some(BatchSize::Fixed(8)),
                 limit: None,
                 dry_run: true,
             },

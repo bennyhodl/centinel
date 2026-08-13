@@ -78,6 +78,7 @@ centinel run --source agartha --limit 50 --skip embed
 centinel collect --source agartha --match /assets/ --rps 5
 centinel embed --dry-run
 centinel embed --limit 100
+centinel embed --batch 64
 centinel search "budget" --source agartha -n 20 --snippet-chars 0
 centinel schedules --check
 centinel history --failed --since 2026-08-01T00:00:00Z
@@ -86,6 +87,9 @@ centinel history --run 8f3c
 
 `--limit` on `run` and `collect` bounds **collection**, never discovery — a truncated
 snapshot of a source's address set would look exactly like a source that shrank.
+
+`--batch` takes a count or `auto`, and overrides `[defaults] embed_batch` for one run.
+Unset, the config decides; unset there too, `auto` sizes the batch to this machine.
 
 `--user-agent` and `--timeout-secs` are available on the ops that fetch on your behalf
 (`check`, `investigate`). A descriptive User-Agent measurably reduces WAF 403s.

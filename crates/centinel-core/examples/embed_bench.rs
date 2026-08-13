@@ -68,12 +68,16 @@ fn main() -> anyhow::Result<()> {
     embedder.embed_documents(&[&chunk])?;
     println!("\nchunk:      {} chars", chunk.len());
 
-    // Batch size matters because a context — and its KV cache — is built per *call*, not
-    // per text. Calling one chunk at a time pays that setup on every chunk, which is the
-    // difference between a benchmark that measures inference and one that measures
-    // allocation. Indexing goes through the batched path, so that is the honest number.
+    // Batch size matters twice over. A context — and its KV cache — is built per *call*,
+    // not per text, so one chunk at a time pays that setup on every chunk. And a batch is
+    // one forward pass over all of its chunks, so one chunk at a time also runs a GPU that
+    // could carry thirty-two at once. Indexing goes through the batched path, so that is
+    // the honest number.
+    //
+    // The sweep reaches 128 because that is the ceiling `--batch auto` will pick. Where a
+    // machine's curve flattens is the number worth putting in its `centinel.toml`.
     let mut best = (1usize, 0.0f64);
-    for batch in [1usize, 8, 32] {
+    for batch in [1usize, 8, 32, 128] {
         let texts: Vec<&str> = std::iter::repeat_n(chunk.as_str(), batch).collect();
         let started = Instant::now();
         for _ in 0..RUNS {
