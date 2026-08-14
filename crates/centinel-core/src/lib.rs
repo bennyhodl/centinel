@@ -49,6 +49,7 @@ pub mod models;
 pub mod op;
 pub mod ops;
 pub mod policy;
+pub mod remote;
 pub mod render;
 pub mod rerank;
 pub mod schedule;

@@ -45,6 +45,8 @@ These bind every decision below and every decision still open.
 
 Centinel profiles the host and downloads a model tier that fits it. A consequence the whole system carries: **output quality varies by machine**, so the model tier that produced an artifact is part of its provenance.
 
+**Reopened for embedding (2026-08), explicitly, per §2.3's own rule.** An operator may name an `openrouter/…` embedding model, and that one stage then calls openrouter.ai: chunk text goes out during `embed`, and the query goes out during `search` against a corpus embedded that way. Nothing else does — blobs, logs, provenance and the index never leave. The default stays local, nothing falls back to the network silently (missing weights still fail loudly with the pull command), and the remote model id keys its own vector table, so the two spaces never mix. Provenance holds: the id in the table names the model *and* where it ran.
+
 ### 2.2 Static files are the only truth
 
 Everything else — the metadata database, the search index — is **derived and rebuildable**. `rm centinel.db && centinel reindex` must reproduce identical state.

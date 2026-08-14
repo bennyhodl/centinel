@@ -5,6 +5,11 @@ How a question becomes a cited passage.
 Everything here runs on the machine in front of you. No embedding API, no reranking API,
 no text leaving the process (SPEC §2.1). Two model files and two files on disk.
 
+One named exception (SPEC §2.1, reopened 2026-08): set `embed_model` to an
+`openrouter/…` model and the embed stage — and the query embedding of any search
+against that corpus — calls openrouter.ai instead. See §3 below. Everything else on
+this page stays local either way.
+
 ```
                         centinel index
   derived text  ──────────────────────────►  centinel.db      chunk + placement + FTS5
@@ -152,6 +157,33 @@ embed_batch`, `--batch N`, or `auto`.
 An over-long text is **refused, not truncated**. A silently shortened chunk would be
 stored under a `chunk_hash` covering text that was never embedded, which makes the record
 lie about what it holds.
+
+### Remote: the same stage through OpenRouter
+
+```bash
+export OPENROUTER_API_KEY=sk-or-…
+centinel embed --model openrouter/qwen/qwen3-embedding-8b --dry-run
+centinel embed --model openrouter/qwen/qwen3-embedding-8b
+centinel search "lobbying expenditures"    # the query embeds remotely too — the table says so
+```
+
+An `openrouter/` model id routes the stage through `remote.rs` instead of local weights.
+Chunk text is sent to openrouter.ai — the run says so before the first byte moves — and
+nothing else leaves: blobs, logs, provenance and the index stay put. The work list, the
+resume subtraction and the skip accounting are unchanged; the batch becomes a request
+body (default 128 chunks, a few requests in flight) instead of a KV-cache reservation.
+The instruction-prefix and normalization recipe still applies, client-side, per model.
+
+The remote id keys **its own vector table**. Even `openrouter/qwen/qwen3-embedding-4b`
+— the local default's weights — is a separate space: quantization and serving differ,
+and parity between them is a measurement nobody has made. Switching between local and
+remote is therefore a full re-embed, exactly like switching models.
+
+The curated list and the pinned dimensions live in `remote.rs` (`REMOTE_REGISTRY`);
+adding a model OpenRouter serves is one entry. The reason to reach for it at all:
+`qwen/qwen3-embedding-8b` — too big for most laptops locally — costs about $0.01 per
+million tokens, so a 400,000-chunk corpus embeds for a few dollars in well under a day,
+GPU or no GPU.
 
 The whole run goes into a single `spawn_blocking`. Inference would otherwise stall the
 async runtime, which matters here because an HTTP caller's connection has to survive a

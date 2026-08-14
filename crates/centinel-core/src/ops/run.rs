@@ -936,7 +936,7 @@ async fn run_derivation(
             // Read out here, beside the model, so the closure below carries the value
             // rather than the whole config.
             let batch = config.defaults.embed_batch;
-            if let Some(reason) = missing_model(model, crate::models::ModelRole::Embedding) {
+            if let Some(reason) = missing_embedder(model) {
                 return Ok(StageRun::skipped(stage, reason));
             }
             // One call, whatever the scope: the vector table is keyed by chunk hash, which
@@ -995,6 +995,23 @@ async fn run_derivation(
 /// hour of crawling at the last step over a download that was never started. A missing
 /// model is a **skip**, not a failure: what was collected is collected, and the stage
 /// resumes on the next run once the weights are there.
+/// Why the embed stage cannot run, or `None` when it can.
+///
+/// A local model is missing when its weights are; a remote one when its key is. Asked
+/// through [`crate::remote::backend_for`] so this check and `embed` itself read the
+/// model id the same way — a skip reason must name the thing the stage would actually
+/// have failed on.
+fn missing_embedder(id: &str) -> Option<String> {
+    use crate::remote::EmbeddingBackend;
+    match crate::remote::backend_for(id) {
+        Err(e) => Some(format!("{e:#}")),
+        Ok(EmbeddingBackend::Local(_)) => missing_model(id, crate::models::ModelRole::Embedding),
+        Ok(EmbeddingBackend::Remote(spec)) => crate::remote::RemoteEmbedder::new(spec)
+            .err()
+            .map(|e| format!("{e:#}")),
+    }
+}
+
 fn missing_model(id: &str, role: crate::models::ModelRole) -> Option<String> {
     let dir = match crate::models::models_dir() {
         Ok(dir) => dir,
