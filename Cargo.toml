@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 # Set by LanceDB, which is the only dependency that asks for more than edition 2024's
 # 1.85. Holding 1.85 would hold LanceDB at 0.23 — ten releases back — to keep a floor
