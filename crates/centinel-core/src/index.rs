@@ -80,6 +80,12 @@ CREATE TABLE IF NOT EXISTS chunk (
     chars       INTEGER NOT NULL
 );
 
+-- Covers `chunk_hashes_by_length`'s `ORDER BY chars, id` — chunk_hash trails so the
+-- scan never touches the table's `text` column. Without it that query is a full
+-- table scan into a temp b-tree sort, and `embed` pays that on every run, not just
+-- the first.
+CREATE INDEX IF NOT EXISTS chunk_by_chars ON chunk(chars, id, chunk_hash);
+
 CREATE TABLE IF NOT EXISTS placement (
     chunk_hash  TEXT NOT NULL,
     source      TEXT NOT NULL,

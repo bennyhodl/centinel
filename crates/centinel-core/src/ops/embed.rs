@@ -254,6 +254,9 @@ pub async fn embed(
 
     // Shortest first, so batches carry texts of one kind and the oversized tail — the
     // chunks that force a bespoke context — arrives together at the end of the run.
+    // Said before it runs, not after: with no index on `chars` this is a full table
+    // scan and sort, and on a large corpus it is the first thing a caller waits on.
+    progress.say("reading the index");
     let index = Index::open(ctx.store.require_index()?)?;
     let indexed = index.chunk_hashes_by_length()?;
 
@@ -285,6 +288,7 @@ pub async fn embed(
     // absent table is read as "nothing stored" rather than created to be asked. An
     // existing one is opened either way, because that is what checks the model.
     let stored = if ctx.store.vectors_path().exists() {
+        progress.say("checking stored vectors");
         VectorTable::open(&ctx.store.vectors_db(), model_id, dims)
             .await?
             .hashes()
