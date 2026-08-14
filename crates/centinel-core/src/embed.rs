@@ -509,7 +509,10 @@ fn decode_into(
 }
 
 /// L2 normalization, so cosine similarity is a plain dot product.
-fn normalize(v: &[f32]) -> Vec<f32> {
+///
+/// `pub(crate)` because [`crate::remote`] holds its vectors to the same contract —
+/// one definition of unit-length, wherever the inference ran.
+pub(crate) fn normalize(v: &[f32]) -> Vec<f32> {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm == 0.0 {
         return v.to_vec();

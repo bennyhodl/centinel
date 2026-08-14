@@ -38,6 +38,15 @@
 //! between decodes: a reader thread keeps the next batch's text ready and a writer task
 //! appends the last batch's vectors, so the GPU waits on neither SQLite nor Lance — see
 //! [`run`].
+//!
+//! ## Remote is the same loop with the decode swapped out
+//!
+//! An `openrouter/…` model routes this stage through [`crate::remote`] instead of local
+//! weights — the work list, the resume subtraction, the writer and the skip accounting
+//! are unchanged, and the remote model id keys its own vector table, so the two kinds of
+//! run cannot touch each other's spaces. What changes is the middle of the pipeline:
+//! HTTP requests in flight instead of a standing `llama.cpp` context ([`run_remote`]),
+//! and a batch that is a request body rather than a KV-cache reservation.
 
 use std::time::Instant;
 
@@ -48,6 +57,7 @@ use crate::embed::{Embedder, SessionOptions};
 use crate::index::Index;
 use crate::models;
 use crate::prelude::*;
+use crate::remote::{self, EmbeddingBackend, RemoteEmbedder};
 use crate::vectors::VectorTable;
 
 /// The batch to fall back on when the machine will not say what it can hold. Measured,
@@ -141,7 +151,9 @@ impl<'de> Deserialize<'de> for BatchSize {
 #[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct EmbedArgs {
     /// Embedding model. Changing this is a full re-embed into a separate cache, not an
-    /// upgrade — vectors from two models share no space (SPEC §6.2).
+    /// upgrade — vectors from two models share no space (SPEC §6.2). An `openrouter/…`
+    /// id embeds remotely: chunk text goes to openrouter.ai, and $OPENROUTER_API_KEY
+    /// must be set.
     #[arg(long, default_value = "qwen3-embedding-4b")]
     #[serde(default = "default_model")]
     pub model: String,
@@ -245,19 +257,35 @@ pub async fn embed(
     let index = Index::open(ctx.store.require_index()?)?;
     let indexed = index.chunk_hashes_by_length()?;
 
-    // Dimensions come from the registry so the table can be opened — and the outstanding
-    // work computed — before a multi-gigabyte model is loaded. A dry run never loads one.
-    let spec = models::require(&args.model)?;
-    let dims = spec
-        .dims
-        .ok_or_else(|| anyhow::anyhow!("`{}` is not an embedding model", args.model))?
-        as usize;
+    // Dimensions come from a registry — local or remote — so the table can be opened,
+    // and the outstanding work computed, before a multi-gigabyte model is loaded or a
+    // key is read. A dry run touches neither.
+    let backend = remote::backend_for(&args.model)?;
+    let (model_id, dims): (&'static str, usize) = match backend {
+        EmbeddingBackend::Local(spec) => (
+            spec.id,
+            spec.dims
+                .ok_or_else(|| anyhow::anyhow!("`{}` is not an embedding model", args.model))?
+                as usize,
+        ),
+        EmbeddingBackend::Remote(spec) => {
+            // A quantization is a fact about weights on this machine. A remote model
+            // keeps none here, and accepting the flag would record a variant that
+            // names nothing.
+            anyhow::ensure!(
+                args.variant.is_none(),
+                "`{}` runs remotely and has no quantization variant — drop --variant",
+                spec.id
+            );
+            (spec.id, spec.dims as usize)
+        }
+    };
 
     // Opening creates the table, and `--dry-run` must leave nothing behind — so an
     // absent table is read as "nothing stored" rather than created to be asked. An
     // existing one is opened either way, because that is what checks the model.
     let stored = if ctx.store.vectors_path().exists() {
-        VectorTable::open(&ctx.store.vectors_db(), spec.id, dims)
+        VectorTable::open(&ctx.store.vectors_db(), model_id, dims)
             .await?
             .hashes()
             .await?
@@ -277,11 +305,16 @@ pub async fn embed(
     }
 
     let base = EmbedReport {
-        model: spec.id.to_string(),
-        variant: args
-            .variant
-            .clone()
-            .unwrap_or_else(|| spec.default_variant.to_string()),
+        model: model_id.to_string(),
+        variant: match backend {
+            EmbeddingBackend::Local(spec) => args
+                .variant
+                .clone()
+                .unwrap_or_else(|| spec.default_variant.to_string()),
+            // The provider stands where the quantization would: it is the honest
+            // answer a remote run can give to "what produced these vectors".
+            EmbeddingBackend::Remote(_) => "openrouter".to_string(),
+        },
         dims,
         vectors: ctx.store.vectors_path(),
         indexed: indexed.len(),
@@ -301,44 +334,65 @@ pub async fn embed(
         return Ok(base);
     }
 
-    let table = VectorTable::open(&ctx.store.vectors_db(), spec.id, dims).await?;
+    let table = VectorTable::open(&ctx.store.vectors_db(), model_id, dims).await?;
 
-    progress.say(format!(
-        "loading {} ({})",
-        spec.id,
-        args.variant.as_deref().unwrap_or(spec.default_variant)
-    ));
-    let embedder = load_embedder(&args, spec.id).await?;
-    anyhow::ensure!(
-        embedder.dims() == dims,
-        "{} reports {} dimensions, the registry pins {dims}",
-        spec.id,
-        embedder.dims()
-    );
-
-    // After the load, not before it: `auto` asks the loaded model what a sequence costs
-    // and asks the backend how much memory is left once the weights are on it.
-    let batch_size = resolve_batch(args.batch, &embedder)?;
-    progress.say(format!("{batch_size} chunks per pass"));
-
-    // The whole run goes into one blocking task rather than one per batch. Inference is
-    // CPU/GPU-bound and would stall the async runtime — which matters here more than
-    // usual, because an HTTP caller's connection has to stay responsive across hours.
-    // One task also means the model is moved once instead of round-tripping per batch.
     let started = Instant::now();
-    let (embedded, skipped) = {
-        let table = table.clone();
-        let host = Host {
-            progress: progress.clone(),
-            cancel: cancel.clone(),
-            // The table's API is async and the loop is not. A handle captured here lets
-            // the blocking thread drive an append to completion without a runtime of its
-            // own — safe precisely because a `spawn_blocking` thread is not a runtime
-            // worker, so parking it starves nothing.
-            handle: tokio::runtime::Handle::current(),
-        };
-        tokio::task::spawn_blocking(move || run(embedder, index, table, todo, batch_size, host))
-            .await??
+    let (embedded, skipped, batch_size) = match backend {
+        EmbeddingBackend::Local(spec) => {
+            progress.say(format!(
+                "loading {} ({})",
+                spec.id,
+                args.variant.as_deref().unwrap_or(spec.default_variant)
+            ));
+            let embedder = load_embedder(&args, spec.id).await?;
+            anyhow::ensure!(
+                embedder.dims() == dims,
+                "{} reports {} dimensions, the registry pins {dims}",
+                spec.id,
+                embedder.dims()
+            );
+
+            // After the load, not before it: `auto` asks the loaded model what a
+            // sequence costs and asks the backend how much memory is left once the
+            // weights are on it.
+            let batch_size = resolve_batch(args.batch, &embedder)?;
+            progress.say(format!("{batch_size} chunks per pass"));
+
+            // The whole run goes into one blocking task rather than one per batch.
+            // Inference is CPU/GPU-bound and would stall the async runtime — which
+            // matters here more than usual, because an HTTP caller's connection has to
+            // stay responsive across hours. One task also means the model is moved once
+            // instead of round-tripping per batch.
+            let (embedded, skipped) = {
+                let table = table.clone();
+                let host = Host {
+                    progress: progress.clone(),
+                    cancel: cancel.clone(),
+                    // The table's API is async and the loop is not. A handle captured
+                    // here lets the blocking thread drive an append to completion
+                    // without a runtime of its own — safe precisely because a
+                    // `spawn_blocking` thread is not a runtime worker, so parking it
+                    // starves nothing.
+                    handle: tokio::runtime::Handle::current(),
+                };
+                tokio::task::spawn_blocking(move || {
+                    run(embedder, index, table, todo, batch_size, host)
+                })
+                .await??
+            };
+            (embedded, skipped, batch_size)
+        }
+        EmbeddingBackend::Remote(spec) => {
+            // Said before the first byte moves, because it is the run's one departure
+            // from §2.1: this stage, this model, chunk text to openrouter.ai.
+            progress.say(format!("{} — chunk text is sent to openrouter.ai", spec.id));
+            let embedder = RemoteEmbedder::new(spec)?;
+            let batch_size = resolve_remote_batch(args.batch)?;
+            progress.say(format!("{batch_size} chunks per request"));
+            let (embedded, skipped) =
+                run_remote(embedder, index, table, todo, batch_size, progress, cancel).await?;
+            (embedded, skipped, batch_size)
+        }
     };
 
     let elapsed = started.elapsed().as_secs_f64();
@@ -374,6 +428,182 @@ fn resolve_batch(flag: Option<BatchSize>, embedder: &Embedder) -> anyhow::Result
         // rather than a guess built on nothing.
         BatchSize::Auto => embedder.auto_batch().unwrap_or(DEFAULT_BATCH),
     })
+}
+
+/// Chunks per request when the operator and the config both said `auto`.
+///
+/// The local `auto` reads the machine because the KV cache is the cost; a request has no
+/// KV cache, and its costs pull mildly in both directions — fewer round trips against
+/// more lost to one failed batch's one-at-a-time retry. 128 chunks is ~40K tokens,
+/// comfortably inside every curated model's request ceiling.
+const REMOTE_DEFAULT_BATCH: usize = 128;
+
+/// Requests in flight at once. What hides the network's latency, as the reader thread
+/// hides SQLite's: while one batch is on the wire, three more are being answered. More
+/// would mostly exercise the provider's rate limiter.
+const REMOTE_IN_FLIGHT: usize = 4;
+
+/// The flag, else the config file's standing preference, else [`REMOTE_DEFAULT_BATCH`].
+///
+/// [`resolve_batch`]'s three tiers, with one difference: `auto` is a question about the
+/// machine, no machine is involved, and so it resolves to a constant rather than to a
+/// memory reading.
+fn resolve_remote_batch(flag: Option<BatchSize>) -> anyhow::Result<usize> {
+    let chosen = match flag {
+        Some(explicit) => explicit,
+        None => crate::config::Config::load()?.defaults.embed_batch,
+    };
+    Ok(match chosen {
+        BatchSize::Fixed(n) => n,
+        BatchSize::Auto => REMOTE_DEFAULT_BATCH,
+    })
+}
+
+/// The remote pipeline: read → request → append, with [`REMOTE_IN_FLIGHT`] requests on
+/// the wire at once.
+///
+/// [`run`]'s shape with the decode swapped for HTTP: the reader thread keeps windows of
+/// text coming off SQLite, in-flight requests overlap the network's latency, and the
+/// writer task appends what has come back. `buffered` completes in submission order, so
+/// the writer receives windows in work-list order and the durable count means what it
+/// does locally: everything before it landed.
+///
+/// Failure handling is [`run`]'s, plus one distinction the local path never needed: a
+/// refused key fails every chunk identically, so it ends the run ([`remote::is_fatal`])
+/// instead of skipping a corpus one round trip at a time.
+async fn run_remote(
+    embedder: RemoteEmbedder,
+    index: Index,
+    table: VectorTable,
+    todo: Vec<String>,
+    batch_size: usize,
+    progress: &Progress,
+    cancel: &Cancel,
+) -> anyhow::Result<(usize, Vec<Skipped>)> {
+    use futures::StreamExt;
+
+    let total = todo.len() as u64;
+    let started = Instant::now();
+    progress.step("embedding", 0, total);
+
+    // The reader owns the index, exactly as in `run`: a SQLite connection does not
+    // share across threads, and nothing else needs it once the work list exists.
+    let (feed_tx, feed_rx) =
+        tokio::sync::mpsc::channel::<anyhow::Result<(Vec<String>, Vec<String>)>>(PIPELINE_SLACK);
+    let reader = std::thread::spawn(move || {
+        for window in todo.chunks(batch_size) {
+            let texts = index.chunk_texts(window);
+            let failed = texts.is_err();
+            if feed_tx
+                .blocking_send(texts.map(|t| (window.to_vec(), t)))
+                .is_err()
+                || failed
+            {
+                return;
+            }
+        }
+    });
+
+    let (write_tx, mut write_rx) =
+        tokio::sync::mpsc::channel::<Vec<(String, Vec<f32>)>>(PIPELINE_SLACK);
+    let writer = tokio::spawn({
+        let table = table.clone();
+        async move {
+            let mut written = 0usize;
+            while let Some(entries) = write_rx.recv().await {
+                table.append(&entries).await?;
+                written += entries.len();
+            }
+            anyhow::Ok(written)
+        }
+    });
+
+    let mut sent = 0usize;
+    let mut skipped: Vec<Skipped> = Vec::new();
+
+    let decoded: anyhow::Result<()> = {
+        let embedder = &embedder;
+        let windows = futures::stream::unfold(feed_rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
+        let mut results = std::pin::pin!(
+            windows
+                .map(move |item| async move {
+                    let (window, texts) = item?;
+                    embed_window(embedder, window, texts).await
+                })
+                .buffered(REMOTE_IN_FLIGHT)
+        );
+
+        let writer_gone = || anyhow::anyhow!("the writer stopped; its error follows");
+        async {
+            while let Some(outcome) = results.next().await {
+                cancel.check()?;
+                let (entries, misses) = outcome?;
+                sent += entries.len();
+                skipped.extend(misses);
+                if !entries.is_empty() {
+                    write_tx.send(entries).await.map_err(|_| writer_gone())?;
+                }
+                let done = (sent + skipped.len()) as u64;
+                let rate = sent as f64 / started.elapsed().as_secs_f64().max(f64::EPSILON);
+                progress.step(format!("embedding ({rate:.1}/sec)"), done, total);
+            }
+            Ok(())
+        }
+        .await
+        // The block ends here so the stream — and the feed receiver inside it — is
+        // dropped, which is what unhooks a reader still mid-send.
+    };
+
+    // Wind down in dependency order, as `run` does: hang up on the writer, let it drain
+    // what is in flight, then ask it what landed.
+    drop(write_tx);
+    let written = writer.await?;
+    let _ = reader.join();
+
+    // The writer's error outranks the request error, because a dead writer is *why* the
+    // request side's send failed.
+    match (written, decoded) {
+        (Err(append_error), _) => Err(append_error),
+        (_, Err(decode_error)) => Err(decode_error),
+        (Ok(written), Ok(())) => Ok((written, skipped)),
+    }
+}
+
+/// One window through the remote embedder: the batch, then chunk-at-a-time for a batch
+/// that failed — [`run`]'s recovery, one network hop up.
+///
+/// The failures that arrive here: a text the provider will not take, a request that
+/// outlived its retries, a response that failed verification. One chunk at a time
+/// isolates the first kind; a chunk that still fails alone is skipped with its reason
+/// on the report rather than allowed to end the run. A refused key is the exception —
+/// see [`run_remote`].
+async fn embed_window(
+    embedder: &RemoteEmbedder,
+    window: Vec<String>,
+    texts: Vec<String>,
+) -> anyhow::Result<(Vec<(String, Vec<f32>)>, Vec<Skipped>)> {
+    match embedder.embed_documents(&texts).await {
+        Ok(vectors) => Ok((window.into_iter().zip(vectors).collect(), Vec::new())),
+        Err(batch_error) if remote::is_fatal(&batch_error) => Err(batch_error),
+        Err(batch_error) => {
+            tracing::debug!(%batch_error, "batch failed; retrying individually");
+            let mut entries = Vec::new();
+            let mut misses = Vec::new();
+            for (hash, text) in window.into_iter().zip(&texts) {
+                match embedder.embed_documents(std::slice::from_ref(text)).await {
+                    Ok(mut v) => entries.push((hash, v.remove(0))),
+                    Err(e) if remote::is_fatal(&e) => return Err(e),
+                    Err(e) => misses.push(Skipped {
+                        chunk_hash: hash,
+                        reason: format!("{e:#}"),
+                    }),
+                }
+            }
+            Ok((entries, misses))
+        }
+    }
 }
 
 /// What the blocking loop needs from the async world it was spawned out of.
@@ -809,6 +1039,49 @@ mod tests {
             r#""auto""#
         );
         assert_eq!(serde_json::to_string(&BatchSize::Fixed(64)).unwrap(), "64");
+    }
+
+    /// The remote registry pins dimensions exactly so this works: a dry run plans a
+    /// remote embed with no key, no network and no weights.
+    #[tokio::test]
+    async fn a_remote_dry_run_needs_no_key_and_no_network() {
+        let (_d, ctx) = indexed_store(5).await;
+        let report = embed(
+            &ctx,
+            EmbedArgs {
+                model: "openrouter/qwen/qwen3-embedding-8b".into(),
+                dry_run: true,
+                ..EmbedArgs::default()
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.dims, 4096);
+        assert_eq!(report.remaining, 5);
+        assert_eq!(report.variant, "openrouter");
+    }
+
+    /// A quantization names weights on this machine; a remote model keeps none here.
+    #[tokio::test]
+    async fn a_variant_on_a_remote_model_is_refused() {
+        let (_d, ctx) = indexed_store(1).await;
+        let err = embed(
+            &ctx,
+            EmbedArgs {
+                model: "openrouter/qwen/qwen3-embedding-8b".into(),
+                variant: Some("q8_0".into()),
+                dry_run: true,
+                ..EmbedArgs::default()
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--variant"), "{err}");
     }
 
     #[tokio::test]

@@ -261,6 +261,17 @@ number for laptops and 128 GB boxes alike. The context **stands** for the whole 
 longer than the standing reservation sends its group through a bespoke context, which is
 why the work list arrives shortest-first.
 
+**Remote embedder** — the one inference allowed off the machine, and only by name: an
+`openrouter/…` model id sends chunk text (and, at search time, the query) to
+openrouter.ai instead of through local weights. The id is the routing — recorded in the
+vector table as any model id is, so a corpus embedded remotely is searched remotely, and
+nothing decides by falling back. *Why it matters:* §2.1 says no inference leaves the
+machine, and a quiet exception would make that promise a lie; the prefix keeps the
+exception in the one place an operator states a model. Local `qwen3-embedding-4b` and
+`openrouter/qwen/qwen3-embedding-4b` are the same weights and still **two spaces** —
+quantization and serving differ, and parity between them is a measurement nobody has
+made — so they share no table until it is.
+
 **Write batch** — the rows `index` commits as a unit, and it is **one document**, because
 that is the unit the row above subtracts. A batch is chosen by the skip predicate, not by
 what makes the writer fastest: widen it to span documents and a crash mid-batch leaves

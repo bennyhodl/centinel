@@ -174,6 +174,10 @@ pub struct Defaults {
     pub rps: f64,
 
     /// The embedding model `run` uses for its single corpus-wide pass.
+    ///
+    /// Local by default. An `openrouter/…` id embeds through OpenRouter instead —
+    /// chunk text leaves the machine, and `$OPENROUTER_API_KEY` must be set. See
+    /// [`crate::remote`].
     #[serde(default = "default_embed_model")]
     pub embed_model: String,
 
@@ -859,6 +863,9 @@ pub const EXAMPLE: &str = r#"# Centinel configuration.
 [defaults]
 # Requests per second, per host. Deliberately slow.
 rps = 1.0
+# Local by default. An `openrouter/` model embeds through openrouter.ai instead —
+# chunk text leaves this machine, and $OPENROUTER_API_KEY must be set:
+#   embed_model = "openrouter/qwen/qwen3-embedding-8b"
 embed_model = "qwen3-embedding-4b"
 # Chunks per forward pass. "auto" sizes it to this machine's free memory; a number
 # fixes it. Bigger is faster until the memory runs out. `--batch` overrides it.

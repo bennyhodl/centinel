@@ -411,15 +411,33 @@ async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<VectorArm, String> {
 
     let query = args.query.clone();
     let model = table.model_id().to_string();
-    // Loading weights and running inference are both blocking, and the model is
-    // gigabytes — a short CLI run pays this per query; `serve` and `mcp` pay it once.
-    let vector = tokio::task::spawn_blocking(move || {
-        let root = crate::models::models_dir()?;
-        crate::embed::Embedder::load(&root, &model, None)?.embed_query(&query)
-    })
-    .await
-    .map_err(|e| format!("{e}"))?
-    .map_err(|e| format!("{e:#}"))?;
+    // The table's model id says where the query must be embedded — a corpus embedded
+    // through OpenRouter can only be searched through OpenRouter, because its vectors
+    // live in that model's space and no local weights produce them.
+    let vector = match crate::remote::backend_for(&model).map_err(|e| format!("{e:#}"))? {
+        crate::remote::EmbeddingBackend::Remote(spec) => {
+            // The query is the one piece of text this sends off the machine, and it is
+            // sent because the operator embedded the corpus remotely — the same consent,
+            // read back off the table.
+            crate::remote::RemoteEmbedder::new(spec)
+                .map_err(|e| format!("{e:#}"))?
+                .embed_query(&query)
+                .await
+                .map_err(|e| format!("{e:#}"))?
+        }
+        crate::remote::EmbeddingBackend::Local(_) => {
+            // Loading weights and running inference are both blocking, and the model is
+            // gigabytes — a short CLI run pays this per query; `serve` and `mcp` pay it
+            // once.
+            tokio::task::spawn_blocking(move || {
+                let root = crate::models::models_dir()?;
+                crate::embed::Embedder::load(&root, &model, None)?.embed_query(&query)
+            })
+            .await
+            .map_err(|e| format!("{e}"))?
+            .map_err(|e| format!("{e:#}"))?
+        }
+    };
 
     let depth = match args.source {
         Some(_) => ARM_DEPTH * SOURCE_OVERFETCH,
