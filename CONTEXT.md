@@ -338,6 +338,14 @@ citation is only useful if the form on screen is the form you can type; printing
 identifier the tool then refuses is worse than printing nothing, because it looks like it
 worked. `search`, `read` and `open` all lead their provenance line with one.
 
+**A `download` page is bytes; a `read` page is characters.** Both verbs slice one
+document with `offset`, and the two numbers stop agreeing at the first character that is
+not ASCII. `read` counts characters because its caller is budgeting a context window and
+must never be handed half a codepoint as text; `download` counts raw bytes because its
+caller is reassembling a file and checking the result against `data_sha` — a hash of
+bytes, which a character count cannot address. An offset carried from one verb to the
+other is the quiet way to build a corrupt file out of two honest answers.
+
 **Original vs derived blob** — the bytes as served versus what an extraction or a
 transcription produced from them. Both are addressable. Only the first is an Observation
 — no server ever served the second — which is why resolving a derived hash means finding

@@ -862,6 +862,7 @@ version = "0.11.1"
 dependencies = [
  "anydoc",
  "anyhow",
+ "base64",
  "calamine",
  "centinel-macros",
  "clap",
