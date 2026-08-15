@@ -21,6 +21,9 @@ tokio.workspace = true
 futures.workspace = true
 sha2.workspace = true
 hex.workspace = true
+# `download` returns blob bytes through a JSON report, and JSON has no bytes — only
+# strings. Already in the tree under reqwest, so declaring it adds no crate.
+base64 = "0.22"
 jiff.workspace = true
 tracing.workspace = true
 # Column alignment measured in display cells rather than bytes or chars — a CJK title in
