@@ -9,17 +9,16 @@
 # call it an install. Those hosts keep building from source, tuned for their own CPU, which
 # is the better answer for them anyway.
 #
-# THIS IS OFF. `release.yml` calls it only when the repository variable RELEASE_BINARIES is
-# `true`, so until somebody sets it in Settings -> Secrets and variables -> Actions, the
-# job skips and every install falls back to a source build — which is what they all do
-# today. The reason it is off is the meter: a macOS runner bills at 10x while this
-# repository is private, so one release is about 400 of a 2,000-3,000 minute monthly
-# allowance, and the two CUDA jobs are long enough to be the bigger half of what is left.
-# A public repository gets the standard runners free and this can simply be turned on.
+# BOTH ARE ON. `release.yml` calls this on every release and both assets build each
+# time. The macOS job kept an opt-in guard while this repository was private — that
+# runner billed at 10x, about 400 of a 2,000-3,000 minute monthly allowance per release
+# — but a public repository gets the standard runners free, and this was always one
+# default away from on. The `macos` input remains as the skip switch: untick it on a
+# hand-started run and only the CUDA assets build.
 #
-# `workflow_dispatch` ignores the variable. A hand-started run builds and uploads against
-# any tag that already exists, which is how to test this without turning the automatic
-# path on — and how to add binaries to a release that shipped without them.
+# `workflow_dispatch` takes the same inputs. A hand-started run builds and uploads against
+# any tag that already exists, which is how to backfill a release that shipped without
+# assets.
 name: Binaries
 
 on:
@@ -28,12 +27,22 @@ on:
       tag:
         required: true
         type: string
+      macos:
+        description: "Build the aarch64-apple-darwin asset (untick to skip)"
+        required: false
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       tag:
         description: "Tag to build and upload assets for, as vX.Y.Z"
         required: true
         type: string
+      macos:
+        description: "Build the aarch64-apple-darwin asset (untick to skip)"
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -58,6 +67,8 @@ env:
 jobs:
   macos:
     name: aarch64-apple-darwin (metal)
+    # On by default; the input is the skip switch — see the header.
+    if: ${{ inputs.macos }}
     # Pinned, because the image decides the oldest macOS the asset will start on. Moving
     # to a newer one moves that floor under everybody who downloads, and `macos-latest`
     # would move it without anybody choosing to. A host below the floor is not stranded:

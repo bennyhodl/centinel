@@ -1,8 +1,8 @@
 # A merge to master decides its own version, writes the changelog, tags, and publishes
-# the release. Binaries are `binaries.yml`, called at the end of this one and skipped
-# unless the RELEASE_BINARIES variable is set — see that file for what it costs to turn on.
-# A release with no assets is not a broken release: `install.sh` asks for one, does not
-# find one, and builds from source the way it always has.
+# the release. Binaries are `binaries.yml`, called at the end of this one: both assets,
+# on every release. A release whose binaries failed is not a broken release:
+# `install.sh` asks for an asset, does not find one, and builds from source the way it
+# always has.
 name: Release
 
 # After CI, not beside it. A push trigger would race the tests and could tag a master
@@ -173,9 +173,10 @@ jobs:
           git push origin "$TAG"
           gh release create "$TAG" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
 
-  # Off unless somebody sets the repository variable, because these are hours of billed
-  # C++ and a macOS runner bills at 10x while this repository is private. Skipped, the
-  # release still ships — it just ships without binaries, and every install builds.
+  # Both assets. The macOS job was gated while this repository was private — that
+  # runner billed at 10x — but a public repository gets the standard runners free, so
+  # the gate went with the bill. If these jobs fail, the release above already shipped —
+  # it just shipped without binaries, and every install builds from source.
   #
   # Called rather than triggered on the release event. A release created with the default
   # GITHUB_TOKEN raises no event that starts another workflow, which is the same rule that
@@ -183,9 +184,10 @@ jobs:
   binaries:
     name: binaries
     needs: release
-    if: ${{ needs.release.outputs.release == 'true' && vars.RELEASE_BINARIES == 'true' }}
+    if: ${{ needs.release.outputs.release == 'true' }}
     uses: ./.github/workflows/binaries.yml
     with:
       tag: v${{ needs.release.outputs.version }}
+      macos: true
     permissions:
       contents: write
