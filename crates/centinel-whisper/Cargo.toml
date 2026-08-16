@@ -30,8 +30,13 @@ clap.workspace = true
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 whisper-rs = { version = "0.16.0", default-features = false, features = ["openmp"] }
 
+# No openmp here, and not because macOS lacks the cores. The feature makes whisper-rs-sys
+# emit `-lomp` against a hardcoded path into Homebrew's libomp keg — a path a clean Mac
+# does not have, so the release job dies at link, and a Mac that does have it ships a
+# binary dynamically bound to it. Off, ggml gets GGML_OPENMP=OFF and threads itself, and
+# Metal carries inference either way.
 [target.'cfg(target_os = "macos")'.dependencies]
-whisper-rs = { version = "0.16.0", default-features = false, features = ["openmp", "metal"] }
+whisper-rs = { version = "0.16.0", default-features = false, features = ["metal"] }
 
 [features]
 # Mirrors centinel-core's accelerator features so `--features cuda` reaches both runtimes.
