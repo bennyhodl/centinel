@@ -841,7 +841,7 @@ async fn run_derivation(
                         ctx,
                         TranscribeArgs {
                             source,
-                            model: model.clone(),
+                            model: Some(model.clone()),
                             language: Some(config.defaults.lang.clone()),
                             // No `limit`: see `RunArgs::limit`. Collection is already
                             // capped, so there is nothing extra here to bound — and a
@@ -948,10 +948,10 @@ async fn run_derivation(
                     let r = super::embed(
                         ctx,
                         EmbedArgs {
-                            model: model.clone(),
                             // Passed rather than left unset: the config is already open
                             // here, and `embed` would otherwise read the same file again
-                            // to find the same number.
+                            // to find the same values.
+                            model: Some(model.clone()),
                             batch: Some(batch),
                             // No `limit`: see `RunArgs::limit`. `--skip embed` is how a run
                             // stops short of this stage, and `centinel embed --limit` is

@@ -154,9 +154,14 @@ pub struct EmbedArgs {
     /// upgrade — vectors from two models share no space (SPEC §6.2). An `openrouter/…`
     /// id embeds remotely: chunk text goes to openrouter.ai, and $OPENROUTER_API_KEY
     /// must be set.
-    #[arg(long, default_value = "qwen3-embedding-4b")]
-    #[serde(default = "default_model")]
-    pub model: String,
+    ///
+    /// Unset means "nobody said here", which falls through to `[defaults] embed_model`
+    /// in the config file and from there to `qwen3-embedding-4b` — `--batch`'s route
+    /// exactly. A clap default here would make a typed model indistinguishable from an
+    /// absent one, and the file's standing preference would be read and never used.
+    #[arg(long)]
+    #[serde(default)]
+    pub model: Option<String>,
 
     /// Quantization. Defaults to the registry's choice for the model.
     #[arg(long)]
@@ -184,17 +189,14 @@ pub struct EmbedArgs {
     pub dry_run: bool,
 }
 
-fn default_model() -> String {
-    "qwen3-embedding-4b".to_string()
-}
-
-/// `batch: None` is not "do not batch" — it is "nobody said", which resolves through the
-/// config file to `auto`. Keeping [`crate::ops::run`] and the CLI on the same unset value
-/// is what stops a second default from quietly reintroducing a number nobody measured.
+/// `model: None` and `batch: None` are not "no model" and "do not batch" — both mean
+/// "nobody said", which resolves through the config file to `[defaults] embed_model` and
+/// `embed_batch`. Keeping [`crate::ops::run`] and the CLI on the same unset value is what
+/// stops a second default from quietly shadowing the file's standing preference.
 impl Default for EmbedArgs {
     fn default() -> Self {
         Self {
-            model: default_model(),
+            model: None,
             variant: None,
             batch: None,
             limit: None,
@@ -260,15 +262,23 @@ pub async fn embed(
     let index = Index::open(ctx.store.require_index()?)?;
     let indexed = index.chunk_hashes_by_length()?;
 
+    // The flag, else the config file's standing preference — [`resolve_batch`]'s first
+    // two tiers, resolved here so `centinel embed` typed by hand embeds with the model
+    // the file names. `run` reads the file once and passes its value down.
+    let model = match args.model.clone() {
+        Some(typed) => typed,
+        None => crate::config::Config::load()?.defaults.embed_model,
+    };
+
     // Dimensions come from a registry — local or remote — so the table can be opened,
     // and the outstanding work computed, before a multi-gigabyte model is loaded or a
     // key is read. A dry run touches neither.
-    let backend = remote::backend_for(&args.model)?;
+    let backend = remote::backend_for(&model)?;
     let (model_id, dims): (&'static str, usize) = match backend {
         EmbeddingBackend::Local(spec) => (
             spec.id,
             spec.dims
-                .ok_or_else(|| anyhow::anyhow!("`{}` is not an embedding model", args.model))?
+                .ok_or_else(|| anyhow::anyhow!("`{}` is not an embedding model", model))?
                 as usize,
         ),
         EmbeddingBackend::Remote(spec) => {
@@ -831,6 +841,12 @@ mod tests {
     use crate::index::Placement;
     use crate::store::Store;
 
+    /// Typed explicitly in every test, because `None` reads whatever config file the
+    /// machine running the tests happens to keep.
+    fn default_model() -> Option<String> {
+        Some("qwen3-embedding-4b".to_string())
+    }
+
     /// A store with `n` chunks indexed, and nothing embedded.
     async fn indexed_store(n: usize) -> (tempfile::TempDir, Ctx) {
         let dir = tempfile::tempdir().unwrap();
@@ -1030,6 +1046,19 @@ mod tests {
         assert_eq!(parse("{}"), None, "unset falls through to the config");
     }
 
+    /// The model takes `batch`'s route: absent stays absent until the op asks the config.
+    /// A serde default here would resurrect the bug where `[defaults] embed_model` was
+    /// read and never used, one surface over.
+    #[test]
+    fn an_absent_model_stays_absent_until_the_config_answers() {
+        let parse = |json: &str| serde_json::from_str::<EmbedArgs>(json).unwrap().model;
+        assert_eq!(parse("{}"), None);
+        assert_eq!(
+            parse(r#"{"model": "qwen3-embedding-0.6b"}"#),
+            Some("qwen3-embedding-0.6b".into())
+        );
+    }
+
     /// Round-tripped as it was written, so a number survives as a number — `run` and the
     /// scheduler both serialize their args and read them back.
     #[test]
@@ -1053,7 +1082,7 @@ mod tests {
         let report = embed(
             &ctx,
             EmbedArgs {
-                model: "openrouter/qwen/qwen3-embedding-8b".into(),
+                model: Some("openrouter/qwen/qwen3-embedding-8b".into()),
                 dry_run: true,
                 ..EmbedArgs::default()
             },
@@ -1074,7 +1103,7 @@ mod tests {
         let err = embed(
             &ctx,
             EmbedArgs {
-                model: "openrouter/qwen/qwen3-embedding-8b".into(),
+                model: Some("openrouter/qwen/qwen3-embedding-8b".into()),
                 variant: Some("q8_0".into()),
                 dry_run: true,
                 ..EmbedArgs::default()
@@ -1094,7 +1123,7 @@ mod tests {
         let err = embed(
             &ctx,
             EmbedArgs {
-                model: "qwen3-reranker-0.6b".into(),
+                model: Some("qwen3-reranker-0.6b".into()),
                 variant: None,
                 batch: Some(BatchSize::Fixed(8)),
                 limit: None,
@@ -1122,7 +1151,7 @@ mod tests {
         let err = embed(
             &ctx,
             EmbedArgs {
-                model: "qwen3-embedding-0.6b".into(),
+                model: Some("qwen3-embedding-0.6b".into()),
                 variant: None,
                 batch: Some(BatchSize::Fixed(8)),
                 limit: None,

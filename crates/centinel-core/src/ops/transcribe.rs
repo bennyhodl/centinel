@@ -43,9 +43,15 @@ pub struct TranscribeArgs {
     pub source: Option<String>,
 
     /// Whisper model id.
-    #[arg(long, default_value = "whisper-large-v3-turbo")]
-    #[serde(default = "default_model")]
-    pub model: String,
+    ///
+    /// Unset means "nobody said here", which falls through to `[defaults]
+    /// transcribe_model` in the config file and from there to `whisper-large-v3-turbo`
+    /// — the route `embed --batch` documents. A clap default here would make a typed
+    /// model indistinguishable from an absent one, and the file's standing preference
+    /// would be read and never used.
+    #[arg(long)]
+    #[serde(default)]
+    pub model: Option<String>,
 
     /// Quantization. Defaults to whichever is installed.
     #[arg(long)]
@@ -81,18 +87,15 @@ pub struct TranscribeArgs {
     pub dry_run: bool,
 }
 
-fn default_model() -> String {
-    "whisper-large-v3-turbo".to_string()
-}
-
 /// So [`crate::ops::run`] inherits the CLI's defaults — including `allow_no_vad: false`,
 /// which is the documented mitigation for Whisper hallucinating over dead air and must
-/// not become opt-out by way of a second default.
+/// not become opt-out by way of a second default. `model: None` is "nobody said", which
+/// resolves through the config file to `[defaults] transcribe_model`.
 impl Default for TranscribeArgs {
     fn default() -> Self {
         Self {
             source: None,
-            model: default_model(),
+            model: None,
             variant: None,
             language: None,
             limit: None,
@@ -157,6 +160,14 @@ pub async fn transcribe(
     progress: &Progress,
     cancel: &Cancel,
 ) -> anyhow::Result<TranscribeReport> {
+    // The flag, else the config file's standing preference — resolved here so
+    // `centinel transcribe` typed by hand uses the model the file names. `run` reads
+    // the file once and passes its value down.
+    let model = match args.model.clone() {
+        Some(typed) => typed,
+        None => crate::config::Config::load()?.defaults.transcribe_model,
+    };
+
     let sources = match &args.source {
         Some(s) => vec![SourceId::new(s.clone())?],
         None => ctx.store.sources().await?,
@@ -164,7 +175,7 @@ pub async fn transcribe(
 
     let mut report = TranscribeReport {
         sources: sources.iter().map(|s| s.to_string()).collect(),
-        model: args.model.clone(),
+        model: model.clone(),
         variant: args.variant.clone(),
         vad: false,
         audio_found: 0,
@@ -234,7 +245,7 @@ pub async fn transcribe(
     let root = crate::models::models_dir()?;
     let transcriber = Transcriber::resolve(
         &root,
-        &args.model,
+        &model,
         args.variant.as_deref(),
         args.language.clone(),
     )?;
@@ -478,7 +489,9 @@ mod tests {
     fn args() -> TranscribeArgs {
         TranscribeArgs {
             source: None,
-            model: default_model(),
+            // Typed explicitly: `None` reads whatever config file the machine running
+            // the tests happens to keep.
+            model: Some("whisper-large-v3-turbo".to_string()),
             variant: None,
             language: None,
             limit: None,
