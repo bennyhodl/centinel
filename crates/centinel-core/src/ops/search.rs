@@ -1094,7 +1094,13 @@ mod tests {
         let ctx = Ctx::new(store.clone());
         super::super::embed(
             &ctx,
-            super::super::EmbedArgs::default(),
+            super::super::EmbedArgs {
+                // Pinned: an unset model reads the config file of whatever machine runs
+                // the tests, and an `openrouter/…` preference there would put this
+                // passage on the wire.
+                model: Some("qwen3-embedding-4b".into()),
+                ..Default::default()
+            },
             &Progress::none(),
             &Cancel::none(),
         )

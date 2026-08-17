@@ -173,7 +173,8 @@ pub struct Defaults {
     #[serde(default = "default_rps")]
     pub rps: f64,
 
-    /// The embedding model `run` uses for its single corpus-wide pass.
+    /// The embedding model — for `run`'s single corpus-wide pass and for a bare
+    /// `centinel embed` alike. `--model` overrides it for one run.
     ///
     /// Local by default. An `openrouter/…` id embeds through OpenRouter instead —
     /// chunk text leaves the machine, and `$OPENROUTER_API_KEY` must be set. See
@@ -195,7 +196,8 @@ pub struct Defaults {
     #[serde(default = "default_embed_batch")]
     pub embed_batch: BatchSize,
 
-    /// The Whisper model `run` uses for sources that produce audio.
+    /// The Whisper model for sources that produce audio — `run`'s and a bare
+    /// `centinel transcribe`'s alike. `--model` overrides it for one run.
     #[serde(default = "default_transcribe_model")]
     pub transcribe_model: String,
 
