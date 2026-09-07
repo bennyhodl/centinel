@@ -55,6 +55,7 @@ fn main() -> anyhow::Result<()> {
         embedder.model_id(),
         embedder.variant()
     );
+    println!("backend:    {}", embedder.device_summary());
     println!("dims:       {}", embedder.dims());
     println!("load:       {load:.2?}");
 

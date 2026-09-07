@@ -95,6 +95,12 @@ pub struct SearchArgs {
     #[arg(long, default_value_t = 400)]
     #[serde(default = "default_snippet")]
     pub snippet_chars: usize,
+
+    /// Scan every vector instead of using the approximate index. Slower, but useful
+    /// for comparing retrieval recall on a large corpus.
+    #[arg(long)]
+    #[serde(default)]
+    pub exact: bool,
 }
 
 fn default_limit() -> usize {
@@ -215,7 +221,7 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
     // reordering a set larger than the one returned (§6.3).
     let (mut hits, total_chunks_indexed) = retrieve(&index_path, &args, vector)?;
 
-    let no_rerank = rerank_arm(&args.query, &mut hits).await.err();
+    let no_rerank = rerank_arm(ctx, &args.query, &mut hits).await.err();
     hits.truncate(args.limit);
 
     let method = method(no_vectors.is_none(), no_rerank.is_none());
@@ -339,7 +345,7 @@ fn retrieve(
 /// The RRF order is left untouched on failure, which is the honest fallback: it is the
 /// best ordering available without the model, and [`SearchReport::method`] will not
 /// claim it was reranked.
-async fn rerank_arm(query: &str, hits: &mut [Hit]) -> Result<(), String> {
+async fn rerank_arm(ctx: &Ctx, query: &str, hits: &mut [Hit]) -> Result<(), String> {
     if hits.is_empty() {
         return Ok(());
     }
@@ -347,9 +353,19 @@ async fn rerank_arm(query: &str, hits: &mut [Hit]) -> Result<(), String> {
     let query = query.to_string();
     let documents: Vec<String> = hits.iter().map(|h| h.text.clone()).collect();
     // Weights load and inference are both blocking, and both are seconds.
+    let cache = ctx.query_reranker.clone();
     let scores = tokio::task::spawn_blocking(move || {
-        let root = crate::models::models_dir()?;
-        crate::rerank::Reranker::load(&root, RERANKER, None)?.score(&query, &documents)
+        let mut cached = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("reranker lock poisoned"))?;
+        if cached.is_none() {
+            let root = crate::models::models_dir()?;
+            *cached = Some(crate::rerank::Reranker::load(&root, RERANKER, None)?);
+        }
+        cached
+            .as_ref()
+            .expect("model loaded above")
+            .score(&query, &documents)
     })
     .await
     .map_err(|e| format!("{e}"))?
@@ -429,9 +445,24 @@ async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<VectorArm, String> {
             // Loading weights and running inference are both blocking, and the model is
             // gigabytes — a short CLI run pays this per query; `serve` and `mcp` pay it
             // once.
+            let cache = ctx.query_embedder.clone();
             tokio::task::spawn_blocking(move || {
-                let root = crate::models::models_dir()?;
-                crate::embed::Embedder::load(&root, &model, None)?.embed_query(&query)
+                let mut cached = cache
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("query model lock poisoned"))?;
+                if cached
+                    .as_ref()
+                    .is_none_or(|loaded| loaded.model_id() != model)
+                {
+                    // Release the old weights before loading a different model.
+                    *cached = None;
+                    let root = crate::models::models_dir()?;
+                    *cached = Some(crate::embed::Embedder::load(&root, &model, None)?);
+                }
+                cached
+                    .as_ref()
+                    .expect("model loaded above")
+                    .embed_query(&query)
             })
             .await
             .map_err(|e| format!("{e}"))?
@@ -445,10 +476,12 @@ async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<VectorArm, String> {
     };
     // The `--source` post-filter is the caller's, because it needs SQLite and this
     // function is the async half.
-    let hits = table
-        .nearest(&vector, depth)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+    let hits = if args.exact {
+        table.nearest_exact(&vector, depth).await
+    } else {
+        table.nearest(&vector, depth).await
+    }
+    .map_err(|e| format!("{e:#}"))?;
 
     Ok(VectorArm { hits, stored })
 }
@@ -1034,7 +1067,9 @@ mod tests {
     #[tokio::test]
     async fn reranking_nothing_is_not_a_failure() {
         let mut none: Vec<Hit> = Vec::new();
-        assert!(rerank_arm("anything", &mut none).await.is_ok());
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(crate::store::Store::open(dir.path()).await.unwrap());
+        assert!(rerank_arm(&ctx, "anything", &mut none).await.is_ok());
     }
 
     // ── the whole pipeline, on real weights ───────────────────────────────────────
@@ -1116,6 +1151,7 @@ mod tests {
                 limit: 3,
                 source: None,
                 snippet_chars: 0,
+                exact: false,
             },
         )
         .await

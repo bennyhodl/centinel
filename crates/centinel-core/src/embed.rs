@@ -215,6 +215,26 @@ impl Embedder {
         })
     }
 
+    /// Report accelerator availability even when backend debug logs are disabled.
+    pub fn device_summary(&self) -> String {
+        let devices = list_llama_ggml_backend_devices();
+        let accelerators: Vec<_> = devices
+            .iter()
+            .filter(|device| {
+                matches!(
+                    device.device_type,
+                    LlamaBackendDeviceType::Gpu | LlamaBackendDeviceType::IntegratedGpu
+                )
+            })
+            .map(|device| format!("{} ({})", device.description, device.backend))
+            .collect();
+        if accelerators.is_empty() {
+            "CPU backend — for NVIDIA acceleration, rebuild with --features cuda and a compatible CUDA toolkit".into()
+        } else {
+            format!("available accelerators: {}", accelerators.join(", "))
+        }
+    }
+
     pub fn model_id(&self) -> &'static str {
         self.spec.id
     }

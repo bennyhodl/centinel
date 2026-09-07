@@ -181,3 +181,47 @@ that also builds the 4B embedder pays more. `centinel serve` and `centinel mcp` 
 once; a short CLI invocation pays on every query.
 
 Next: [Ops](ops.md).
+
+## Large corpora
+
+After embedding, Centinel compacts small Lance files on tables with at least 4,096
+vectors. Exact search remains the default. `embed --ann-index` also creates a cosine
+IVF_FLAT index; later embedding runs maintain an existing index automatically.
+Search probes nearby partitions instead of scanning every vector. Vectors remain full
+precision, but partition selection makes retrieval approximate; evaluate recall on
+representative questions when comparing versions. Use `centinel search --exact "question"`
+to bypass the ANN index for a recall comparison. Small tables use exact search.
+Newly appended vectors remain searchable before maintenance completes.
+
+Existing stores can compact files without loading weights or re-embedding:
+
+```sh
+centinel embed --limit 0
+```
+
+To also build an approximate index, use `centinel embed --limit 0 --ann-index`.
+Indexing is opt-in because speed and recall depend on the corpus.
+
+Use the same embedding model setting that originally wrote the store. Maintenance
+runs after ingestion, never on the query path, and retains historical Lance versions.
+It needs additional disk space for compacted files and the full precision index.
+`--dry-run` performs no maintenance.
+
+The persistent MCP/HTTP context retains one query embedding model and one reranker, and
+serializes inference calls for each model, avoiding repeated weight loads and concurrent copies on the GPU.
+A separate CLI invocation still pays model startup cost.
+
+A reproducible synthetic benchmark reports warm exact/indexed latency and recall@10:
+
+```sh
+cargo run --release --locked -p centinel-core --example vector_bench -- 100000 2560
+```
+
+It uses a temporary store, removes it on completion, and excludes index construction
+from query timing. Its synthetic vectors test the storage path, not embedding or
+reranking quality; use real corpus questions for an end-to-end evaluation.
+
+Local debug-build measurements (20 queries, uniformly random 64-dimensional vectors)
+show why ANN is opt-in: at 10,000 rows, exact/indexed latency was 9.52/13.92 ms with
+96.5% recall@10; at 100,000 rows it was 35.47/37.71 ms with 78.5% recall@10. These
+measurements do not establish a speedup, and do not represent Qwen embeddings on Spark.
