@@ -659,6 +659,18 @@ build_from_source() {
     FEATURE=""
     ACCEL_NOTE=""
 
+    # CUDA is often installed outside PATH on Linux, including DGX Spark. Discover
+    # the compiler before auto-selection can silently choose a CPU-only build.
+    if [ "$OS" = linux ] && { [ "$ACCEL" = auto ] || [ "$ACCEL" = cuda ]; } && ! have nvcc; then
+        for _nvcc in "${CUDA_PATH:-/usr/local/cuda}/bin/nvcc" /usr/local/cuda-*/bin/nvcc; do
+            if [ -x "$_nvcc" ]; then
+                PATH="$(dirname "$_nvcc"):$PATH"
+                export PATH
+                break
+            fi
+        done
+    fi
+
     case "$ACCEL" in
         auto)
             if [ "$OS" = macos ]; then
@@ -686,7 +698,10 @@ build_from_source() {
                 vulkan) have glslc || warn "glslc is not on PATH; the Vulkan build will need it" ;;
             esac ;;
         none)
-            ACCEL_NOTE="none (CPU)" ;;
+            ACCEL_NOTE="none (CPU)"
+            if [ "$OS" = linux ] && have nvidia-smi; then
+                warn "NVIDIA tools detected, but this build will use CPU inference. For GPU acceleration install a compatible CUDA toolkit and use --accel cuda."
+            fi ;;
     esac
 
     # ------------------------------------------------------------ cpu tuning

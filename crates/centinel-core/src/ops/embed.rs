@@ -187,6 +187,12 @@ pub struct EmbedArgs {
     #[arg(long)]
     #[serde(default)]
     pub dry_run: bool,
+
+    /// Build an approximate vector index after embedding. Compare speed and recall
+    /// with `search --exact` on representative queries before adopting it.
+    #[arg(long)]
+    #[serde(default)]
+    pub ann_index: bool,
 }
 
 /// `model: None` and `batch: None` are not "no model" and "do not batch" — both mean
@@ -201,6 +207,7 @@ impl Default for EmbedArgs {
             batch: None,
             limit: None,
             dry_run: false,
+            ann_index: false,
         }
     }
 }
@@ -342,8 +349,13 @@ pub async fn embed(
     };
 
     if args.dry_run || todo.is_empty() {
-        if todo.is_empty() {
-            progress.say("nothing to embed — every indexed chunk is already stored");
+        if !args.dry_run && ctx.store.vectors_path().exists() {
+            cancel.check()?;
+            progress.say("optimizing vector search");
+            VectorTable::open(&ctx.store.vectors_db(), model_id, dims)
+                .await?
+                .optimize_for_search(args.ann_index)
+                .await?;
         }
         return Ok(base);
     }
@@ -359,6 +371,7 @@ pub async fn embed(
                 args.variant.as_deref().unwrap_or(spec.default_variant)
             ));
             let embedder = load_embedder(&args, spec.id).await?;
+            progress.say(embedder.device_summary());
             anyhow::ensure!(
                 embedder.dims() == dims,
                 "{} reports {} dimensions, the registry pins {dims}",
@@ -403,12 +416,23 @@ pub async fn embed(
             let embedder = RemoteEmbedder::new(spec)?;
             let batch_size = resolve_remote_batch(args.batch)?;
             progress.say(format!("{batch_size} chunks per request"));
-            let (embedded, skipped) =
-                run_remote(embedder, index, table, todo, batch_size, progress, cancel).await?;
+            let (embedded, skipped) = run_remote(
+                embedder,
+                index,
+                table.clone(),
+                todo,
+                batch_size,
+                progress,
+                cancel,
+            )
+            .await?;
             (embedded, skipped, batch_size)
         }
     };
 
+    cancel.check()?;
+    progress.say("optimizing vector search");
+    table.optimize_for_search(args.ann_index).await?;
     let elapsed = started.elapsed().as_secs_f64();
     Ok(EmbedReport {
         embedded,
@@ -597,7 +621,7 @@ async fn embed_window(
     embedder: &RemoteEmbedder,
     window: Vec<String>,
     texts: Vec<String>,
-) -> anyhow::Result<(Vec<(String, Vec<f32>)>, Vec<Skipped>)> {
+) -> anyhow::Result<EmbeddedWindow> {
     match embedder.embed_documents(&texts).await {
         Ok(vectors) => Ok((window.into_iter().zip(vectors).collect(), Vec::new())),
         Err(batch_error) if remote::is_fatal(&batch_error) => Err(batch_error),
@@ -660,6 +684,12 @@ fn run(
         cancel,
         handle,
     } = host;
+    // Create the GPU context before starting threads that would otherwise survive
+    // a failed allocation without being joined.
+    let mut session = embedder.session(SessionOptions {
+        batch: batch_size,
+        ..SessionOptions::default()
+    })?;
     let total = todo.len() as u64;
     let started = Instant::now();
     progress.step("embedding", 0, total);
@@ -696,48 +726,23 @@ fn run(
 
     let mut sent = 0usize;
     let mut skipped: Vec<Skipped> = Vec::new();
-    let mut session = embedder.session(SessionOptions {
-        batch: batch_size,
-        ..SessionOptions::default()
-    })?;
-
     let decoded: anyhow::Result<()> = (|| {
         let writer_gone = || anyhow::anyhow!("the writer stopped; its error follows");
         for item in feed_rx.iter() {
             cancel.check()?;
             let (window, texts) = item?;
 
-            match session.embed(&texts) {
-                Ok(vectors) => {
-                    let entries: Vec<(String, Vec<f32>)> =
-                        window.iter().cloned().zip(vectors).collect();
-                    sent += entries.len();
-                    write_tx.blocking_send(entries).map_err(|_| writer_gone())?;
-                }
-                // A batch fails as a unit, so it is retried one at a time. Otherwise a
-                // single bad chunk costs the other 31, and on a corpus this size that
-                // compounds. The failures that arrive here: a chunk that will not
-                // tokenize, a group the machine could not hold, and a sequence the
-                // backend failed on numerically — one chunk at a time is the right
-                // answer to all three, and the chunk that still fails alone is skipped
-                // with its reason on the report rather than allowed to end the run.
-                Err(batch_error) => {
-                    tracing::debug!(%batch_error, "batch failed; retrying individually");
-                    for (hash, text) in window.iter().zip(&texts) {
-                        match session.embed(std::slice::from_ref(text)) {
-                            Ok(mut v) => {
-                                sent += 1;
-                                write_tx
-                                    .blocking_send(vec![(hash.clone(), v.remove(0))])
-                                    .map_err(|_| writer_gone())?;
-                            }
-                            Err(e) => skipped.push(Skipped {
-                                chunk_hash: hash.clone(),
-                                reason: format!("{e:#}"),
-                            }),
-                        }
-                    }
-                }
+            let (entries, misses) = embed_with_recovery(
+                &window,
+                &texts,
+                &mut |texts| session.embed(texts),
+                &cancel,
+                &progress,
+            )?;
+            sent += entries.len();
+            skipped.extend(misses);
+            if !entries.is_empty() {
+                write_tx.blocking_send(entries).map_err(|_| writer_gone())?;
             }
 
             let done = (sent + skipped.len()) as u64;
@@ -762,6 +767,49 @@ fn run(
         (_, Err(decode_error)) => Err(decode_error),
         (Ok(written), Ok(())) => Ok((written, skipped)),
     }
+}
+
+type EmbeddedWindow = (Vec<(String, Vec<f32>)>, Vec<Skipped>);
+
+/// Bisect failed batches so healthy chunks still run together. The explicit stack
+/// preserves input order, bounds memory, and checks cancellation between retries.
+fn embed_with_recovery(
+    hashes: &[String],
+    texts: &[String],
+    embed: &mut impl FnMut(&[String]) -> anyhow::Result<Vec<Vec<f32>>>,
+    cancel: &Cancel,
+    progress: &Progress,
+) -> anyhow::Result<EmbeddedWindow> {
+    let mut pending: Vec<_> = std::iter::once(0..texts.len()).collect();
+    let mut entries = Vec::with_capacity(texts.len());
+    let mut skipped = Vec::new();
+    let mut reported = false;
+    while let Some(range) = pending.pop() {
+        cancel.check()?;
+        match embed(&texts[range.clone()]) {
+            Ok(vectors) => {
+                anyhow::ensure!(
+                    vectors.len() == range.len(),
+                    "embedding result count mismatch"
+                );
+                entries.extend(hashes[range].iter().cloned().zip(vectors));
+            }
+            Err(error) if range.len() > 1 => {
+                if !reported {
+                    progress.say(format!("batch failed; retrying smaller groups: {error:#}"));
+                    reported = true;
+                }
+                let middle = range.start + range.len() / 2;
+                pending.push(middle..range.end);
+                pending.push(range.start..middle);
+            }
+            Err(error) => skipped.push(Skipped {
+                chunk_hash: hashes[range.start].clone(),
+                reason: format!("{error:#}"),
+            }),
+        }
+    }
+    Ok((entries, skipped))
 }
 
 /// Loads the model off the async runtime — it is seconds of blocking file and GPU work.
@@ -841,6 +889,79 @@ mod tests {
     use crate::index::Placement;
     use crate::store::Store;
 
+    #[test]
+    fn a_bad_chunk_does_not_serialize_the_healthy_batch() {
+        let texts: Vec<_> = (0..64).map(|i| i.to_string()).collect();
+        let mut calls = 0;
+        let (entries, skipped) = embed_with_recovery(
+            &texts,
+            &texts,
+            &mut |group| {
+                calls += 1;
+                anyhow::ensure!(!group.iter().any(|text| text == "17"), "bad chunk");
+                Ok(group
+                    .iter()
+                    .map(|text| vec![text.parse::<f32>().unwrap()])
+                    .collect())
+            },
+            &Cancel::none(),
+            &Progress::none(),
+        )
+        .unwrap();
+        assert_eq!(calls, 13, "only the failing half is split at each level");
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].chunk_hash, "17");
+        let expected: Vec<_> = texts.iter().filter(|text| *text != "17").cloned().collect();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|(hash, _)| hash.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for (hash, vector) in entries {
+            assert_eq!(hash.parse::<f32>().unwrap(), vector[0]);
+        }
+    }
+
+    #[test]
+    fn smaller_groups_recover_a_batch_that_exceeds_capacity() {
+        let texts: Vec<_> = (0..40).map(|i| i.to_string()).collect();
+        let (entries, skipped) = embed_with_recovery(
+            &texts,
+            &texts,
+            &mut |group| {
+                anyhow::ensure!(group.len() <= 10, "capacity exceeded");
+                Ok(vec![vec![1.0]; group.len()])
+            },
+            &Cancel::none(),
+            &Progress::none(),
+        )
+        .unwrap();
+        assert_eq!(entries.len(), 40);
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn cancellation_stops_retries_after_a_failed_batch() {
+        let texts = vec!["a".to_string(), "b".to_string()];
+        let (canceller, cancel) = Cancel::channel();
+        let mut calls = 0;
+        let result = embed_with_recovery(
+            &texts,
+            &texts,
+            &mut |_| {
+                calls += 1;
+                canceller.cancel();
+                anyhow::bail!("capacity exceeded")
+            },
+            &cancel,
+            &Progress::none(),
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
+
     /// Typed explicitly in every test, because `None` reads whatever config file the
     /// machine running the tests happens to keep.
     fn default_model() -> Option<String> {
@@ -888,6 +1009,7 @@ mod tests {
                 batch: None,
                 limit: None,
                 dry_run: true,
+                ann_index: false,
             },
             &Progress::none(),
             &Cancel::none(),
@@ -915,6 +1037,7 @@ mod tests {
                 batch: Some(BatchSize::Fixed(8)),
                 limit: None,
                 dry_run: true,
+                ann_index: false,
             },
             &Progress::none(),
             &Cancel::none(),
@@ -934,6 +1057,7 @@ mod tests {
                 batch: None,
                 limit: None,
                 dry_run: false,
+                ann_index: false,
             },
             &Progress::none(),
             &Cancel::none(),
@@ -969,6 +1093,7 @@ mod tests {
                 batch: None,
                 limit: None,
                 dry_run: true,
+                ann_index: false,
             },
             &Progress::none(),
             &Cancel::none(),
@@ -994,6 +1119,7 @@ mod tests {
                 batch: Some(BatchSize::Fixed(8)),
                 limit: None,
                 dry_run: true,
+                ann_index: false,
             },
             &Progress::none(),
             &Cancel::none(),
@@ -1014,6 +1140,7 @@ mod tests {
                 batch: Some(BatchSize::Fixed(0)),
                 limit: None,
                 dry_run: true,
+                ann_index: false,
             },
             &Progress::none(),
             &Cancel::none(),
@@ -1084,6 +1211,7 @@ mod tests {
             EmbedArgs {
                 model: Some("openrouter/qwen/qwen3-embedding-8b".into()),
                 dry_run: true,
+                ann_index: false,
                 ..EmbedArgs::default()
             },
             &Progress::none(),
@@ -1106,6 +1234,7 @@ mod tests {
                 model: Some("openrouter/qwen/qwen3-embedding-8b".into()),
                 variant: Some("q8_0".into()),
                 dry_run: true,
+                ann_index: false,
                 ..EmbedArgs::default()
             },
             &Progress::none(),
@@ -1128,6 +1257,7 @@ mod tests {
                 batch: Some(BatchSize::Fixed(8)),
                 limit: None,
                 dry_run: true,
+                ann_index: false,
             },
             &Progress::none(),
             &Cancel::none(),
@@ -1156,6 +1286,7 @@ mod tests {
                 batch: Some(BatchSize::Fixed(8)),
                 limit: None,
                 dry_run: true,
+                ann_index: false,
             },
             &Progress::none(),
             &Cancel::none(),

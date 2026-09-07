@@ -43,7 +43,9 @@ use lancedb::arrow::arrow_array::{
     StringArray, types::Float32Type,
 };
 use lancedb::arrow::arrow_schema::{DataType, Field, Schema, SchemaRef};
+use lancedb::index::{Index as LanceIndex, vector::IvfFlatIndexBuilder};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
+use lancedb::table::OptimizeAction;
 use lancedb::{DistanceType, Table};
 
 /// The table inside the database, which is what names `vectors.lance` on disk.
@@ -199,7 +201,7 @@ impl VectorTable {
         Ok(out)
     }
 
-    /// Appends vectors. The only mutation this type performs.
+    /// Appends vectors in one durable commit.
     ///
     /// Lance commits a version per call, so an interrupted run keeps every batch that
     /// landed before the kill and the work list is recomputed from what is there. That is
@@ -237,12 +239,71 @@ impl VectorTable {
         Ok(())
     }
 
+    /// Consolidate append files and update existing indexes after ingestion.
+    /// Creating an ANN index requires explicit opt-in through `build_index`.
+    /// Small corpora retain exact search. IVF_FLAT keeps full precision vectors;
+    /// only partition selection is approximate. Never prune historical versions.
+    pub async fn optimize_for_search(&self, build_index: bool) -> anyhow::Result<()> {
+        let rows = self.len().await?;
+        if rows < 4096 {
+            return Ok(());
+        }
+        self.table
+            .optimize(OptimizeAction::Compact {
+                options: Default::default(),
+                remap_options: None,
+            })
+            .await?;
+        let indexed = self
+            .table
+            .list_indices()
+            .await?
+            .iter()
+            .any(|index| index.columns == [VECTOR_COLUMN]);
+        if indexed {
+            self.table
+                .optimize(OptimizeAction::Index(Default::default()))
+                .await?;
+        } else if build_index {
+            self.table
+                .create_index(
+                    &[VECTOR_COLUMN],
+                    LanceIndex::IvfFlat(
+                        IvfFlatIndexBuilder::default()
+                            .distance_type(DistanceType::Cosine)
+                            .num_partitions((rows as f64).sqrt() as u32),
+                    ),
+                )
+                .execute()
+                .await?;
+        }
+        Ok(())
+    }
+
     /// The `limit` nearest chunks to `query`, best first.
     ///
     /// Returns cosine **similarity**, not Lance's distance — higher is better, matching
     /// the BM25 arm, so a caller fusing the two never has to remember which way one of
     /// them points.
     pub async fn nearest(&self, query: &[f32], limit: usize) -> anyhow::Result<Vec<(String, f32)>> {
+        self.nearest_with_index(query, limit, true).await
+    }
+
+    /// Exhaustive cosine search, including when an ANN index exists.
+    pub async fn nearest_exact(
+        &self,
+        query: &[f32],
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, f32)>> {
+        self.nearest_with_index(query, limit, false).await
+    }
+
+    async fn nearest_with_index(
+        &self,
+        query: &[f32],
+        limit: usize,
+        use_index: bool,
+    ) -> anyhow::Result<Vec<(String, f32)>> {
         anyhow::ensure!(
             query.len() == self.dims,
             "query vector has {} dimensions, this table holds {}",
@@ -258,7 +319,7 @@ impl VectorTable {
             return Ok(Vec::new());
         }
 
-        let mut stream = self
+        let search = self
             .table
             .query()
             .nearest_to(query.to_vec())?
@@ -266,9 +327,17 @@ impl VectorTable {
             // under L2. Relying on that would make the ranking depend on a property of
             // the embedder that this module cannot see.
             .distance_type(DistanceType::Cosine)
-            .limit(limit)
-            .execute()
-            .await?;
+            // The backend's 20-partition default lost too many candidates in the
+            // synthetic recall benchmark. Search more partitions before reranking.
+            .nprobes(64)
+            .select(Select::Columns(vec![HASH_COLUMN.to_string()]))
+            .limit(limit);
+        let search = if use_index {
+            search
+        } else {
+            search.bypass_vector_index()
+        };
+        let mut stream = search.execute().await?;
 
         let mut out = Vec::with_capacity(limit);
         while let Some(batch) = stream.try_next().await? {
@@ -360,6 +429,63 @@ mod tests {
 
     async fn table(dir: &Path) -> VectorTable {
         VectorTable::open(dir, "test-model", DIMS).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn maintenance_indexes_large_tables_and_preserves_appended_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = table(dir.path()).await;
+        let entries: Vec<_> = (0..4096u32)
+            .map(|i| {
+                // Deterministic, distinct directions without an additional RNG dependency.
+                let x = (i.wrapping_mul(1664525).wrapping_add(1013904223)) as f32;
+                let y = (i.wrapping_mul(22695477).wrapping_add(1)) as f32;
+                (format!("{i:064x}"), unit([x, y, i as f32 * 1000000.0, 1.0]))
+            })
+            .collect();
+        t.append(&entries[..2048]).await.unwrap();
+        t.append(&entries[2048..]).await.unwrap();
+        t.optimize_for_search(false).await.unwrap();
+        assert!(
+            t.table.list_indices().await.unwrap().is_empty(),
+            "ANN must be opt-in"
+        );
+        t.optimize_for_search(true).await.unwrap();
+        assert_eq!(t.table.list_indices().await.unwrap().len(), 1);
+        let query = unit([-1.0, 0.0, 0.0, 0.0]);
+        let added = "f".repeat(64);
+        t.append(&[(added.clone(), query.clone())]).await.unwrap();
+        // Lance must scan the unindexed tail as well as searching the ANN index.
+        assert_eq!(t.nearest(&query, 1).await.unwrap()[0].0, added);
+        t.optimize_for_search(true).await.unwrap();
+        let reopened = table(dir.path()).await;
+        assert_eq!(reopened.len().await.unwrap(), 4097);
+        assert_eq!(reopened.hashes().await.unwrap().len(), 4097);
+        let hits = reopened.nearest(&query, 1).await.unwrap();
+        assert_eq!(hits[0].0, added);
+        assert!((hits[0].1 - 1.0).abs() < 1e-5);
+        let exact = reopened.nearest_exact(&query, 4097).await.unwrap();
+        assert_eq!(
+            exact.len(),
+            4097,
+            "exact search bypasses partition selection"
+        );
+        assert_eq!(exact[0].0, added);
+    }
+
+    #[tokio::test]
+    async fn maintenance_leaves_small_tables_on_exact_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = table(dir.path()).await;
+        t.append(&[(hash(1), unit([1.0, 0.0, 0.0, 0.0]))])
+            .await
+            .unwrap();
+        t.optimize_for_search(true).await.unwrap();
+        assert!(t.table.list_indices().await.unwrap().is_empty());
+        assert_eq!(
+            t.nearest(&[1.0, 0.0, 0.0, 0.0], 1).await.unwrap()[0].0,
+            hash(1)
+        );
     }
 
     #[tokio::test]

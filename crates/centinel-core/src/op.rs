@@ -38,11 +38,18 @@ use crate::store::Store;
 #[derive(Clone, Debug)]
 pub struct Ctx {
     pub store: Store,
+    /// One model per role, shared across requests to bound GPU residency.
+    pub(crate) query_reranker: Arc<std::sync::Mutex<Option<crate::rerank::Reranker>>>,
+    pub(crate) query_embedder: Arc<std::sync::Mutex<Option<crate::embed::Embedder>>>,
 }
 
 impl Ctx {
     pub fn new(store: Store) -> Self {
-        Self { store }
+        Self {
+            store,
+            query_reranker: Arc::new(std::sync::Mutex::new(None)),
+            query_embedder: Arc::new(std::sync::Mutex::new(None)),
+        }
     }
 }
 

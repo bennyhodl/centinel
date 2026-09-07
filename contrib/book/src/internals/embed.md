@@ -153,3 +153,33 @@ of a stored vector rather than a re-embed. A reversible decision, deferred until
 measures a need for it.
 
 Next: [Models](models.md).
+
+## Diagnosing slow embedding on DGX Spark
+
+A rate such as 0.2 chunks/sec does not by itself establish GPU use. Embedding now
+prints available accelerator backends, or explicitly reports CPU fallback. Run
+`nvidia-smi` during inference and use `centinel --verbose embed --limit 200` to inspect
+llama.cpp's actual layer placement. The installer discovers CUDA under `CUDA_PATH`
+or `/usr/local/cuda*` before choosing its backend.
+
+Spark is Linux ARM64 with a GB10 GPU; the x86_64 CUDA release asset does not apply.
+Build from the clone with a compatible CUDA toolkit and a GB10 target, following
+[NVIDIA's Spark build guidance](https://build.nvidia.com/spark/llama-cpp/instructions):
+
+```sh
+CMAKE_CUDA_ARCHITECTURES=121a-real ./install.sh --build --accel cuda --force
+```
+
+Measure batch widths on that machine before selecting a larger batch:
+
+```sh
+CMAKE_CUDA_ARCHITECTURES=121a-real cargo run --release --locked -p centinel-core \
+  --features cuda --example embed_bench -- --sweep
+```
+
+The benchmark compares throughput and vector parity. Keep the same model and
+quantization when comparing runs. A failed batch is now split into halves until
+healthy groups succeed and bad individual chunks can be reported; cancellation is
+checked between retries. This preserves batching when one chunk is invalid or a
+whole group exceeds backend capacity. The first failure in each batch is visible
+in progress output.
