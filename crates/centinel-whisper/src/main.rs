@@ -250,8 +250,6 @@ fn read_pcm() -> Result<Vec<f32>> {
         bytes.len()
     );
 
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect())
+    let (samples, _) = bytes.as_chunks::<4>();
+    Ok(samples.iter().map(|b| f32::from_le_bytes(*b)).collect())
 }
