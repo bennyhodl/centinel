@@ -16,12 +16,13 @@
 #   download   a release asset, when a release carries one this host can run
 #   build      from source, which is every other host and the fallback for every failure
 #
-# A release carries two assets, and both are GPU builds. Embedding is the stage measured in
-# days and it is what the whole tool is for, so a CPU-only download would hand somebody the
-# slow half of Centinel and call it an install:
+# A release carries three assets, and all are GPU builds. Embedding is the stage measured
+# in days and it is what the whole tool is for, so a CPU-only download would hand somebody
+# the slow half of Centinel and call it an install:
 #
-#   aarch64-apple-darwin              Metal, which is built into any macOS build
-#   x86_64-unknown-linux-gnu, CUDA    wants an NVIDIA driver and the CUDA runtime
+#   aarch64-apple-darwin                 Metal, which is built into any macOS build
+#   x86_64-unknown-linux-gnu, CUDA 12    wants an NVIDIA driver and the CUDA 12 runtime
+#   aarch64-unknown-linux-gnu, CUDA 13   the DGX Spark and other arm64 hosts with a GPU
 #
 # Nothing about the download is load-bearing. No asset for this host, no release yet, a
 # checksum that does not match, a binary that will not start — each falls back to the build
@@ -54,6 +55,7 @@ REPO="https://github.com/bennyhodl/centinel"
 # installing rather than a second thing to remember.
 ASSET_MACOS_ARM64="centinel-aarch64-apple-darwin.tar.gz"
 ASSET_LINUX_CUDA="centinel-x86_64-unknown-linux-gnu-cuda.tar.gz"
+ASSET_LINUX_ARM64_CUDA="centinel-aarch64-unknown-linux-gnu-cuda.tar.gz"
 
 # A cold build unpacks and compiles llama.cpp, whisper.cpp, arrow, datafusion and lance.
 # Below this it is close enough that "no space left on device" is a real way to lose half
@@ -304,18 +306,21 @@ nvidia_driver() {
 
 # `centinel` links cuBLAS statically, so it needs nothing but the driver. `centinel-whisper`
 # does not — whisper-rs-sys links `-lcudart -lcublas -lcublasLt` — so the host needs the
-# CUDA runtime. Shipping those in the asset would be most of a gigabyte, which is why this
-# is a check and not a bundle.
+# CUDA runtime, and the *major* it was built against: a 12.x binary loads any 12.x
+# runtime and no 13.x one. Shipping those in the asset would be most of a gigabyte, which
+# is why this is a check and not a bundle. Takes the major to look for.
 cuda_runtime() {
-    for _d in /usr/local/cuda/lib64 /usr/local/cuda-12*/lib64 \
-              /usr/lib/x86_64-linux-gnu /usr/lib64 /opt/cuda/lib64; do
-        for _f in "$_d"/libcublas.so.12*; do
+    _major=$1
+    for _d in /usr/local/cuda/lib64 /usr/local/cuda-"$_major"*/lib64 \
+              /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/lib64 \
+              /opt/cuda/lib64; do
+        for _f in "$_d"/libcublas.so."$_major"*; do
             if [ -e "$_f" ]; then return 0; fi
         done
     done
     for _ldconfig in ldconfig /sbin/ldconfig; do
         if command -v "$_ldconfig" >/dev/null 2>&1; then
-            if "$_ldconfig" -p 2>/dev/null | grep -q 'libcublas\.so\.12'; then return 0; fi
+            if "$_ldconfig" -p 2>/dev/null | grep -q "libcublas\.so\.$_major"; then return 0; fi
         fi
     done
     return 1
@@ -348,12 +353,32 @@ asset_for_host() {
                 note "no NVIDIA driver here, and the Linux release binary is a CUDA build"
                 return 0
             fi
-            if ! cuda_runtime; then
+            if ! cuda_runtime 12; then
                 note "the CUDA runtime is not installed, and centinel-whisper links it"
                 note "  ${PM_INSTALL:-your package manager} cuda-runtime-12-4  ${D}(~150 MB, no compiler)${N}"
                 return 0
             fi
             printf '%s' "$ASSET_LINUX_CUDA" ;;
+        linux/arm64)
+            # The DGX Spark and its kin. A CUDA 13 build, because the GB10 is sm_121 and no
+            # CUDA 12.4 compiler can target it — and because DGX OS ships the 13.0 runtime
+            # and nothing older. No CPU-feature check: ggml's kernels in this asset are
+            # armv8-a, the baseline of the architecture, so there is nothing to fault on.
+            case "$ACCEL" in
+                auto|cuda) ;;
+                *) note "the Linux release binary is a CUDA build; --accel $ACCEL builds"
+                   return 0 ;;
+            esac
+            if ! nvidia_driver; then
+                note "no NVIDIA driver here, and the Linux release binary is a CUDA build"
+                return 0
+            fi
+            if ! cuda_runtime 13; then
+                note "the CUDA 13 runtime is not installed, and centinel-whisper links it"
+                note "  ${PM_INSTALL:-your package manager} cuda-runtime-13-0  ${D}(~150 MB, no compiler)${N}"
+                return 0
+            fi
+            printf '%s' "$ASSET_LINUX_ARM64_CUDA" ;;
         *)
             note "no release binary for $OS/$ARCH" ;;
     esac

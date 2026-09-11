@@ -15,16 +15,18 @@ the command for whatever is missing rather than installing a toolchain behind yo
 
 ## What a release carries
 
-Two binaries, and both are GPU builds. Embedding is the stage measured in days, so a
+Three assets, and all are GPU builds. Embedding is the stage measured in days, so a
 CPU-only download would be the slow half of Centinel handed over as an install.
 
 | Asset | Wants |
 |---|---|
 | `aarch64-apple-darwin` | an Apple Silicon Mac. Metal is compiled in, shaders and all |
-| `x86_64-unknown-linux-gnu`, CUDA 12 | an NVIDIA driver, the CUDA runtime, and AVX2 |
+| `x86_64-unknown-linux-gnu`, CUDA 12 | an NVIDIA driver, the CUDA 12 runtime, and AVX2 |
+| `aarch64-unknown-linux-gnu`, CUDA 13 | an arm64 host with an NVIDIA GPU — the DGX Spark — and the CUDA 13 runtime |
 
 `centinel` links cuBLAS statically and needs only the driver. `centinel-whisper` does not,
-so the CUDA asset wants the runtime present — `cuda-runtime-12-4` is about 150 MB and
+so a CUDA asset wants the runtime present, at the major it was built against —
+`cuda-runtime-12-4` on x86_64, `cuda-runtime-13-0` on arm64; each is about 150 MB and
 carries no compiler. Bundling those libraries into the asset would be most of a gigabyte.
 
 Nothing about the download is load-bearing. No asset for this host, no release, a checksum

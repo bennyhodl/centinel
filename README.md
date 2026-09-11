@@ -71,12 +71,13 @@ curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/bennyhodl
 
 The same command installs and updates. It downloads a release binary when the latest release carries one this host can run, and builds from source when it does not — which is most hosts, and every host until binary releases are switched on. A download needs no Rust and no C++ toolchain; a build checks for both, plus `libclang` and `protoc`, and names the command for whatever is missing rather than installing a toolchain behind your back.
 
-A release carries two binaries, and both are GPU builds. Embedding is the stage measured in days, so a CPU-only download would be the slow half of Centinel handed over as an install:
+A release carries three assets, and all are GPU builds. Embedding is the stage measured in days, so a CPU-only download would be the slow half of Centinel handed over as an install:
 
 | Asset | Wants |
 |---|---|
 | `aarch64-apple-darwin` | an Apple Silicon Mac. Metal is compiled in, shaders and all |
-| `x86_64-unknown-linux-gnu`, CUDA 12 | an NVIDIA driver, the CUDA runtime, and AVX2 |
+| `x86_64-unknown-linux-gnu`, CUDA 12 | an NVIDIA driver, the CUDA 12 runtime, and AVX2 |
+| `aarch64-unknown-linux-gnu`, CUDA 13 | an arm64 host with an NVIDIA GPU — the DGX Spark — and the CUDA 13 runtime |
 
 Nothing about the download is load-bearing. No asset, no release, a checksum that does not match, a binary that will not start on this host — each falls back to the build, so the worst a bad release does is cost one request. The one exception is a checksum that is published and wrong, which stops instead: that is somebody handing you a different file.
 

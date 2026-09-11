@@ -1,5 +1,5 @@
 # A merge to master decides its own version, writes the changelog, tags, and publishes
-# the release. Binaries are `binaries.yml`, called at the end of this one: both assets,
+# the release. Binaries are `binaries.yml`, called at the end of this one: every asset,
 # on every release. A release whose binaries failed is not a broken release:
 # `install.sh` asks for an asset, does not find one, and builds from source the way it
 # always has.
