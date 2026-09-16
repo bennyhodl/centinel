@@ -40,6 +40,7 @@ mod status;
 mod target;
 mod transcribe;
 mod update;
+mod verify;
 
 pub use check::{CheckArgs, CheckReport, Checked, Enumerated, check};
 pub use models::{
@@ -80,6 +81,10 @@ pub use transcribe::{
 pub use update::{
     Applied, InstalledFrom, Provenance, ReleaseCheck, RepoCheck, UpdateArgs, UpdateReport, update,
 };
+// `VerifyArgs` collides with `models::VerifyArgs` (`centinel models verify`, a different
+// op entirely; see that module). Aliased here rather than renamed at the definition, so
+// `verify.rs` reads like every other op file: its own args type named for its own op.
+pub use verify::{UnreadableFragment, VerifyArgs as VerifyTableArgs, VerifyReport, verify};
 
 // ── shared plumbing ───────────────────────────────────────────────────────────
 

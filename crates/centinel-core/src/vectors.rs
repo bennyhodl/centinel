@@ -51,7 +51,10 @@ use lancedb::{DistanceType, Table};
 /// The table inside the database, which is what names `vectors.lance` on disk.
 pub const TABLE: &str = "vectors";
 
-const HASH_COLUMN: &str = "chunk_hash";
+// `pub(crate)`, not private: `ops::verify` scans a fragment at a time for the same
+// column, one layer below anything this struct exposes, and a second literal for the
+// name of this column is how the two silently drift.
+pub(crate) const HASH_COLUMN: &str = "chunk_hash";
 const VECTOR_COLUMN: &str = "vector";
 /// Where the model id is recorded. Namespaced, because the schema metadata is a shared
 /// map and Lance writes its own keys into it.

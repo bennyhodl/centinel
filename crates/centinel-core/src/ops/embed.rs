@@ -306,10 +306,21 @@ pub async fn embed(
     // existing one is opened either way, because that is what checks the model.
     let stored = if ctx.store.vectors_path().exists() {
         progress.say("checking stored vectors");
+        // This is a full scan of every fragment, so it is where storage that silently
+        // truncated a write shows up: Lance reads a `chunk_hash` back and finds a
+        // fragment with no footer at all. `hashes` itself has no way to say which
+        // fragment that was (it only sees the scan fail), so the fix is named here,
+        // at the one place that turns "a scan failed" into "here is what to run".
         VectorTable::open(&ctx.store.vectors_db(), model_id, dims)
             .await?
             .hashes()
-            .await?
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "{e}: the vector table has unreadable fragments; run `centinel verify` \
+                     to list them and `centinel verify --repair` to drop them"
+                )
+            })?
     } else {
         std::collections::HashSet::new()
     };
