@@ -282,12 +282,15 @@ impl Embedder {
     /// Refused rather than truncated. A silently shortened chunk would be indexed
     /// under a `chunk_hash` covering text that was never embedded, which makes the
     /// cache lie about what it holds.
+    ///
+    /// NUL bytes are the one thing removed first. [`without_nul`] says why that is not
+    /// the same kind of shortening.
     fn tokenize<S: AsRef<str>>(&self, texts: &[S]) -> anyhow::Result<Vec<Vec<LlamaToken>>> {
         let tokenized: Vec<Vec<LlamaToken>> = texts
             .iter()
             .map(|t| {
                 self.model
-                    .str_to_token(t.as_ref(), AddBos::Always)
+                    .str_to_token(&without_nul(t.as_ref()), AddBos::Always)
                     .map_err(|e| anyhow::anyhow!("tokenizing: {e}"))
             })
             .collect::<anyhow::Result<_>>()?;
@@ -540,6 +543,23 @@ pub(crate) fn normalize(v: &[f32]) -> Vec<f32> {
     v.iter().map(|x| x / norm).collect()
 }
 
+/// The text with its NUL bytes removed, borrowed untouched when it has none.
+///
+/// `llama.cpp` takes C strings, so one NUL anywhere in a text fails the tokenize ("nul
+/// byte found in provided data") and, in `embed`, the whole batch it rode in with. They
+/// come from PDFs whose strings are UTF-16 but were read one byte at a time: every ASCII
+/// character arrives with a zero byte beside it, `\0f\0o\0r\0m` for `form`. Dropping
+/// the zeros gives back the text the page shows, so the vector still describes what the
+/// `chunk_hash` covers, which truncation would not.
+///
+/// `pub(crate)` because [`crate::rerank`] tokenizes the same stored chunks.
+pub(crate) fn without_nul(text: &str) -> std::borrow::Cow<'_, str> {
+    match text.contains('\0') {
+        true => std::borrow::Cow::Owned(text.replace('\0', "")),
+        false => std::borrow::Cow::Borrowed(text),
+    }
+}
+
 /// Cosine similarity of two normalized vectors.
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
@@ -596,6 +616,17 @@ mod tests {
     fn an_auto_batch_never_reaches_zero() {
         assert_eq!(batch_for_budget(0, QWEN3_4B_KV_CELL), 1);
         assert_eq!(batch_for_budget(1 << 20, QWEN3_4B_KV_CELL), 1);
+    }
+
+    /// UTF-16 read as bytes interleaves zeros; llama.cpp refuses any text holding one.
+    #[test]
+    fn nul_bytes_are_dropped_and_clean_text_is_borrowed() {
+        let read_as_bytes: String = "form1[0]".chars().flat_map(|c| ['\0', c]).collect();
+        assert_eq!(without_nul(&read_as_bytes), "form1[0]");
+        assert!(matches!(
+            without_nul("City Hall"),
+            std::borrow::Cow::Borrowed("City Hall")
+        ));
     }
 
     #[test]
