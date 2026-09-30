@@ -117,6 +117,17 @@ END;
 CREATE TRIGGER IF NOT EXISTS chunk_ad AFTER DELETE ON chunk BEGIN
     INSERT INTO chunk_fts(chunk_fts, rowid, text) VALUES('delete', old.id, old.text);
 END;
+
+-- A running count, so `chunk_count` reads one row instead of scanning an index as long
+-- as the corpus. `Index::seed_chunk_count` writes the first value for a store that
+-- predates it; until then these update nothing.
+CREATE TRIGGER IF NOT EXISTS chunk_count_ai AFTER INSERT ON chunk BEGIN
+    UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'chunk_count';
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunk_count_ad AFTER DELETE ON chunk BEGIN
+    UPDATE meta SET value = CAST(value AS INTEGER) - 1 WHERE key = 'chunk_count';
+END;
 "#;
 
 /// Kept apart from [`SCHEMA`] because a migration that replaces `placement` drops these
@@ -149,6 +160,7 @@ impl Index {
         conn.execute_batch(SCHEMA)?;
         let index = Self { conn };
         index.migrate()?;
+        index.seed_chunk_count()?;
         Ok(index)
     }
 
@@ -158,7 +170,33 @@ impl Index {
         conn.execute_batch(SCHEMA)?;
         let index = Self { conn };
         index.migrate()?;
+        index.seed_chunk_count()?;
         Ok(index)
+    }
+
+    /// Writes the first value of the running count, once, for a store that has none.
+    ///
+    /// Checked outside a transaction first because every `open` passes through here,
+    /// `search` included, and taking the write lock each time would queue readers behind
+    /// whatever batch a writer holds. Only a store with no count pays for the `COUNT(*)`,
+    /// inside a write transaction so no insert can land between the count and its row.
+    fn seed_chunk_count(&self) -> anyhow::Result<()> {
+        const SEEDED: &str = "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'chunk_count')";
+        if self.conn.query_row(SEEDED, [], |r| r.get::<_, bool>(0))? {
+            return Ok(());
+        }
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        if !tx.query_row(SEEDED, [], |r| r.get::<_, bool>(0))? {
+            tx.execute(
+                "INSERT INTO meta (key, value) SELECT 'chunk_count', COUNT(*) FROM chunk",
+                [],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Brings an older `placement` table up to [`SCHEMA_VERSION`], keeping its rows.
@@ -565,10 +603,17 @@ impl Index {
     /// arm's coverage — and needs none of the other three figures. Paying six seconds
     /// for a number in a report footer made the corpus size the most expensive part of
     /// asking the corpus a question.
+    ///
+    /// The same held for `COUNT(*)` itself once the corpus grew: the index it reads grows
+    /// with every chunk, and at 21.7M chunks it measured **99 s cold** on NVMe, paid by
+    /// every search whose pages were not already in memory. So the count is a running
+    /// one, kept by the `chunk_count_ai` and `chunk_count_ad` triggers.
     pub fn chunk_count(&self) -> anyhow::Result<usize> {
-        let n: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM chunk", [], |r| r.get(0))?;
+        let n: i64 = self.conn.query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'chunk_count'",
+            [],
+            |r| r.get(0),
+        )?;
         Ok(n as usize)
     }
 
@@ -1170,6 +1215,61 @@ mod tests {
                 .unwrap(),
             "the second address is outstanding, not done"
         );
+    }
+
+    /// A store written before the running count gets one the first time it is opened,
+    /// and the triggers keep it from there.
+    #[test]
+    fn an_index_from_before_the_running_count_is_seeded_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("centinel.db");
+        v1_index_at(&path);
+
+        let idx = Index::open(&path).unwrap();
+        assert_eq!(idx.chunk_count().unwrap(), 1);
+        idx.conn
+            .execute(
+                "INSERT INTO chunk (chunk_hash, text, chars) VALUES ('c2', 'a new notice', 12)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(idx.chunk_count().unwrap(), 2);
+
+        drop(idx);
+        assert_eq!(Index::open(&path).unwrap().chunk_count().unwrap(), 2);
+    }
+
+    /// Both ways chunks leave keep the count exact: one Source at a time, and all of it.
+    #[test]
+    fn the_running_count_follows_chunks_out_of_the_index() {
+        let mut idx = indexed(&[
+            (
+                "https://x/a",
+                "# A\n\nThe stormwater plan for the coming year.",
+            ),
+            (
+                "https://x/b",
+                "# B\n\nA notice of public hearing on rezoning.",
+            ),
+        ]);
+        let exact = |idx: &Index| -> usize {
+            idx.conn
+                .query_row("SELECT COUNT(*) FROM chunk", [], |r| r.get::<_, i64>(0))
+                .unwrap() as usize
+        };
+        assert_eq!(idx.chunk_count().unwrap(), exact(&idx));
+
+        let source = idx
+            .conn
+            .query_row("SELECT source FROM placement LIMIT 1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap();
+        idx.clear_source(&source).unwrap();
+        assert_eq!(idx.chunk_count().unwrap(), exact(&idx));
+
+        idx.clear().unwrap();
+        assert_eq!(idx.chunk_count().unwrap(), 0);
     }
 
     /// Migrating twice is not a second migration.
