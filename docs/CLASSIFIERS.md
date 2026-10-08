@@ -111,9 +111,26 @@ is the summed probability of its exclude options under the current actions.
 The **junk gate** is one choice, `page_kind`. Its options are `record`, `service_info`,
 `navigation`, `calendar_or_directory`, `unreadable`, and `other`. The three junk options
 exclude. The default policy excludes at 0.90 together and holds 0.50 to 0.90 for review.
-The Classifiers view adds it as a preset, beside the **city topics** (nouls that tag laws,
-real estate, budget, policy, and public participation) and the **record type** (a choice
-that tags agenda, minutes, law text, and other kinds of record).
+It is the first of the defaults Centinel ships in the binary. A store that has never saved
+a question set gets all of them, versioned, the first time anything reads the saved
+questions; after that `workspace/questions.jsonl` is the only owner, and the Classifiers
+view's Add menu offers each group back from the server. The groups, one per axis a reader
+filters on:
+
+| Preset | Kind | Tags |
+|---|---|---|
+| junk gate | choice `page_kind` | excludes `navigation`, `calendar_or_directory`, `unreadable` |
+| record type | choice `record_type` | agenda, minutes, law text, budget document, public notice, staff report, plan or study, contract or procurement, application or form, data table |
+| topics | fifteen nouls | laws, real estate, budget, policy, public participation, transportation, water and environment, housing, public safety, taxes and fees, procurement, personnel, courts and records, health and human services, grants and philanthropy |
+| who decided | choice `body` | county commission, city council, advisory board, constitutional officer, department staff, regional agency, nonprofit |
+| decision stage | choice `decision_stage` | proposed, adopted, in effect, reported, informational |
+| who it touches | four nouls | property owners, businesses, residents, the government itself |
+| actionability | two nouls | `has_deadline`, `names_outside_org` |
+
+Only the gate excludes. Every other default tags, because a tag is not a usage decision.
+`data_table` exists for the exports that arrive as CSV and chunk into hundreds of thousands
+of rows: the gate keeps them as records, the type names them, and search can ask for them
+or leave them out.
 
 Run the junk gate alone over every document first. Commit its exclusions. Then run the
 topics over the documents that stay included. A run can use any subset of the saved

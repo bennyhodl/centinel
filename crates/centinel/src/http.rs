@@ -180,6 +180,7 @@ fn router(ctx: Arc<Ctx>) -> Router {
             "/workspace/questions",
             get(workspace_questions).put(workspace_save_questions),
         )
+        .route("/workspace/presets", get(workspace_presets))
         .route("/workspace/runs", get(workspace_runs).post(workspace_run))
         .route("/workspace/runs/{id}", get(workspace_run_detail))
         .route("/workspace/runs/{id}/commit", post(workspace_commit))
@@ -256,6 +257,12 @@ async fn workspace_questions(State(ctx): State<Arc<Ctx>>) -> Response {
         Ok(questions) => Json(json!({ "questions": questions })).into_response(),
         Err(error) => workspace_error(error),
     }
+}
+
+/// The shipped question groups, for the Add menu. The saved set is seeded from these on
+/// first use, so this is what a page offers back rather than what it starts from.
+async fn workspace_presets() -> Response {
+    Json(json!({ "presets": centinel_core::workspace::presets() })).into_response()
 }
 
 async fn workspace_save_questions(
@@ -624,6 +631,49 @@ mod tests {
                 "`{name}` is reachable over HTTP"
             );
         }
+    }
+
+    /// A fresh store answers its first question read with the shipped defaults, and the
+    /// same defaults are offered as presets to add back after an edit.
+    #[tokio::test]
+    async fn a_fresh_workspace_has_the_default_questions_and_offers_them_as_presets() {
+        let (_d, app) = app().await;
+        let questions = body_json(
+            app.clone()
+                .oneshot(
+                    Request::get("/workspace/questions")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let ids: Vec<&str> = questions["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|q| q["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids[0], "page_kind");
+        assert!(
+            ids.contains(&"record_type") && ids.contains(&"body"),
+            "{ids:?}"
+        );
+
+        let presets = body_json(
+            app.oneshot(
+                Request::get("/workspace/presets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        let groups = presets["presets"].as_array().unwrap();
+        assert_eq!(groups[0]["id"], "junk");
+        assert_eq!(groups[0]["questions"][0]["id"], "page_kind");
     }
 
     #[tokio::test]

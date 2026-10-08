@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronDown, ListPlus, Play, Plus, Trash2, X } from 'lucide-react'
-import { api, corpusParams, type ChoiceOption, type CorpusFilters, type Question, type QuestionAction, type RunDetailQuery } from './api'
+import { api, corpusParams, type ChoiceOption, type CorpusFilters, type Preset, type Question, type QuestionAction, type RunDetailQuery } from './api'
 import { Button } from '@/components/ui/button'
 import { Input, Textarea } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { compact, money, number, plural } from './format'
 import { LiveRun, useRunDetail } from './live'
 import { estimateRun, isChoice, missingOther, policyShort, questionProblem, questionSnapshot } from './policy'
-import { presets } from './presets'
 import { ResultsSection } from './results'
 import { ErrorBox, Empty, PageHeader, Segmented, Spinner } from './ui'
 
@@ -44,6 +43,9 @@ const blankChoice = (count: number): Question => ({
 export function Classify() {
   const client = useQueryClient()
   const saved = useQuery({ queryKey: ['questions'], queryFn: api.questions })
+  // The shipped defaults come from the server, which is also what seeded the saved set,
+  // so the page never carries a second copy of the questions.
+  const shipped = useQuery({ queryKey: ['presets'], queryFn: api.presets, staleTime: Infinity })
   const [questions, setQuestions] = useState<LocalQuestion[]>([])
   const [savedQuestions, setSavedQuestions] = useState<Question[] | null>(null)
   const [openKey, setOpenKey] = useState('')
@@ -61,7 +63,9 @@ export function Classify() {
 
   useEffect(() => {
     if (!loaded && saved.data) {
-      setQuestions(withKeys(saved.data.questions.length ? saved.data.questions : presets[0].questions))
+      // The server seeds a new store with the defaults, so an empty saved set is one the
+      // operator emptied on purpose; the Add menu offers the presets back.
+      setQuestions(withKeys(saved.data.questions))
       setSavedQuestions(saved.data.questions)
       setLoaded(true)
     }
@@ -141,7 +145,7 @@ export function Classify() {
       <section className="panel question-list">
         <div className="list-head">
           <div><h2>Questions</h2><p>{number(checked.length)} of {plural(questions.length, 'question')} will run. Click a question to edit it.</p></div>
-          <AddMenu onAdd={add} count={questions.length} existing={questions.map(question => question.id)} />
+          <AddMenu onAdd={add} count={questions.length} existing={questions.map(question => question.id)} presets={shipped.data?.presets || []} />
           <Button variant="secondary" size="sm" disabled={save.isPending || !dirty || problems.length > 0} onClick={() => save.mutate()}>{save.isPending ? <Spinner /> : <Check />}{dirty ? 'Save' : 'Saved'}</Button>
         </div>
         {questions.map(question => <QuestionRow
@@ -154,6 +158,7 @@ export function Classify() {
           remove={() => setQuestions(current => current.filter(item => item.localKey !== question.localKey))}
         />)}
         {!questions.length && <Empty>Add the junk gate or another preset to start.</Empty>}
+        {shipped.error && <ErrorBox error={shipped.error} />}
         {saved.error && <ErrorBox error={saved.error} />}{save.error && <ErrorBox error={save.error} />}
       </section>
 
@@ -209,7 +214,7 @@ function PreviewResults({ id }: { id: string }) {
   return <section className="panel preview-panel"><ResultsSection run={detail.data} questions={questions} view={view} setView={setView} loading={detail.isFetching} /></section>
 }
 
-function AddMenu({ onAdd, count, existing }: { onAdd: (questions: Question[]) => void; count: number; existing: string[] }) {
+function AddMenu({ onAdd, count, existing, presets }: { onAdd: (questions: Question[]) => void; count: number; existing: string[]; presets: Preset[] }) {
   const [open, setOpen] = useState(false)
   const pick = (questions: Question[]) => { onAdd(questions); setOpen(false) }
   return <div className="add-menu" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setOpen(false) }}>

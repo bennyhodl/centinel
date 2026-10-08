@@ -19,6 +19,9 @@ use serde_json::{Value, json};
 use crate::index::to_fts_query;
 use crate::store::Store;
 
+mod defaults;
+pub use defaults::{Preset, default_questions, presets};
+
 static FILE_LOCK: Mutex<()> = Mutex::new(());
 static ACTIVE_RUNS: LazyLock<Mutex<std::collections::HashSet<String>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
@@ -879,7 +882,20 @@ impl<'a> Workspace<'a> {
         Self { store }
     }
 
+    /// The saved question set.
+    ///
+    /// A store that has never saved one gets the shipped defaults, saved and versioned
+    /// like any other set, so a run can use them at once and the file is the one owner of
+    /// the questions from here on. A set that was saved empty stays empty: that was a
+    /// decision, and the defaults are offered back as presets, never pushed.
     pub fn questions(&self) -> anyhow::Result<Vec<Question>> {
+        if !self.store.workspace_questions_path().exists() {
+            return self.save_questions(default_questions());
+        }
+        self.saved_questions()
+    }
+
+    fn saved_questions(&self) -> anyhow::Result<Vec<Question>> {
         Ok(
             read_json_lines::<Vec<Question>>(&self.store.workspace_questions_path())?
                 .pop()
@@ -892,7 +908,7 @@ impl<'a> Workspace<'a> {
     pub fn save_questions(&self, mut next: Vec<Question>) -> anyhow::Result<Vec<Question>> {
         validate_questions(&next)?;
         let current: HashMap<String, Question> = self
-            .questions()?
+            .saved_questions()?
             .into_iter()
             .map(|q| (q.id.clone(), q))
             .collect();
@@ -2927,6 +2943,48 @@ mod tests {
         policy.threshold = 0.6;
         policy.action = QuestionAction::Tag;
         assert_eq!(ws.save_questions(vec![policy]).unwrap()[0].version, 3);
+    }
+
+    /// The first read of a fresh store writes the defaults as version 1 and reads them
+    /// back; the second read appends nothing.
+    #[tokio::test]
+    async fn a_fresh_store_is_seeded_with_the_defaults_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let ws = Workspace::new(&store);
+
+        let seeded = ws.questions().unwrap();
+        let expected: Vec<String> = default_questions().into_iter().map(|q| q.id).collect();
+        assert_eq!(
+            seeded.iter().map(|q| q.id.clone()).collect::<Vec<_>>(),
+            expected
+        );
+        assert!(seeded.iter().all(|q| q.version == 1), "{seeded:?}");
+
+        let again = ws.questions().unwrap();
+        assert_eq!(again, seeded);
+        let lines = fs::read_to_string(store.workspace_questions_path()).unwrap();
+        assert_eq!(
+            lines.lines().count(),
+            1,
+            "the seed is one save, not one per read"
+        );
+    }
+
+    /// An operator who saved an empty set, or their own set, is never handed the defaults
+    /// again by a read.
+    #[tokio::test]
+    async fn a_saved_set_is_not_overwritten_by_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let ws = Workspace::new(&store);
+
+        ws.save_questions(vec![q("mine", "My question", 0)])
+            .unwrap();
+        assert_eq!(ws.questions().unwrap()[0].id, "mine");
+
+        ws.save_questions(Vec::new()).unwrap();
+        assert!(ws.questions().unwrap().is_empty());
     }
 
     #[test]

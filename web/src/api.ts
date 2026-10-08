@@ -59,6 +59,14 @@ export type Question = {
   action: QuestionAction
 }
 
+/** A group of shipped default questions, as the server offers them for adding. */
+export type Preset = {
+  id: string
+  label: string
+  detail: string
+  questions: Question[]
+}
+
 /** The Corpus filter a run resolves on the server, plus how many top matches to take. */
 export type RunSelection = {
   search: string
@@ -258,6 +266,8 @@ export const api = {
     method: 'PUT',
     body: JSON.stringify({ questions }),
   }),
+  /** The shipped defaults, grouped. The server seeds a new store's saved set from these. */
+  presets: () => request<{ presets: Preset[] }>('/workspace/presets').then(value => withArray(value, 'presets', '/workspace/presets')),
   runs: (page = 1, pageSize = 25) => {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
     const path = `/workspace/runs?${params}`
