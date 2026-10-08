@@ -176,7 +176,12 @@ pub struct SearchReport {
     pub method: String,
     pub results: Vec<SearchResult>,
     pub total_chunks_indexed: usize,
-    /// How many of those chunks have a vector.
+    /// Rows in the vector table.
+    ///
+    /// `embed` keeps the table equal to the indexed chunks it has embedded — it prunes
+    /// rows the index no longer has before it writes — so this is the count of chunks
+    /// with a vector, except between a rebuilt index and the next `embed`, when it can
+    /// exceed `total_chunks_indexed`. The rendering says so in either direction.
     ///
     /// Beside the chunk count because RRF cannot tell a small pool from a large one, so
     /// the reader has to. See this module's header.
@@ -221,7 +226,10 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
     // reordering a set larger than the one returned (§6.3).
     let (mut hits, total_chunks_indexed) = retrieve(&index_path, &args, vector)?;
 
-    let no_rerank = rerank_arm(ctx, &args.query, &mut hits).await.err();
+    let no_rerank = match crate::models::models_dir() {
+        Ok(models) => rerank_arm(ctx, &models, &args.query, &mut hits).await.err(),
+        Err(e) => Some(format!("{e:#}")),
+    };
     hits.truncate(args.limit);
 
     let method = method(no_vectors.is_none(), no_rerank.is_none());
@@ -345,13 +353,29 @@ fn retrieve(
 /// The RRF order is left untouched on failure, which is the honest fallback: it is the
 /// best ordering available without the model, and [`SearchReport::method`] will not
 /// claim it was reranked.
-async fn rerank_arm(ctx: &Ctx, query: &str, hits: &mut [Hit]) -> Result<(), String> {
+///
+/// `models` is where the weights live — passed in so a test can point it at an empty
+/// directory, or at files of the right size and nothing else.
+async fn rerank_arm(
+    ctx: &Ctx,
+    models: &std::path::Path,
+    query: &str,
+    hits: &mut [Hit],
+) -> Result<(), String> {
+    // Asked before the empty check, and asked of the disk rather than the cache.
+    // Whether the reranker is installed is a fact about the machine, not about this
+    // query's hits: a search that found nothing has to say the reranker is missing too,
+    // or the next search finds something and is worse for it without a word. Presence
+    // only — the load itself waits for a hit to score.
+    crate::models::resolve(RERANKER, crate::models::ModelRole::Reranker, None, models)
+        .map_err(|e| e.to_string())?;
     if hits.is_empty() {
         return Ok(());
     }
 
     let query = query.to_string();
     let documents: Vec<String> = hits.iter().map(|h| h.text.clone()).collect();
+    let root = models.to_path_buf();
     // Weights load and inference are both blocking, and both are seconds.
     let cache = ctx.query_reranker.clone();
     let scores = tokio::task::spawn_blocking(move || {
@@ -359,7 +383,6 @@ async fn rerank_arm(ctx: &Ctx, query: &str, hits: &mut [Hit]) -> Result<(), Stri
             .lock()
             .map_err(|_| anyhow::anyhow!("reranker lock poisoned"))?;
         if cached.is_none() {
-            let root = crate::models::models_dir()?;
             *cached = Some(crate::rerank::Reranker::load(&root, RERANKER, None)?);
         }
         cached
@@ -527,8 +550,8 @@ fn fuse(
             }),
             None => {
                 // The two stores drift legitimately: a rebuilt index, or `clear_source`,
-                // leaves vectors for chunks SQLite no longer has, and `embed` never
-                // removes them. So an unresolvable hash is dropped rather than raised —
+                // leaves vectors for chunks SQLite no longer has until the next `embed`
+                // prunes them. So an unresolvable hash is dropped rather than raised —
                 // one stale vector must not fail a whole query — and it is the same rule
                 // the keyword path applies to a hit with no placement, for the same
                 // reason: a result nothing can cite is worse than no result.
@@ -577,29 +600,45 @@ impl Render for SearchReport {
         );
         p.title(&self.query, &aside)?;
 
-        // How much of the corpus the vector arm could see. Printed whenever it is not
-        // all of it, because RRF gives a rank from a thin pool the weight of a rank from
-        // a whole one — so a reader who is not told will read ten confident results as
-        // ten results from the corpus.
-        if self.no_vectors.is_none() && self.vectors_indexed < self.total_chunks_indexed {
-            let share = if self.total_chunks_indexed == 0 {
-                0.0
-            } else {
-                100.0 * self.vectors_indexed as f64 / self.total_chunks_indexed as f64
-            };
-            // `<0.1%` rather than `0.0%`. A barely-started corpus is the case this line
-            // exists for, and rounding its share to zero reads as "no vectors at all" —
-            // which is a different fact, and one `no_vectors` already carries.
-            let share = match share {
-                s if s > 0.0 && s < 0.1 => "<0.1".to_string(),
-                s => format!("{s:.1}"),
-            };
-            let text = format!(
-                "the vector arm saw {} of {} chunks ({share}%) — run `centinel embed` for the rest",
-                render::count(self.vectors_indexed as u64),
-                render::count(self.total_chunks_indexed as u64),
-            );
-            p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+        // How much of the corpus the vector arm could see. Printed whenever the two
+        // counts disagree, because RRF gives a rank from a thin pool the weight of a rank
+        // from a whole one — so a reader who is not told will read ten confident results
+        // as ten results from the corpus.
+        if self.no_vectors.is_none() {
+            match self.vectors_indexed.cmp(&self.total_chunks_indexed) {
+                std::cmp::Ordering::Less => {
+                    let share = if self.total_chunks_indexed == 0 {
+                        0.0
+                    } else {
+                        100.0 * self.vectors_indexed as f64 / self.total_chunks_indexed as f64
+                    };
+                    // `<0.1%` rather than `0.0%`. A barely-started corpus is the case this
+                    // line exists for, and rounding its share to zero reads as "no vectors
+                    // at all" — which is a different fact, and one `no_vectors` carries.
+                    let share = match share {
+                        s if s > 0.0 && s < 0.1 => "<0.1".to_string(),
+                        s => format!("{s:.1}"),
+                    };
+                    let text = format!(
+                        "the vector arm saw {} of {} chunks ({share}%) — run `centinel embed` for the rest",
+                        render::count(self.vectors_indexed as u64),
+                        render::count(self.total_chunks_indexed as u64),
+                    );
+                    p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+                }
+                // More vectors than chunks: a rebuilt index or a cleared source, and the
+                // rows it left behind have not been pruned yet. The count alone would
+                // read as a corpus more than fully embedded.
+                std::cmp::Ordering::Greater => {
+                    let text = format!(
+                        "the vector table holds {} vectors for {} chunks — run `centinel embed` to reconcile",
+                        render::count(self.vectors_indexed as u64),
+                        render::count(self.total_chunks_indexed as u64),
+                    );
+                    p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+                }
+                std::cmp::Ordering::Equal => {}
+            }
         }
         if let Some(reason) = &self.no_vectors {
             let text = format!("keyword search only — {reason}");
@@ -965,6 +1004,26 @@ mod tests {
         assert!(out.contains("110"), "the count is still exact: {out}");
     }
 
+    /// The other direction. A rebuilt index or a cleared source leaves the table holding
+    /// more vectors than there are chunks until the next `embed` prunes them — measured
+    /// at 1,353,933 rows for 288,785 chunks — and a bare count would read as a corpus
+    /// more than fully embedded.
+    #[test]
+    fn a_table_with_more_vectors_than_chunks_says_so() {
+        let mut r = report(vec![result(Vec::new())]);
+        r.vectors_indexed = 1_353_933;
+        r.total_chunks_indexed = 288_785;
+
+        let out = render_to_string(&r);
+        assert!(out.contains("1,353,933"), "{out}");
+        assert!(out.contains("288,785"), "{out}");
+        assert!(out.contains("centinel embed"), "names the fix: {out}");
+        assert!(
+            !out.contains("the vector arm saw"),
+            "stale rows are not a thin pool: {out}"
+        );
+    }
+
     /// A fully embedded corpus has nothing to warn about, and a warning printed every
     /// time is a warning nobody reads.
     #[test]
@@ -1062,14 +1121,47 @@ mod tests {
         assert_eq!(hits[0].score, 0.9);
     }
 
-    /// Nothing to reorder is not a failure — an empty result set must not report the
-    /// reranker as missing.
+    /// Whether the reranker exists is a fact about the machine, not about the hits. A
+    /// search that found nothing used to answer `→rerank` on a machine with no reranker,
+    /// because the empty check came before the weights were looked for.
     #[tokio::test]
-    async fn reranking_nothing_is_not_a_failure() {
+    async fn an_empty_result_still_says_the_reranker_is_missing() {
+        let store = tempfile::tempdir().unwrap();
+        let models = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(crate::store::Store::open(store.path()).await.unwrap());
         let mut none: Vec<Hit> = Vec::new();
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = Ctx::new(crate::store::Store::open(dir.path()).await.unwrap());
-        assert!(rerank_arm(&ctx, "anything", &mut none).await.is_ok());
+
+        let err = rerank_arm(&ctx, models.path(), "anything", &mut none)
+            .await
+            .unwrap_err();
+        assert!(err.contains(RERANKER), "{err}");
+        assert!(err.contains("centinel models pull"), "names the fix: {err}");
+    }
+
+    /// Nothing to reorder is not a failure, and it must not cost a load either. The
+    /// weights here are files of the pinned size and nothing else, so loading them would
+    /// fail — an `Ok` proves the empty case looked for them and went no further.
+    #[tokio::test]
+    async fn reranking_nothing_wants_the_weights_present_and_never_loads_them() {
+        let store = tempfile::tempdir().unwrap();
+        let models = tempfile::tempdir().unwrap();
+        let spec = crate::models::find(RERANKER).unwrap();
+        let dir = spec.dir(models.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in spec.files_for(spec.variant(None).unwrap()) {
+            std::fs::File::create(dir.join(file.path))
+                .unwrap()
+                .set_len(file.size)
+                .unwrap();
+        }
+        let ctx = Ctx::new(crate::store::Store::open(store.path()).await.unwrap());
+        let mut none: Vec<Hit> = Vec::new();
+
+        assert!(
+            rerank_arm(&ctx, models.path(), "anything", &mut none)
+                .await
+                .is_ok()
+        );
     }
 
     // ── the whole pipeline, on real weights ───────────────────────────────────────

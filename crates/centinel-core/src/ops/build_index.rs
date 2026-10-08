@@ -370,8 +370,8 @@ pub async fn index(
 /// A `chunk_hash` is the hash of the chunk's **text**, and the geometry decides the text.
 /// Re-chunking at a different size therefore produces an entirely different set of
 /// hashes: the old chunks stay in the index, the new ones join them, and `embed` — whose
-/// work list is "indexed hashes minus cached hashes" — re-embeds the whole corpus while
-/// the old vectors sit in an append-only cache file that nothing will ever read again.
+/// work list is "indexed hashes minus stored hashes" — re-embeds the whole corpus while
+/// the old vectors sit in the table beside the new, claimed by chunks nothing searches.
 ///
 /// None of that fails. It is hours of GPU time and a doubled index, and the only sign is
 /// a number the operator was not watching. So it is refused, and the refusal names the

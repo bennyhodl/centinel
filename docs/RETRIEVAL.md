@@ -200,7 +200,16 @@ index chunk hashes  −  stored chunk hashes
 Kill it at chunk 40,000 and re-run; it starts at 40,001. Lance commits a version per
 append, so what landed before the kill is there.
 
-`--dry-run` creates no table. A plan must leave nothing behind.
+The subtraction runs the other way too. Before a run embeds anything it deletes the rows
+whose hash the index no longer has — what a rebuilt index or a `--rebuild --source`
+leaves behind — so one stage owns the table in both directions and a stored vector has
+one meaning: a row whose hash is in the index. The report says how many were `stale` and
+how many it `pruned`. An empty index prunes nothing; it is an index that has not been
+built, not a verdict on the vectors. After the run the table is compacted and versions
+older than ten minutes are dropped, which is what keeps a query from reading one fragment
+per batch ever appended (one store reached 20,000 fragments and 16 GiB of manifests).
+
+`--dry-run` creates no table and prunes nothing. A plan must leave nothing behind.
 
 ### What it costs
 

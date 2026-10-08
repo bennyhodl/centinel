@@ -23,6 +23,21 @@
 //! codebase most often. What it bought was one property — append-only bytes the query
 //! engine never rewrites — which is not worth ~4 GiB and a stage.
 //!
+//! ## What a stored vector means
+//!
+//! A row whose `chunk_hash` is in the index. That is the one definition, and `embed` —
+//! the only writer — keeps the table to it in both directions: [`VectorTable::append`]
+//! adds what the index has and the table lacks, [`VectorTable::retain`] drops what the
+//! table has and the index lacks. A rebuilt index or a cleared source therefore leaves
+//! the table stale only until the next `embed`, and `search` says so when the two counts
+//! disagree. Nothing else tracks orphans, and [`VectorTable::len`] is the count of
+//! vectors that count.
+//!
+//! Each append is a Lance commit — a fragment of that batch's rows and a manifest listing
+//! every fragment so far — and a query reads every fragment. Nothing in Lance removes
+//! either on its own; on one 1.3-million-vector corpus that was 20,000 fragments, 20,000
+//! manifests and 16 GiB of them. [`VectorTable::maintain`] is what consolidates them.
+//!
 //! ## The guard
 //!
 //! A query vector and the vectors it searches must come from the same model (SPEC §6.2).
@@ -36,6 +51,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::TryStreamExt;
 use lancedb::arrow::arrow_array::{
@@ -58,6 +74,29 @@ const VECTOR_COLUMN: &str = "vector";
 const MODEL_KEY: &str = "centinel.model_id";
 /// Lance's name for the column a vector query scores into.
 const DISTANCE_COLUMN: &str = "_distance";
+
+/// How long a superseded table version stays on disk after [`VectorTable::maintain`].
+///
+/// Long enough for a `search` that opened the table a moment ago to finish reading the
+/// files it opened — `serve` opens the table per query, and a query is seconds. Short
+/// enough that the manifests one run leaves behind are gone by the next. The table is
+/// derived, so old versions buy no rollback worth their size.
+const VERSION_RETENTION: Duration = Duration::from_secs(10 * 60);
+
+/// Below this many rows an ANN index is not worth its partition loss; exact search is
+/// fast enough and loses nothing.
+const ANN_MIN_ROWS: usize = 4096;
+
+/// What [`VectorTable::maintain`] did to the files behind the table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Maintenance {
+    /// Per-append fragments rewritten into fewer, larger ones.
+    pub fragments_removed: usize,
+    pub fragments_added: usize,
+    /// Superseded versions whose manifests and data files were deleted.
+    pub versions_removed: u64,
+    pub bytes_removed: u64,
+}
 
 /// A LanceDB table of `(chunk_hash, vector)` for one model.
 ///
@@ -239,21 +278,65 @@ impl VectorTable {
         Ok(())
     }
 
-    /// Consolidate append files and update existing indexes after ingestion.
-    /// Creating an ANN index requires explicit opt-in through `build_index`.
-    /// Small corpora retain exact search. IVF_FLAT keeps full precision vectors;
-    /// only partition selection is approximate. Never prune historical versions.
-    pub async fn optimize_for_search(&self, build_index: bool) -> anyhow::Result<()> {
-        let rows = self.len().await?;
-        if rows < 4096 {
-            return Ok(());
+    /// Deletes every row whose hash is not in `keep`, and says how many that was.
+    ///
+    /// The other half of [`Self::append`]: that adds what the index has and the table
+    /// lacks, this removes what the table has and the index lacks. One commit, as a join
+    /// against `keep`, rather than a predicate spelling out a million hashes — on the
+    /// corpus that motivated this, the predicate form could not even be parsed.
+    ///
+    /// An empty `keep` removes nothing. Zero chunks is what an index looks like before
+    /// `centinel index` has run, not a statement that every vector is stale, and vectors
+    /// are the one derived artifact that costs hours or money to replace.
+    pub async fn retain(&self, keep: &HashSet<String>) -> anyhow::Result<usize> {
+        if keep.is_empty() {
+            return Ok(0);
         }
-        self.table
+
+        // Only the key column: the merge neither inserts nor updates, so there is no
+        // vector to supply, and sending one would mean sending a width.
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            HASH_COLUMN,
+            DataType::Utf8,
+            false,
+        )]));
+        let hashes = StringArray::from_iter_values(keep.iter().map(String::as_str));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(hashes)])?;
+        let reader = Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema))
+            as Box<dyn RecordBatchReader + Send>;
+
+        let mut merge = self.table.merge_insert(&[HASH_COLUMN]);
+        merge.when_not_matched_by_source_delete(None);
+        let result = merge.execute(reader).await?;
+        Ok(result.num_deleted_rows as usize)
+    }
+
+    /// Consolidates what [`Self::append`] and [`Self::retain`] leave behind.
+    ///
+    /// Compaction rewrites the per-append fragments into few and writes deleted rows out
+    /// for good; then every version older than `VERSION_RETENTION` (ten minutes) is
+    /// dropped with its files. Creating an ANN index stays opt-in through `build_index` — small corpora
+    /// keep exact search, and IVF_FLAT keeps full-precision vectors, so only partition
+    /// selection is approximate. An index that exists is brought up to date either way.
+    pub async fn maintain(&self, build_index: bool) -> anyhow::Result<Maintenance> {
+        self.maintain_keeping(build_index, VERSION_RETENTION).await
+    }
+
+    /// [`Self::maintain`] with the retention spelled out, so a test can watch versions go.
+    async fn maintain_keeping(
+        &self,
+        build_index: bool,
+        retention: Duration,
+    ) -> anyhow::Result<Maintenance> {
+        let compacted = self
+            .table
             .optimize(OptimizeAction::Compact {
                 options: Default::default(),
                 remap_options: None,
             })
             .await?;
+
+        let rows = self.len().await?;
         let indexed = self
             .table
             .list_indices()
@@ -264,7 +347,7 @@ impl VectorTable {
             self.table
                 .optimize(OptimizeAction::Index(Default::default()))
                 .await?;
-        } else if build_index {
+        } else if build_index && rows >= ANN_MIN_ROWS {
             self.table
                 .create_index(
                     &[VECTOR_COLUMN],
@@ -277,7 +360,35 @@ impl VectorTable {
                 .execute()
                 .await?;
         }
-        Ok(())
+
+        // Last, so the versions the compaction and the index just superseded are among
+        // what goes.
+        // Lance measures the retention in chrono's `Duration`, which it re-exports; the
+        // conversion fails only for a span longer than chrono can count, which ten
+        // minutes is not.
+        let pruned = self
+            .table
+            .optimize(OptimizeAction::Prune {
+                older_than: Some(lancedb::table::Duration::from_std(retention)?),
+                delete_unverified: None,
+                error_if_tagged_old_versions: None,
+            })
+            .await?;
+
+        let (fragments_removed, fragments_added) = compacted
+            .compaction
+            .map(|c| (c.fragments_removed, c.fragments_added))
+            .unwrap_or_default();
+        let (versions_removed, bytes_removed) = pruned
+            .prune
+            .map(|p| (p.old_versions, p.bytes_removed))
+            .unwrap_or_default();
+        Ok(Maintenance {
+            fragments_removed,
+            fragments_added,
+            versions_removed,
+            bytes_removed,
+        })
     }
 
     /// The `limit` nearest chunks to `query`, best first.
@@ -431,6 +542,20 @@ mod tests {
         VectorTable::open(dir, "test-model", DIMS).await.unwrap()
     }
 
+    /// `.manifest` files under the table — one per version Lance still holds.
+    fn manifests(dir: &Path) -> usize {
+        std::fs::read_dir(dir.join("vectors.lance").join("_versions"))
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|x| x == "manifest")
+            })
+            .count()
+    }
+
     #[tokio::test]
     async fn maintenance_indexes_large_tables_and_preserves_appended_rows() {
         let dir = tempfile::tempdir().unwrap();
@@ -445,19 +570,19 @@ mod tests {
             .collect();
         t.append(&entries[..2048]).await.unwrap();
         t.append(&entries[2048..]).await.unwrap();
-        t.optimize_for_search(false).await.unwrap();
+        t.maintain(false).await.unwrap();
         assert!(
             t.table.list_indices().await.unwrap().is_empty(),
             "ANN must be opt-in"
         );
-        t.optimize_for_search(true).await.unwrap();
+        t.maintain(true).await.unwrap();
         assert_eq!(t.table.list_indices().await.unwrap().len(), 1);
         let query = unit([-1.0, 0.0, 0.0, 0.0]);
         let added = "f".repeat(64);
         t.append(&[(added.clone(), query.clone())]).await.unwrap();
         // Lance must scan the unindexed tail as well as searching the ANN index.
         assert_eq!(t.nearest(&query, 1).await.unwrap()[0].0, added);
-        t.optimize_for_search(true).await.unwrap();
+        t.maintain(true).await.unwrap();
         let reopened = table(dir.path()).await;
         assert_eq!(reopened.len().await.unwrap(), 4097);
         assert_eq!(reopened.hashes().await.unwrap().len(), 4097);
@@ -480,11 +605,101 @@ mod tests {
         t.append(&[(hash(1), unit([1.0, 0.0, 0.0, 0.0]))])
             .await
             .unwrap();
-        t.optimize_for_search(true).await.unwrap();
+        t.maintain(true).await.unwrap();
         assert!(t.table.list_indices().await.unwrap().is_empty());
         assert_eq!(
             t.nearest(&[1.0, 0.0, 0.0, 0.0], 1).await.unwrap()[0].0,
             hash(1)
+        );
+    }
+
+    /// The reconciling half of `embed`: a rebuilt index or a cleared source leaves rows
+    /// no chunk claims, and they must go without touching the rows one does.
+    #[tokio::test]
+    async fn retain_keeps_exactly_the_hashes_it_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = table(dir.path()).await;
+        t.append(&[
+            (hash(1), unit([1.0, 0.0, 0.0, 0.0])),
+            (hash(2), unit([0.0, 1.0, 0.0, 0.0])),
+            (hash(3), unit([0.0, 0.0, 1.0, 0.0])),
+        ])
+        .await
+        .unwrap();
+
+        let keep = HashSet::from([hash(1), hash(3), hash(9)]);
+        assert_eq!(
+            t.retain(&keep).await.unwrap(),
+            1,
+            "only the unclaimed row goes"
+        );
+        assert_eq!(t.hashes().await.unwrap(), HashSet::from([hash(1), hash(3)]));
+        // A hash in `keep` that the table never had is not an error and not a row.
+        assert_eq!(t.len().await.unwrap(), 2);
+        // Nearer to the deleted row than to either survivor, and nearer to `3` than to
+        // `1` so the answer is not a tie between the survivors.
+        assert_eq!(
+            t.nearest(&unit([0.0, 0.8, 0.6, 0.0]), 1).await.unwrap()[0].0,
+            hash(3),
+            "the deleted row no longer answers queries"
+        );
+    }
+
+    /// An index with no chunks is an index that has not been built, and that must not
+    /// read as "delete every vector" — the one derived artifact that costs money.
+    #[tokio::test]
+    async fn retain_of_nothing_removes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = table(dir.path()).await;
+        t.append(&[(hash(1), unit([1.0, 0.0, 0.0, 0.0]))])
+            .await
+            .unwrap();
+        assert_eq!(t.retain(&HashSet::new()).await.unwrap(), 0);
+        assert_eq!(t.len().await.unwrap(), 1);
+    }
+
+    /// Every append is a version with its own manifest, and Lance never drops one on its
+    /// own — 20,000 of them on the store that motivated this. Maintenance folds the
+    /// fragments and removes the versions it superseded, and what is stored survives it.
+    #[tokio::test]
+    async fn maintenance_folds_appends_and_drops_superseded_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = table(dir.path()).await;
+        for i in 1..=5u8 {
+            t.append(&[(hash(i), unit([i as f32, 1.0, 0.0, 0.0]))])
+                .await
+                .unwrap();
+        }
+        t.retain(&HashSet::from([hash(1), hash(2), hash(3), hash(4)]))
+            .await
+            .unwrap();
+        let before = manifests(dir.path());
+        assert!(
+            before >= 6,
+            "one version per append and one per delete: {before}"
+        );
+
+        let done = t.maintain_keeping(false, Duration::ZERO).await.unwrap();
+
+        // Four, not five: deleting the only row of a fragment empties it, and Lance drops
+        // an empty fragment with the delete rather than leaving it for compaction.
+        assert!(done.fragments_removed >= 4, "{done:?}");
+        assert_eq!(done.fragments_added, 1, "{done:?}");
+        assert!(done.versions_removed >= 5, "{done:?}");
+        assert_eq!(manifests(dir.path()), 1, "only the current version remains");
+        let reopened = table(dir.path()).await;
+        assert_eq!(
+            reopened.hashes().await.unwrap(),
+            HashSet::from([hash(1), hash(2), hash(3), hash(4)]),
+            "the deleted row stays deleted and the rest stay"
+        );
+        assert_eq!(
+            reopened
+                .nearest(&unit([4.0, 1.0, 0.0, 0.0]), 1)
+                .await
+                .unwrap()[0]
+                .0,
+            hash(4)
         );
     }
 

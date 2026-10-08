@@ -262,10 +262,10 @@ impl Index {
     ///
     /// A `chunk_hash` is the hash of the chunk's *text*, and the text is decided by the
     /// geometry — so re-chunking at a different size produces a wholly different set of
-    /// hashes. Nothing in the index or the vector table can tell the two sets apart, and
-    /// both are append-only, so mixing them leaves the old chunks in place and re-embeds
-    /// the entire corpus. Recording the geometry is what makes that a question the
-    /// caller gets asked instead of a bill they get later.
+    /// hashes. Nothing in the index or the vector table can tell the two sets apart, so
+    /// mixing them leaves the old chunks in place and re-embeds the entire corpus.
+    /// Recording the geometry is what makes that a question the caller gets asked
+    /// instead of a bill they get later.
     pub fn geometry(&self) -> anyhow::Result<Option<(usize, usize)>> {
         let read = |key: &str| -> anyhow::Result<Option<usize>> {
             let v: Option<String> = self

@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let exact_time = started.elapsed();
     let started = Instant::now();
-    table.optimize_for_search(true).await?;
+    table.maintain(true).await?;
     let build_time = started.elapsed();
     table.nearest(&queries[0], 10).await?;
     let started = Instant::now();
