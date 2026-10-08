@@ -57,11 +57,12 @@ const RRF_K: f64 = 60.0;
 
 /// How much deeper the vector arm reaches when `--source` is set.
 ///
-/// Lance carries no source column, so the filter is applied after retrieval and a
-/// plain top-100 could come back nearly empty on a corpus one source dominates. This
-/// over-fetches instead. It can still under-fill, which is a known limit of the
-/// post-filter rather than a bug in it.
-const SOURCE_OVERFETCH: usize = 5;
+/// Lance carries no source or tag column, and knows nothing of exclusions, so every filter
+/// is applied after retrieval and a plain top-100 could come back nearly empty on a corpus
+/// one source dominates. This over-fetches instead, always: exclusion is a filter nobody
+/// can turn off. It can still under-fill, which is a known limit of the post-filter rather
+/// than a bug in it.
+const FILTER_OVERFETCH: usize = 5;
 
 /// How many fused candidates reach the reranker (SPEC §6: "top 30–40").
 ///
@@ -90,6 +91,17 @@ pub struct SearchArgs {
     #[arg(long)]
     #[serde(default)]
     pub source: Option<String>,
+
+    /// Only documents carrying this tag. Repeatable; every one must be present. A tag is
+    /// a yes-or-no question's id, or `choice:option` — `centinel questions` lists them.
+    #[arg(long = "tag", value_name = "TAG")]
+    #[serde(default)]
+    pub tags: Vec<String>,
+
+    /// Leave out documents carrying this tag. Repeatable.
+    #[arg(long = "not-tag", value_name = "TAG")]
+    #[serde(default)]
+    pub not_tags: Vec<String>,
 
     /// Characters of matched passage to return. 0 returns the whole chunk.
     #[arg(long, default_value_t = 400)]
@@ -162,6 +174,11 @@ pub struct SearchResult {
     /// How many there are in total, which `also_at` may not list in full.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub also_at_total: usize,
+    /// What the classifier workspace's policy says the cited document is: a yes-or-no
+    /// question's id, or `choice:option`. The same words `--tag` takes, so a reader can
+    /// turn what they see on one result into the filter for the next search.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -205,6 +222,21 @@ pub struct SearchReport {
 /// Search the corpus for a passage.
 #[op(group = "corpus")]
 pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport> {
+    // A tag nobody defined is a typo, and a typo that returned nothing would read as a
+    // corpus with nothing in it. Checked against the saved questions as they are, before
+    // anything is opened or loaded.
+    if !args.tags.is_empty() || !args.not_tags.is_empty() {
+        let saved = crate::workspace::saved_questions_at(&ctx.store.workspace_questions_path())?;
+        let known = crate::workspace::known_tags(&saved);
+        for tag in args.tags.iter().chain(&args.not_tags) {
+            anyhow::ensure!(
+                known.contains(tag),
+                "no saved question defines the tag `{tag}` — a tag is a yes-or-no \
+                 question's id or `choice:option`; `centinel questions` lists them"
+            );
+        }
+    }
+
     // Checked before the vector arm so a missing index fails immediately rather than
     // after a multi-gigabyte model load. This is a path, not a connection.
     let index_path = ctx.store.require_index()?;
@@ -280,6 +312,7 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
                 char_end: primary.char_end,
                 also_at,
                 also_at_total,
+                tags: hit.tags,
             })
         })
         .collect();
@@ -311,8 +344,8 @@ fn method(vectors: bool, reranked: bool) -> String {
     parts
 }
 
-/// Everything that touches SQLite: the keyword arm, the vector arm's source filter, the
-/// fusion, and the corpus size.
+/// Everything that touches SQLite: the keyword arm, the vector arm's post-filter, the
+/// fusion, the tags, and the corpus size.
 ///
 /// One function so that `Index` — which is not `Send` — is created and dropped without
 /// an `await` anywhere near it.
@@ -322,23 +355,36 @@ fn retrieve(
     mut vector: Vec<(String, f32)>,
 ) -> anyhow::Result<(Vec<Hit>, usize)> {
     let index = Index::open(index_path)?;
+    // One filter for both arms — the keyword arm applies it in SQL, the vector arm
+    // after retrieval — so the two never disagree about which documents are in play.
+    let filter = crate::index::Filter {
+        source: args.source.as_deref(),
+        tags: &args.tags,
+        not_tags: &args.not_tags,
+    };
 
     // Both arms reach `ARM_DEPTH`, not `args.limit`: fusion decides the top n, and an
     // arm that only ever returned ten could not lift a result the other missed.
-    let keyword = index.search(&args.query, ARM_DEPTH, args.source.as_deref())?;
+    let keyword = index.search(&args.query, ARM_DEPTH, &filter)?;
 
-    // The vector arm's `--source` post-filter. One query for the whole candidate set,
-    // not one per candidate.
+    // The vector arm's post-filter. One query for the whole candidate set, not one per
+    // candidate.
     let hashes: Vec<String> = vector.iter().map(|(h, _)| h.clone()).collect();
-    let kept = match args.source.as_deref() {
-        Some(source) => index.in_source(&hashes, source)?,
-        None => index.eligible(&hashes)?,
-    };
+    let kept = index.eligible(&hashes, &filter)?;
     vector.retain(|(h, _)| kept.contains(h));
     vector.truncate(ARM_DEPTH);
 
     let depth = RERANK_DEPTH.max(args.limit);
-    let hits = fuse(&index, keyword, &vector, depth)?;
+    let mut hits = fuse(&index, keyword, &vector, depth)?;
+    // The tags ride with the hit, read off the document its first placement cites — the
+    // one the result will name — so a reader sees why a filtered hit qualified and what
+    // else it is.
+    for hit in &mut hits {
+        if let Some(primary) = hit.placements.first() {
+            hit.tags =
+                index.document_tags(&primary.source, &primary.resource, &primary.derived_sha)?;
+        }
+    }
     // `chunk_count`, not `stats` — see its doc comment. `stats` sums a text column, which
     // cost six seconds per query on the Tampa corpus for a number in the report footer.
     Ok((hits, index.chunk_count()?))
@@ -494,12 +540,10 @@ async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<VectorArm, String> {
         }
     };
 
-    let depth = match args.source {
-        Some(_) => ARM_DEPTH * SOURCE_OVERFETCH,
-        None => ARM_DEPTH * SOURCE_OVERFETCH,
-    };
-    // The `--source` post-filter is the caller's, because it needs SQLite and this
-    // function is the async half.
+    // Always over-fetched: exclusions, `--source` and `--tag` are all applied after
+    // retrieval, and exclusion applies to every query. The post-filter itself is the
+    // caller's, because it needs SQLite and this function is the async half.
+    let depth = ARM_DEPTH * FILTER_OVERFETCH;
     let hits = if args.exact {
         table.nearest_exact(&vector, depth).await
     } else {
@@ -566,6 +610,7 @@ fn fuse(
                     text: index.chunk_texts(&[hash.to_string()])?.remove(0),
                     score,
                     placements,
+                    tags: Vec::new(),
                 });
             }
         }
@@ -726,6 +771,12 @@ impl Render for SearchResult {
                 };
                 p.line(format!("{hash}  ·  {}", p.paint(&provenance, Ink::Dim)))?;
 
+                // In the words `--tag` takes, so the next search can be typed off this one.
+                if !self.tags.is_empty() {
+                    let tags = format!("tags  {}", self.tags.join(" · "));
+                    p.line(p.paint(&tags, Ink::Dim))?;
+                }
+
                 // Each with its own handle. A count alone told the reader two more
                 // documents carry this passage and gave them no way to reach either —
                 // and the hash cannot be guessed from the one above, because a different
@@ -791,6 +842,7 @@ mod tests {
             char_end: 143,
             also_at_total: also_at.len(),
             also_at,
+            tags: Vec::new(),
         }
     }
 
@@ -869,6 +921,7 @@ mod tests {
             text: format!("text of {hash}"),
             score,
             placements: Vec::new(),
+            tags: Vec::new(),
         }
     }
 
@@ -1243,6 +1296,8 @@ mod tests {
                 query: "drinking water sampling results".into(),
                 limit: 3,
                 source: None,
+                tags: Vec::new(),
+                not_tags: Vec::new(),
                 snippet_chars: 0,
                 exact: false,
             },
@@ -1257,6 +1312,52 @@ mod tests {
             report.results[0].text.contains("UCMR 5"),
             "the water passage has to win despite sharing no word with the query: {:#?}",
             report.results.iter().map(|r| &r.text).collect::<Vec<_>>()
+        );
+    }
+
+    /// The tags are printed the way `--tag` takes them, so one result teaches the filter
+    /// for the next search.
+    #[test]
+    fn a_result_prints_its_tags_in_the_words_the_filter_takes() {
+        let mut tagged = result(Vec::new());
+        tagged.tags = vec!["budget".into(), "record_type:minutes".into()];
+        let out = render_to_string(&report(vec![tagged]));
+        assert!(out.contains("tags  budget · record_type:minutes"), "{out}");
+
+        let out = render_to_string(&report(vec![result(Vec::new())]));
+        assert!(
+            !out.contains("tags"),
+            "an untagged result has no tag line: {out}"
+        );
+    }
+
+    /// A tag nobody defined is an error, not an empty result — and it is refused before
+    /// the index is opened or a model loaded.
+    #[tokio::test]
+    async fn an_unknown_tag_is_refused_before_anything_is_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).await.unwrap();
+        let ctx = Ctx::new(store);
+        let error = search(
+            &ctx,
+            SearchArgs {
+                query: "budget".into(),
+                limit: 3,
+                source: None,
+                tags: vec!["nope".into()],
+                not_tags: Vec::new(),
+                snippet_chars: 0,
+                exact: false,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("`nope`"), "{error}");
+        assert!(error.contains("centinel questions"), "{error}");
+        assert!(
+            !ctx.store.index_path().exists(),
+            "refused before an index was opened or created"
         );
     }
 

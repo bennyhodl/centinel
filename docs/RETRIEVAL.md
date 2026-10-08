@@ -338,12 +338,28 @@ candidate among many and a shortened judgement is still a judgement, where refus
 drop a result the first stage chose. Nothing here is stored, so nothing can lie about what
 it covers.
 
-### `--source`
+### `--source`, `--tag`, `--not-tag`
 
-The BM25 arm filters in SQL. The vector arm cannot: Lance carries no source column, and a
-chunk has many placements across sources. So it **over-fetches 5×, then post-filters** in
-one query for the whole candidate set. It can still under-fill on a corpus one source
-dominates — a known limit of the post-filter, not a bug in it.
+```
+centinel search "stormwater" --source hillsborough
+centinel search "stormwater" --tag record_type:minutes --tag water_environment
+centinel search "permits" --not-tag record_type:data_table
+```
+
+One filter, applied the same way by both arms. The BM25 arm applies it in SQL. The vector
+arm cannot: Lance carries no source or tag column, and a chunk has many placements across
+documents. So it **over-fetches 5×, then post-filters** in one query for the whole candidate
+set — the same query the keyword arm's `WHERE` is built from, so the two never disagree
+about which documents are in play. It can still under-fill on a corpus one source dominates
+— a known limit of the post-filter, not a bug in it.
+
+A tag is what the classifier workspace's policy put on a document: a yes-or-no question's
+id, or `choice:option`. Repeated `--tag` is AND. A tag no saved question defines is an
+error, not an empty result. Every result carries the `tags` of the document it cites, so a
+reader sees why a filtered hit qualified and what else it is. Tags live in a projection the
+index refreshes from the workspace ledgers when it opens, so a threshold moved in the web
+page reaches the next `centinel search` without a re-score. See
+[CLASSIFIERS.md](CLASSIFIERS.md).
 
 ---
 

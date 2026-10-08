@@ -767,11 +767,15 @@ mod tests {
 
         let idx = Index::open(ctx.store.index_path()).unwrap();
         assert!(
-            !idx.search("zoning", 5, None).unwrap().is_empty(),
+            !idx.search("zoning", 5, &crate::index::Filter::default())
+                .unwrap()
+                .is_empty(),
             "the newest extraction answers"
         );
         assert!(
-            idx.search("budget", 5, None).unwrap().is_empty(),
+            idx.search("budget", 5, &crate::index::Filter::default())
+                .unwrap()
+                .is_empty(),
             "the superseded one does not"
         );
     }
@@ -803,7 +807,11 @@ mod tests {
 
         assert_eq!(rebuilt.total_chunks, first.total_chunks);
         let idx = Index::open(ctx.store.index_path()).unwrap();
-        assert!(idx.search("budget", 5, None).unwrap().is_empty());
+        assert!(
+            idx.search("budget", 5, &crate::index::Filter::default())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Two addresses whose pages extract to the same text — the shape that made 285 of
@@ -868,7 +876,9 @@ mod tests {
         assert_eq!(report.already_indexed, 0, "neither address was skipped");
 
         let idx = Index::open(ctx.store.index_path()).unwrap();
-        let hits = idx.search("proclamation", 10, None).unwrap();
+        let hits = idx
+            .search("proclamation", 10, &crate::index::Filter::default())
+            .unwrap();
         let cited: std::collections::HashSet<_> = hits
             .iter()
             .flat_map(|h| &h.placements)

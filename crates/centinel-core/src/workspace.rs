@@ -905,11 +905,7 @@ impl<'a> Workspace<'a> {
     }
 
     fn saved_questions(&self) -> anyhow::Result<Vec<Question>> {
-        Ok(
-            read_json_lines::<Vec<Question>>(&self.store.workspace_questions_path())?
-                .pop()
-                .unwrap_or_default(),
-        )
+        saved_questions_at(&self.store.workspace_questions_path())
     }
 
     /// Save one ordered question set. The server owns versions so editing a text field in
@@ -2140,6 +2136,12 @@ fn prepare_projection(conn: &Connection) -> anyhow::Result<()> {
         CREATE TABLE IF NOT EXISTS workspace_current_key (
           key TEXT PRIMARY KEY
         );
+        CREATE TABLE IF NOT EXISTS workspace_tag (
+          source TEXT NOT NULL, resource TEXT NOT NULL, derived_sha TEXT NOT NULL,
+          tag TEXT NOT NULL, by TEXT NOT NULL,
+          PRIMARY KEY(source,resource,derived_sha,tag,by)
+        );
+        CREATE INDEX IF NOT EXISTS workspace_tag_by_tag ON workspace_tag(tag);
     "#,
     )?;
     if !column_exists(conn, "workspace_exclusion", "reason")? {
@@ -2638,9 +2640,60 @@ fn latest_decisions(path: &Path) -> anyhow::Result<HashMap<DocumentId, UsageDeci
     Ok(out)
 }
 
-/// Replays durable decisions into a disposable index when the ledger changed. `Index`
-/// calls this on open, so CLI search and embed do not depend on somebody opening `/web`
-/// first and an index rebuild cannot restore excluded placements by accident.
+/// The saved question set at `path`, as it is. No seeding: this is the read for a caller
+/// that must not write, such as opening the index.
+pub fn saved_questions_at(path: &Path) -> anyhow::Result<Vec<Question>> {
+    Ok(read_json_lines::<Vec<Question>>(path)?
+        .pop()
+        .unwrap_or_default())
+}
+
+/// Every tag the saved questions can put on a document, spelled the way search takes
+/// them: a yes-or-no question's id when its action tags, and `question:option` for each
+/// option of a choice whose action tags. An option that keeps or excludes is not a tag.
+pub fn known_tags(questions: &[Question]) -> Vec<String> {
+    let mut tags = Vec::new();
+    for question in questions {
+        match question.kind {
+            QuestionKind::Noul => {
+                if question.action == QuestionAction::Tag {
+                    tags.push(question.id.clone());
+                }
+            }
+            QuestionKind::Choice => {
+                for option in &question.options {
+                    if option.action == QuestionAction::Tag {
+                        tags.push(option_key(&question.id, &option.id));
+                    }
+                }
+            }
+        }
+    }
+    tags
+}
+
+/// Brings every projection search reads up to date: exclusions from the decisions
+/// ledger, scores and tags from the runs ledger under the saved questions. `Index` calls
+/// this on open, so the CLI's search and embed see what was committed without anyone
+/// opening `/web` first, and an index rebuild cannot restore excluded placements or lose
+/// tags by accident. The questions are read as saved — a store with none has no tags, and
+/// opening the index must not write a questions file.
+pub(crate) fn sync_for_search(conn: &Connection, root: &Path) -> anyhow::Result<()> {
+    prepare_projection(conn)?;
+    sync_search_projection(conn, root)?;
+    let store = Store::at(root);
+    let questions = saved_questions_at(&store.workspace_questions_path())?;
+    sync_score_projection(
+        conn,
+        &store.workspace_runs_path(),
+        &store.workspace_questions_path(),
+        &questions,
+    )
+}
+
+/// Replays durable decisions into a disposable index when the ledger changed. Part of
+/// [`sync_for_search`], and called on its own by the paths that already know the
+/// questions.
 pub(crate) fn sync_search_projection(conn: &Connection, root: &Path) -> anyhow::Result<()> {
     let path = Store::at(root).workspace_decisions_path();
     let fingerprint = file_fingerprint(&path)?;
@@ -2685,8 +2738,9 @@ fn sync_score_projection(
 ) -> anyhow::Result<()> {
     // The leading version changes when the projection's shape does, so an index
     // projected by an older build is projected again rather than read half-empty.
+    // `v3` added the tag projection.
     let fingerprint = format!(
-        "v2:{}:{}",
+        "v3:{}:{}",
         file_fingerprint(runs)?,
         file_fingerprint(questions)?
     );
@@ -2942,6 +2996,14 @@ fn project_exclusions(conn: &Connection, excluded: &[DocumentId]) -> anyhow::Res
     Ok(())
 }
 
+/// The scores, and what the current policy makes of them, as tables search can join.
+///
+/// Scores are stored per answer key. Beside them, two things policy decides are written
+/// out so that nothing downstream re-applies a threshold: a choice's own row is the
+/// probability that the document is one of its exclude options, and `workspace_tag` holds
+/// every tag a question's policy puts on a document — a yes-or-no question under its id, a
+/// choice option under `question:option`. A changed threshold reaches search by re-running
+/// this, never by re-asking Jev.
 fn project_scores(
     conn: &Connection,
     scores: &HashMap<DocumentId, BTreeMap<String, f64>>,
@@ -2951,8 +3013,13 @@ fn project_scores(
     tx.execute("DELETE FROM workspace_classification", [])?;
     tx.execute("DELETE FROM workspace_required_question", [])?;
     tx.execute("DELETE FROM workspace_current_key", [])?;
+    // Only the model's tags: a person's, written by the review tool, outlive a re-score.
+    tx.execute("DELETE FROM workspace_tag WHERE by='model'", [])?;
     {
         let mut stmt = tx.prepare("INSERT OR REPLACE INTO workspace_classification(source,resource,derived_sha,question,score) VALUES (?1,?2,?3,?4,?5)")?;
+        let mut tag = tx.prepare(
+            "INSERT OR IGNORE INTO workspace_tag(source,resource,derived_sha,tag,by) VALUES (?1,?2,?3,?4,'model')",
+        )?;
         for (id, answers) in scores {
             for (question, score) in answers {
                 stmt.execute(params![
@@ -2963,32 +3030,41 @@ fn project_scores(
                     score
                 ])?;
             }
-            // A choice's own score is the probability that the document is one of its
-            // exclude options under today's actions, so the Corpus can filter a junk
-            // gate like a noul and a changed action shows without re-scoring.
-            for question in questions.iter().filter(|q| q.kind == QuestionKind::Choice) {
-                let prefix = format!("{}:", question.id);
+            for question in questions {
+                // This question's answers at its current version, keyed the way `decide`
+                // reads them: the id for a noul, `id:option` for each option of a choice.
                 let suffix = format!("@{}", question.version);
-                let options: BTreeMap<String, f64> = answers
+                let prefix = format!("{}:", question.id);
+                let current: BTreeMap<String, f64> = answers
                     .iter()
                     .filter_map(|(key, score)| {
                         let bare = key.strip_suffix(&suffix)?;
-                        bare.starts_with(&prefix).then(|| (bare.to_owned(), *score))
+                        (bare == question.id || bare.starts_with(&prefix))
+                            .then(|| (bare.to_owned(), *score))
                     })
                     .collect();
-                if options.is_empty() {
+                let Some(outcome) = decide(question, &current) else {
                     continue;
+                };
+                // A choice's own score is the probability that the document is one of its
+                // exclude options under today's actions, so the Corpus can filter a junk
+                // gate like a noul and a changed action shows without re-scoring.
+                if question.kind == QuestionKind::Choice {
+                    stmt.execute(params![
+                        id.source,
+                        id.resource,
+                        id.derived_sha,
+                        question_version(&question.id, question.version),
+                        outcome.exclusion.unwrap_or(0.0)
+                    ])?;
                 }
-                let exclusion = decide(question, &options)
-                    .and_then(|outcome| outcome.exclusion)
-                    .unwrap_or(0.0);
-                stmt.execute(params![
-                    id.source,
-                    id.resource,
-                    id.derived_sha,
-                    question_version(&question.id, question.version),
-                    exclusion
-                ])?;
+                for tagged in &outcome.tags {
+                    let key = match question.kind {
+                        QuestionKind::Noul => tagged.clone(),
+                        QuestionKind::Choice => option_key(&question.id, tagged),
+                    };
+                    tag.execute(params![id.source, id.resource, id.derived_sha, key])?;
+                }
             }
         }
     }
@@ -3270,6 +3346,123 @@ mod tests {
         assert_eq!(
             ws.pending_documents(&reworded, None, false).unwrap().len(),
             2
+        );
+    }
+
+    /// Tags reach search through a projection the index refreshes on open, from the runs
+    /// ledger under the saved policy: a yes-or-no question tags under its id, a choice
+    /// option under `question:option`, and a moved threshold changes the tags without a
+    /// new score.
+    #[tokio::test]
+    async fn tags_are_projected_under_the_current_policy_when_the_index_opens() {
+        use crate::index::Filter;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let text = "# Minutes\n\nThe board adopted the stormwater budget.";
+        let derived = store.put_blob(text.as_bytes()).await.unwrap().to_string();
+        {
+            let mut index = Index::open(store.index_path()).unwrap();
+            for chunk in chunk_markdown(text, &ChunkConfig::default()) {
+                index
+                    .insert(
+                        &chunk,
+                        &Placement {
+                            source: "city".into(),
+                            resource: "https://example.gov/minutes".into(),
+                            blob_sha: "aa".repeat(32),
+                            derived_sha: derived.clone(),
+                            ordinal: chunk.ordinal,
+                            heading: chunk.heading.clone(),
+                            char_start: chunk.char_start,
+                            char_end: chunk.char_end,
+                            observed_at: "2026-10-07T12:00:00Z".into(),
+                            tool: "test 1".into(),
+                            title: None,
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+        let ws = Workspace::new(&store);
+        let defaults = default_questions();
+        let pick = |id: &str| defaults.iter().find(|q| q.id == id).unwrap().clone();
+        let saved = ws
+            .save_questions(vec![pick("page_kind"), pick("record_type"), pick("budget")])
+            .unwrap();
+
+        let mut run = stored_run(
+            "run-tags",
+            "completed",
+            saved[0].clone(),
+            RunResult {
+                source: "city".into(),
+                resource: "https://example.gov/minutes".into(),
+                derived_sha: derived.clone(),
+                answers: BTreeMap::from([
+                    (option_key("page_kind", "record"), 0.96),
+                    (option_key("page_kind", "navigation"), 0.04),
+                    (option_key("record_type", "minutes"), 0.88),
+                    (option_key("record_type", "agenda"), 0.12),
+                    ("budget".to_string(), 0.83),
+                ]),
+                ..RunResult::default()
+            },
+        );
+        run.questions = saved.clone();
+        append_json(&store.workspace_runs_path(), &RunRecord::Complete { run }).unwrap();
+
+        let index = Index::open(store.index_path()).unwrap();
+        assert_eq!(
+            index
+                .document_tags("city", "https://example.gov/minutes", &derived)
+                .unwrap(),
+            ["budget", "record_type:minutes"],
+            "the gate's `record` keeps and so is no tag; minutes and budget cleared theirs"
+        );
+        let minutes = vec!["record_type:minutes".to_string()];
+        let tagged = Filter {
+            tags: &minutes,
+            ..Default::default()
+        };
+        assert_eq!(
+            index
+                .search("stormwater budget", 10, &tagged)
+                .unwrap()
+                .len(),
+            1
+        );
+        let agenda = vec!["record_type:agenda".to_string()];
+        let other = Filter {
+            tags: &agenda,
+            ..Default::default()
+        };
+        assert!(
+            index
+                .search("stormwater budget", 10, &other)
+                .unwrap()
+                .is_empty()
+        );
+        drop(index);
+
+        // Policy, not meaning: a higher threshold for `budget` is the same version, so no
+        // document is pending again — and the tag is gone the next time the index opens.
+        let mut stricter = saved.clone();
+        stricter[2].threshold = 0.9;
+        let stricter = ws.save_questions(stricter).unwrap();
+        assert_eq!(stricter[2].version, saved[2].version);
+        let index = Index::open(store.index_path()).unwrap();
+        assert_eq!(
+            index
+                .document_tags("city", "https://example.gov/minutes", &derived)
+                .unwrap(),
+            ["record_type:minutes"]
+        );
+        assert!(
+            ws.pending_documents(&stricter, None, false)
+                .unwrap()
+                .is_empty(),
+            "a policy change asks Jev nothing"
         );
     }
 
@@ -3824,7 +4017,7 @@ mod tests {
         assert_eq!(
             Index::open(store.index_path())
                 .unwrap()
-                .search("budget", 10, None)
+                .search("budget", 10, &crate::index::Filter::default())
                 .unwrap()[0]
                 .placements
                 .len(),
@@ -3841,7 +4034,9 @@ mod tests {
         assert_eq!(new_preview.affected_chunks, 0);
         assert_eq!(ws.commit("run-test").unwrap().committed, 1);
         let index = Index::open(store.index_path()).unwrap();
-        let hits = index.search("budget", 10, None).unwrap();
+        let hits = index
+            .search("budget", 10, &crate::index::Filter::default())
+            .unwrap();
         assert_eq!(hits[0].placements.len(), 1);
         assert_eq!(hits[0].placements[0].resource, "https://example.gov/b");
         drop(index);
@@ -3869,7 +4064,9 @@ mod tests {
                     .unwrap();
             }
         }
-        let replayed = rebuilt.search("budget", 10, None).unwrap();
+        let replayed = rebuilt
+            .search("budget", 10, &crate::index::Filter::default())
+            .unwrap();
         assert_eq!(
             replayed[0].placements.len(),
             1,
@@ -3889,7 +4086,7 @@ mod tests {
         assert_eq!(
             Index::open(store.index_path())
                 .unwrap()
-                .search("budget", 10, None)
+                .search("budget", 10, &crate::index::Filter::default())
                 .unwrap()[0]
                 .placements
                 .len(),

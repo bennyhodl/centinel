@@ -197,6 +197,26 @@ No block, no text leaves the machine on a scheduled run; the stage is skipped wi
 reason. A missing `TYPESAFE_API_KEY` is a skip too, not a failure. `--skip classify`
 works like `--skip embed`.
 
+### Tags in search
+
+```
+centinel search "stormwater" --tag record_type:minutes --tag water_environment
+centinel search "permits" --not-tag record_type:data_table
+```
+
+A tag is spelled the way the answers are stored: a yes-or-no question's id, or
+`choice:option`. Repeated `--tag` is AND; `--not-tag` removes. Both arms of the search
+apply the filter, and every result carries the `tags` of the document it cites. The HTTP
+op and the MCP tool take `tags` and `not_tags` arrays.
+
+Tags reach search through `workspace_tag`, a projection in `centinel.db` beside the
+exclusions: one row per document and tag the current policy puts on it, marked `model`,
+with room for a person's rows beside them. The index rebuilds it from the runs ledger and
+the saved questions whenever either changes, on open — so moving a threshold in the
+Classify view changes what the next `centinel search --tag` returns, and sends nothing to
+Jev. A tag no saved question defines is refused with the list to check, so a typo is an
+error rather than an empty result. See [RETRIEVAL.md](RETRIEVAL.md).
+
 ## `centinel web`
 
 ```
