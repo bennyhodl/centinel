@@ -46,7 +46,7 @@ pub use models::{
     FetchedFile, FileCheck, ModelsAction, ModelsArgs, ModelsReport, Orphan, PruneArgs, PullArgs,
     RemoveArgs, VerifyArgs, models,
 };
-pub use open::{OpenArgs, OpenReport, open};
+pub use open::{OpenArgs, OpenReport, open, system_opener};
 pub use probe::NetArgs;
 pub use read::{ReadArgs, ReadReport, read};
 

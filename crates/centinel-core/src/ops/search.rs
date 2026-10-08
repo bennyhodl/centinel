@@ -329,12 +329,13 @@ fn retrieve(
 
     // The vector arm's `--source` post-filter. One query for the whole candidate set,
     // not one per candidate.
-    if let Some(source) = args.source.as_deref() {
-        let hashes: Vec<String> = vector.iter().map(|(h, _)| h.clone()).collect();
-        let kept = index.in_source(&hashes, source)?;
-        vector.retain(|(h, _)| kept.contains(h));
-        vector.truncate(ARM_DEPTH);
-    }
+    let hashes: Vec<String> = vector.iter().map(|(h, _)| h.clone()).collect();
+    let kept = match args.source.as_deref() {
+        Some(source) => index.in_source(&hashes, source)?,
+        None => index.eligible(&hashes)?,
+    };
+    vector.retain(|(h, _)| kept.contains(h));
+    vector.truncate(ARM_DEPTH);
 
     let depth = RERANK_DEPTH.max(args.limit);
     let hits = fuse(&index, keyword, &vector, depth)?;
@@ -495,7 +496,7 @@ async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<VectorArm, String> {
 
     let depth = match args.source {
         Some(_) => ARM_DEPTH * SOURCE_OVERFETCH,
-        None => ARM_DEPTH,
+        None => ARM_DEPTH * SOURCE_OVERFETCH,
     };
     // The `--source` post-filter is the caller's, because it needs SQLite and this
     // function is the async half.

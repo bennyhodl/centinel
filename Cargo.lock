@@ -846,6 +846,7 @@ dependencies = [
  "indicatif",
  "jiff",
  "libc",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

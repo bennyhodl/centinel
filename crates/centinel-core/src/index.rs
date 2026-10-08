@@ -102,6 +102,17 @@ CREATE TABLE IF NOT EXISTS placement (
     PRIMARY KEY (chunk_hash, source, resource, derived_sha, ordinal)
 );
 
+-- A disposable projection of durable classifier decisions. The workspace rebuilds it
+-- from its JSONL ledger. Search reads it so one excluded placement does not hide shared
+-- text that still has an included placement.
+CREATE TABLE IF NOT EXISTS workspace_exclusion (
+    source      TEXT NOT NULL,
+    resource    TEXT NOT NULL,
+    derived_sha TEXT NOT NULL,
+    reason      TEXT,
+    PRIMARY KEY (source, resource, derived_sha)
+);
+
 -- External-content FTS5: the text lives once, in `chunk`.
 CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
     text,
@@ -145,10 +156,17 @@ pub struct Index {
 impl Index {
     /// Opens (and migrates) the index at `path`.
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let path = path.as_ref();
         let conn = Connection::open(path)?;
+        // The web workspace and a rebuild share this file across processes; see
+        // `workspace::open_index` for why a lock is waited on rather than failed on.
+        conn.busy_timeout(crate::workspace::INDEX_BUSY_TIMEOUT)?;
         conn.execute_batch(SCHEMA)?;
         let index = Self { conn };
         index.migrate()?;
+        if let Some(root) = path.parent() {
+            crate::workspace::sync_search_projection(&index.conn, root)?;
+        }
         Ok(index)
     }
 
@@ -173,6 +191,19 @@ impl Index {
     ///
     /// Chunk text is untouched, so no `chunk_hash` moves and no cached vector is orphaned.
     fn migrate(&self) -> anyhow::Result<()> {
+        let mut columns = self
+            .conn
+            .prepare("PRAGMA table_info(workspace_exclusion)")?;
+        let has_reason = columns
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|name| name == "reason");
+        drop(columns);
+        if !has_reason {
+            self.conn
+                .execute("ALTER TABLE workspace_exclusion ADD COLUMN reason TEXT", [])?;
+        }
         let recorded: Option<i64> = self
             .conn
             .query_row(
@@ -338,9 +369,14 @@ impl Index {
             FROM chunk_fts
             JOIN chunk c ON c.id = chunk_fts.rowid
             WHERE chunk_fts MATCH ?1
-              AND (?2 IS NULL OR EXISTS(
+              AND EXISTS(
                     SELECT 1 FROM placement p
-                    WHERE p.chunk_hash = c.chunk_hash AND p.source = ?2))
+                    WHERE p.chunk_hash = c.chunk_hash
+                      AND (?2 IS NULL OR p.source = ?2)
+                      AND NOT EXISTS (
+                        SELECT 1 FROM workspace_exclusion x
+                        WHERE x.source=p.source AND x.resource=p.resource
+                          AND x.derived_sha=p.derived_sha))
             ORDER BY bm25(chunk_fts)
             LIMIT ?3";
 
@@ -381,7 +417,11 @@ impl Index {
     pub fn chunk_hashes(&self) -> anyhow::Result<Vec<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT chunk_hash FROM chunk ORDER BY id")?;
+            .prepare("SELECT c.chunk_hash FROM chunk c WHERE EXISTS (
+                SELECT 1 FROM placement p WHERE p.chunk_hash=c.chunk_hash
+                AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x
+                  WHERE x.source=p.source AND x.resource=p.resource AND x.derived_sha=p.derived_sha))
+                ORDER BY c.id")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -397,7 +437,11 @@ impl Index {
     pub fn chunk_hashes_by_length(&self) -> anyhow::Result<Vec<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT chunk_hash FROM chunk ORDER BY chars, id")?;
+            .prepare("SELECT c.chunk_hash FROM chunk c WHERE EXISTS (
+                SELECT 1 FROM placement p WHERE p.chunk_hash=c.chunk_hash
+                AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x
+                  WHERE x.source=p.source AND x.resource=p.resource AND x.derived_sha=p.derived_sha))
+                ORDER BY c.chars, c.id")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -456,8 +500,11 @@ impl Index {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT DISTINCT chunk_hash FROM placement
-             WHERE source = ?1 AND chunk_hash IN ({holes})"
+            "SELECT DISTINCT p.chunk_hash FROM placement p
+             WHERE p.source = ?1 AND p.chunk_hash IN ({holes})
+               AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x
+                 WHERE x.source=p.source AND x.resource=p.resource
+                   AND x.derived_sha=p.derived_sha)"
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -468,6 +515,28 @@ impl Index {
         }
         let rows = stmt.query_map(params.as_slice(), |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<Result<HashSet<_>, _>>()?)
+    }
+
+    /// Candidate chunks that still have at least one included placement.
+    pub fn eligible(&self, hashes: &[String]) -> anyhow::Result<HashSet<String>> {
+        if hashes.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let holes = std::iter::repeat_n("?", hashes.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT DISTINCT p.chunk_hash FROM placement p
+            WHERE p.chunk_hash IN ({holes}) AND NOT EXISTS (
+              SELECT 1 FROM workspace_exclusion x WHERE x.source=p.source
+              AND x.resource=p.resource AND x.derived_sha=p.derived_sha)"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let values: Vec<&dyn rusqlite::ToSql> =
+            hashes.iter().map(|h| h as &dyn rusqlite::ToSql).collect();
+        Ok(stmt
+            .query_map(values.as_slice(), |r| r.get::<_, String>(0))?
+            .collect::<Result<HashSet<_>, _>>()?)
     }
 
     /// Where a chunk sits, everywhere it sits.
@@ -481,7 +550,11 @@ impl Index {
         let mut stmt = self.conn.prepare_cached(
             "SELECT source, resource, blob_sha, derived_sha, ordinal, heading,
                     char_start, char_end, observed_at, tool, title
-             FROM placement WHERE chunk_hash = ?1 ORDER BY source, resource",
+             FROM placement p WHERE chunk_hash = ?1
+               AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x
+                 WHERE x.source=p.source AND x.resource=p.resource
+                   AND x.derived_sha=p.derived_sha)
+             ORDER BY source, resource",
         )?;
         let rows = stmt.query_map(params![chunk_hash], |r| {
             Ok(Placement {
@@ -520,7 +593,10 @@ impl Index {
         let sql = format!(
             "SELECT chunk_hash, source, resource, blob_sha, derived_sha, ordinal, heading,
                     char_start, char_end, observed_at, tool, title
-             FROM placement WHERE chunk_hash IN ({holes})
+             FROM placement p WHERE chunk_hash IN ({holes})
+               AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x
+                 WHERE x.source=p.source AND x.resource=p.resource
+                   AND x.derived_sha=p.derived_sha)
              ORDER BY source, resource"
         );
 
@@ -568,7 +644,10 @@ impl Index {
     pub fn chunk_count(&self) -> anyhow::Result<usize> {
         let n: i64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM chunk", [], |r| r.get(0))?;
+            .query_row("SELECT COUNT(*) FROM chunk c WHERE EXISTS (
+                SELECT 1 FROM placement p WHERE p.chunk_hash=c.chunk_hash
+                AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x
+                  WHERE x.source=p.source AND x.resource=p.resource AND x.derived_sha=p.derived_sha))", [], |r| r.get(0))?;
         Ok(n as usize)
     }
 
@@ -1113,6 +1192,41 @@ mod tests {
             1,
             "the text is still stored once"
         );
+    }
+
+    #[test]
+    fn excluding_one_placement_keeps_shared_text_searchable() {
+        let mut idx = Index::in_memory().unwrap();
+        let chunks = chunk_markdown(
+            "# Hearing\n\nResidents may speak about the budget.",
+            &ChunkConfig::default(),
+        );
+        let derived = "dd".repeat(32);
+        for resource in ["https://example.gov/a", "https://example.gov/b"] {
+            for chunk in &chunks {
+                idx.insert(chunk, &placement("tampa", resource, &derived))
+                    .unwrap();
+            }
+        }
+        idx.conn
+            .execute(
+                "INSERT INTO workspace_exclusion(source,resource,derived_sha) VALUES (?1,?2,?3)",
+                params!["tampa", "https://example.gov/a", derived],
+            )
+            .unwrap();
+
+        let hits = idx.search("budget", 10, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].placements.len(), 1);
+        assert_eq!(hits[0].placements[0].resource, "https://example.gov/b");
+
+        idx.conn
+            .execute(
+                "INSERT INTO workspace_exclusion(source,resource,derived_sha) VALUES (?1,?2,?3)",
+                params!["tampa", "https://example.gov/b", derived],
+            )
+            .unwrap();
+        assert!(idx.search("budget", 10, None).unwrap().is_empty());
     }
 
     /// The version-1 table, written by a build that keyed placements on the derived blob.

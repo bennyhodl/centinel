@@ -232,26 +232,32 @@ pkg_for() {
     case "$PM:$1" in
         brew:cmake)              echo cmake ;;
         brew:protoc)             echo protobuf ;;
+        brew:node)               echo node ;;
         apt:cmake)               echo cmake ;;
         apt:cc|apt:c++)          echo build-essential ;;
         apt:libclang)            echo libclang-dev ;;
         apt:protoc)              echo "protobuf-compiler libprotobuf-dev" ;;
+        apt:node)                echo "nodejs npm" ;;
         dnf:cmake)               echo cmake ;;
         dnf:cc|dnf:c++)          echo "gcc gcc-c++ make" ;;
         dnf:libclang)            echo clang-devel ;;
         dnf:protoc)              echo "protobuf-compiler protobuf-devel" ;;
+        dnf:node)                echo "nodejs npm" ;;
         pacman:cmake)            echo cmake ;;
         pacman:cc|pacman:c++)    echo base-devel ;;
         pacman:libclang)         echo clang ;;
         pacman:protoc)           echo protobuf ;;
+        pacman:node)             echo "nodejs npm" ;;
         zypper:cmake)            echo cmake ;;
         zypper:cc|zypper:c++)    echo "gcc gcc-c++ make" ;;
         zypper:libclang)         echo clang-devel ;;
         zypper:protoc)           echo "protobuf-devel" ;;
+        zypper:node)             echo "nodejs npm" ;;
         apk:cmake)               echo cmake ;;
         apk:cc|apk:c++)          echo build-base ;;
         apk:libclang)            echo clang-dev ;;
         apk:protoc)              echo protobuf-dev ;;
+        apk:node)                echo "nodejs npm" ;;
     esac
 }
 
@@ -264,6 +270,7 @@ why_for() {
         c++)      echo "a C++ compiler" ;;
         libclang) echo "bindgen reads llama.cpp's and whisper.cpp's headers with it" ;;
         protoc)   echo "six lance crates run prost-build, and none of them vendor it" ;;
+        node)     echo "builds the browser workspace that is embedded in centinel" ;;
     esac
 }
 
@@ -573,6 +580,7 @@ missing_build_tools() {
     have c++ || have g++ || have clang++ || _m="$_m c++"
     have_libclang || _m="$_m libclang"
     have_protoc || _m="$_m protoc"
+    { have node && have npm; } || _m="$_m node"
     printf '%s' "$_m"
 }
 
@@ -628,6 +636,17 @@ check_build_tools() {
         say ""
         exit 1
     fi
+
+    node_version=$(node --version | sed 's/^v//')
+    node_major=$(printf '%s' "$node_version" | cut -d. -f1)
+    node_supported=0
+    if [ "$node_major" = 20 ] && version_ge "$node_version" "20.19.0"; then
+        node_supported=1
+    elif [ "$node_major" -ge 22 ] && { [ "$node_major" -gt 22 ] || version_ge "$node_version" "22.12.0"; }; then
+        node_supported=1
+    fi
+    [ "$node_supported" = 1 ] || die "Node $node_version cannot build the Centinel
+      browser workspace. Install Node 20.19+ or 22.12+, then re-run this."
 
     check_disk
 }

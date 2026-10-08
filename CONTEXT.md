@@ -132,13 +132,36 @@ and edits no renderer.
 
 ## The store
 
-**Truth vs derived** — four things are truth, and each is a fact no replay of the others can
-recover: `blobs/` and `log/` are what the world served, `runs/` is what this machine
-attempted (a quiet run writes nothing to `log/`, so "the schedule fired and everything was
-current" lives only here), and `decisions.jsonl` is what the operator decided. `current/`,
-`centinel.db` and `vectors.lance/` are derived and can be rebuilt from them. *Why it
-matters:* it is what makes the index disposable and the corpus something you can hand to
-somebody with `rsync`.
+**Truth vs derived** — the truth is every fact no replay of the others can recover:
+`blobs/` and `log/` are what the world served, `runs/` is what this machine attempted (a
+quiet run writes nothing to `log/`, so "the schedule fired and everything was current"
+lives only here), `decisions.jsonl` holds corpus-wide crumb rulings, and `workspace/`
+holds saved classifier questions, classifier attempts and scores, and reversible usage
+decisions. `current/`, `centinel.db` and `vectors.lance/` are derived and can be rebuilt
+from them. *Why it matters:* it is what makes the index disposable and the corpus
+something you can hand to somebody with `rsync`.
+
+**Classifier workspace** — `workspace/questions.jsonl` holds versioned atomic questions,
+`workspace/runs.jsonl` holds selected input identities, progress, scores and benchmark
+metrics, and `workspace/decisions.jsonl` holds the operator's reversible rulings about
+document usage. The projection tables with `workspace_` names inside `centinel.db` are
+derived caches of these ledgers. *Why it matters:* deleting or rebuilding the search index
+must not restore excluded material to search or embedding, and changing a threshold must
+not require sending document text to Jev again.
+
+**Meaning vs policy** — a question's meaning is what Jev is asked: the wording, the kind
+(noul or choice), and each option's id and description. Its policy is what the program
+does with the answer: the threshold, the review floor, and each action. Meaning is
+versioned; policy is not. *Why it matters:* a stored score is valid only for the meaning
+it answered, and any policy can be applied to it again for free.
+
+**Junk gate** — the choice `page_kind` that decides whether a document is a record, service
+information, or junk (navigation, calendar or directory, unreadable). Its junk options
+are summed against one threshold. It is a usage decision, like every classifier: it
+excludes from search and embedding and never from the archive.
+
+**Review band** — the scores from a question's review floor up to its threshold. A
+document in it is held for a person to look at. It is neither excluded nor tagged.
 
 **Derived is not the same as cheap.** Everything derived is rebuildable; only some of it
 is rebuildable over a coffee. `centinel.db` is minutes. `vectors.lance/` is **a day** on a
