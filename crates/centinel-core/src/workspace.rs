@@ -13,6 +13,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, bail};
 use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -860,6 +861,172 @@ struct UsageDecision {
     run_id: Option<String>,
 }
 
+/// What a person said about one question's answer for one document, beside what the
+/// model said at the time, so the two can be compared later without the run.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Verdict {
+    /// The model's answer when reviewed: a yes-or-no question's probability, or a
+    /// choice's winning option. Absent when the document had not been scored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<Value>,
+    /// The person's: `true` or `false` for a yes-or-no question, an option id for a choice.
+    pub human: Value,
+}
+
+impl Verdict {
+    pub fn yes(&self) -> Option<bool> {
+        self.human.as_bool()
+    }
+
+    pub fn option(&self) -> Option<&str> {
+        self.human.as_str()
+    }
+}
+
+/// One line of `workspace/reviews.jsonl`: a person's reading of one document against the
+/// saved questions. The latest review of a document is the one that counts.
+///
+/// One record per document rather than per question, because a reviewer reads the
+/// document once and answers everything they can see; a question they did not touch is
+/// simply absent from `verdicts`, and the model's answer stands for it.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Review {
+    /// Set by the server when the review is recorded.
+    #[serde(default)]
+    pub at: String,
+    pub source: String,
+    pub resource: String,
+    pub derived_sha: String,
+    /// By question id.
+    #[serde(default)]
+    pub verdicts: BTreeMap<String, Verdict>,
+    /// Tags the person wished existed, for the next edit of the questions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposed: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reviewer: String,
+}
+
+impl Review {
+    fn id(&self) -> DocumentId {
+        DocumentId {
+            source: self.source.clone(),
+            resource: self.resource.clone(),
+            derived_sha: self.derived_sha.clone(),
+        }
+    }
+}
+
+/// What recording a review changed, beyond the ledger line.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ReviewReport {
+    /// The document is excluded after this review.
+    pub excluded: bool,
+    /// This review changed the document's usage: restored it, or excluded it.
+    pub usage_changed: bool,
+    /// The tags on the document now, the person's and the model's together.
+    pub tags: Vec<String>,
+}
+
+/// Which documents the review tool shows next.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ReviewQuery {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default = "review_page")]
+    pub page_size: usize,
+    /// Show documents a person already reviewed, too.
+    #[serde(default)]
+    pub include_reviewed: bool,
+}
+
+impl Default for ReviewQuery {
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            page_size: review_page(),
+            include_reviewed: false,
+        }
+    }
+}
+
+fn review_page() -> usize {
+    20
+}
+
+/// One document as the review tool shows it: what the index knows, what the policy
+/// decided per question, and whether a person has already been here.
+#[derive(Clone, Debug, Serialize)]
+pub struct ReviewCandidate {
+    #[serde(flatten)]
+    pub document: Document,
+    /// Per question id, under the current policy.
+    pub outcomes: BTreeMap<String, Outcome>,
+    /// Some question's answer sits in its review band.
+    pub review_band: bool,
+    pub reviewed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ReviewQueue {
+    /// The review band first, then a random sample of decided documents.
+    pub documents: Vec<ReviewCandidate>,
+    /// Documents with an answer in some review band and no review yet.
+    pub in_review_band: usize,
+    /// Documents a person has reviewed.
+    pub reviewed: usize,
+    /// Documents with any answer under the current questions.
+    pub scored: usize,
+}
+
+/// How well the model's answers agree with the people who checked them.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct Evaluation {
+    /// Review records in the ledger.
+    pub reviews: usize,
+    /// Documents with a review, counting each once.
+    pub documents: usize,
+    pub questions: Vec<QuestionEvaluation>,
+    /// Tag names people proposed, and how often.
+    pub proposed: BTreeMap<String, usize>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct QuestionEvaluation {
+    pub id: String,
+    pub version: u64,
+    /// `yes/no` or `choice`.
+    pub kind: String,
+    /// Reviews that answered this question and had a model score to compare with.
+    pub compared: usize,
+    /// Reviews that answered it for a document the model never scored at this version.
+    pub unscored: usize,
+    /// The share of compared reviews where the policy's decision matched the person's.
+    pub agreement: Option<f64>,
+    pub threshold: f64,
+    /// For a yes-or-no question: the threshold that would agree with the most reviews,
+    /// when the reviews hold both a yes and a no.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_threshold: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precision: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall: Option<f64>,
+    #[serde(default)]
+    pub true_positive: usize,
+    #[serde(default)]
+    pub false_positive: usize,
+    #[serde(default)]
+    pub false_negative: usize,
+    #[serde(default)]
+    pub true_negative: usize,
+    /// For a choice: what people chose, against what the model's top option was.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub confusion: BTreeMap<String, BTreeMap<String, usize>>,
+}
+
 #[derive(Debug, Deserialize)]
 struct TypeSafeResponse {
     model: Option<String>,
@@ -946,12 +1113,7 @@ impl<'a> Workspace<'a> {
 
         let current_questions = self.questions()?;
         sync_search_projection(&conn, self.store.root())?;
-        sync_score_projection(
-            &conn,
-            &self.store.workspace_runs_path(),
-            &self.store.workspace_questions_path(),
-            &current_questions,
-        )?;
+        sync_score_projection(&conn, self.store, &current_questions)?;
 
         let sources = string_column(
             &conn,
@@ -969,26 +1131,7 @@ impl<'a> Workspace<'a> {
         let (total, total_chars, page) = select_identities(&conn, &query)?;
         let mut documents = Vec::with_capacity(page.len());
         for mut doc in page {
-            let mut stmt = conn.prepare_cached(
-                "SELECT ck.key,wc.score FROM workspace_current_key ck
-                 JOIN workspace_classification wc ON wc.question=ck.key
-                 WHERE wc.source=?1 AND wc.resource=?2 AND wc.derived_sha=?3",
-            )?;
-            let rows = stmt.query_map(params![doc.source, doc.resource, doc.derived_sha], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
-            })?;
-            doc.classifications = rows
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .map(|(key, score)| {
-                    (
-                        key.rsplit_once('@')
-                            .map_or(key.as_str(), |x| x.0)
-                            .to_owned(),
-                        score,
-                    )
-                })
-                .collect();
+            doc.classifications = classifications_of(&conn, &doc)?;
             documents.push(doc);
         }
         Ok(CorpusPage {
@@ -1022,12 +1165,7 @@ impl<'a> Workspace<'a> {
         prepare_projection(&conn)?;
         let current = self.questions()?;
         sync_search_projection(&conn, self.store.root())?;
-        sync_score_projection(
-            &conn,
-            &self.store.workspace_runs_path(),
-            &self.store.workspace_questions_path(),
-            &current,
-        )?;
+        sync_score_projection(&conn, self.store, &current)?;
 
         let mut where_parts = vec!["x.source IS NULL".to_string()];
         let mut values: Vec<rusqlite::types::Value> = Vec::new();
@@ -1113,6 +1251,252 @@ impl<'a> Workspace<'a> {
         Ok(PendingDocument {
             id,
             chars: chars as usize,
+        })
+    }
+
+    /// Records what a person said about one document, and acts on it at once.
+    ///
+    /// The review is a ledger line first. Then its verdict on any question that can
+    /// exclude decides the document's usage — a `record` said of an excluded menu restores
+    /// it, a `navigation` said of a kept page excludes it — and its verdicts on the
+    /// questions that tag reach `workspace_tag` through the same projection the model's
+    /// answers take, marked `human`. So the review tool fixes search as it goes, and
+    /// `evaluate` reads the same line later to say how the model did.
+    pub fn review(&self, mut review: Review) -> anyhow::Result<ReviewReport> {
+        let questions = self.questions()?;
+        let conn = open_index(self.store.require_index()?)?;
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM placement WHERE source=?1 AND resource=?2 AND derived_sha=?3)",
+            params![review.source, review.resource, review.derived_sha],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            bail!("the reviewed document is not in the index");
+        }
+        for (id, verdict) in &review.verdicts {
+            let question = questions
+                .iter()
+                .find(|q| &q.id == id)
+                .ok_or_else(|| anyhow::anyhow!("no saved question is called `{id}`"))?;
+            match question.kind {
+                QuestionKind::Noul => {
+                    if verdict.yes().is_none() {
+                        bail!("the verdict for `{id}` must be true or false");
+                    }
+                }
+                QuestionKind::Choice => {
+                    let chosen = verdict.option().ok_or_else(|| {
+                        anyhow::anyhow!("the verdict for `{id}` must name one of its options")
+                    })?;
+                    if !question.options.iter().any(|o| o.id == chosen) {
+                        bail!("`{chosen}` is not an option of `{id}`");
+                    }
+                }
+            }
+        }
+        review.proposed = review
+            .proposed
+            .iter()
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty())
+            .collect();
+        review.at = Timestamp::now().to_string();
+        append_json(&self.store.workspace_reviews_path(), &review)?;
+
+        // Usage. Only a question that can exclude has a say; the last word is "exclude"
+        // if any of them said so, else "include".
+        let mut wants: Option<bool> = None;
+        for (id, verdict) in &review.verdicts {
+            let question = questions
+                .iter()
+                .find(|q| &q.id == id)
+                .expect("validated above");
+            let (can_exclude, says_exclude) = match question.kind {
+                QuestionKind::Noul => (
+                    question.action == QuestionAction::Exclude,
+                    question.action == QuestionAction::Exclude && verdict.yes() == Some(true),
+                ),
+                QuestionKind::Choice => (
+                    question
+                        .options
+                        .iter()
+                        .any(|o| o.action == QuestionAction::Exclude),
+                    verdict
+                        .option()
+                        .and_then(|chosen| question.options.iter().find(|o| o.id == chosen))
+                        .is_some_and(|o| o.action == QuestionAction::Exclude),
+                ),
+            };
+            if can_exclude {
+                wants = Some(wants.unwrap_or(false) || says_exclude);
+            }
+        }
+        let id = review.id();
+        let decisions = self.store.workspace_decisions_path();
+        let excluded_now = latest_decisions(&decisions)?
+            .get(&id)
+            .is_some_and(|d| d.excluded);
+        let mut usage_changed = false;
+        let excluded = match wants {
+            Some(exclude) if exclude != excluded_now => {
+                append_json(
+                    &decisions,
+                    &UsageDecision {
+                        at: review.at.clone(),
+                        source: id.source.clone(),
+                        resource: id.resource.clone(),
+                        derived_sha: id.derived_sha.clone(),
+                        excluded: exclude,
+                        reason: "review".into(),
+                        run_id: None,
+                    },
+                )?;
+                usage_changed = true;
+                exclude
+            }
+            _ => excluded_now,
+        };
+
+        prepare_projection(&conn)?;
+        sync_search_projection(&conn, self.store.root())?;
+        sync_score_projection(&conn, self.store, &questions)?;
+        let tags = string_column(
+            &conn,
+            "SELECT DISTINCT tag FROM workspace_tag WHERE source=?1 AND resource=?2 AND derived_sha=?3 ORDER BY tag",
+            params![id.source, id.resource, id.derived_sha],
+        )?;
+        Ok(ReviewReport {
+            excluded,
+            usage_changed,
+            tags,
+        })
+    }
+
+    /// The documents a person should look at next: those with an answer in some review
+    /// band first, then a random sample of the decided ones, skipping documents already
+    /// reviewed unless asked. Sorted in SQL, so a corpus of forty thousand documents is
+    /// never read into memory to pick twenty.
+    pub fn review_queue(&self, query: ReviewQuery) -> anyhow::Result<ReviewQueue> {
+        let questions = self.questions()?;
+        let conn = open_index(self.store.require_index()?)?;
+        prepare_projection(&conn)?;
+        sync_search_projection(&conn, self.store.root())?;
+        sync_score_projection(&conn, self.store, &questions)?;
+
+        // The band, as rows the query joins rather than parameters it threads through:
+        // one per answer key whose question holds a review floor.
+        conn.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS review_band_key(key TEXT PRIMARY KEY, floor REAL, threshold REAL);
+             DELETE FROM review_band_key;",
+        )?;
+        {
+            let mut insert =
+                conn.prepare("INSERT OR REPLACE INTO review_band_key VALUES (?1,?2,?3)")?;
+            for (key, floor, threshold) in band_keys(&questions) {
+                insert.execute(params![key, floor, threshold])?;
+            }
+        }
+        const ON_DOCUMENT: &str =
+            "wc.source=d.source AND wc.resource=d.resource AND wc.derived_sha=d.derived_sha";
+        let scored = format!(
+            "EXISTS (SELECT 1 FROM workspace_classification wc JOIN workspace_current_key ck ON ck.key=wc.question WHERE {ON_DOCUMENT})"
+        );
+        let band = format!(
+            "EXISTS (SELECT 1 FROM workspace_classification wc JOIN review_band_key b ON b.key=wc.question WHERE {ON_DOCUMENT} AND wc.score>=b.floor AND wc.score<b.threshold)"
+        );
+        let reviewed = "EXISTS (SELECT 1 FROM workspace_review r WHERE r.source=d.source AND r.resource=d.resource AND r.derived_sha=d.derived_sha)";
+
+        let mut where_parts = vec![scored.clone()];
+        let mut values: Vec<rusqlite::types::Value> = Vec::new();
+        if !query.source.trim().is_empty() {
+            where_parts.push("d.source=?".into());
+            values.push(query.source.clone().into());
+        }
+        if !query.include_reviewed {
+            where_parts.push(format!("NOT {reviewed}"));
+        }
+        let sql = format!(
+            "SELECT d.source,d.resource,d.blob_sha,d.derived_sha,d.title,d.observed_at,d.tool,d.chars,d.chunks,
+                    x.source IS NOT NULL,x.reason,({band}) AS band,({reviewed}) AS reviewed
+             FROM workspace_document d
+             LEFT JOIN workspace_exclusion x ON x.source=d.source AND x.resource=d.resource AND x.derived_sha=d.derived_sha
+             WHERE {} ORDER BY band DESC, random() LIMIT ?",
+            where_parts.join(" AND ")
+        );
+        values.push((query.page_size.clamp(1, 200) as i64).into());
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
+            Ok((
+                Document {
+                    source: r.get(0)?,
+                    resource: r.get(1)?,
+                    blob_sha: r.get(2)?,
+                    derived_sha: r.get(3)?,
+                    title: r.get(4)?,
+                    observed_at: r.get(5)?,
+                    tool: r.get(6)?,
+                    chars: r.get::<_, i64>(7)? as usize,
+                    chunks: r.get::<_, i64>(8)? as usize,
+                    excluded: r.get(9)?,
+                    exclusion_reason: r.get(10)?,
+                    classifications: BTreeMap::new(),
+                },
+                r.get::<_, bool>(12)?,
+            ))
+        })?;
+        let mut documents = Vec::new();
+        for row in rows {
+            let (mut document, reviewed) = row?;
+            document.classifications = classifications_of(&conn, &document)?;
+            let outcomes: BTreeMap<String, Outcome> = questions
+                .iter()
+                .filter_map(|q| Some((q.id.clone(), decide(q, &document.classifications)?)))
+                .collect();
+            documents.push(ReviewCandidate {
+                review_band: outcomes.values().any(|o| o.review),
+                reviewed,
+                document,
+                outcomes,
+            });
+        }
+        let count = |sql: &str| -> anyhow::Result<usize> {
+            Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))? as usize)
+        };
+        Ok(ReviewQueue {
+            documents,
+            in_review_band: count(&format!(
+                "SELECT COUNT(*) FROM workspace_document d WHERE {scored} AND {band} AND NOT {reviewed}"
+            ))?,
+            reviewed: count("SELECT COUNT(*) FROM workspace_review")?,
+            scored: count(&format!(
+                "SELECT COUNT(*) FROM workspace_document d WHERE {scored}"
+            ))?,
+        })
+    }
+
+    /// The model against the people: per saved question, how often the current policy's
+    /// decision matched a reviewer's verdict, and for a yes-or-no question the threshold
+    /// that would have matched most. Reads the ledgers only; nothing is sent anywhere.
+    pub fn evaluation(&self) -> anyhow::Result<Evaluation> {
+        let questions = self.questions()?;
+        let path = self.store.workspace_reviews_path();
+        let all = read_json_lines::<Review>(&path)?;
+        let latest = latest_reviews(&path)?;
+        let scores = latest_scores(&self.store.workspace_runs_path())?;
+        let mut proposed = BTreeMap::new();
+        for review in &all {
+            for name in &review.proposed {
+                *proposed.entry(name.clone()).or_insert(0) += 1;
+            }
+        }
+        Ok(Evaluation {
+            reviews: all.len(),
+            documents: latest.len(),
+            questions: questions
+                .iter()
+                .map(|q| evaluate_question(q, &latest, &scores))
+                .collect(),
+            proposed,
         })
     }
 
@@ -1404,12 +1788,7 @@ impl<'a> Workspace<'a> {
         prepare_projection(&conn)?;
         let current_questions = self.questions()?;
         sync_search_projection(&conn, self.store.root())?;
-        sync_score_projection(
-            &conn,
-            &self.store.workspace_runs_path(),
-            &self.store.workspace_questions_path(),
-            &current_questions,
-        )?;
+        sync_score_projection(&conn, self.store, &current_questions)?;
         let query = DocumentQuery {
             page: 1,
             page_size: selection.count.min(MAX_RUN_DOCUMENTS),
@@ -2142,6 +2521,11 @@ fn prepare_projection(conn: &Connection) -> anyhow::Result<()> {
           PRIMARY KEY(source,resource,derived_sha,tag,by)
         );
         CREATE INDEX IF NOT EXISTS workspace_tag_by_tag ON workspace_tag(tag);
+        CREATE TABLE IF NOT EXISTS workspace_review (
+          source TEXT NOT NULL, resource TEXT NOT NULL, derived_sha TEXT NOT NULL,
+          at TEXT NOT NULL, reviewer TEXT NOT NULL,
+          PRIMARY KEY(source,resource,derived_sha)
+        );
     "#,
     )?;
     if !column_exists(conn, "workspace_exclusion", "reason")? {
@@ -2683,12 +3067,7 @@ pub(crate) fn sync_for_search(conn: &Connection, root: &Path) -> anyhow::Result<
     sync_search_projection(conn, root)?;
     let store = Store::at(root);
     let questions = saved_questions_at(&store.workspace_questions_path())?;
-    sync_score_projection(
-        conn,
-        &store.workspace_runs_path(),
-        &store.workspace_questions_path(),
-        &questions,
-    )
+    sync_score_projection(conn, &store, &questions)
 }
 
 /// Replays durable decisions into a disposable index when the ledger changed. Part of
@@ -2730,19 +3109,24 @@ pub(crate) fn sync_search_projection(conn: &Connection, root: &Path) -> anyhow::
     Ok(())
 }
 
+/// Projects the runs, the saved questions and the reviews into the score, tag and review
+/// tables whenever any of the three ledgers changed.
 fn sync_score_projection(
     conn: &Connection,
-    runs: &Path,
-    questions: &Path,
+    store: &Store,
     current: &[Question],
 ) -> anyhow::Result<()> {
+    let runs = store.workspace_runs_path();
+    let questions = store.workspace_questions_path();
+    let reviews = store.workspace_reviews_path();
     // The leading version changes when the projection's shape does, so an index
     // projected by an older build is projected again rather than read half-empty.
-    // `v3` added the tag projection.
+    // `v3` added the tag projection; `v4` the reviews.
     let fingerprint = format!(
-        "v3:{}:{}",
-        file_fingerprint(runs)?,
-        file_fingerprint(questions)?
+        "v4:{}:{}:{}",
+        file_fingerprint(&runs)?,
+        file_fingerprint(&questions)?,
+        file_fingerprint(&reviews)?
     );
     let recorded: Option<String> = conn
         .query_row(
@@ -2754,8 +3138,9 @@ fn sync_score_projection(
     if recorded.as_deref() == Some(&fingerprint) {
         return Ok(());
     }
-    let scores = latest_scores(runs)?;
-    project_scores(conn, &scores, current)?;
+    let scores = latest_scores(&runs)?;
+    let reviews = latest_reviews(&reviews)?;
+    project_scores(conn, &scores, current, &reviews)?;
     conn.execute(
         "INSERT INTO workspace_meta(key,value) VALUES ('scores_fingerprint',?1)
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -3001,26 +3386,40 @@ fn project_exclusions(conn: &Connection, excluded: &[DocumentId]) -> anyhow::Res
 /// Scores are stored per answer key. Beside them, two things policy decides are written
 /// out so that nothing downstream re-applies a threshold: a choice's own row is the
 /// probability that the document is one of its exclude options, and `workspace_tag` holds
-/// every tag a question's policy puts on a document — a yes-or-no question under its id, a
-/// choice option under `question:option`. A changed threshold reaches search by re-running
-/// this, never by re-asking Jev.
+/// every tag on a document — a yes-or-no question under its id, a choice option under
+/// `question:option`. A changed threshold reaches search by re-running this, never by
+/// re-asking Jev.
+///
+/// A person's verdict beats the model's for the question it answers: a `yes` is a tag
+/// marked `human`, a `no` or a different option takes the model's tag away, and the model's
+/// tags stand for every question nobody reviewed. `workspace_review` records which
+/// documents a person has looked at, so the review queue can skip them.
 fn project_scores(
     conn: &Connection,
     scores: &HashMap<DocumentId, BTreeMap<String, f64>>,
     questions: &[Question],
+    reviews: &HashMap<DocumentId, Review>,
 ) -> anyhow::Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM workspace_classification", [])?;
     tx.execute("DELETE FROM workspace_required_question", [])?;
     tx.execute("DELETE FROM workspace_current_key", [])?;
-    // Only the model's tags: a person's, written by the review tool, outlive a re-score.
-    tx.execute("DELETE FROM workspace_tag WHERE by='model'", [])?;
+    tx.execute("DELETE FROM workspace_tag", [])?;
+    tx.execute("DELETE FROM workspace_review", [])?;
     {
         let mut stmt = tx.prepare("INSERT OR REPLACE INTO workspace_classification(source,resource,derived_sha,question,score) VALUES (?1,?2,?3,?4,?5)")?;
         let mut tag = tx.prepare(
-            "INSERT OR IGNORE INTO workspace_tag(source,resource,derived_sha,tag,by) VALUES (?1,?2,?3,?4,'model')",
+            "INSERT OR IGNORE INTO workspace_tag(source,resource,derived_sha,tag,by) VALUES (?1,?2,?3,?4,?5)",
         )?;
-        for (id, answers) in scores {
+        let mut reviewed = tx.prepare(
+            "INSERT OR REPLACE INTO workspace_review(source,resource,derived_sha,at,reviewer) VALUES (?1,?2,?3,?4,?5)",
+        )?;
+        let empty = BTreeMap::new();
+        let documents: std::collections::HashSet<&DocumentId> =
+            scores.keys().chain(reviews.keys()).collect();
+        for id in documents {
+            let answers = scores.get(id).unwrap_or(&empty);
+            let review = reviews.get(id);
             for (question, score) in answers {
                 stmt.execute(params![
                     id.source,
@@ -3030,26 +3429,25 @@ fn project_scores(
                     score
                 ])?;
             }
+            if let Some(review) = review {
+                reviewed.execute(params![
+                    id.source,
+                    id.resource,
+                    id.derived_sha,
+                    review.at,
+                    review.reviewer
+                ])?;
+            }
             for question in questions {
-                // This question's answers at its current version, keyed the way `decide`
-                // reads them: the id for a noul, `id:option` for each option of a choice.
-                let suffix = format!("@{}", question.version);
-                let prefix = format!("{}:", question.id);
-                let current: BTreeMap<String, f64> = answers
-                    .iter()
-                    .filter_map(|(key, score)| {
-                        let bare = key.strip_suffix(&suffix)?;
-                        (bare == question.id || bare.starts_with(&prefix))
-                            .then(|| (bare.to_owned(), *score))
-                    })
-                    .collect();
-                let Some(outcome) = decide(question, &current) else {
-                    continue;
-                };
+                let verdict = review.and_then(|r| r.verdicts.get(&question.id));
+                let current = answers_for(question, answers);
+                let outcome = decide(question, &current);
                 // A choice's own score is the probability that the document is one of its
                 // exclude options under today's actions, so the Corpus can filter a junk
                 // gate like a noul and a changed action shows without re-scoring.
-                if question.kind == QuestionKind::Choice {
+                if question.kind == QuestionKind::Choice
+                    && let Some(outcome) = &outcome
+                {
                     stmt.execute(params![
                         id.source,
                         id.resource,
@@ -3058,12 +3456,23 @@ fn project_scores(
                         outcome.exclusion.unwrap_or(0.0)
                     ])?;
                 }
-                for tagged in &outcome.tags {
-                    let key = match question.kind {
-                        QuestionKind::Noul => tagged.clone(),
-                        QuestionKind::Choice => option_key(&question.id, tagged),
-                    };
-                    tag.execute(params![id.source, id.resource, id.derived_sha, key])?;
+                let (tags, by): (Vec<String>, &str) = match verdict {
+                    Some(verdict) => (human_tags(question, verdict), "human"),
+                    None => (
+                        outcome
+                            .map(|o| o.tags)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|tagged| match question.kind {
+                                QuestionKind::Noul => tagged,
+                                QuestionKind::Choice => option_key(&question.id, &tagged),
+                            })
+                            .collect(),
+                        "model",
+                    ),
+                };
+                for key in tags {
+                    tag.execute(params![id.source, id.resource, id.derived_sha, key, by])?;
                 }
             }
         }
@@ -3091,6 +3500,243 @@ fn project_scores(
 
 fn question_version(id: &str, version: u64) -> String {
     format!("{id}@{version}")
+}
+
+/// One question's stored answers at its current version, keyed the way [`decide`] reads
+/// them: the id for a noul, `id:option` for each option of a choice.
+fn answers_for(question: &Question, stored: &BTreeMap<String, f64>) -> BTreeMap<String, f64> {
+    let suffix = format!("@{}", question.version);
+    let prefix = format!("{}:", question.id);
+    stored
+        .iter()
+        .filter_map(|(key, score)| {
+            let bare = key.strip_suffix(&suffix)?;
+            (bare == question.id || bare.starts_with(&prefix)).then(|| (bare.to_owned(), *score))
+        })
+        .collect()
+}
+
+/// The tags a person's verdict puts on a document for one question: a `yes` to a question
+/// that tags, or the option they chose when that option tags. Spelled as search takes them.
+fn human_tags(question: &Question, verdict: &Verdict) -> Vec<String> {
+    match question.kind {
+        QuestionKind::Noul => {
+            if question.action == QuestionAction::Tag && verdict.yes() == Some(true) {
+                vec![question.id.clone()]
+            } else {
+                Vec::new()
+            }
+        }
+        QuestionKind::Choice => verdict
+            .option()
+            .and_then(|chosen| question.options.iter().find(|o| o.id == chosen))
+            .filter(|option| option.action == QuestionAction::Tag)
+            .map(|option| vec![option_key(&question.id, &option.id)])
+            .unwrap_or_default(),
+    }
+}
+
+/// A document's scores under the current questions, keyed without the version, as the
+/// Corpus and the review tool show them.
+fn classifications_of(
+    conn: &Connection,
+    document: &Document,
+) -> anyhow::Result<BTreeMap<String, f64>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT ck.key,wc.score FROM workspace_current_key ck
+         JOIN workspace_classification wc ON wc.question=ck.key
+         WHERE wc.source=?1 AND wc.resource=?2 AND wc.derived_sha=?3",
+    )?;
+    let rows = stmt.query_map(
+        params![document.source, document.resource, document.derived_sha],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)),
+    )?;
+    Ok(rows
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|(key, score)| {
+            (
+                key.rsplit_once('@')
+                    .map_or(key.as_str(), |x| x.0)
+                    .to_owned(),
+                score,
+            )
+        })
+        .collect())
+}
+
+/// Every answer key whose question holds a review floor, with the band it is held in:
+/// a yes-or-no question's own key; a choice's own key (its junk probability) when it can
+/// exclude, and each option that tags. Score rows in `[floor, threshold)` are the band.
+fn band_keys(questions: &[Question]) -> Vec<(String, f64, f64)> {
+    let mut keys = Vec::new();
+    for question in questions {
+        let Some(floor) = question.review else {
+            continue;
+        };
+        let threshold = question.threshold;
+        let key = |id: &str| question_version(id, question.version);
+        match question.kind {
+            QuestionKind::Noul => {
+                if question.action != QuestionAction::Keep {
+                    keys.push((key(&question.id), floor, threshold));
+                }
+            }
+            QuestionKind::Choice => {
+                if question
+                    .options
+                    .iter()
+                    .any(|o| o.action == QuestionAction::Exclude)
+                {
+                    keys.push((key(&question.id), floor, threshold));
+                }
+                for option in &question.options {
+                    if option.action == QuestionAction::Tag {
+                        keys.push((key(&option_key(&question.id, &option.id)), floor, threshold));
+                    }
+                }
+            }
+        }
+    }
+    keys
+}
+
+/// One question's agreement with its reviewers. See [`Workspace::evaluation`].
+fn evaluate_question(
+    question: &Question,
+    reviews: &HashMap<DocumentId, Review>,
+    scores: &HashMap<DocumentId, BTreeMap<String, f64>>,
+) -> QuestionEvaluation {
+    let mut out = QuestionEvaluation {
+        id: question.id.clone(),
+        version: question.version,
+        kind: match question.kind {
+            QuestionKind::Noul => "yes/no",
+            QuestionKind::Choice => "choice",
+        }
+        .into(),
+        threshold: question.threshold,
+        ..QuestionEvaluation::default()
+    };
+    // Yes-or-no pairs of (what the person said, what the model scored).
+    let mut pairs: Vec<(bool, f64)> = Vec::new();
+    let mut agreed = 0usize;
+    let prefix = format!("{}:", question.id);
+    for (id, review) in reviews {
+        let Some(verdict) = review.verdicts.get(&question.id) else {
+            continue;
+        };
+        let answers = scores
+            .get(id)
+            .map(|stored| answers_for(question, stored))
+            .unwrap_or_default();
+        if answers.is_empty() {
+            out.unscored += 1;
+            continue;
+        }
+        match question.kind {
+            QuestionKind::Noul => {
+                let (Some(yes), Some(score)) = (verdict.yes(), answers.get(&question.id)) else {
+                    continue;
+                };
+                pairs.push((yes, *score));
+            }
+            QuestionKind::Choice => {
+                let Some(human) = verdict.option() else {
+                    continue;
+                };
+                let model = answers
+                    .iter()
+                    .filter(|(key, _)| key.starts_with(&prefix))
+                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .map(|(key, _)| key[prefix.len()..].to_string())
+                    .unwrap_or_default();
+                out.compared += 1;
+                if human == model {
+                    agreed += 1;
+                }
+                *out.confusion
+                    .entry(human.to_string())
+                    .or_default()
+                    .entry(model)
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+    if question.kind == QuestionKind::Choice {
+        if out.compared > 0 {
+            out.agreement = Some(agreed as f64 / out.compared as f64);
+        }
+        return out;
+    }
+
+    out.compared = pairs.len();
+    let counts = |threshold: f64| -> (usize, usize, usize, usize) {
+        pairs
+            .iter()
+            .fold((0, 0, 0, 0), |(tp, fp, fn_, tn), (yes, score)| {
+                match (*yes, *score >= threshold) {
+                    (true, true) => (tp + 1, fp, fn_, tn),
+                    (false, true) => (tp, fp + 1, fn_, tn),
+                    (true, false) => (tp, fp, fn_ + 1, tn),
+                    (false, false) => (tp, fp, fn_, tn + 1),
+                }
+            })
+    };
+    let (tp, fp, fn_, tn) = counts(question.threshold);
+    out.true_positive = tp;
+    out.false_positive = fp;
+    out.false_negative = fn_;
+    out.true_negative = tn;
+    if out.compared > 0 {
+        out.agreement = Some((tp + tn) as f64 / out.compared as f64);
+    }
+    if tp + fp > 0 {
+        out.precision = Some(tp as f64 / (tp + fp) as f64);
+    }
+    if tp + fn_ > 0 {
+        out.recall = Some(tp as f64 / (tp + fn_) as f64);
+    }
+    // The threshold that would agree with the most reviewers, judged by F1 so that a
+    // threshold which agrees by saying no to everything does not win. Only when the
+    // reviews hold both answers; one-sided reviews cannot place a line.
+    let has_yes = pairs.iter().any(|(yes, _)| *yes);
+    let has_no = pairs.iter().any(|(yes, _)| !*yes);
+    if has_yes && has_no {
+        let f1 = |threshold: f64| -> f64 {
+            let (tp, fp, fn_, _) = counts(threshold);
+            if tp == 0 {
+                0.0
+            } else {
+                2.0 * tp as f64 / (2 * tp + fp + fn_) as f64
+            }
+        };
+        let mut candidates: Vec<f64> = pairs.iter().map(|(_, score)| *score).collect();
+        candidates.push(question.threshold);
+        candidates.sort_by(|a, b| a.total_cmp(b));
+        candidates.dedup();
+        // Ties go to the higher threshold: the stricter of two equally good lines.
+        let best = candidates
+            .iter()
+            .copied()
+            .fold(None::<(f64, f64)>, |best, threshold| {
+                let score = f1(threshold);
+                match best {
+                    Some((_, top)) if top > score => best,
+                    _ => Some((threshold, score)),
+                }
+            });
+        out.suggested_threshold = best.map(|(threshold, _)| threshold);
+    }
+    out
+}
+
+fn latest_reviews(path: &Path) -> anyhow::Result<HashMap<DocumentId, Review>> {
+    let mut out = HashMap::new();
+    for review in read_json_lines::<Review>(path)? {
+        out.insert(review.id(), review);
+    }
+    Ok(out)
 }
 
 fn pending_sql(document_alias: &str) -> String {
@@ -3464,6 +4110,281 @@ mod tests {
                 .is_empty(),
             "a policy change asks Jev nothing"
         );
+    }
+
+    /// The review loop end to end: the queue offers the band first, a verdict restores a
+    /// document the gate excluded and tags it by hand, a `no` takes the model's tag away,
+    /// and the evaluation reads the same lines back as agreement.
+    #[tokio::test]
+    async fn a_review_overrides_the_model_and_feeds_the_evaluation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let docs = [
+            (
+                "https://example.gov/menu",
+                "# MENU\n\nHome · Quick Links · Site Map",
+            ),
+            (
+                "https://example.gov/ordinance",
+                "# Ordinance 12\n\nBe it ordained by the council.",
+            ),
+            (
+                "https://example.gov/notice",
+                "# Notice\n\nThe board may consider a fee.",
+            ),
+        ];
+        let mut ids = Vec::new();
+        {
+            let mut index = Index::open(store.index_path()).unwrap();
+            for (resource, text) in docs {
+                let derived = store.put_blob(text.as_bytes()).await.unwrap().to_string();
+                for chunk in chunk_markdown(text, &ChunkConfig::default()) {
+                    index
+                        .insert(
+                            &chunk,
+                            &Placement {
+                                source: "city".into(),
+                                resource: resource.into(),
+                                blob_sha: "aa".repeat(32),
+                                derived_sha: derived.clone(),
+                                ordinal: chunk.ordinal,
+                                heading: chunk.heading.clone(),
+                                char_start: chunk.char_start,
+                                char_end: chunk.char_end,
+                                observed_at: "2026-10-07T12:00:00Z".into(),
+                                tool: "test 1".into(),
+                                title: None,
+                            },
+                        )
+                        .unwrap();
+                }
+                ids.push(DocumentId {
+                    source: "city".into(),
+                    resource: resource.into(),
+                    derived_sha: derived,
+                });
+            }
+        }
+        let ws = Workspace::new(&store);
+        let defaults = default_questions();
+        let pick = |id: &str| defaults.iter().find(|q| q.id == id).unwrap().clone();
+        let saved = ws
+            .save_questions(vec![pick("page_kind"), pick("laws")])
+            .unwrap();
+        let answer = |id: &DocumentId, kind: &str, laws: f64| RunResult {
+            source: id.source.clone(),
+            resource: id.resource.clone(),
+            derived_sha: id.derived_sha.clone(),
+            answers: BTreeMap::from([
+                (option_key("page_kind", kind), 0.95),
+                (option_key("page_kind", "other"), 0.05),
+                ("laws".to_string(), laws),
+            ]),
+            ..RunResult::default()
+        };
+        let mut run = stored_run(
+            "run-review",
+            "completed",
+            saved[0].clone(),
+            answer(&ids[0], "navigation", 0.2),
+        );
+        run.questions = saved.clone();
+        run.results.push(answer(&ids[1], "record", 0.9));
+        run.results.push(answer(&ids[2], "record", 0.6));
+        run.inputs = ids.clone();
+        run.document_count = 3;
+        append_json(&store.workspace_runs_path(), &RunRecord::Complete { run }).unwrap();
+        assert_eq!(
+            ws.commit("run-review").unwrap().committed,
+            1,
+            "the menu is excluded"
+        );
+
+        // The band first: the notice's `laws` at 0.6 sits in [0.5, 0.8).
+        let queue = ws.review_queue(ReviewQuery::default()).unwrap();
+        assert_eq!(queue.scored, 3);
+        assert_eq!(queue.in_review_band, 1);
+        assert_eq!(queue.reviewed, 0);
+        assert_eq!(queue.documents.len(), 3);
+        assert_eq!(
+            queue.documents[0].document.resource,
+            "https://example.gov/notice"
+        );
+        assert!(queue.documents[0].review_band);
+        let menu = queue
+            .documents
+            .iter()
+            .find(|c| c.document.resource == "https://example.gov/menu")
+            .unwrap();
+        assert!(
+            menu.document.excluded,
+            "an excluded document is still offered for review"
+        );
+        assert_eq!(
+            menu.outcomes["page_kind"].top.as_deref(),
+            Some("navigation")
+        );
+
+        // A person says the menu is a record with a law in it: restored, tagged by hand.
+        let report = ws
+            .review(Review {
+                at: String::new(),
+                source: ids[0].source.clone(),
+                resource: ids[0].resource.clone(),
+                derived_sha: ids[0].derived_sha.clone(),
+                verdicts: BTreeMap::from([
+                    (
+                        "page_kind".to_string(),
+                        Verdict {
+                            model: Some(json!("navigation")),
+                            human: json!("record"),
+                        },
+                    ),
+                    (
+                        "laws".to_string(),
+                        Verdict {
+                            model: Some(json!(0.2)),
+                            human: json!(true),
+                        },
+                    ),
+                ]),
+                proposed: vec![" Ordinance Amendment ".into()],
+                note: "a menu wrapped round an ordinance".into(),
+                reviewer: "ben".into(),
+            })
+            .unwrap();
+        assert!(!report.excluded);
+        assert!(report.usage_changed);
+        assert_eq!(report.tags, ["laws"]);
+        let index = Index::open(store.index_path()).unwrap();
+        let texts = index.chunk_texts(&index.chunk_hashes().unwrap()).unwrap();
+        assert!(
+            texts.iter().any(|t| t.contains("Quick Links")),
+            "restored to search"
+        );
+        let by: Vec<String> = string_column(
+            &open_index(store.index_path()).unwrap(),
+            "SELECT by FROM workspace_tag WHERE resource='https://example.gov/menu'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(by, ["human"]);
+        drop(index);
+
+        // A `no` on the ordinance takes the model's `laws` tag away; the gate, which the
+        // person did not answer, keeps the model's word.
+        let report = ws
+            .review(Review {
+                at: String::new(),
+                source: ids[1].source.clone(),
+                resource: ids[1].resource.clone(),
+                derived_sha: ids[1].derived_sha.clone(),
+                verdicts: BTreeMap::from([(
+                    "laws".to_string(),
+                    Verdict {
+                        model: Some(json!(0.9)),
+                        human: json!(false),
+                    },
+                )]),
+                proposed: Vec::new(),
+                note: String::new(),
+                reviewer: "ben".into(),
+            })
+            .unwrap();
+        assert!(!report.excluded);
+        assert!(!report.usage_changed);
+        assert!(report.tags.is_empty(), "{:?}", report.tags);
+
+        // Reviewed documents leave the queue unless asked for.
+        let queue = ws.review_queue(ReviewQuery::default()).unwrap();
+        assert_eq!(queue.reviewed, 2);
+        assert_eq!(
+            queue
+                .documents
+                .iter()
+                .map(|c| c.document.resource.as_str())
+                .collect::<Vec<_>>(),
+            ["https://example.gov/notice"]
+        );
+        let all = ws
+            .review_queue(ReviewQuery {
+                include_reviewed: true,
+                ..ReviewQuery::default()
+            })
+            .unwrap();
+        assert_eq!(all.documents.len(), 3);
+        assert_eq!(all.documents.iter().filter(|c| c.reviewed).count(), 2);
+
+        // A verdict that is not one of the question's answers is refused and recorded
+        // nowhere.
+        let lines_before = fs::read_to_string(store.workspace_reviews_path())
+            .unwrap()
+            .lines()
+            .count();
+        let error = ws
+            .review(Review {
+                at: String::new(),
+                source: ids[2].source.clone(),
+                resource: ids[2].resource.clone(),
+                derived_sha: ids[2].derived_sha.clone(),
+                verdicts: BTreeMap::from([(
+                    "page_kind".to_string(),
+                    Verdict {
+                        model: None,
+                        human: json!("spreadsheet"),
+                    },
+                )]),
+                proposed: Vec::new(),
+                note: String::new(),
+                reviewer: String::new(),
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`spreadsheet`"), "{error}");
+        assert_eq!(
+            fs::read_to_string(store.workspace_reviews_path())
+                .unwrap()
+                .lines()
+                .count(),
+            lines_before
+        );
+
+        // The evaluation: the model was wrong both times on `laws` and once on the gate.
+        let evaluation = ws.evaluation().unwrap();
+        assert_eq!(evaluation.reviews, 2);
+        assert_eq!(evaluation.documents, 2);
+        assert_eq!(
+            evaluation.proposed,
+            BTreeMap::from([("ordinance amendment".to_string(), 1)])
+        );
+        let laws = evaluation
+            .questions
+            .iter()
+            .find(|q| q.id == "laws")
+            .unwrap();
+        assert_eq!(laws.compared, 2);
+        assert_eq!(
+            (
+                laws.true_positive,
+                laws.false_positive,
+                laws.false_negative,
+                laws.true_negative
+            ),
+            (0, 1, 1, 0)
+        );
+        assert_eq!(laws.agreement, Some(0.0));
+        assert!(
+            laws.suggested_threshold.is_some(),
+            "both answers are present, so a line can be placed"
+        );
+        let gate = evaluation
+            .questions
+            .iter()
+            .find(|q| q.id == "page_kind")
+            .unwrap();
+        assert_eq!(gate.compared, 1);
+        assert_eq!(gate.confusion["record"]["navigation"], 1);
+        assert_eq!(gate.agreement, Some(0.0));
     }
 
     #[test]

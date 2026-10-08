@@ -40,7 +40,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use centinel_core::op::{self, Ctx, Progress};
 use centinel_core::workspace::{
-    DocumentQuery, ReadQuery, RestoreRequest, RunDetailQuery, RunQuery, RunRequest, Workspace,
+    DocumentQuery, ReadQuery, RestoreRequest, Review, ReviewQuery, RunDetailQuery, RunQuery,
+    RunRequest, Workspace,
 };
 use futures::stream::Stream;
 use serde_json::{Value, json};
@@ -185,6 +186,9 @@ fn router(ctx: Arc<Ctx>) -> Router {
         .route("/workspace/runs/{id}", get(workspace_run_detail))
         .route("/workspace/runs/{id}/commit", post(workspace_commit))
         .route("/workspace/restore", post(workspace_restore))
+        .route("/workspace/review/queue", get(workspace_review_queue))
+        .route("/workspace/review", post(workspace_review))
+        .route("/workspace/evaluation", get(workspace_evaluation))
         .route("/ops", get(list_ops))
         .route("/ops/{name}", post(invoke))
         .route("/ops/{name}/stream", post(invoke_streaming))
@@ -257,6 +261,30 @@ async fn workspace_questions(State(ctx): State<Arc<Ctx>>) -> Response {
         Ok(questions) => Json(json!({ "questions": questions })).into_response(),
         Err(error) => workspace_error(error),
     }
+}
+
+async fn workspace_review_queue(
+    State(ctx): State<Arc<Ctx>>,
+    Query(query): Query<ReviewQuery>,
+) -> Response {
+    workspace_response(Workspace::new(&ctx.store).review_queue(query))
+}
+
+/// A person's verdicts on one document. A write: it can restore or exclude the document
+/// and it puts tags on it, so it wants the same origin every other write wants.
+async fn workspace_review(
+    State(ctx): State<Arc<Ctx>>,
+    headers: HeaderMap,
+    Json(review): Json<Review>,
+) -> Response {
+    if !same_origin(&headers) {
+        return forbidden_origin();
+    }
+    workspace_response(Workspace::new(&ctx.store).review(review))
+}
+
+async fn workspace_evaluation(State(ctx): State<Arc<Ctx>>) -> Response {
+    workspace_response(Workspace::new(&ctx.store).evaluation())
 }
 
 /// The shipped question groups, for the Add menu. The saved set is seeded from these on
@@ -759,7 +787,7 @@ mod tests {
             std::str::from_utf8(&bytes).unwrap().contains("Centinel"),
             "the embedded document arrived"
         );
-        for path in ["/web/", "/web/classifiers", "/web/runs"] {
+        for path in ["/web/", "/web/classifiers", "/web/runs", "/web/review"] {
             assert_eq!(
                 app.clone()
                     .oneshot(Request::get(path).body(Body::empty()).unwrap())
@@ -770,6 +798,42 @@ mod tests {
                 "SPA route {path}"
             );
         }
+    }
+
+    /// The review surfaces read before anything is written: an empty store has an empty
+    /// evaluation and no queue, and a review from another origin is refused.
+    #[tokio::test]
+    async fn review_surfaces_answer_on_an_empty_store_and_refuse_foreign_writes() {
+        let (_d, app) = app().await;
+        let evaluation = body_json(
+            app.clone()
+                .oneshot(
+                    Request::get("/workspace/evaluation")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(evaluation["reviews"], 0);
+        assert!(evaluation["questions"].is_array());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/workspace/review")
+                    .header("content-type", "application/json")
+                    .header("host", "127.0.0.1:8787")
+                    .header("origin", "http://attacker.example")
+                    .body(Body::from(
+                        r#"{"source":"s","resource":"r","derived_sha":"d","verdicts":{}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]

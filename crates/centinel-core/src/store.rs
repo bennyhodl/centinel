@@ -285,6 +285,13 @@ impl Store {
         self.workspace_dir().join("decisions.jsonl")
     }
 
+    /// `workspace/reviews.jsonl` — what a person said about the classifier's answers,
+    /// document by document. The labelled set every evaluation and threshold is tuned
+    /// against, so it is truth: no replay of the runs can recover a human's verdict.
+    pub fn workspace_reviews_path(&self) -> PathBuf {
+        self.workspace_dir().join("reviews.jsonl")
+    }
+
     /// `run.lock` — the run in flight, if any.
     ///
     /// On disk rather than in the scheduler's memory, because the CLI is a second process:
@@ -1141,6 +1148,10 @@ mod tests {
         assert!(
             s.workspace_decisions_path()
                 .ends_with("workspace/decisions.jsonl")
+        );
+        assert!(
+            s.workspace_reviews_path()
+                .ends_with("workspace/reviews.jsonl")
         );
         assert!(
             s.crumbs_path(&SourceId::new("tampa").unwrap())

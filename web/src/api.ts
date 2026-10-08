@@ -213,6 +213,68 @@ export type ReadReport = {
   truncated: boolean
 }
 
+/** A document as the review tool shows it: the Corpus row plus what the policy decided. */
+export type ReviewCandidate = Document & {
+  outcomes: Record<string, Outcome>
+  /** Some answer sits in a question's review band. */
+  review_band: boolean
+  reviewed: boolean
+}
+
+export type ReviewQueue = {
+  documents: ReviewCandidate[]
+  in_review_band: number
+  reviewed: number
+  scored: number
+}
+
+/** What the model said beside what the person said, for one question. */
+export type Verdict = {
+  /** A yes-or-no question's probability, or a choice's winning option. */
+  model?: number | string | null
+  /** `true`/`false` for a yes-or-no question, an option id for a choice. */
+  human: boolean | string
+}
+
+/** One line of `workspace/reviews.jsonl`. The server stamps `at`. */
+export type Review = DocumentIdentity & {
+  verdicts: Record<string, Verdict>
+  proposed?: string[]
+  note?: string
+  reviewer?: string
+}
+
+export type ReviewReport = {
+  excluded: boolean
+  usage_changed: boolean
+  tags: string[]
+}
+
+export type QuestionEvaluation = {
+  id: string
+  version: number
+  kind: string
+  compared: number
+  unscored: number
+  agreement?: number | null
+  threshold: number
+  suggested_threshold?: number
+  precision?: number
+  recall?: number
+  true_positive?: number
+  false_positive?: number
+  false_negative?: number
+  true_negative?: number
+  confusion?: Record<string, Record<string, number>>
+}
+
+export type Evaluation = {
+  reviews: number
+  documents: number
+  questions: QuestionEvaluation[]
+  proposed: Record<string, number>
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response
   try {
@@ -297,4 +359,16 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(identity),
   }),
+  /** The review band first, then a random sample of decided documents. */
+  reviewQueue: (query: { source?: string; page_size?: number; include_reviewed?: boolean }) => {
+    const params = new URLSearchParams()
+    if (query.source) params.set('source', query.source)
+    if (query.page_size) params.set('page_size', String(query.page_size))
+    if (query.include_reviewed) params.set('include_reviewed', 'true')
+    const path = `/workspace/review/queue?${params}`
+    return request<ReviewQueue>(path).then(value => withArray(value, 'documents', path))
+  },
+  /** Records a person's verdicts on one document, and acts on them at once. */
+  review: (review: Review) => request<ReviewReport>('/workspace/review', { method: 'POST', body: JSON.stringify(review) }),
+  evaluation: () => request<Evaluation>('/workspace/evaluation').then(value => withArray(value, 'questions', '/workspace/evaluation')),
 }

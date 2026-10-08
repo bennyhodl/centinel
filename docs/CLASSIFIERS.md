@@ -217,6 +217,40 @@ Classify view changes what the next `centinel search --tag` returns, and sends n
 Jev. A tag no saved question defines is refused with the list to check, so a typo is an
 error rather than an empty result. See [RETRIEVAL.md](RETRIEVAL.md).
 
+## Review, and the loop that tunes the questions
+
+The fourth view of `centinel web` is **Review**: one document at a time, its full text on
+the left, and on the right what the current policy decided for each saved question — the
+gate's verdict, each choice's winning option, each tag it put on or left off. The person
+answers with the keyboard. Right arrow says the document is a record, left arrow says it is
+junk; the chips and options can be changed first; Enter records the card as it stands;
+`s` skips. A box takes tag names that do not exist yet, and a note.
+
+Every card writes one line to `workspace/reviews.jsonl`:
+
+```json
+{"at":"2026-10-07T21:10:00Z","source":"tampa","resource":"https://…","derived_sha":"a59…",
+ "verdicts":{"page_kind":{"model":"navigation","human":"record"},
+             "laws":{"model":0.41,"human":true}},
+ "proposed":["ordinance amendment"],"note":"agenda packet, menus around it","reviewer":"ben"}
+```
+
+A verdict is not only a label for later. It acts at once: a `record` said of an excluded
+menu restores it to search and embedding, a junk option said of a kept page excludes it,
+a `yes` to a question that tags puts the tag on the document marked `human`, and a `no`
+takes the model's tag away. The queue offers the review band first — documents with some
+answer between a question's review floor and its threshold — then a random sample of the
+decided ones, and skips documents already reviewed unless asked.
+
+`centinel evaluate` reads the same lines back beside the runs ledger. Per question: how
+many reviews had a model score to compare with, how often the policy's decision matched
+the person's, precision and recall at the current threshold, and for a yes-or-no question
+the threshold that would have matched most (judged by F1, so "no to everything" cannot
+win). For a choice, what people said against what the model's top option was. And every
+proposed tag with a count. The `--json` form is the one an agent reads: change a wording
+in `workspace/questions.jsonl`, `classify --preview` the reviewed documents, read it again.
+Reviewed documents are the regression set for every later run.
+
 ## `centinel web`
 
 ```

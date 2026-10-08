@@ -143,11 +143,19 @@ something you can hand to somebody with `rsync`.
 
 **Classifier workspace** — `workspace/questions.jsonl` holds versioned atomic questions,
 `workspace/runs.jsonl` holds selected input identities, progress, scores and benchmark
-metrics, and `workspace/decisions.jsonl` holds the operator's reversible rulings about
-document usage. The projection tables with `workspace_` names inside `centinel.db` are
-derived caches of these ledgers. *Why it matters:* deleting or rebuilding the search index
-must not restore excluded material to search or embedding, and changing a threshold must
-not require sending document text to Jev again.
+metrics, `workspace/decisions.jsonl` holds the operator's reversible rulings about document
+usage, and `workspace/reviews.jsonl` holds what a person said about the model's answers,
+one line per document read. The projection tables with `workspace_` names inside
+`centinel.db` are derived caches of these ledgers, rebuilt when the index opens and any
+ledger changed. *Why it matters:* deleting or rebuilding the search index must not restore
+excluded material to search or embedding, and changing a threshold must not require
+sending document text to Jev again.
+
+**Tag** — what the policy says a document is, spelled the way `search --tag` takes it: a
+yes-or-no question's id, or `choice:option`. A person's verdict beats the model's for the
+question it answers; the model's stands for the rest. *Why it matters:* one spelling joins
+the review tool, the projection, the CLI and the MCP tool, so a tag seen on a result is the
+filter for the next search.
 
 **Meaning vs policy** — a question's meaning is what Jev is asked: the wording, the kind
 (noul or choice), and each option's id and description. Its policy is what the program

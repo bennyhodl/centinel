@@ -2,11 +2,12 @@ import React, { useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createRootRoute, createRoute, createRouter, Link, Outlet, RouterProvider, useNavigate, useSearch } from '@tanstack/react-router'
-import { Archive, ArrowLeft, ChevronLeft, ChevronRight, FileText, FlaskConical, History, RotateCcw, Search, ShieldCheck, TextSearch } from 'lucide-react'
+import { Archive, ArrowLeft, ChevronLeft, ChevronRight, Eye, FileText, FlaskConical, History, RotateCcw, Search, ShieldCheck, TextSearch } from 'lucide-react'
 import { api, corpusParams, type CorpusFilters, type Document, type Question } from './api'
 import { Classify, classifierOptions } from './classify'
 import { characters, number, tail } from './format'
 import { classificationBadges, hasScores } from './policy'
+import { Review } from './review'
 import { Runs } from './runs'
 import { DocumentLink, Empty, ErrorBox, PageHeader, Pulse } from './ui'
 import { Badge } from '@/components/ui/badge'
@@ -36,6 +37,7 @@ function Shell() {
       <Link to="/" search={{ text: '', address: '', page: 1, source: '', usage: 'all', classifier: '', minScore: '0.5', maxScore: '' }} activeOptions={{ exact: true }}><Archive />Corpus</Link>
       <Link to="/classifiers"><FlaskConical />Classify</Link>
       <Link to="/runs" search={{ run: running[0]?.id || '', page: 1, outcome: '' }}><History />Runs{running.length > 0 && <span className="rail-live"><Pulse />{running.length} running</span>}</Link>
+      <Link to="/review"><Eye />Review</Link>
     </nav>
     <div className="rail-note"><ShieldCheck /><div><b>Archive stays intact</b><span>Classification changes corpus usage. Collected bytes and the log do not change.</span></div></div>
   </aside><main><Outlet /></main></div></TooltipProvider>
@@ -70,7 +72,8 @@ const runsRoute = createRoute({
   }),
   component: Runs,
 })
-const router = createRouter({ basepath: '/web', routeTree: rootRoute.addChildren([corpusRoute, documentRoute, classifierRoute, runsRoute]) })
+const reviewRoute = createRoute({ getParentRoute: () => rootRoute, path: '/review', component: Review })
+const router = createRouter({ basepath: '/web', routeTree: rootRoute.addChildren([corpusRoute, documentRoute, classifierRoute, runsRoute, reviewRoute]) })
 declare module '@tanstack/react-router' { interface Register { router: typeof router } }
 
 function Corpus() {

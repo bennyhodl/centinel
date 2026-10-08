@@ -24,6 +24,7 @@ mod discover;
 mod doctor;
 mod download;
 mod embed;
+mod evaluate;
 mod extract;
 mod ingest;
 mod investigate;
@@ -61,6 +62,7 @@ pub use discover::{DiscoverArgs, DiscoverReport, discover};
 pub use doctor::{Binary, DoctorArgs, DoctorReport, GateStatus, Weights, doctor};
 pub use download::{DownloadArgs, DownloadReport, download};
 pub use embed::{BatchSize, EmbedArgs, EmbedReport, Skipped, embed};
+pub use evaluate::{EvaluateArgs, evaluate};
 pub use extract::{ExtractArgs, ExtractReport, ExtractSample, Unreadable, extract};
 pub use ingest::{IngestArgs, IngestOutcome, IngestReport, ingest};
 pub use investigate::{
