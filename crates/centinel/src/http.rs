@@ -32,15 +32,84 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use centinel_core::op::{self, Ctx, Progress};
+use centinel_core::workspace::{
+    DocumentQuery, ReadQuery, RestoreRequest, Review, ReviewQuery, RunDetailQuery, RunQuery,
+    RunRequest, Workspace,
+};
 use futures::stream::Stream;
 use serde_json::{Value, json};
+
+include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
+
+/// Identifies the binary this process runs: the executable's size and modification
+/// time. Two `centinel web` invocations from the same build agree on it; a rebuild
+/// changes it, so a server left running from before the build is recognised as stale
+/// even though its version string still matches.
+pub fn build_id() -> &'static str {
+    static ID: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let meta = std::env::current_exe().and_then(std::fs::metadata);
+        match meta {
+            Ok(meta) => {
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                format!("{}-{modified}", meta.len())
+            }
+            Err(_) => "unknown".to_string(),
+        }
+    });
+    &ID
+}
+
+/// A page rebuilt by `centinel web --rebuild`, served in place of the embedded one for
+/// the life of this process. Set once, before the server starts.
+static REBUILT_PAGE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+/// Serves `page` at `/web` instead of the embedded copy. A second call is ignored.
+pub fn serve_page_from(page: Vec<u8>) {
+    let _ = REBUILT_PAGE.set(page);
+}
+
+/// The workspace page this process serves: the rebuilt one when there is one, else the
+/// copy embedded at compile time.
+fn web_page() -> Option<&'static [u8]> {
+    if let Some(page) = REBUILT_PAGE.get() {
+        return Some(page.as_slice());
+    }
+    WEB_ASSETS
+        .iter()
+        .find(|asset| asset.0 == "/web")
+        .map(|asset| asset.2)
+}
+
+/// The version stamped into the served workspace page by `vite.config.ts`.
+///
+/// The build script refuses a bundle whose stamp differs from the crate, so on a binary
+/// built from source this always equals `CARGO_PKG_VERSION`. A release download cannot
+/// rebuild the bundle, so [`crate::web::check_bundle`] only checks it, early.
+pub fn web_version() -> Option<String> {
+    stamped_version(std::str::from_utf8(web_page()?).ok()?)
+}
+
+/// The `centinel-version` meta tag in a page, as `vite.config.ts` writes it.
+pub fn stamped_version(html: &str) -> Option<String> {
+    let start = html.find("name=\"centinel-version\"")?;
+    let rest = &html[start..];
+    let content = rest.find("content=\"")? + "content=\"".len();
+    let rest = &rest[content..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
 
 /// Serves until the process is asked to stop.
 ///
@@ -101,11 +170,271 @@ pub async fn serve_until(
 fn router(ctx: Arc<Ctx>) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/web", get(web_ui))
+        .route("/web/", get(web_ui))
+        .route("/web/{*path}", get(web_ui))
+        .route("/assets/{*path}", get(web_asset))
+        .route("/workspace/documents", get(workspace_documents))
+        .route("/workspace/system", get(workspace_system))
+        .route("/workspace/document", get(workspace_document))
+        .route(
+            "/workspace/questions",
+            get(workspace_questions).put(workspace_save_questions),
+        )
+        .route("/workspace/presets", get(workspace_presets))
+        .route("/workspace/runs", get(workspace_runs).post(workspace_run))
+        .route("/workspace/runs/{id}", get(workspace_run_detail))
+        .route("/workspace/runs/{id}/commit", post(workspace_commit))
+        .route("/workspace/restore", post(workspace_restore))
+        .route("/workspace/review/queue", get(workspace_review_queue))
+        .route("/workspace/review", post(workspace_review))
+        .route("/workspace/evaluation", get(workspace_evaluation))
         .route("/ops", get(list_ops))
         .route("/ops/{name}", post(invoke))
         .route("/ops/{name}/stream", post(invoke_streaming))
         .route("/mcp", post(mcp_over_http))
         .with_state(ctx)
+}
+
+/// The bundled classifier workspace.
+///
+/// One file, embedded at build time: no asset directory to ship beside the binary and no
+/// build step on the user's machine. It talks to the ops API on this origin, so nothing
+/// here learns a route by name — the UI calls `/ops/read` and `/ops/search` the same way
+/// the CLI does.
+async fn web_ui() -> impl IntoResponse {
+    asset_response("/web")
+}
+
+async fn web_asset(Path(path): Path<String>) -> Response {
+    asset_response(&format!("/assets/{path}"))
+}
+
+fn asset_response(path: &str) -> Response {
+    if path == "/web"
+        && let Some(page) = REBUILT_PAGE.get()
+    {
+        return (
+            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            page.clone(),
+        )
+            .into_response();
+    }
+    match WEB_ASSETS.iter().find(|asset| asset.0 == path) {
+        Some((_, mime, bytes)) => {
+            ([(axum::http::header::CONTENT_TYPE, *mime)], *bytes).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn workspace_documents(
+    State(ctx): State<Arc<Ctx>>,
+    Query(query): Query<DocumentQuery>,
+) -> Response {
+    workspace_response(Workspace::new(&ctx.store).documents(query))
+}
+
+async fn workspace_document(
+    State(ctx): State<Arc<Ctx>>,
+    Query(query): Query<ReadQuery>,
+) -> Response {
+    workspace_response(Workspace::new(&ctx.store).read(query).await)
+}
+
+async fn workspace_system(State(ctx): State<Arc<Ctx>>) -> Response {
+    let root =
+        std::fs::canonicalize(ctx.store.root()).unwrap_or_else(|_| ctx.store.root().to_path_buf());
+    Json(json!({
+        "product": "centinel",
+        "api_version": 1,
+        "version": env!("CARGO_PKG_VERSION"),
+        "web_version": web_version(),
+        "build_id": build_id(),
+        "store_root": root,
+    }))
+    .into_response()
+}
+
+async fn workspace_questions(State(ctx): State<Arc<Ctx>>) -> Response {
+    match Workspace::new(&ctx.store).questions() {
+        Ok(questions) => Json(json!({ "questions": questions })).into_response(),
+        Err(error) => workspace_error(error),
+    }
+}
+
+async fn workspace_review_queue(
+    State(ctx): State<Arc<Ctx>>,
+    Query(query): Query<ReviewQuery>,
+) -> Response {
+    workspace_response(Workspace::new(&ctx.store).review_queue(query))
+}
+
+/// A person's verdicts on one document. A write: it can restore or exclude the document
+/// and it puts tags on it, so it wants the same origin every other write wants.
+async fn workspace_review(
+    State(ctx): State<Arc<Ctx>>,
+    headers: HeaderMap,
+    Json(review): Json<Review>,
+) -> Response {
+    if !same_origin(&headers) {
+        return forbidden_origin();
+    }
+    workspace_response(Workspace::new(&ctx.store).review(review))
+}
+
+async fn workspace_evaluation(State(ctx): State<Arc<Ctx>>) -> Response {
+    workspace_response(Workspace::new(&ctx.store).evaluation())
+}
+
+/// The shipped question groups, for the Add menu. The saved set is seeded from these on
+/// first use, so this is what a page offers back rather than what it starts from.
+async fn workspace_presets() -> Response {
+    Json(json!({ "presets": centinel_core::workspace::presets() })).into_response()
+}
+
+async fn workspace_save_questions(
+    State(ctx): State<Arc<Ctx>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if !same_origin(&headers) {
+        return forbidden_origin();
+    }
+    let questions =
+        match serde_json::from_value(body.get("questions").cloned().unwrap_or(Value::Null)) {
+            Ok(questions) => questions,
+            Err(error) => return workspace_error(error.into()),
+        };
+    match Workspace::new(&ctx.store).save_questions(questions) {
+        Ok(questions) => Json(json!({ "questions": questions })).into_response(),
+        Err(error) => workspace_error(error),
+    }
+}
+
+async fn workspace_runs(State(ctx): State<Arc<Ctx>>, Query(query): Query<RunQuery>) -> Response {
+    workspace_response(Workspace::new(&ctx.store).runs(query))
+}
+
+async fn workspace_run_detail(
+    State(ctx): State<Arc<Ctx>>,
+    Path(id): Path<String>,
+    Query(query): Query<RunDetailQuery>,
+) -> Response {
+    workspace_response(Workspace::new(&ctx.store).run_detail(&id, query))
+}
+
+async fn workspace_run(
+    State(ctx): State<Arc<Ctx>>,
+    headers: HeaderMap,
+    Json(request): Json<RunRequest>,
+) -> Response {
+    if !same_origin(&headers) {
+        return forbidden_origin();
+    }
+    // Answer with the run as started, then score it on a task of its own. The browser
+    // polls the run detail for progress; a request held open for a thousand documents
+    // sat behind proxies, browser limits, and a person wondering whether anything was
+    // happening.
+    let prepared = match Workspace::new(&ctx.store).prepare(request) {
+        Ok(prepared) => prepared,
+        Err(error) => return workspace_error(error),
+    };
+    let started = prepared.run().clone();
+    let worker = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        let id = prepared.run().id.clone();
+        match Workspace::new(&worker.store).execute(prepared).await {
+            Ok(run) => tracing::info!(
+                run = %run.id,
+                documents = run.results.len(),
+                errors = run.errors,
+                duration_ms = run.duration_ms.unwrap_or_default(),
+                "classifier run finished"
+            ),
+            Err(error) => {
+                tracing::warn!(run = %id, error = %format!("{error:#}"), "classifier run failed")
+            }
+        }
+    });
+    (StatusCode::ACCEPTED, Json(started)).into_response()
+}
+
+async fn workspace_commit(
+    State(ctx): State<Arc<Ctx>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !same_origin(&headers) {
+        return forbidden_origin();
+    }
+    workspace_response(Workspace::new(&ctx.store).commit(&id))
+}
+
+async fn workspace_restore(
+    State(ctx): State<Arc<Ctx>>,
+    headers: HeaderMap,
+    Json(request): Json<RestoreRequest>,
+) -> Response {
+    if !same_origin(&headers) {
+        return forbidden_origin();
+    }
+    workspace_response(Workspace::new(&ctx.store).restore(request))
+}
+
+fn workspace_response<T: serde::Serialize>(result: anyhow::Result<T>) -> Response {
+    match result {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => workspace_error(error),
+    }
+}
+
+fn workspace_error(error: anyhow::Error) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": format!("{error:#}") })),
+    )
+        .into_response()
+}
+
+/// Workspace writes can cause paid inference or change corpus usage. A browser must send
+/// the same authority in `Origin` and `Host`, which blocks a page on another origin from
+/// using the loopback server as its write target.
+fn same_origin(headers: &HeaderMap) -> bool {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok());
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok());
+    let origin_uri = origin.and_then(|value| value.parse::<Uri>().ok());
+    let origin_host = origin_uri
+        .as_ref()
+        .and_then(|uri| uri.authority().map(|a| a.as_str()));
+    let loopback = host
+        .and_then(|authority| authority.parse::<axum::http::uri::Authority>().ok())
+        .is_some_and(|authority| {
+            matches!(
+                authority.host(),
+                "localhost" | "127.0.0.1" | "[::1]" | "::1"
+            )
+        });
+    if loopback
+        && origin_uri.as_ref().and_then(Uri::scheme_str) == Some("http")
+        && host.is_some()
+        && host == origin_host
+    {
+        return true;
+    }
+    false
+}
+
+fn forbidden_origin() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "error": "workspace mutations require a same-origin Origin and Host" })),
+    )
+        .into_response()
 }
 
 /// The registry as JSON — the same information the CLI turns into help text and MCP
@@ -332,6 +661,49 @@ mod tests {
         }
     }
 
+    /// A fresh store answers its first question read with the shipped defaults, and the
+    /// same defaults are offered as presets to add back after an edit.
+    #[tokio::test]
+    async fn a_fresh_workspace_has_the_default_questions_and_offers_them_as_presets() {
+        let (_d, app) = app().await;
+        let questions = body_json(
+            app.clone()
+                .oneshot(
+                    Request::get("/workspace/questions")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let ids: Vec<&str> = questions["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|q| q["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids[0], "page_kind");
+        assert!(
+            ids.contains(&"record_type") && ids.contains(&"body"),
+            "{ids:?}"
+        );
+
+        let presets = body_json(
+            app.oneshot(
+                Request::get("/workspace/presets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        let groups = presets["presets"].as_array().unwrap();
+        assert_eq!(groups[0]["id"], "junk");
+        assert_eq!(groups[0]["questions"][0]["id"], "page_kind");
+    }
+
     #[tokio::test]
     async fn invoking_an_op_with_no_body_works() {
         let (_d, app) = app().await;
@@ -391,6 +763,94 @@ mod tests {
         assert_eq!(
             json["result"]["tools"].as_array().unwrap().len(),
             op::mcp_tools().len()
+        );
+    }
+
+    #[tokio::test]
+    async fn web_serves_the_embedded_ui() {
+        let (_d, app) = app().await;
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/web").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()["content-type"],
+            "text/html; charset=utf-8",
+            "the browser has to be told what it received"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert!(
+            std::str::from_utf8(&bytes).unwrap().contains("Centinel"),
+            "the embedded document arrived"
+        );
+        for path in ["/web/", "/web/classifiers", "/web/runs", "/web/review"] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK,
+                "SPA route {path}"
+            );
+        }
+    }
+
+    /// The review surfaces read before anything is written: an empty store has an empty
+    /// evaluation and no queue, and a review from another origin is refused.
+    #[tokio::test]
+    async fn review_surfaces_answer_on_an_empty_store_and_refuse_foreign_writes() {
+        let (_d, app) = app().await;
+        let evaluation = body_json(
+            app.clone()
+                .oneshot(
+                    Request::get("/workspace/evaluation")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(evaluation["reviews"], 0);
+        assert!(evaluation["questions"].is_array());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/workspace/review")
+                    .header("content-type", "application/json")
+                    .header("host", "127.0.0.1:8787")
+                    .header("origin", "http://attacker.example")
+                    .body(Body::from(
+                        r#"{"source":"s","resource":"r","derived_sha":"d","verdicts":{}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn workspace_writes_require_same_loopback_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "127.0.0.1:8787".parse().unwrap());
+        headers.insert("origin", "http://127.0.0.1:8787".parse().unwrap());
+        assert!(same_origin(&headers));
+
+        headers.insert("origin", "http://attacker.example".parse().unwrap());
+        assert!(!same_origin(&headers));
+
+        headers.insert("host", "attacker.example".parse().unwrap());
+        headers.insert("origin", "http://attacker.example".parse().unwrap());
+        assert!(
+            !same_origin(&headers),
+            "matching attacker headers are not loopback"
         );
     }
 }

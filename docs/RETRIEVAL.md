@@ -200,7 +200,16 @@ index chunk hashes  −  stored chunk hashes
 Kill it at chunk 40,000 and re-run; it starts at 40,001. Lance commits a version per
 append, so what landed before the kill is there.
 
-`--dry-run` creates no table. A plan must leave nothing behind.
+The subtraction runs the other way too. Before a run embeds anything it deletes the rows
+whose hash the index no longer has — what a rebuilt index or a `--rebuild --source`
+leaves behind — so one stage owns the table in both directions and a stored vector has
+one meaning: a row whose hash is in the index. The report says how many were `stale` and
+how many it `pruned`. An empty index prunes nothing; it is an index that has not been
+built, not a verdict on the vectors. After the run the table is compacted and versions
+older than ten minutes are dropped, which is what keeps a query from reading one fragment
+per batch ever appended (one store reached 20,000 fragments and 16 GiB of manifests).
+
+`--dry-run` creates no table and prunes nothing. A plan must leave nothing behind.
 
 ### What it costs
 
@@ -329,12 +338,28 @@ candidate among many and a shortened judgement is still a judgement, where refus
 drop a result the first stage chose. Nothing here is stored, so nothing can lie about what
 it covers.
 
-### `--source`
+### `--source`, `--tag`, `--not-tag`
 
-The BM25 arm filters in SQL. The vector arm cannot: Lance carries no source column, and a
-chunk has many placements across sources. So it **over-fetches 5×, then post-filters** in
-one query for the whole candidate set. It can still under-fill on a corpus one source
-dominates — a known limit of the post-filter, not a bug in it.
+```
+centinel search "stormwater" --source hillsborough
+centinel search "stormwater" --tag record_type:minutes --tag water_environment
+centinel search "permits" --not-tag record_type:data_table
+```
+
+One filter, applied the same way by both arms. The BM25 arm applies it in SQL. The vector
+arm cannot: Lance carries no source or tag column, and a chunk has many placements across
+documents. So it **over-fetches 5×, then post-filters** in one query for the whole candidate
+set — the same query the keyword arm's `WHERE` is built from, so the two never disagree
+about which documents are in play. It can still under-fill on a corpus one source dominates
+— a known limit of the post-filter, not a bug in it.
+
+A tag is what the classifier workspace's policy put on a document: a yes-or-no question's
+id, or `choice:option`. Repeated `--tag` is AND. A tag no saved question defines is an
+error, not an empty result. Every result carries the `tags` of the document it cites, so a
+reader sees why a filtered hit qualified and what else it is. Tags live in a projection the
+index refreshes from the workspace ledgers when it opens, so a threshold moved in the web
+page reaches the next `centinel search` without a re-score. See
+[CLASSIFIERS.md](CLASSIFIERS.md).
 
 ---
 

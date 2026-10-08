@@ -17,12 +17,14 @@
 
 mod build_index;
 mod check;
+mod classify;
 mod collect;
 mod crumbs;
 mod discover;
 mod doctor;
 mod download;
 mod embed;
+mod evaluate;
 mod extract;
 mod ingest;
 mod investigate;
@@ -30,6 +32,7 @@ mod list;
 mod models;
 mod open;
 mod probe;
+mod questions;
 mod read;
 mod run;
 mod schedule;
@@ -37,7 +40,7 @@ mod schedules;
 mod search;
 mod source;
 mod status;
-mod target;
+pub(crate) mod target;
 mod transcribe;
 mod update;
 
@@ -46,17 +49,20 @@ pub use models::{
     FetchedFile, FileCheck, ModelsAction, ModelsArgs, ModelsReport, Orphan, PruneArgs, PullArgs,
     RemoveArgs, VerifyArgs, models,
 };
-pub use open::{OpenArgs, OpenReport, open};
+pub use open::{OpenArgs, OpenReport, open, system_opener};
 pub use probe::NetArgs;
+pub use questions::{QuestionSummary, QuestionsArgs, QuestionsReport, questions};
 pub use read::{ReadArgs, ReadReport, read};
 
 pub use build_index::{IndexArgs, IndexReport, index};
+pub use classify::{ClassifyArgs, ClassifyFailure, ClassifyReport, classify};
 pub use collect::{CollectArgs, CollectFailure, CollectReport, collect};
 pub use crumbs::{CrumbsAction, CrumbsArgs, CrumbsReport, RuleArgs, ShowArgs, crumbs};
 pub use discover::{DiscoverArgs, DiscoverReport, discover};
 pub use doctor::{Binary, DoctorArgs, DoctorReport, GateStatus, Weights, doctor};
 pub use download::{DownloadArgs, DownloadReport, download};
 pub use embed::{BatchSize, EmbedArgs, EmbedReport, Skipped, embed};
+pub use evaluate::{EvaluateArgs, evaluate};
 pub use extract::{ExtractArgs, ExtractReport, ExtractSample, Unreadable, extract};
 pub use ingest::{IngestArgs, IngestOutcome, IngestReport, ingest};
 pub use investigate::{

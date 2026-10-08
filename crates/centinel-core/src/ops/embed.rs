@@ -16,10 +16,26 @@
 //! ```
 //!
 //! so killing a run at chunk 40,000 and re-running starts at 40,001. That falls out of
-//! the table being append-only and content-addressed, exactly as `collect`'s
+//! the table being content-addressed and every append a commit, exactly as `collect`'s
 //! resumability falls out of the log. It is also why a **monthly recrawl is cheap**: a
 //! re-crawled site is ~95% identical, identical text has an identical `chunk_hash`, and
 //! only genuinely new chunks reach the model (SPEC §6.1).
+//!
+//! ## The subtraction runs the other way too
+//!
+//! Before anything is embedded, rows whose hash the index no longer has are deleted
+//! ([`VectorTable::retain`]). A rebuilt index or a `--rebuild --source` used to leave
+//! them behind for good — nothing read them, `search` counted them, and on one store
+//! they were 1.09 million of 1.35 million rows and four of every five bytes a query
+//! scanned. One stage owns the table in both directions, so there is one definition of
+//! a stored vector: a row whose hash is in the index. After the run the table is
+//! compacted and its superseded versions dropped ([`VectorTable::maintain`]), which is
+//! what keeps a query from reading one fragment per batch ever appended.
+//!
+//! The one thing this will not do is empty the table on an empty index — see `retain`.
+//! The cost that remains is an index rebuilt and not yet re-indexed when `embed` runs:
+//! those vectors go, and come back at the price of embedding them again. `run` orders
+//! `index` before `embed` for exactly that reason, and the report says what was pruned.
 //!
 //! ## Batching is not optional
 //!
@@ -233,6 +249,16 @@ pub struct EmbedReport {
     pub embedded: usize,
     /// Still outstanding after this run, from `--limit` or from failures.
     pub remaining: usize,
+    /// Rows for chunks the index no longer had when the run started — what a rebuilt
+    /// index or a cleared source leaves behind.
+    #[serde(default)]
+    pub stale: usize,
+    /// Of those, how many this run deleted. Zero on a dry run.
+    #[serde(default)]
+    pub pruned: usize,
+    /// Superseded table versions whose files this run removed.
+    #[serde(default)]
+    pub versions_removed: u64,
     pub elapsed_secs: f64,
     /// Sustained rate, for planning the rest of a corpus.
     pub chunks_per_sec: f64,
@@ -304,16 +330,22 @@ pub async fn embed(
     // Opening creates the table, and `--dry-run` must leave nothing behind — so an
     // absent table is read as "nothing stored" rather than created to be asked. An
     // existing one is opened either way, because that is what checks the model.
-    let stored = if ctx.store.vectors_path().exists() {
-        progress.say("checking stored vectors");
-        VectorTable::open(&ctx.store.vectors_db(), model_id, dims)
-            .await?
-            .hashes()
-            .await?
+    let table = if ctx.store.vectors_path().exists() {
+        Some(VectorTable::open(&ctx.store.vectors_db(), model_id, dims).await?)
     } else {
-        std::collections::HashSet::new()
+        None
     };
+    let stored = match &table {
+        Some(table) => {
+            progress.say("checking stored vectors");
+            table.hashes().await?
+        }
+        None => std::collections::HashSet::new(),
+    };
+    let keep: std::collections::HashSet<String> = indexed.iter().cloned().collect();
     let already_embedded = indexed.iter().filter(|h| stored.contains(*h)).count();
+    // Rows no chunk claims. Counted here and removed below, so a dry run can say.
+    let stale = stored.iter().filter(|h| !keep.contains(*h)).count();
 
     let mut todo: Vec<String> = indexed
         .iter()
@@ -342,25 +374,47 @@ pub async fn embed(
         already_embedded,
         embedded: 0,
         remaining: outstanding,
+        stale,
+        pruned: 0,
+        versions_removed: 0,
         elapsed_secs: 0.0,
         chunks_per_sec: 0.0,
         batch: None,
         skipped: Vec::new(),
     };
 
-    if args.dry_run || todo.is_empty() {
-        if !args.dry_run && ctx.store.vectors_path().exists() {
-            cancel.check()?;
-            progress.say("optimizing vector search");
-            VectorTable::open(&ctx.store.vectors_db(), model_id, dims)
-                .await?
-                .optimize_for_search(args.ann_index)
-                .await?;
-        }
+    if args.dry_run {
         return Ok(base);
     }
+    // No table and nothing to embed: nothing to reconcile and nothing to maintain, and
+    // creating an empty table to say so would leave the store looking embedded.
+    let table = match table {
+        Some(table) => table,
+        None if todo.is_empty() => return Ok(base),
+        None => VectorTable::open(&ctx.store.vectors_db(), model_id, dims).await?,
+    };
 
-    let table = VectorTable::open(&ctx.store.vectors_db(), model_id, dims).await?;
+    // Reconciled before anything new is written, so the table never holds the old
+    // chunks beside the new and `already_embedded` means what it says.
+    let pruned = match stale {
+        0 => 0,
+        _ => {
+            cancel.check()?;
+            progress.say(format!("pruning {stale} vectors the index no longer has"));
+            table.retain(&keep).await?
+        }
+    };
+
+    if todo.is_empty() {
+        cancel.check()?;
+        progress.say("maintaining the vector table");
+        let done = table.maintain(args.ann_index).await?;
+        return Ok(EmbedReport {
+            pruned,
+            versions_removed: done.versions_removed,
+            ..base
+        });
+    }
 
     let started = Instant::now();
     let (embedded, skipped, batch_size) = match backend {
@@ -431,12 +485,14 @@ pub async fn embed(
     };
 
     cancel.check()?;
-    progress.say("optimizing vector search");
-    table.optimize_for_search(args.ann_index).await?;
+    progress.say("maintaining the vector table");
+    let done = table.maintain(args.ann_index).await?;
     let elapsed = started.elapsed().as_secs_f64();
     Ok(EmbedReport {
         embedded,
         remaining: outstanding - embedded,
+        pruned,
+        versions_removed: done.versions_removed,
         elapsed_secs: elapsed,
         chunks_per_sec: embedded as f64 / elapsed.max(f64::EPSILON),
         batch: Some(batch_size),
@@ -838,12 +894,19 @@ impl Render for EmbedReport {
             &format!("{} · {} dims", self.variant, self.dims),
         )?;
         p.nest(|p| {
-            p.figures(&[
+            let mut figures = vec![
                 (self.indexed as u64, "chunks indexed"),
                 (self.already_embedded as u64, "already embedded"),
                 (self.embedded as u64, "embedded"),
                 (self.remaining as u64, "remaining"),
-            ])?;
+            ];
+            // Only when there were any: a corpus in step with its index has nothing to
+            // say here, and a figure printed every run is a figure nobody reads.
+            if self.stale > 0 {
+                figures.push((self.stale as u64, "stale"));
+                figures.push((self.pruned as u64, "pruned"));
+            }
+            p.figures(&figures)?;
 
             p.blank()?;
             // The batch beside the rate, because it is what the rate is a rate *at* —
@@ -1104,6 +1167,68 @@ mod tests {
         assert_eq!(report.indexed, 10);
         assert_eq!(report.already_embedded, 4);
         assert_eq!(report.remaining, 6, "only unembedded chunks are work");
+    }
+
+    /// The subtraction the other way. A rebuilt index or a cleared source leaves rows no
+    /// chunk claims: a dry run counts them, a run removes them before it embeds — and
+    /// with every chunk already stored, the run needs no weights to show it.
+    #[tokio::test]
+    async fn stale_vectors_are_counted_by_a_plan_and_pruned_by_a_run() {
+        let (_dir, ctx) = indexed_store(3).await;
+        let index = Index::open(ctx.store.require_index().unwrap()).unwrap();
+        let hashes = index.chunk_hashes().unwrap();
+
+        let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
+            .await
+            .unwrap();
+        let mut seeded: Vec<(String, Vec<f32>)> = hashes
+            .iter()
+            .map(|h| (h.clone(), vec![0.0; 2560]))
+            .collect();
+        seeded.push(("a".repeat(64), vec![0.0; 2560]));
+        seeded.push(("b".repeat(64), vec![0.0; 2560]));
+        table.append(&seeded).await.unwrap();
+
+        let plan = embed(
+            &ctx,
+            EmbedArgs {
+                model: default_model(),
+                dry_run: true,
+                ..Default::default()
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(plan.stale, 2);
+        assert_eq!(plan.pruned, 0, "a plan removes nothing");
+        assert_eq!(table.len().await.unwrap(), 5);
+
+        let report = embed(
+            &ctx,
+            EmbedArgs {
+                model: default_model(),
+                ..Default::default()
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.stale, 2);
+        assert_eq!(report.pruned, 2);
+        assert_eq!(report.already_embedded, 3);
+        assert_eq!(report.embedded, 0);
+
+        let reopened = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.hashes().await.unwrap(),
+            hashes.into_iter().collect::<std::collections::HashSet<_>>(),
+            "exactly the index's chunks remain"
+        );
     }
 
     /// A dry run is a plan, so it must not leave a table behind on a store that had

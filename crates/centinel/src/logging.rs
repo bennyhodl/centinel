@@ -46,7 +46,9 @@ const VERBOSE_DEFAULT: &str = "centinel=debug,centinel_core=debug";
 pub fn install(surface: &str, verbose: bool, no_color: bool) {
     let default = match (surface, verbose) {
         (_, true) => VERBOSE_DEFAULT,
-        ("serve" | "mcp", false) => SERVER_DEFAULT,
+        // `web` is a server too: a person watching its terminal has no report coming
+        // and no progress bar to protect, so the log is the only thing to read.
+        ("serve" | "mcp" | "web", false) => SERVER_DEFAULT,
         _ => OP_DEFAULT,
     };
 

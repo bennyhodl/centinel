@@ -6,16 +6,19 @@
 //!   log/<source>/YYYY-MM.jsonl TRUTH    append-only
 //!   runs/YYYY-MM.jsonl         TRUTH    what this machine attempted
 //!   decisions.jsonl            TRUTH    what the operator decided
+//!   workspace/questions.jsonl  TRUTH    saved classifier question sets
+//!   workspace/runs.jsonl       TRUTH    classifier attempts and scores
+//!   workspace/decisions.jsonl  TRUTH    reversible corpus usage decisions
 //!   crumbs/<source>.jsonl      DERIVED  the off-host links each page dropped
 //!   current/<source>/…         DERIVED  URL-mirroring tree. Regenerable.
 //!   centinel.db                DERIVED  SQLite: metadata + FTS5   — the BM25 arm
 //!   vectors.lance/             DERIVED  LanceDB: chunk vectors    — the vector arm
 //! ```
 //!
-//! The four above are truth; everything else is rebuildable from them, which is what makes
-//! the index disposable and the corpus `rsync`-able (§5.4). The two that are neither bytes
-//! nor a log of them say why in their own accessor — [`Store::runs_dir`] and
-//! [`Store::decisions_path`] — because each holds a fact no replay of `log/` can recover.
+//! The truth entries above are durable; everything else is rebuildable from them, which is
+//! what makes the index disposable and the corpus `rsync`-able (§5.4). Each ledger that is
+//! neither bytes nor a log of them has one accessor here because its facts cannot be
+//! recovered by replaying `log/`.
 //!
 //! Blobs are **pooled across Sources** — the same PDF on two `.gov` sites stores once.
 //! Logs and trees are **per-Source**, so a single city's corpus stays separable.
@@ -259,6 +262,34 @@ impl Store {
     /// harder to read than the one file.
     pub fn decisions_path(&self) -> PathBuf {
         self.root.join("decisions.jsonl")
+    }
+
+    /// `workspace/` — durable classifier state. None of its files belong in the
+    /// disposable SQLite projection.
+    pub fn workspace_dir(&self) -> PathBuf {
+        self.root.join("workspace")
+    }
+
+    /// `workspace/questions.jsonl` — saved, versioned classifier question sets.
+    pub fn workspace_questions_path(&self) -> PathBuf {
+        self.workspace_dir().join("questions.jsonl")
+    }
+
+    /// `workspace/runs.jsonl` — classifier attempts, progress, scores, and metrics.
+    pub fn workspace_runs_path(&self) -> PathBuf {
+        self.workspace_dir().join("runs.jsonl")
+    }
+
+    /// `workspace/decisions.jsonl` — reversible document usage decisions.
+    pub fn workspace_decisions_path(&self) -> PathBuf {
+        self.workspace_dir().join("decisions.jsonl")
+    }
+
+    /// `workspace/reviews.jsonl` — what a person said about the classifier's answers,
+    /// document by document. The labelled set every evaluation and threshold is tuned
+    /// against, so it is truth: no replay of the runs can recover a human's verdict.
+    pub fn workspace_reviews_path(&self) -> PathBuf {
+        self.workspace_dir().join("reviews.jsonl")
     }
 
     /// `run.lock` — the run in flight, if any.
@@ -1108,6 +1139,20 @@ mod tests {
         assert!(s.current_dir().ends_with("current"));
         assert!(s.runs_dir().ends_with("runs"));
         assert!(s.decisions_path().ends_with("decisions.jsonl"));
+        assert!(s.workspace_dir().ends_with("workspace"));
+        assert!(
+            s.workspace_questions_path()
+                .ends_with("workspace/questions.jsonl")
+        );
+        assert!(s.workspace_runs_path().ends_with("workspace/runs.jsonl"));
+        assert!(
+            s.workspace_decisions_path()
+                .ends_with("workspace/decisions.jsonl")
+        );
+        assert!(
+            s.workspace_reviews_path()
+                .ends_with("workspace/reviews.jsonl")
+        );
         assert!(
             s.crumbs_path(&SourceId::new("tampa").unwrap())
                 .ends_with("crumbs/tampa.jsonl")

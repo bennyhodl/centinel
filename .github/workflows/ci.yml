@@ -79,6 +79,19 @@ jobs:
       # second reuses the first's C++ build output instead of compiling llama.cpp twice.
       - uses: Swatinem/rust-cache@v2
 
+      # The workspace is compiled into the centinel binary. Node is a build input only;
+      # the installed program serves static bytes and has no Node runtime dependency.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: build web workspace
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+
       # Not `--all-features`. cuda, vulkan and rocm each need a toolchain (nvcc, hipcc,
       # glslc) this runner does not have, so enabling them here only fails the build.
       #

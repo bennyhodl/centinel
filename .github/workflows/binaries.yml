@@ -89,6 +89,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: build web workspace
+        run: |
+          npm ci
+          npm run build
+
       # No target-cpu. rustc's default for aarch64-apple-darwin is already apple-m1, and
       # so is Apple clang's, so the asset runs on every Apple Silicon Mac as built.
       # `native` would only pin it to whichever chip this runner has.
@@ -166,6 +175,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: build web workspace
+        run: |
+          npm ci
+          npm run build
+
       # x86-64-v3 is AVX2, FMA, F16C and BMI2 — every x86_64 since about 2013. It is also
       # what makes llama-cpp-sys-2 set GGML_NATIVE=OFF and pass -march to ggml, which is
       # what stops it compiling the CPU kernels for the baseline `fxsr,sse,sse2,x87`
@@ -242,6 +260,15 @@ jobs:
           echo "CUDA_PATH=/usr/local/cuda-13.0" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: build web workspace
+        run: |
+          npm ci
+          npm run build
 
       # No target-cpu: llama-cpp-sys-2 forces GGML_CPU_ARM_ARCH=armv8-a on Linux aarch64
       # whenever the target-cpu is not `native`, so a flag here would tune the Rust side

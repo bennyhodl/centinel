@@ -11,6 +11,7 @@ mod mcp;
 mod progress;
 mod promote;
 mod schedule;
+mod web;
 mod wizard;
 
 use std::io::{IsTerminal, Write};
@@ -160,6 +161,25 @@ fn build_cli() -> Command {
             ),
     )
     .subcommand(Command::new("mcp").about(SERVER_COMMANDS[1].1).hide(true))
+    .subcommand(
+        Command::new("web")
+            .about("Open the corpus workspace in a browser")
+            .arg(
+                Arg::new("bind")
+                    .long("bind")
+                    .default_value("127.0.0.1:8787")
+                    .value_name("ADDR"),
+            )
+            .arg(
+                Arg::new("rebuild")
+                    .long("rebuild")
+                    .action(ArgAction::SetTrue)
+                    .help(
+                        "Rebuild the web page with Vite from this source checkout and serve \
+                         it, instead of the page embedded at compile time. Source builds only",
+                    ),
+            ),
+    )
 }
 
 /// The command list, grouped by [`Group`].
@@ -203,6 +223,11 @@ fn command_overview() -> String {
     for (name, about) in SERVER_COMMANDS {
         out.push_str(&format!("  {name:width$}  {about}\n"));
     }
+    out.push_str(&format!(
+        "  {:width$}  Open the corpus workspace in a browser\n",
+        "web",
+        width = width
+    ));
     out
 }
 
@@ -236,6 +261,17 @@ async fn main() -> Result<()> {
                 .expect("bind has a default")
                 .clone();
             serve(ctx, &bind, sub).await
+        }
+        "web" => {
+            let bind = sub
+                .get_one::<String>("bind")
+                .expect("bind has a default")
+                .clone();
+            let rebuilt = sub.get_flag("rebuild");
+            if rebuilt {
+                crate::web::rebuild_bundle()?;
+            }
+            crate::web::open(ctx, &bind, rebuilt).await
         }
         "mcp" => mcp::serve(ctx).await,
         op_name => run_op(ctx, op_name, sub, Output::detect(sub)).await,

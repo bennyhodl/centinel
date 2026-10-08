@@ -25,6 +25,11 @@
 *~
 .obsidian/
 
+# Web workspace dependencies and generated bundle. CI builds the bundle before Rust
+# embeds it; neither directory is source.
+**/node_modules/
+/web-dist/
+
 # Local config (app preferences are per-machine)
 centinel.toml
 .claude

@@ -57,11 +57,12 @@ const RRF_K: f64 = 60.0;
 
 /// How much deeper the vector arm reaches when `--source` is set.
 ///
-/// Lance carries no source column, so the filter is applied after retrieval and a
-/// plain top-100 could come back nearly empty on a corpus one source dominates. This
-/// over-fetches instead. It can still under-fill, which is a known limit of the
-/// post-filter rather than a bug in it.
-const SOURCE_OVERFETCH: usize = 5;
+/// Lance carries no source or tag column, and knows nothing of exclusions, so every filter
+/// is applied after retrieval and a plain top-100 could come back nearly empty on a corpus
+/// one source dominates. This over-fetches instead, always: exclusion is a filter nobody
+/// can turn off. It can still under-fill, which is a known limit of the post-filter rather
+/// than a bug in it.
+const FILTER_OVERFETCH: usize = 5;
 
 /// How many fused candidates reach the reranker (SPEC §6: "top 30–40").
 ///
@@ -90,6 +91,17 @@ pub struct SearchArgs {
     #[arg(long)]
     #[serde(default)]
     pub source: Option<String>,
+
+    /// Only documents carrying this tag. Repeatable; every one must be present. A tag is
+    /// a yes-or-no question's id, or `choice:option` — `centinel questions` lists them.
+    #[arg(long = "tag", value_name = "TAG")]
+    #[serde(default)]
+    pub tags: Vec<String>,
+
+    /// Leave out documents carrying this tag. Repeatable.
+    #[arg(long = "not-tag", value_name = "TAG")]
+    #[serde(default)]
+    pub not_tags: Vec<String>,
 
     /// Characters of matched passage to return. 0 returns the whole chunk.
     #[arg(long, default_value_t = 400)]
@@ -162,6 +174,11 @@ pub struct SearchResult {
     /// How many there are in total, which `also_at` may not list in full.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub also_at_total: usize,
+    /// What the classifier workspace's policy says the cited document is: a yes-or-no
+    /// question's id, or `choice:option`. The same words `--tag` takes, so a reader can
+    /// turn what they see on one result into the filter for the next search.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -176,7 +193,12 @@ pub struct SearchReport {
     pub method: String,
     pub results: Vec<SearchResult>,
     pub total_chunks_indexed: usize,
-    /// How many of those chunks have a vector.
+    /// Rows in the vector table.
+    ///
+    /// `embed` keeps the table equal to the indexed chunks it has embedded — it prunes
+    /// rows the index no longer has before it writes — so this is the count of chunks
+    /// with a vector, except between a rebuilt index and the next `embed`, when it can
+    /// exceed `total_chunks_indexed`. The rendering says so in either direction.
     ///
     /// Beside the chunk count because RRF cannot tell a small pool from a large one, so
     /// the reader has to. See this module's header.
@@ -200,6 +222,21 @@ pub struct SearchReport {
 /// Search the corpus for a passage.
 #[op(group = "corpus")]
 pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport> {
+    // A tag nobody defined is a typo, and a typo that returned nothing would read as a
+    // corpus with nothing in it. Checked against the saved questions as they are, before
+    // anything is opened or loaded.
+    if !args.tags.is_empty() || !args.not_tags.is_empty() {
+        let saved = crate::workspace::saved_questions_at(&ctx.store.workspace_questions_path())?;
+        let known = crate::workspace::known_tags(&saved);
+        for tag in args.tags.iter().chain(&args.not_tags) {
+            anyhow::ensure!(
+                known.contains(tag),
+                "no saved question defines the tag `{tag}` — a tag is a yes-or-no \
+                 question's id or `choice:option`; `centinel questions` lists them"
+            );
+        }
+    }
+
     // Checked before the vector arm so a missing index fails immediately rather than
     // after a multi-gigabyte model load. This is a path, not a connection.
     let index_path = ctx.store.require_index()?;
@@ -221,7 +258,10 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
     // reordering a set larger than the one returned (§6.3).
     let (mut hits, total_chunks_indexed) = retrieve(&index_path, &args, vector)?;
 
-    let no_rerank = rerank_arm(ctx, &args.query, &mut hits).await.err();
+    let no_rerank = match crate::models::models_dir() {
+        Ok(models) => rerank_arm(ctx, &models, &args.query, &mut hits).await.err(),
+        Err(e) => Some(format!("{e:#}")),
+    };
     hits.truncate(args.limit);
 
     let method = method(no_vectors.is_none(), no_rerank.is_none());
@@ -272,6 +312,7 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
                 char_end: primary.char_end,
                 also_at,
                 also_at_total,
+                tags: hit.tags,
             })
         })
         .collect();
@@ -303,8 +344,8 @@ fn method(vectors: bool, reranked: bool) -> String {
     parts
 }
 
-/// Everything that touches SQLite: the keyword arm, the vector arm's source filter, the
-/// fusion, and the corpus size.
+/// Everything that touches SQLite: the keyword arm, the vector arm's post-filter, the
+/// fusion, the tags, and the corpus size.
 ///
 /// One function so that `Index` — which is not `Send` — is created and dropped without
 /// an `await` anywhere near it.
@@ -314,22 +355,36 @@ fn retrieve(
     mut vector: Vec<(String, f32)>,
 ) -> anyhow::Result<(Vec<Hit>, usize)> {
     let index = Index::open(index_path)?;
+    // One filter for both arms — the keyword arm applies it in SQL, the vector arm
+    // after retrieval — so the two never disagree about which documents are in play.
+    let filter = crate::index::Filter {
+        source: args.source.as_deref(),
+        tags: &args.tags,
+        not_tags: &args.not_tags,
+    };
 
     // Both arms reach `ARM_DEPTH`, not `args.limit`: fusion decides the top n, and an
     // arm that only ever returned ten could not lift a result the other missed.
-    let keyword = index.search(&args.query, ARM_DEPTH, args.source.as_deref())?;
+    let keyword = index.search(&args.query, ARM_DEPTH, &filter)?;
 
-    // The vector arm's `--source` post-filter. One query for the whole candidate set,
-    // not one per candidate.
-    if let Some(source) = args.source.as_deref() {
-        let hashes: Vec<String> = vector.iter().map(|(h, _)| h.clone()).collect();
-        let kept = index.in_source(&hashes, source)?;
-        vector.retain(|(h, _)| kept.contains(h));
-        vector.truncate(ARM_DEPTH);
-    }
+    // The vector arm's post-filter. One query for the whole candidate set, not one per
+    // candidate.
+    let hashes: Vec<String> = vector.iter().map(|(h, _)| h.clone()).collect();
+    let kept = index.eligible(&hashes, &filter)?;
+    vector.retain(|(h, _)| kept.contains(h));
+    vector.truncate(ARM_DEPTH);
 
     let depth = RERANK_DEPTH.max(args.limit);
-    let hits = fuse(&index, keyword, &vector, depth)?;
+    let mut hits = fuse(&index, keyword, &vector, depth)?;
+    // The tags ride with the hit, read off the document its first placement cites — the
+    // one the result will name — so a reader sees why a filtered hit qualified and what
+    // else it is.
+    for hit in &mut hits {
+        if let Some(primary) = hit.placements.first() {
+            hit.tags =
+                index.document_tags(&primary.source, &primary.resource, &primary.derived_sha)?;
+        }
+    }
     // `chunk_count`, not `stats` — see its doc comment. `stats` sums a text column, which
     // cost six seconds per query on the Tampa corpus for a number in the report footer.
     Ok((hits, index.chunk_count()?))
@@ -345,13 +400,29 @@ fn retrieve(
 /// The RRF order is left untouched on failure, which is the honest fallback: it is the
 /// best ordering available without the model, and [`SearchReport::method`] will not
 /// claim it was reranked.
-async fn rerank_arm(ctx: &Ctx, query: &str, hits: &mut [Hit]) -> Result<(), String> {
+///
+/// `models` is where the weights live — passed in so a test can point it at an empty
+/// directory, or at files of the right size and nothing else.
+async fn rerank_arm(
+    ctx: &Ctx,
+    models: &std::path::Path,
+    query: &str,
+    hits: &mut [Hit],
+) -> Result<(), String> {
+    // Asked before the empty check, and asked of the disk rather than the cache.
+    // Whether the reranker is installed is a fact about the machine, not about this
+    // query's hits: a search that found nothing has to say the reranker is missing too,
+    // or the next search finds something and is worse for it without a word. Presence
+    // only — the load itself waits for a hit to score.
+    crate::models::resolve(RERANKER, crate::models::ModelRole::Reranker, None, models)
+        .map_err(|e| e.to_string())?;
     if hits.is_empty() {
         return Ok(());
     }
 
     let query = query.to_string();
     let documents: Vec<String> = hits.iter().map(|h| h.text.clone()).collect();
+    let root = models.to_path_buf();
     // Weights load and inference are both blocking, and both are seconds.
     let cache = ctx.query_reranker.clone();
     let scores = tokio::task::spawn_blocking(move || {
@@ -359,7 +430,6 @@ async fn rerank_arm(ctx: &Ctx, query: &str, hits: &mut [Hit]) -> Result<(), Stri
             .lock()
             .map_err(|_| anyhow::anyhow!("reranker lock poisoned"))?;
         if cached.is_none() {
-            let root = crate::models::models_dir()?;
             *cached = Some(crate::rerank::Reranker::load(&root, RERANKER, None)?);
         }
         cached
@@ -470,12 +540,10 @@ async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<VectorArm, String> {
         }
     };
 
-    let depth = match args.source {
-        Some(_) => ARM_DEPTH * SOURCE_OVERFETCH,
-        None => ARM_DEPTH,
-    };
-    // The `--source` post-filter is the caller's, because it needs SQLite and this
-    // function is the async half.
+    // Always over-fetched: exclusions, `--source` and `--tag` are all applied after
+    // retrieval, and exclusion applies to every query. The post-filter itself is the
+    // caller's, because it needs SQLite and this function is the async half.
+    let depth = ARM_DEPTH * FILTER_OVERFETCH;
     let hits = if args.exact {
         table.nearest_exact(&vector, depth).await
     } else {
@@ -527,8 +595,8 @@ fn fuse(
             }),
             None => {
                 // The two stores drift legitimately: a rebuilt index, or `clear_source`,
-                // leaves vectors for chunks SQLite no longer has, and `embed` never
-                // removes them. So an unresolvable hash is dropped rather than raised —
+                // leaves vectors for chunks SQLite no longer has until the next `embed`
+                // prunes them. So an unresolvable hash is dropped rather than raised —
                 // one stale vector must not fail a whole query — and it is the same rule
                 // the keyword path applies to a hit with no placement, for the same
                 // reason: a result nothing can cite is worse than no result.
@@ -542,6 +610,7 @@ fn fuse(
                     text: index.chunk_texts(&[hash.to_string()])?.remove(0),
                     score,
                     placements,
+                    tags: Vec::new(),
                 });
             }
         }
@@ -577,29 +646,45 @@ impl Render for SearchReport {
         );
         p.title(&self.query, &aside)?;
 
-        // How much of the corpus the vector arm could see. Printed whenever it is not
-        // all of it, because RRF gives a rank from a thin pool the weight of a rank from
-        // a whole one — so a reader who is not told will read ten confident results as
-        // ten results from the corpus.
-        if self.no_vectors.is_none() && self.vectors_indexed < self.total_chunks_indexed {
-            let share = if self.total_chunks_indexed == 0 {
-                0.0
-            } else {
-                100.0 * self.vectors_indexed as f64 / self.total_chunks_indexed as f64
-            };
-            // `<0.1%` rather than `0.0%`. A barely-started corpus is the case this line
-            // exists for, and rounding its share to zero reads as "no vectors at all" —
-            // which is a different fact, and one `no_vectors` already carries.
-            let share = match share {
-                s if s > 0.0 && s < 0.1 => "<0.1".to_string(),
-                s => format!("{s:.1}"),
-            };
-            let text = format!(
-                "the vector arm saw {} of {} chunks ({share}%) — run `centinel embed` for the rest",
-                render::count(self.vectors_indexed as u64),
-                render::count(self.total_chunks_indexed as u64),
-            );
-            p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+        // How much of the corpus the vector arm could see. Printed whenever the two
+        // counts disagree, because RRF gives a rank from a thin pool the weight of a rank
+        // from a whole one — so a reader who is not told will read ten confident results
+        // as ten results from the corpus.
+        if self.no_vectors.is_none() {
+            match self.vectors_indexed.cmp(&self.total_chunks_indexed) {
+                std::cmp::Ordering::Less => {
+                    let share = if self.total_chunks_indexed == 0 {
+                        0.0
+                    } else {
+                        100.0 * self.vectors_indexed as f64 / self.total_chunks_indexed as f64
+                    };
+                    // `<0.1%` rather than `0.0%`. A barely-started corpus is the case this
+                    // line exists for, and rounding its share to zero reads as "no vectors
+                    // at all" — which is a different fact, and one `no_vectors` carries.
+                    let share = match share {
+                        s if s > 0.0 && s < 0.1 => "<0.1".to_string(),
+                        s => format!("{s:.1}"),
+                    };
+                    let text = format!(
+                        "the vector arm saw {} of {} chunks ({share}%) — run `centinel embed` for the rest",
+                        render::count(self.vectors_indexed as u64),
+                        render::count(self.total_chunks_indexed as u64),
+                    );
+                    p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+                }
+                // More vectors than chunks: a rebuilt index or a cleared source, and the
+                // rows it left behind have not been pruned yet. The count alone would
+                // read as a corpus more than fully embedded.
+                std::cmp::Ordering::Greater => {
+                    let text = format!(
+                        "the vector table holds {} vectors for {} chunks — run `centinel embed` to reconcile",
+                        render::count(self.vectors_indexed as u64),
+                        render::count(self.total_chunks_indexed as u64),
+                    );
+                    p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+                }
+                std::cmp::Ordering::Equal => {}
+            }
         }
         if let Some(reason) = &self.no_vectors {
             let text = format!("keyword search only — {reason}");
@@ -686,6 +771,12 @@ impl Render for SearchResult {
                 };
                 p.line(format!("{hash}  ·  {}", p.paint(&provenance, Ink::Dim)))?;
 
+                // In the words `--tag` takes, so the next search can be typed off this one.
+                if !self.tags.is_empty() {
+                    let tags = format!("tags  {}", self.tags.join(" · "));
+                    p.line(p.paint(&tags, Ink::Dim))?;
+                }
+
                 // Each with its own handle. A count alone told the reader two more
                 // documents carry this passage and gave them no way to reach either —
                 // and the hash cannot be guessed from the one above, because a different
@@ -751,6 +842,7 @@ mod tests {
             char_end: 143,
             also_at_total: also_at.len(),
             also_at,
+            tags: Vec::new(),
         }
     }
 
@@ -829,6 +921,7 @@ mod tests {
             text: format!("text of {hash}"),
             score,
             placements: Vec::new(),
+            tags: Vec::new(),
         }
     }
 
@@ -965,6 +1058,26 @@ mod tests {
         assert!(out.contains("110"), "the count is still exact: {out}");
     }
 
+    /// The other direction. A rebuilt index or a cleared source leaves the table holding
+    /// more vectors than there are chunks until the next `embed` prunes them — measured
+    /// at 1,353,933 rows for 288,785 chunks — and a bare count would read as a corpus
+    /// more than fully embedded.
+    #[test]
+    fn a_table_with_more_vectors_than_chunks_says_so() {
+        let mut r = report(vec![result(Vec::new())]);
+        r.vectors_indexed = 1_353_933;
+        r.total_chunks_indexed = 288_785;
+
+        let out = render_to_string(&r);
+        assert!(out.contains("1,353,933"), "{out}");
+        assert!(out.contains("288,785"), "{out}");
+        assert!(out.contains("centinel embed"), "names the fix: {out}");
+        assert!(
+            !out.contains("the vector arm saw"),
+            "stale rows are not a thin pool: {out}"
+        );
+    }
+
     /// A fully embedded corpus has nothing to warn about, and a warning printed every
     /// time is a warning nobody reads.
     #[test]
@@ -1062,14 +1175,47 @@ mod tests {
         assert_eq!(hits[0].score, 0.9);
     }
 
-    /// Nothing to reorder is not a failure — an empty result set must not report the
-    /// reranker as missing.
+    /// Whether the reranker exists is a fact about the machine, not about the hits. A
+    /// search that found nothing used to answer `→rerank` on a machine with no reranker,
+    /// because the empty check came before the weights were looked for.
     #[tokio::test]
-    async fn reranking_nothing_is_not_a_failure() {
+    async fn an_empty_result_still_says_the_reranker_is_missing() {
+        let store = tempfile::tempdir().unwrap();
+        let models = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(crate::store::Store::open(store.path()).await.unwrap());
         let mut none: Vec<Hit> = Vec::new();
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = Ctx::new(crate::store::Store::open(dir.path()).await.unwrap());
-        assert!(rerank_arm(&ctx, "anything", &mut none).await.is_ok());
+
+        let err = rerank_arm(&ctx, models.path(), "anything", &mut none)
+            .await
+            .unwrap_err();
+        assert!(err.contains(RERANKER), "{err}");
+        assert!(err.contains("centinel models pull"), "names the fix: {err}");
+    }
+
+    /// Nothing to reorder is not a failure, and it must not cost a load either. The
+    /// weights here are files of the pinned size and nothing else, so loading them would
+    /// fail — an `Ok` proves the empty case looked for them and went no further.
+    #[tokio::test]
+    async fn reranking_nothing_wants_the_weights_present_and_never_loads_them() {
+        let store = tempfile::tempdir().unwrap();
+        let models = tempfile::tempdir().unwrap();
+        let spec = crate::models::find(RERANKER).unwrap();
+        let dir = spec.dir(models.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in spec.files_for(spec.variant(None).unwrap()) {
+            std::fs::File::create(dir.join(file.path))
+                .unwrap()
+                .set_len(file.size)
+                .unwrap();
+        }
+        let ctx = Ctx::new(crate::store::Store::open(store.path()).await.unwrap());
+        let mut none: Vec<Hit> = Vec::new();
+
+        assert!(
+            rerank_arm(&ctx, models.path(), "anything", &mut none)
+                .await
+                .is_ok()
+        );
     }
 
     // ── the whole pipeline, on real weights ───────────────────────────────────────
@@ -1150,6 +1296,8 @@ mod tests {
                 query: "drinking water sampling results".into(),
                 limit: 3,
                 source: None,
+                tags: Vec::new(),
+                not_tags: Vec::new(),
                 snippet_chars: 0,
                 exact: false,
             },
@@ -1164,6 +1312,52 @@ mod tests {
             report.results[0].text.contains("UCMR 5"),
             "the water passage has to win despite sharing no word with the query: {:#?}",
             report.results.iter().map(|r| &r.text).collect::<Vec<_>>()
+        );
+    }
+
+    /// The tags are printed the way `--tag` takes them, so one result teaches the filter
+    /// for the next search.
+    #[test]
+    fn a_result_prints_its_tags_in_the_words_the_filter_takes() {
+        let mut tagged = result(Vec::new());
+        tagged.tags = vec!["budget".into(), "record_type:minutes".into()];
+        let out = render_to_string(&report(vec![tagged]));
+        assert!(out.contains("tags  budget · record_type:minutes"), "{out}");
+
+        let out = render_to_string(&report(vec![result(Vec::new())]));
+        assert!(
+            !out.contains("tags"),
+            "an untagged result has no tag line: {out}"
+        );
+    }
+
+    /// A tag nobody defined is an error, not an empty result — and it is refused before
+    /// the index is opened or a model loaded.
+    #[tokio::test]
+    async fn an_unknown_tag_is_refused_before_anything_is_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).await.unwrap();
+        let ctx = Ctx::new(store);
+        let error = search(
+            &ctx,
+            SearchArgs {
+                query: "budget".into(),
+                limit: 3,
+                source: None,
+                tags: vec!["nope".into()],
+                not_tags: Vec::new(),
+                snippet_chars: 0,
+                exact: false,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("`nope`"), "{error}");
+        assert!(error.contains("centinel questions"), "{error}");
+        assert!(
+            !ctx.store.index_path().exists(),
+            "refused before an index was opened or created"
         );
     }
 

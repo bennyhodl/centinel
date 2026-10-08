@@ -472,7 +472,10 @@ a re-import rather than a re-embed — was already true without it.
 `index chunk hashes − stored chunk hashes`. Kill it at chunk 40,000 and re-run; it starts
 at 40,001. Lance commits a version per append, so what landed before the kill is there. Same shape as `collect`, for the same reason. It is also why a monthly recrawl
 is cheap: identical text has an identical `chunk_hash`, so only genuinely new chunks reach
-the model (§6.1).
+the model (§6.1). The subtraction runs the other way too: before it embeds, a run deletes
+the rows whose hash the index no longer has, then compacts the table and drops its
+superseded versions — so `embed` owns the table in both directions and a stored vector
+means one thing, a row whose hash is in the index.
 
 **Batching is not optional.** A batch is one forward pass over many chunks: one context,
 one `decode`, every chunk as its own `seq_id`. Two costs collapse into it. A `llama.cpp`

@@ -119,6 +119,14 @@ pub struct Config {
     #[serde(default)]
     pub defaults: Defaults,
 
+    /// `[classify]` — the Jev model the pipeline's classify stage sends documents to.
+    ///
+    /// Absent means the stage is skipped. It is the one stage that sends corpus text off
+    /// the machine on a schedule, so it runs only where this file, which only the operator
+    /// writes, says so — the same authority story as `[[schedule]]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classify: Option<ClassifyConfig>,
+
     /// The sources a bare `centinel run` walks, in file order.
     ///
     /// `rename` because TOML spells a list of tables `[[source]]` — singular reads
@@ -135,6 +143,19 @@ pub struct Config {
     /// story in `docs/SCHEDULING.md` §1.1.
     #[serde(default, rename = "schedule")]
     pub schedules: Vec<ScheduleConfig>,
+}
+
+/// The `[classify]` block: what `run`'s classify stage sends documents to.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClassifyConfig {
+    /// The model, such as `jev-1.13.0`. `centinel classify --model` overrides it for one
+    /// run.
+    pub model: String,
+
+    /// Documents in flight to Jev at once. Eight unless set; at most thirty-two.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<usize>,
 }
 
 /// Which application opens which kind of document.
@@ -875,6 +896,13 @@ embed_batch = "auto"
 transcribe_model = "whisper-large-v3-turbo"
 lang = "en"
 
+# Score every newly indexed document with Jev during `centinel run`: junk is excluded
+# from search and embedding, the rest is tagged. Document text leaves this machine for
+# api.typesafe.ai, and $TYPESAFE_API_KEY must be set. Without this block the stage is
+# skipped and nothing is sent.
+#   [classify]
+#   model = "jev-1.13.0"
+
 # A website. `site` is any URL on it; only the origin is used.
 #   [[source]]
 #   id = "tampa"
@@ -1317,6 +1345,25 @@ mod tests {
         assert_eq!(c.store_root(), PathBuf::from("/srv/corpus"));
         assert_eq!(c.defaults.rps, 0.5);
         assert_eq!(c.sources.len(), 1);
+    }
+
+    /// The block that lets `run` send text to Jev. Absent is the default and means the
+    /// stage is skipped; present, it names the model and nothing else is required.
+    #[test]
+    fn a_classify_block_names_the_model_and_is_otherwise_absent() {
+        let c = parse("[classify]\nmodel = \"jev-1.13.0\"\n");
+        let block = c.classify.as_ref().expect("classify block");
+        assert_eq!(block.model, "jev-1.13.0");
+        assert_eq!(block.concurrency, None);
+
+        let c = parse("[classify]\nmodel = \"jev-1.13.0\"\nconcurrency = 16\n");
+        assert_eq!(c.classify.unwrap().concurrency, Some(16));
+
+        assert!(parse("[defaults]\nrps = 1.0\n").classify.is_none());
+        assert!(
+            Config::parse("[classify]\nmodle = \"jev\"\n").is_err(),
+            "a misspelt key is refused, not ignored"
+        );
     }
 
     /// A config file predating `[[source]]` must keep working untouched.

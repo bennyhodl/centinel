@@ -61,6 +61,7 @@ pub mod transcribe;
 pub mod vectors;
 pub mod verdict;
 pub mod version;
+pub mod workspace;
 pub mod youtube;
 
 /// The `#[op]` attribute. Lives in the macro namespace, so it does not collide with
