@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::index::to_fts_query;
+use crate::op::{Cancel, Progress};
 use crate::store::Store;
 
 mod defaults;
@@ -436,6 +437,14 @@ pub struct Document {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclusion_reason: Option<String>,
     pub classifications: BTreeMap<String, f64>,
+}
+
+/// A document a classify run would send, with the size the estimate is priced from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingDocument {
+    pub id: DocumentId,
+    /// Characters of derived text, as the index measured it.
+    pub chars: usize,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -997,6 +1006,120 @@ impl<'a> Workspace<'a> {
         })
     }
 
+    /// The documents a classify run has left to do: every included document, in `source`
+    /// when one is named, that has no answer for at least one of `questions` at its
+    /// current version. With `rescore`, every included document whether answered or not.
+    ///
+    /// A subtraction, like every stage's work list: scoring a thousand documents and
+    /// stopping leaves the next run the rest, and saving a question with new wording puts
+    /// every document back in the queue for that question alone. Excluded documents are
+    /// not here — a document the gate already threw out is not sent again to be tagged.
+    ///
+    /// Index order, so two runs over the same pending set take the same documents first.
+    pub fn pending_documents(
+        &self,
+        questions: &[Question],
+        source: Option<&str>,
+        rescore: bool,
+    ) -> anyhow::Result<Vec<PendingDocument>> {
+        let conn = open_index(self.store.require_index()?)?;
+        prepare_projection(&conn)?;
+        let current = self.questions()?;
+        sync_search_projection(&conn, self.store.root())?;
+        sync_score_projection(
+            &conn,
+            &self.store.workspace_runs_path(),
+            &self.store.workspace_questions_path(),
+            &current,
+        )?;
+
+        let mut where_parts = vec!["x.source IS NULL".to_string()];
+        let mut values: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(source) = source {
+            where_parts.push("d.source=?".into());
+            values.push(source.to_owned().into());
+        }
+        if !rescore {
+            if questions.is_empty() {
+                return Ok(Vec::new());
+            }
+            let missing: Vec<String> = questions
+                .iter()
+                .map(|q| {
+                    values.push(question_version(&q.id, q.version).into());
+                    "NOT EXISTS (SELECT 1 FROM workspace_classification wc WHERE wc.source=d.source \
+                     AND wc.resource=d.resource AND wc.derived_sha=d.derived_sha AND wc.question=?)"
+                        .to_string()
+                })
+                .collect();
+            where_parts.push(format!("({})", missing.join(" OR ")));
+        }
+        let sql = format!(
+            "SELECT d.source,d.resource,d.derived_sha,d.chars FROM workspace_document d
+             LEFT JOIN workspace_exclusion x ON x.source=d.source AND x.resource=d.resource
+               AND x.derived_sha=d.derived_sha
+             WHERE {} ORDER BY d.source,d.resource",
+            where_parts.join(" AND ")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
+            Ok(PendingDocument {
+                id: DocumentId {
+                    source: r.get(0)?,
+                    resource: r.get(1)?,
+                    derived_sha: r.get(2)?,
+                },
+                chars: r.get::<_, i64>(3)? as usize,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// One indexed document by the handles `search` prints: a URL, a substring of one, or
+    /// a blob hash, resolved the way `read` resolves them, to the derivation the index
+    /// holds for it.
+    pub async fn document_by_target(
+        &self,
+        ctx: &crate::op::Ctx,
+        target: &str,
+        source: Option<&str>,
+    ) -> anyhow::Result<PendingDocument> {
+        let found = crate::ops::target::resolve(ctx, target, source).await?;
+        let derivation = found
+            .replay
+            .latest_derivation(&found.observation.blob_sha)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no extracted text for {} — run `extract` first",
+                    found.resource.natural_key
+                )
+            })?;
+        let id = DocumentId {
+            source: found.source.to_string(),
+            resource: found.resource.natural_key.clone(),
+            derived_sha: derivation.to_sha.to_string(),
+        };
+        let conn = open_index(self.store.require_index()?)?;
+        let chars: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(char_end) FROM placement WHERE source=?1 AND resource=?2 AND derived_sha=?3",
+                params![id.source, id.resource, id.derived_sha],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let chars = chars.with_context(|| {
+            format!(
+                "{} is collected but not indexed — run `index` first",
+                id.resource
+            )
+        })?;
+        Ok(PendingDocument {
+            id,
+            chars: chars as usize,
+        })
+    }
+
     pub fn runs(&self, mut query: RunQuery) -> anyhow::Result<RunPage> {
         query.page = query.page.max(1);
         query.page_size = query.page_size.clamp(1, 100);
@@ -1193,7 +1316,7 @@ impl<'a> Workspace<'a> {
                 self.store.root().join(".env").display()
             )
         })?;
-        let endpoint = typesafe_endpoint()?;
+        let endpoint = typesafe_endpoint(&request.settings)?;
         let concurrency = request
             .settings
             .values
@@ -1318,6 +1441,20 @@ impl<'a> Workspace<'a> {
     /// result recorded the moment it lands, the live snapshot updated with it. Results
     /// are stored in input order however they arrive, so a repeated trial lines up.
     pub async fn execute(&self, prepared: PreparedRun) -> anyhow::Result<ClassifierRun> {
+        self.execute_with(prepared, &Progress::none(), &Cancel::none())
+            .await
+    }
+
+    /// [`Workspace::execute`] for a caller with somewhere to put progress and a way to be
+    /// stopped: the CLI and the pipeline stage. A cancellation lands between results, so
+    /// every answer so far is in the ledger; the run is left `running` there and reads
+    /// back as `interrupted` once this process is gone, and the next run scores the rest.
+    pub async fn execute_with(
+        &self,
+        prepared: PreparedRun,
+        progress: &Progress,
+        cancel: &Cancel,
+    ) -> anyhow::Result<ClassifierRun> {
         use futures::StreamExt;
 
         let PreparedRun {
@@ -1399,12 +1536,32 @@ impl<'a> Workspace<'a> {
                     publish(&run);
                     published = Instant::now();
                 }
+                progress.track(
+                    "classify",
+                    format!(
+                        "{} of {} scored · {} failed",
+                        run.results.len(),
+                        run.document_count,
+                        run.errors
+                    ),
+                    run.results.len() as u64,
+                    run.document_count as u64,
+                    crate::op::Unit::Count,
+                );
+                // Between results, never inside one: the answer just recorded is whole,
+                // and the documents still in flight are simply dropped unasked.
+                cancel.check()?;
             }
             Ok(())
         }
         .await;
         if let Err(error) = outcome {
-            run.status = "failed".into();
+            run.status = if crate::op::is_cancelled(&error) {
+                "interrupted"
+            } else {
+                "failed"
+            }
+            .into();
             publish(&run);
             return Err(error);
         }
@@ -1786,7 +1943,7 @@ fn validate_questions(questions: &[Question]) -> anyhow::Result<()> {
 /// How many of the latest answers a live run detail carries.
 const RECENT_RESULTS: usize = 12;
 
-fn view_results(
+pub(crate) fn view_results(
     questions: &[Question],
     results: Vec<RunResult>,
     query: &RunDetailQuery,
@@ -2382,14 +2539,29 @@ fn dotenv_value(text: &str, name: &str) -> Option<String> {
     found
 }
 
-fn typesafe_endpoint() -> anyhow::Result<String> {
-    let Ok(endpoint) = std::env::var("CENTINEL_TYPESAFE_ENDPOINT") else {
-        return Ok("https://api.typesafe.ai/v1/systemone".into());
+/// Whether a run could start on this machine: the key is in the environment or an `.env`
+/// the store would read. Asked by the pipeline before its classify stage, so a missing key
+/// is a skip with a reason rather than a failure at the end of a crawl.
+pub fn typesafe_key_present(root: &Path) -> bool {
+    secret("TYPESAFE_API_KEY", root).is_some()
+}
+
+/// Where a run posts. TypeSafe's API unless the run's settings or the environment name a
+/// loopback server — a mock that answers like Jev, for a test or for working on the page
+/// without spending. Anything off-host is refused: corpus text goes to TypeSafe or to this
+/// machine, never to a third place because a setting said so.
+fn typesafe_endpoint(settings: &RunSettings) -> anyhow::Result<String> {
+    let (endpoint, named_by) = match settings.values.get("endpoint").and_then(Value::as_str) {
+        Some(endpoint) => (endpoint.to_owned(), "the run's `endpoint` setting"),
+        None => match std::env::var("CENTINEL_TYPESAFE_ENDPOINT") {
+            Ok(endpoint) => (endpoint, "CENTINEL_TYPESAFE_ENDPOINT"),
+            Err(_) => return Ok("https://api.typesafe.ai/v1/systemone".into()),
+        },
     };
-    let url = url::Url::parse(&endpoint).context("invalid CENTINEL_TYPESAFE_ENDPOINT")?;
+    let url = url::Url::parse(&endpoint).with_context(|| format!("invalid {named_by}"))?;
     let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
     if !local {
-        bail!("CENTINEL_TYPESAFE_ENDPOINT can only name a loopback test server");
+        bail!("{named_by} can only name a loopback test server");
     }
     Ok(endpoint)
 }
@@ -2985,6 +3157,120 @@ mod tests {
 
         ws.save_questions(Vec::new()).unwrap();
         assert!(ws.questions().unwrap().is_empty());
+    }
+
+    /// The classify stage's work list: documents missing an answer for a question at its
+    /// current version, never excluded ones, and everything with `rescore`.
+    #[tokio::test]
+    async fn pending_documents_are_the_unanswered_included_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let mut index = Index::open(store.index_path()).unwrap();
+        let mut ids = Vec::new();
+        for (source, resource) in [
+            ("city", "https://example.gov/a"),
+            ("city", "https://example.gov/b"),
+            ("county", "https://county.gov/c"),
+        ] {
+            let text = format!("# {resource}\n\nSome words about {resource}.");
+            let derived = store.put_blob(text.as_bytes()).await.unwrap().to_string();
+            for chunk in chunk_markdown(&text, &ChunkConfig::default()) {
+                index
+                    .insert(
+                        &chunk,
+                        &Placement {
+                            source: source.into(),
+                            resource: resource.into(),
+                            blob_sha: "aa".repeat(32),
+                            derived_sha: derived.clone(),
+                            ordinal: chunk.ordinal,
+                            heading: chunk.heading.clone(),
+                            char_start: chunk.char_start,
+                            char_end: chunk.char_end,
+                            observed_at: "2026-10-07T12:00:00Z".into(),
+                            tool: "test 1".into(),
+                            title: None,
+                        },
+                    )
+                    .unwrap();
+            }
+            ids.push(DocumentId {
+                source: source.into(),
+                resource: resource.into(),
+                derived_sha: derived,
+            });
+        }
+        drop(index);
+        let ws = Workspace::new(&store);
+        let noise = ws.save_questions(vec![q("noise", "Noise?", 0)]).unwrap();
+
+        let all = ws.pending_documents(&noise, None, false).unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(all.iter().all(|p| p.chars > 0));
+        assert_eq!(
+            ws.pending_documents(&noise, Some("county"), false)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            ws.pending_documents(&[], None, false).unwrap().is_empty(),
+            "no questions, nothing to answer"
+        );
+
+        // `a` answered at the current version; `b` excluded by the operator.
+        let result = RunResult {
+            source: ids[0].source.clone(),
+            resource: ids[0].resource.clone(),
+            derived_sha: ids[0].derived_sha.clone(),
+            answers: BTreeMap::from([("noise".to_string(), 0.1)]),
+            ..RunResult::default()
+        };
+        append_json(
+            &store.workspace_runs_path(),
+            &RunRecord::Complete {
+                run: stored_run("run-a", "completed", noise[0].clone(), result),
+            },
+        )
+        .unwrap();
+        append_json(
+            &store.workspace_decisions_path(),
+            &UsageDecision {
+                at: "2026-10-07T12:00:00Z".into(),
+                source: ids[1].source.clone(),
+                resource: ids[1].resource.clone(),
+                derived_sha: ids[1].derived_sha.clone(),
+                excluded: true,
+                reason: "test".into(),
+                run_id: None,
+            },
+        )
+        .unwrap();
+
+        let left = ws.pending_documents(&noise, None, false).unwrap();
+        assert_eq!(
+            left.iter()
+                .map(|p| p.id.resource.as_str())
+                .collect::<Vec<_>>(),
+            ["https://county.gov/c"],
+            "a is answered, b is excluded"
+        );
+        let everything = ws.pending_documents(&noise, None, true).unwrap();
+        assert_eq!(
+            everything.len(),
+            2,
+            "rescore sends the answered one again, never the excluded"
+        );
+
+        // New wording is a new version, and every included document is pending for it.
+        let reworded = ws
+            .save_questions(vec![q("noise", "Is it noise?", 0)])
+            .unwrap();
+        assert_eq!(reworded[0].version, 2);
+        assert_eq!(
+            ws.pending_documents(&reworded, None, false).unwrap().len(),
+            2
+        );
     }
 
     #[test]

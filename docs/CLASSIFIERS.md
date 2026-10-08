@@ -157,6 +157,46 @@ First, a choice with described options and an escape option works better than a 
 independent nouls for "what kind of thing is this". Second, a wide review band catches
 more than a narrow band round 0.5: DocJev's one real error scored 0.76.
 
+## `centinel classify` and the pipeline stage
+
+```
+centinel classify                                # every pending document, every saved question
+centinel classify --source tampa
+centinel classify --document a5923354            # a URL, part of one, or a blob hash
+centinel classify --question page_kind --question record_type
+centinel classify --rescore                      # answered documents too
+centinel classify --limit 500                    # the rest stay pending
+centinel classify --dry-run                      # documents, tokens, estimated cost; nothing sent
+centinel classify --preview                      # scores shown, nothing written
+centinel questions                               # the saved set, versions, policy
+centinel questions --add-defaults                # append any shipped question the set lacks
+```
+
+A document is **pending** when it is included and has no answer for some saved question
+at that question's current version. That is the work list, and it is a subtraction like
+every other stage's: a run that stops leaves the rest for the next one, rewording a
+question queues every document for that question alone, and a document the gate excluded
+is not sent again to be tagged.
+
+Unlike a run started from the Classify view, this op **commits**: a document whose junk
+probability clears the gate's threshold is excluded at once, and the report says how many.
+Tags are on the record the moment the run is; the review band is left for a person.
+`restore` undoes an exclusion. `--preview` scores and shows but writes nothing, so a
+reworded question can be tried on a hundred documents before it is saved.
+
+`centinel run` has the same op as a stage, between `index` and `embed`, so junk is out of
+the embed work list before `embed` builds it. The stage runs only where `centinel.toml`
+says so:
+
+```toml
+[classify]
+model = "jev-1.13.0"
+```
+
+No block, no text leaves the machine on a scheduled run; the stage is skipped with that
+reason. A missing `TYPESAFE_API_KEY` is a skip too, not a failure. `--skip classify`
+works like `--skip embed`.
+
 ## `centinel web`
 
 ```

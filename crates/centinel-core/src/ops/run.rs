@@ -20,8 +20,11 @@
 //!
 //! ```text
 //!   per source   discover → collect          (network-bound, per-host paced)
-//!   then once    extract → transcribe → index → embed
+//!   then once    extract → transcribe → index → classify → embed
 //! ```
+//!
+//! `classify` runs only where the config has a `[classify]` block, and sits before `embed`
+//! so that a document the junk gate excludes never reaches the vector table.
 //!
 //! Acquisition is per source because politeness is per host and a 403 on one site must
 //! not stop the next. Derivation is corpus-wide because `transcribe` and `embed` each
@@ -44,7 +47,7 @@ use crate::op::TOTAL_TRACK;
 use crate::prelude::*;
 use crate::sources::{self, Overrides};
 
-use super::{EmbedArgs, ExtractArgs, IndexArgs, TranscribeArgs};
+use super::{ClassifyArgs, EmbedArgs, ExtractArgs, IndexArgs, TranscribeArgs};
 
 /// One step of the pipeline.
 ///
@@ -78,6 +81,9 @@ pub enum Stage {
     Transcribe,
     /// Chunk derived text into the search index.
     Index,
+    /// Score indexed documents with Jev: exclude junk, tag the rest. Only with a
+    /// `[classify]` block in the config.
+    Classify,
     /// Turn indexed chunks into vectors.
     Embed,
 }
@@ -90,6 +96,7 @@ impl Stage {
             Self::Extract => "extract",
             Self::Transcribe => "transcribe",
             Self::Index => "index",
+            Self::Classify => "classify",
             Self::Embed => "embed",
         }
     }
@@ -398,8 +405,9 @@ impl RunReport {
 /// Collect everything new for every configured source, then index and embed it.
 ///
 /// Reads `centinel.toml`, and for each `[[source]]` runs discover and collect, then runs
-/// extract, transcribe, index and embed once across the corpus. Every stage skips work
-/// it has already done, so running this on a schedule costs only what actually changed.
+/// extract, transcribe, index, classify and embed once across the corpus. Every stage
+/// skips work it has already done, so running this on a schedule costs only what actually
+/// changed.
 #[op(long_running, reach = "operator", group = "pipeline")]
 pub async fn run(
     ctx: &Ctx,
@@ -454,10 +462,13 @@ pub async fn run(
     // corpus-wide tail. Counted before anything runs so the bar never grows a total
     // underneath someone watching it.
     let yields_audio = built.iter().any(|s| s.yields_audio());
+    // Classify sits between index and embed on purpose: a document the gate excludes is
+    // out of `embed`'s work list before `embed` builds it, so junk is never paid for twice.
     let derive_stages: Vec<Stage> = [
         Stage::Extract,
         Stage::Transcribe,
         Stage::Index,
+        Stage::Classify,
         Stage::Embed,
     ]
     .into_iter()
@@ -926,6 +937,60 @@ async fn run_derivation(
                         ));
                     }
                     line
+                },
+            )
+            .await
+        }
+
+        Stage::Classify => {
+            // Two skips, both reasons rather than failures: the stage sends corpus text
+            // off the machine, so it runs only where the config says so and only when the
+            // key it would use is actually there.
+            let Some(classify) = &config.classify else {
+                return Ok(StageRun::skipped(
+                    stage,
+                    "no [classify] block in the config — add one to score with Jev",
+                ));
+            };
+            if !crate::workspace::typesafe_key_present(ctx.store.root()) {
+                return Ok(StageRun::skipped(stage, "TYPESAFE_API_KEY is not set"));
+            }
+            fold_targets(
+                stage,
+                targets,
+                |source| async move {
+                    let r = super::classify(
+                        ctx,
+                        ClassifyArgs {
+                            source,
+                            model: Some(classify.model.clone()),
+                            concurrency: classify.concurrency,
+                            ..Default::default()
+                        },
+                        progress,
+                        cancel,
+                    )
+                    .await?;
+                    Ok(Tally::of(
+                        r.scored as u64,
+                        &[
+                            ("scored", r.scored as u64),
+                            ("failed", r.failed as u64),
+                            ("excluded", r.excluded as u64),
+                            ("review", r.review as u64),
+                            ("tagged", r.tagged as u64),
+                            ("remaining", r.remaining as u64),
+                        ],
+                    ))
+                },
+                |t, _| {
+                    format!(
+                        "{} {} scored \u{00b7} {} excluded \u{00b7} {} tagged",
+                        render::count(t.new),
+                        noun(t.new, "document", "documents"),
+                        render::count(t.get("excluded")),
+                        render::count(t.get("tagged"))
+                    )
                 },
             )
             .await
@@ -1464,10 +1529,10 @@ mod tests {
             Stage::Extract,
             Stage::Transcribe,
             Stage::Index,
+            Stage::Classify,
             Stage::Embed,
         ] {
-            // Every stage but `transcribe` is a registered op of the same name; the
-            // transcribe op is registered too, so all six must resolve.
+            // Every stage is a registered op of the same name, so all seven must resolve.
             assert!(
                 crate::op::find(stage.name()).is_some(),
                 "stage `{}` names no op",
