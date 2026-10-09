@@ -4,6 +4,7 @@ import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
 import { ArrowUp, ChevronDown, ChevronLeft, ChevronRight, X } from 'lucide-react'
 import type { CorpusFacets, CorpusFilters, Document, Question } from '../api'
 import { classifierOptions } from '../classify'
+import { Candle, useElapsed, useShownInPlace } from '../feedback'
 import { characters, compact, number, tail } from '../format'
 import { classificationBadges, hasScores } from '../policy'
 import { queries } from '../queries'
@@ -21,9 +22,12 @@ export const Route = createFileRoute('/')({
     minScore: String(search.minScore || '0.5'), maxScore: String(search.maxScore || ''),
   }),
   loaderDeps: ({ search }) => search,
+  // A search can take half a minute, so the page never waits on one: the box stays, and
+  // the results wait in place. Only the opening counts are worth holding the page for.
   loader: ({ context: { queryClient }, deps }) => {
     void queryClient.prefetchQuery(queries.questions())
-    return queryClient.ensureQueryData(asking(deps) ? queries.corpus(filtersOf(deps), deps.page) : everything)
+    if (asking(deps)) void queryClient.prefetchQuery(queries.corpus(filtersOf(deps), deps.page))
+    else return queryClient.ensureQueryData(everything)
   },
   pendingComponent: SearchSkeleton,
   component: SearchPage,
@@ -80,25 +84,34 @@ function SearchPage() {
   </div>
 
   const data = query.data
+  // Fetching with the last results still up, or with none yet: either way, a search is under way.
+  const searching = query.isFetching && (query.isPlaceholderData || !data)
   const pages = Math.max(1, Math.ceil((data?.total || 0) / (data?.page_size || 25)))
   return <>
     <div className="mb-3 flex items-center gap-3">
       <button type="button" onClick={() => navigate({ search: cleared })} className="inline-flex h-12 shrink-0 items-center gap-1 self-start text-[13px] text-muted-foreground hover:text-foreground" aria-label="New search"><ChevronLeft className="size-4" /><span className="hidden sm:inline">New</span></button>
-      <SearchBox key={search.text} initial={search.text} ready onSearch={text => set({ text, page: 1 })}>{filtersFor(search, set)}</SearchBox>
+      <SearchBox key={search.text} initial={search.text} ready busy={searching} onSearch={text => set({ text, page: 1 })}>{filtersFor(search, set)}</SearchBox>
     </div>
-    <p className="pl-12 text-[13px] text-muted-foreground">{data ? `${number(data.total)} documents · ${characters(data.total_chars)}` : ''}</p>
-    <section className="mt-6">
+    <p className="flex h-5 items-center gap-2 pl-12 text-[13px] text-muted-foreground">{searching ? <Searching /> : data ? `${number(data.total)} documents · ${characters(data.total_chars)}` : ''}</p>
+    <section aria-busy={searching} className={`mt-6 transition-opacity duration-(--motion-indicator) ${searching && data ? 'pointer-events-none opacity-45' : ''}`}>
       <div className="flex h-8 items-center gap-6 border-b border-foreground text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
         <span className="flex-1">Document</span><span className="hidden w-56 md:block">Scores</span><span className="w-16 text-right">Blob</span>
       </div>
-      {query.error ? <ErrorBox error={query.error} /> : data?.documents.map(doc => <ResultRow key={`${doc.source}:${doc.resource}:${doc.derived_sha}`} doc={doc} questions={saved} />)}
-      {data && !data.documents.length && <Empty>No documents match. Loosen a filter or try other words.</Empty>}
+      {query.error ? <ErrorBox error={query.error} /> : !data ? Array.from({ length: 8 }, (_, i) => <ResultRow key={i} questions={[]} />) : data.documents.map(doc => <ResultRow key={`${doc.source}:${doc.resource}:${doc.derived_sha}`} doc={doc} questions={saved} />)}
+      {data && !searching && !data.documents.length && <Empty>No documents match. Loosen a filter or try other words.</Empty>}
       {data && data.total > 0 && <div className="flex items-center justify-between py-4 text-[13px] text-muted-foreground">
         <span>Page {search.page} of {number(pages)}</span>
         <span className="flex gap-2"><Button variant="outline" size="sm" disabled={search.page === 1} onClick={() => set({ page: search.page - 1 })}><ChevronLeft />Previous</Button><Button variant="outline" size="sm" disabled={search.page >= pages} onClick={() => set({ page: search.page + 1 })}>Next<ChevronRight /></Button></span>
       </div>}
     </section>
   </>
+}
+
+/** The count line while a search runs: a flame, and the seconds, so a slow one still reads as work. */
+function Searching() {
+  const seconds = useElapsed(true)
+  useShownInPlace()
+  return <><Candle /><span className="text-flame-ink">Searching every document{seconds >= 1 ? ` · ${seconds}s` : '…'}</span>{seconds >= 8 && <span>Long searches across the whole archive can take a minute.</span>}</>
 }
 
 /** A large count at a glance: 1.35B, 312M, 48K. */
@@ -112,7 +125,7 @@ function Stat({ value, label, flame }: { value: string; label: string; flame?: b
  * The question box: what to look for on top, the filters and the send button along its
  * foot, one surface. Large on the opening page, compact above the results.
  */
-function SearchBox({ initial, large, ready, onSearch, children }: { initial: string; large?: boolean; ready?: boolean; onSearch: (text: string) => void; children: React.ReactNode }) {
+function SearchBox({ initial, large, ready, busy, onSearch, children }: { initial: string; large?: boolean; ready?: boolean; busy?: boolean; onSearch: (text: string) => void; children: React.ReactNode }) {
   const [draft, setDraft] = useState(initial)
   return <form className={`w-full ${large ? 'max-w-[760px]' : 'flex-1'}`} onSubmit={event => { event.preventDefault(); if (draft.trim() || ready) onSearch(draft.trim()) }}>
     <div className="grid rounded-[22px] border border-input bg-background shadow-[0_1px_2px_rgba(26,23,18,0.04),0_10px_30px_rgba(26,23,18,0.06)] focus-within:border-[#CFC6B5]">
@@ -120,7 +133,9 @@ function SearchBox({ initial, large, ready, onSearch, children }: { initial: str
         className={`bg-transparent px-5 outline-none placeholder:text-muted-foreground ${large ? 'h-[72px] text-[18px]' : 'h-14 text-[15px]'}`} />
       <div className="flex min-w-0 items-center gap-2 px-3 pb-3">
         {children}
-        <button type="submit" disabled={!draft.trim() && !ready} aria-label="Search" className="ml-auto grid size-10 shrink-0 place-items-center rounded-full bg-foreground text-parchment transition-opacity duration-(--motion-micro) disabled:opacity-25"><ArrowUp className="size-[18px]" /></button>
+        <button type="submit" disabled={!draft.trim() && !ready} aria-label={busy ? 'Searching' : 'Search'} className="relative ml-auto grid size-10 shrink-0 place-items-center rounded-full bg-foreground text-parchment transition-opacity duration-(--motion-micro) disabled:opacity-25">
+          {busy ? <><span aria-hidden className="absolute -inset-1 animate-spin rounded-full border-2 border-transparent border-t-flame motion-reduce:animate-none" /><Candle /></> : <ArrowUp className="size-[18px]" />}
+        </button>
       </div>
     </div>
   </form>
