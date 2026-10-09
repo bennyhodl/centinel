@@ -245,9 +245,8 @@ pub async fn extract(
                 continue;
             }
 
-            // Every item, not every twenty-fifth: the bar sits directly above a tally that
-            // moves on each one, and the two drifting apart is what made the collect
-            // display look broken.
+            // Every item, not every twenty-fifth: this is the line that names the document
+            // about to be read and where it sits in the work list.
             progress.step_on(
                 format!("{} extracted", report.extracted),
                 i as u64,

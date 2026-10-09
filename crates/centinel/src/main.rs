@@ -8,7 +8,6 @@
 mod http;
 mod logging;
 mod mcp;
-mod progress;
 mod promote;
 mod schedule;
 mod web;
@@ -20,7 +19,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use centinel_core::config::{self, Config};
-use centinel_core::op::{self, Ctx, Group, Progress};
+use centinel_core::op::{self, Ctx, Group};
 use centinel_core::render::{DEFAULT_WIDTH, Painter};
 use centinel_core::store::Store;
 use clap::{Arg, ArgAction, Command};
@@ -61,7 +60,16 @@ fn build_cli() -> Command {
                 .short('v')
                 .global(true)
                 .action(ArgAction::SetTrue)
-                .help("Log debug detail to stderr (`serve` and `mcp` log at info without it)"),
+                .conflicts_with("quiet")
+                .help("Log the internals too: calls made, sizes, timings, devices (RUST_LOG overrides)"),
+        )
+        .arg(
+            Arg::new("quiet")
+                .long("quiet")
+                .short('q')
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .help("Log only warnings and errors"),
         )
         .arg(
             Arg::new("json")
@@ -241,10 +249,10 @@ async fn main() -> Result<()> {
 
     // Installed before the store opens, so that opening it is inside the log rather than
     // the first thing missing from it. Which levels reach stderr is [`logging`]'s
-    // decision — it is the one that knows a server has no other way to speak.
+    // decision.
     logging::install(
-        name,
         matches.get_flag("verbose"),
+        matches.get_flag("quiet"),
         matches.get_flag("no-color-env"),
     );
 
@@ -252,6 +260,7 @@ async fn main() -> Result<()> {
     let store = Store::open(&root)
         .await
         .with_context(|| format!("opening store at {}", root.display()))?;
+    tracing::debug!(root = %root.display(), "store open");
     let ctx = Arc::new(Ctx::new(store));
 
     match name {
@@ -301,10 +310,12 @@ async fn serve(ctx: Arc<Ctx>, bind: &str, matches: &clap::ArgMatches) -> Result<
     let (reload_tx, reload_rx) = schedule::ReloadSignal::channel();
     let (canceller, thread) = schedule::spawn(scheduler, reload_rx)?;
 
-    if count == 0 {
-        eprintln!("  no schedules configured — centinel schedule set");
-    } else {
-        eprintln!("  {count} schedule(s) armed — centinel schedules");
+    match count {
+        0 => tracing::info!("no schedules configured — `centinel schedule set` adds one"),
+        n => tracing::info!(
+            schedules = n,
+            "scheduler armed — `centinel schedules` lists them"
+        ),
     }
     install_reload_handler(reload_tx);
 
@@ -493,25 +504,11 @@ async fn run_op(
         args = wizard::schedule_set(&ctx, args, assume_yes).await?;
     }
 
-    // Progress goes to stderr so stdout stays a clean JSON stream for piping. Which
-    // renderer draws it — bars or lines — is [`progress`]'s decision, not this one's.
-    let (progress, rx) = if def.long_running {
-        let (p, rx) = Progress::channel();
-        (p, Some(rx))
-    } else {
-        (Progress::none(), None)
-    };
-
-    let printer = rx.map(progress::spawn);
-
-    let result = logging::invoke("cli", def, Arc::clone(&ctx), args, Some(progress)).await;
-
-    if let Some(handle) = printer {
-        // The sink was dropped with `progress`, so the printer terminates on its own.
-        let _ = handle.await;
-    }
-
-    let value = result?;
+    // Progress is the log, on stderr, so stdout stays a clean JSON stream for piping. No
+    // sink is passed: [`logging::invoke`] hands the op one that writes each event as a
+    // line, and the line is written before the op moves on, so nothing is left to drain
+    // when the report arrives.
+    let value = logging::invoke("cli", def, Arc::clone(&ctx), args, None).await?;
 
     if output.json {
         println!("{}", serde_json::to_string_pretty(&value)?);
@@ -519,7 +516,7 @@ async fn run_op(
     }
 
     // Rendered through a lock and flushed once: a report is one screen of output and
-    // should not interleave with anything the progress renderer is still finishing.
+    // should not interleave with anything else writing to the terminal.
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     writeln!(handle)?;
@@ -570,6 +567,19 @@ mod tests {
             m.get_one::<String>("root").map(String::as_str),
             Some("/srv/corpus")
         );
+    }
+
+    /// The two verbosity flags are global, so they parse wherever a hand puts them, and
+    /// they contradict each other, so clap refuses both at once rather than one winning
+    /// silently.
+    #[test]
+    fn verbosity_flags_are_global_and_exclusive() {
+        let parsed = |argv: &[&str]| build_cli().try_get_matches_from(argv);
+        let m = parsed(&["centinel", "doctor", "-v"]).unwrap();
+        assert!(m.get_flag("verbose") && !m.get_flag("quiet"));
+        let m = parsed(&["centinel", "-q", "doctor"]).unwrap();
+        assert!(m.get_flag("quiet") && !m.get_flag("verbose"));
+        assert!(parsed(&["centinel", "doctor", "-v", "-q"]).is_err());
     }
 
     /// `-y` answers a prompt this crate draws *after* the op it belongs to, so it has to

@@ -226,7 +226,7 @@ pub async fn index(
             }
         }
         let mut derivations: Vec<_> = latest.into_values().collect();
-        // A HashMap has no order, and the progress bar and insert order should not vary
+        // A HashMap has no order, and the progress lines and insert order should not vary
         // run to run.
         derivations.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.to_sha.cmp(&b.to_sha)));
         report.derivations += derivations.len();

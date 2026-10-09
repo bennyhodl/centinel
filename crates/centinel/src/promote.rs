@@ -70,20 +70,14 @@ pub async fn offer(
     if config.source(&promote.id).is_some() {
         // Said rather than asked. The suggested id comes from the host, so investigating a
         // site a second time reaches this every time, and a prompt whose default answer
-        // produces an error is worse than no prompt.
-        //
-        // Said only to somebody who was expecting an offer, though: a piped investigation
-        // never had one coming, and a line about an add that is not happening is noise on
-        // a stream something else is reading. It says why there was no offer and not that
-        // the site is collected — the id could belong to another block entirely, and the
-        // command printed above is still there to edit.
-        if assume_yes || can_ask(output) {
-            eprintln!(
-                "  `{}` is already in {} — not offering to add it again",
-                promote.id,
-                path.display()
-            );
-        }
+        // produces an error is worse than no prompt. It says why there was no offer and
+        // not that the site is collected — the id could belong to another block entirely,
+        // and the command printed above is still there to edit.
+        tracing::info!(
+            id = %promote.id,
+            config = %path.display(),
+            "already in the config — not offering to add it again"
+        );
         return Ok(());
     }
 
@@ -129,13 +123,13 @@ async fn add(ctx: &Arc<Ctx>, promote: &Promote, output: Output) -> Result<()> {
     if output.json {
         // stdout is carrying the investigation as one JSON document and must stay one, so
         // the outcome goes where progress goes.
-        eprintln!(
-            "  added `{}` to {}",
-            promote.id,
-            value
+        tracing::info!(
+            id = %promote.id,
+            config = value
                 .get("config")
                 .and_then(Value::as_str)
-                .unwrap_or("the config")
+                .unwrap_or("the config"),
+            "added to the config"
         );
         return Ok(());
     }

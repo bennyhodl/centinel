@@ -240,15 +240,26 @@ The hardest case. Ops emit progress one way and never learn who called them:
 
 | Surface | Rendering |
 |---|---|
-| CLI | progress bars on stderr when stderr is a terminal, plain lines when it is a pipe — so stdout carries only the report, and stays a clean JSON stream whenever it is piped |
-| HTTP | `POST /ops/{name}/stream` → SSE progress frames, then a terminal `result` or `error` |
-| MCP | waits and returns once — base MCP has no streaming channel for tool results |
+| CLI | log lines on stderr, one per thing done, through `tracing` — so stdout carries only the report, and stays a clean JSON stream whenever it is piped |
+| HTTP | `POST /ops/{name}/stream` → SSE progress frames, then a terminal `result` or `error`; every other route and a scheduled run write the same lines to the server's log |
+| MCP | waits and returns once — base MCP has no streaming channel for tool results — and the progress goes to stderr, which the client captures |
 
 A `ProgressEvent` carries an optional **`id`** and a **`unit`**. Events sharing an `id`
-are one unit of work, so a renderer can keep a bar per file plus an aggregate beside it
-rather than one bar whose meaning shifts underneath the operator; `unit: bytes` is what
-turns `312000000/613527539` into `297 MiB / 585 MiB at 18.4 MiB/s`. Both are presentation
-hints. The op emits them and never learns whether anything drew a bar.
+are one unit of work, so a consumer can tell one file's bytes from the aggregate beside
+it rather than reading one counter whose meaning shifts underneath the operator; `unit:
+bytes` says that `312000000/613527539` is a size. Both are presentation hints. The op
+emits them and never learns who is listening.
+
+Which event becomes which line, and at which level, is decided once, in
+`centinel_core::op::log_event`: info is what happened — a page fetched, a document
+extracted, a batch embedded, a stage's summary — and debug is what is in flight: the item a
+step is about to work on, each tick of a download, the aggregate counter. Beneath that the
+internals say what they did at debug — which request was made and what came back, the
+device and batch shape an embedding session opened with, how long a decode or a Lance
+append took. `-v` selects debug, `-q` keeps only warnings, and `RUST_LOG` overrides both.
+The server logs every request at info: method, path and query, status, duration; a search
+adds its query, filters, result count and timing; an op invocation adds its arguments, its
+outcome and its elapsed time, under a span naming the op and the surface it arrived on.
 
 `/stream` holds the connection open rather than returning a job id. Honest for the spine, wrong for a multi-hour crawl; a durable job store belongs with scheduling ([#7](https://github.com/bennyhodl/centinel/issues/7)).
 

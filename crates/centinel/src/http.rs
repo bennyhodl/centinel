@@ -142,6 +142,7 @@ pub async fn serve_until(
     bind: &str,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
+    let store = ctx.store.root().display().to_string();
     let app = router(ctx);
 
     let listener = tokio::net::TcpListener::bind(bind)
@@ -152,22 +153,20 @@ pub async fn serve_until(
     if !addr.ip().is_loopback() {
         tracing::warn!(
             %addr,
-            "serving on a non-loopback address with no authentication — \
-             access control is unspecified (SPEC §8)"
+            "reachable off-host with no authentication — access control is unspecified (SPEC §8)"
         );
-        eprintln!("warning: {addr} is reachable off-host and centinel has no authentication yet");
     }
 
-    eprintln!("centinel serving on http://{addr}");
-    eprintln!("  GET  /ops                  list operations");
-    eprintln!("  POST /ops/{{name}}           invoke");
-    eprintln!("  POST /ops/{{name}}/stream    invoke with progress (SSE)");
-    eprintln!("  POST /mcp                  MCP over HTTP");
-
-    // The banner above is the greeting; this is the first line of the log. It exists so
-    // that an operator can tell, before sending a single request, whether the log they
-    // are watching is on at all.
-    tracing::info!(%addr, ops = op::remote_ops().len(), "http server listening");
+    // The first lines of the log, and what they are for: an operator can tell, before
+    // sending a single request, which store this is, what it answers, and whether the
+    // log they are watching is on at all.
+    tracing::info!(url = %format!("http://{addr}"), store = %store, "listening");
+    tracing::info!(
+        ops = op::remote_ops().len(),
+        tools = op::mcp_tools().len(),
+        web = web_version().as_deref().unwrap_or("absent"),
+        "serving /ops, /ops/{{name}}[/stream], /mcp and /web"
+    );
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -206,7 +205,40 @@ fn router(ctx: Arc<Ctx>) -> Router {
         .route("/ops/{name}", post(invoke))
         .route("/ops/{name}/stream", post(invoke_streaming))
         .route("/mcp", post(mcp_over_http))
+        .layer(axum::middleware::from_fn(log_request))
         .with_state(ctx)
+}
+
+/// One line per request, once it is answered: what was asked, what came back, how long.
+///
+/// Every route, including the ones that return a stream — for those the line is written
+/// when the headers go out, which is when the request was *answered* even if the body
+/// runs for an hour. The query string is kept because on this API it is the question:
+/// `/workspace/documents?source=tampa&tag=junk` is a search, and a line without it would
+/// say only that someone searched. What an op was asked and how it went is the
+/// invocation's own lines, under [`crate::logging::invoke`]; this is the transport's.
+async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().map(str::to_string);
+    let started = std::time::Instant::now();
+
+    let response = next.run(req).await;
+
+    let status = response.status().as_u16();
+    let ms = started.elapsed().as_millis() as u64;
+    let target = match &query {
+        Some(q) => format!("{path}?{q}"),
+        None => path,
+    };
+    // A 5xx is this process's fault and is worth seeing without raising the level; a
+    // 4xx is the caller's, and the route that refused it has already said why.
+    if status >= 500 {
+        tracing::error!(status, ms, "{method} {target}");
+    } else {
+        tracing::info!(status, ms, "{method} {target}");
+    }
+    response
 }
 
 /// The bundled classifier workspace.

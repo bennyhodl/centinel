@@ -332,11 +332,9 @@ pub async fn collect(
         // the latest DiscoveryRun and picks up exactly here.
         opts.cancel.check()?;
 
-        // Every resource, not every twenty-fifth. The throttle was harmless when the bar
-        // was the only output; beside a request log that moves on every fetch it made the
-        // bar visibly disagree with the tally under it — 25/500 sitting still while the
-        // line beneath counted past a hundred requests. `indicatif` rate-limits its own
-        // redraws, so the cost of an event the renderer discards is a channel send.
+        // Every resource, not every twenty-fifth: this is the line that names the page
+        // about to be fetched and where it sits in the work list, and a counter that
+        // moved every twenty-fifth page read as a run that had stalled between them.
         progress.step_on(
             format!("{} stored, {} failed", report.stored, report.failed),
             i as u64,

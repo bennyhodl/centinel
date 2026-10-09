@@ -98,9 +98,18 @@ impl Reranker {
     pub fn load(root: &Path, model_id: &str, variant: Option<&str>) -> anyhow::Result<Self> {
         let found = models::resolve(model_id, ModelRole::Reranker, variant, root)?;
 
+        let started = std::time::Instant::now();
         let params = LlamaModelParams::default().with_n_gpu_layers(GPU_LAYERS);
         let model = LlamaModel::load_from_file(backend()?, &found.path, &params)
             .map_err(|e| anyhow::anyhow!("loading {}: {e}", found.path.display()))?;
+        tracing::debug!(
+            model = model_id,
+            variant = %found.variant,
+            path = %found.path.display(),
+            gpu_layers = GPU_LAYERS,
+            ms = started.elapsed().as_millis() as u64,
+            "reranker loaded"
+        );
 
         let yes = single_token(&model, "yes")?;
         let no = single_token(&model, "no")?;
@@ -135,6 +144,7 @@ impl Reranker {
         if documents.is_empty() {
             return Ok(Vec::new());
         }
+        let started = std::time::Instant::now();
 
         let params = LlamaContextParams::default()
             .with_n_ctx(std::num::NonZeroU32::new(self.context_tokens))
@@ -191,6 +201,12 @@ impl Reranker {
             out.push(probability_of_yes(yes, no));
         }
 
+        tracing::debug!(
+            documents = documents.len(),
+            n_ctx = self.context_tokens,
+            ms = started.elapsed().as_millis() as u64,
+            "reranked"
+        );
         Ok(out)
     }
 

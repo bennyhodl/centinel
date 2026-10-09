@@ -2220,6 +2220,16 @@ impl<'a> Workspace<'a> {
             let body = loop {
                 attempts += 1;
                 Flight::attempt(run_id, index, attempts, text.chars().count());
+                tracing::debug!(
+                    run = run_id,
+                    document = %input.resource,
+                    questions = level.len(),
+                    attempt = attempts,
+                    chars = text.chars().count(),
+                    sampled = sampled.is_some(),
+                    model = %request.model,
+                    "scoring"
+                );
                 let payload = json!({
                     "state": { "text": text, "evaluation_date": request.evaluation_date },
                     "model": request.model,
