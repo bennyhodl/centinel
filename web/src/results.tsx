@@ -107,7 +107,7 @@ function SortHeader({ label, note, sortKey, view, onSort }: { label: string; not
   const direction = effectiveDirection(view)
   const Icon = !active ? ArrowUpDown : direction === 'asc' ? ArrowUp : ArrowDown
   return <TableHead aria-sort={active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
-    <button type="button" className={`flex w-full items-end justify-between gap-2 p-3 text-left text-xs font-medium [&_small]:block [&_small]:text-muted-foreground [&_svg]:size-3 ${active ? 'bg-primary text-primary-foreground' : ''}`} onClick={() => onSort(sortKey)} title={`Sort by ${label}`}>
+    <button type="button" className={`flex w-full items-end justify-between gap-2 p-3 text-left text-xs font-medium [&_small]:block [&_small]:text-muted-foreground [&_svg]:size-3 ${active ? 'bg-parchment font-semibold text-foreground [&_svg]:text-flame-ink' : ''}`} onClick={() => onSort(sortKey)} title={`Sort by ${label}`}>
       <span>{label}{note && <small>{note}</small>}</span><Icon />
     </button>
   </TableHead>

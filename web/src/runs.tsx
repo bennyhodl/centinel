@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { money, number, plural, seconds, tail } from './format'
-import { LiveRun, useRunDetail } from './live'
+import { asked, LiveRun, useRunDetail } from './live'
 import { ResultsSection } from './results'
 import { DocumentLink, Empty, ErrorBox, PageHeader, Spinner } from './ui'
 
@@ -25,7 +25,7 @@ export function Runs() {
   const open = (run: string) => navigate({ search: { run, page: search.page, outcome: '' } })
 
   if (search.run) return <>
-    <PageHeader eyebrow={<button type="button" onClick={() => open('')} className="inline-flex items-center gap-1 hover:text-foreground"><ChevronLeft className="size-3.5" />All runs</button>} title="Run" />
+    <button type="button" onClick={() => open('')} className="mb-4 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground"><ChevronLeft className="size-3.5" />All runs</button>
     {detail.error ? <ErrorBox error={detail.error} /> : detail.data ? <RunDetail run={detail.data} view={view} setView={setView} loading={detail.isFetching} /> : <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground"><Spinner /> Reading the run…</div>}
   </>
 
@@ -42,7 +42,7 @@ export function Runs() {
       </div>
     </PageHeader>
     {query.error && <ErrorBox error={query.error} />}
-    <div className="grid gap-4">{running.map(run => <RunHero key={run.id} id={run.id} onOpen={() => open(run.id)} />)}</div>
+    {running.map(run => <LiveRun key={run.id} id={run.id} />)}
     <section className="mt-6">
       <div className="flex h-8 items-center gap-6 border-b border-foreground text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
         <span className="w-36 shrink-0">Started</span><span className="flex-1">Asked</span><span className="hidden w-56 shrink-0 md:block">Outcome</span><span className="w-52 shrink-0 text-right">Next</span>
@@ -56,48 +56,6 @@ export function Runs() {
 
 function Stat({ value, label, flame }: { value: string; label: string; flame?: boolean }) {
   return <span className="grid justify-items-end gap-0.5"><b className={`text-2xl leading-7 font-semibold tracking-[-0.02em] ${flame ? 'text-flame-ink' : ''}`}>{value}</b><span className="text-xs text-muted-foreground">{label}</span></span>
-}
-
-/** What a run asks, in words: the question itself when there is one, the ids when there are several. */
-const asked = (run: Run) => run.questions.length === 1 ? run.questions[0].instructions || run.questions[0].id : run.questions.map(question => question.id).join(' · ')
-
-/** One colour per decision, as on the live panel. */
-const segments = [
-  ['kept', 'bg-foreground', 'keep'],
-  ['review', 'bg-flame', 'need you'],
-  ['excluded', 'bg-[#B9AE98]', 'exclude'],
-  ['errors', 'bg-destructive', 'errors'],
-] as const
-
-/** A run that is scoring now: what it asks, how far it is, and how its documents are falling. */
-function RunHero({ id, onOpen }: { id: string; onOpen: () => void }) {
-  const detail = useRunDetail(id, { page: 1, page_size: 1 }, 700)
-  const run = detail.data
-  const [now, setNow] = useState(Date.now())
-  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer) }, [])
-  if (!run) return <div className="flex items-center gap-2 rounded-xl border border-[#F0D6B0] bg-[#FFFBF4] p-6 text-sm text-flame-ink"><Spinner />Reading the run…</div>
-  const totals = run.view?.documents
-  const scored = run.view?.scored ?? 0
-  const elapsed = now - Date.parse(run.created_at)
-  const rate = scored && elapsed > 0 ? scored / elapsed : 0
-  const left = rate ? (run.document_count - scored) / rate : null
-  return <section className="grid gap-[18px] rounded-xl border border-[#F0D6B0] bg-[#FFFBF4] p-6">
-    <div className="flex items-start justify-between gap-6">
-      <div className="grid gap-1.5">
-        <span className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.08em] text-flame-ink"><span className="size-2 rounded-full bg-flame shadow-[0_0_0_4px_#F6D9B4]" />Scoring now · {seconds(elapsed)}</span>
-        <h2 className="text-[22px] leading-7 font-semibold tracking-[-0.01em]">{asked(run)}</h2>
-        <span className="text-sm text-muted-foreground">{plural(run.document_count, 'document')} · {plural(run.questions.length, 'question')} · {run.model}</span>
-      </div>
-      <Button variant="outline" className="shrink-0 bg-background" onClick={onOpen}>Open</Button>
-    </div>
-    <div className="grid gap-3">
-      <span className="flex h-2.5 overflow-hidden rounded-full bg-[#EFE9DC]">{totals && segments.map(([key, colour]) => totals[key] ? <i key={key} className={colour} style={{ width: `${totals[key] / Math.max(1, run.document_count) * 100}%` }} /> : null)}</span>
-      <div className="flex flex-wrap items-center gap-x-7 gap-y-2">
-        {segments.map(([key, colour, label]) => <span key={key} className="inline-flex items-center gap-2 text-[13px]"><i className={`size-2.5 rounded-[2px] ${colour}`} /><b className="font-semibold">{number(totals?.[key] ?? 0)}</b>{label}</span>)}
-        <span className="ml-auto text-[13px] text-muted-foreground">{number(scored)} of {number(run.document_count)}{left != null ? ` · ~${seconds(left)} left` : ''} · {number(run.view?.in_flight?.length ?? 0)} in flight to Jev</span>
-      </div>
-    </div>
-  </section>
 }
 
 /** A finished run in the ledger, with the one thing to do with it next. */
@@ -148,13 +106,10 @@ function RunDetail({ run, view, setView, loading }: { run: Run; view: RunDetailQ
   })
   const questions = run.effective_questions?.length ? run.effective_questions : run.questions
   const inputTotal = run.view?.input_total ?? run.inputs.length
-  return <section className="min-w-0 rounded-lg border bg-card p-5">
-    <div className="flex flex-wrap items-start justify-between gap-5 [&_h2]:mt-1 [&_h2]:text-lg [&_h2]:font-semibold">
-      <div><span className="text-xs font-medium text-muted-foreground">{run.model} · evaluated as of {run.evaluation_date}</span><h2>{plural(run.document_count, 'document')} × {plural(run.questions.length, 'question')}</h2><small className="mt-1 block font-mono text-xs text-muted-foreground">{run.id}</small></div>
-      <div className="flex gap-2"><Button variant="secondary" disabled={running || repeat.isPending || !inputTotal} onClick={() => repeat.mutate()}><RotateCcw />{repeat.isPending ? 'Starting…' : 'Run again'}</Button></div>
-    </div>
+  return <section className="min-w-0">
+    <LiveRun id={run.id} embedded onOutcome={outcome => setView({ ...view, outcome, page: 1 })}
+      actions={<Button variant="outline" disabled={running || repeat.isPending || !inputTotal} onClick={() => repeat.mutate()}><RotateCcw />{repeat.isPending ? 'Starting…' : 'Run again'}</Button>} />
     {repeat.error && <ErrorBox error={repeat.error} />}
-    <LiveRun id={run.id} embedded onOutcome={outcome => setView({ ...view, outcome, page: 1 })} />
     <Tabs defaultValue="results"><TabsList><TabsTrigger value="results">Results</TabsTrigger><TabsTrigger value="questions">Questions</TabsTrigger><TabsTrigger value="inputs">Inputs · {number(inputTotal)}</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList>
       <TabsContent value="results"><ResultsSection run={run} questions={questions} view={view} setView={setView} loading={loading} /></TabsContent>
       <TabsContent value="questions"><div className="grid gap-3 [&>div]:rounded-md [&>div]:border [&>div]:p-3 [&_h4]:mb-2 [&_h4]:font-mono [&_h4]:text-sm [&_small]:text-muted-foreground [&_p]:text-sm [&_ul]:mt-2 [&_ul]:list-disc [&_ul]:pl-4 [&_li]:text-sm [&_em]:text-xs [&_em]:not-italic [&_em]:text-muted-foreground">{questions.map(question => <div key={question.id}><h4>{question.id} <small>v{question.version} · {question.kind === 'choice' ? 'choice' : 'yes / no'}</small></h4><p>{question.instructions}</p>{question.options?.length ? <ul>{question.options.map(option => <li key={option.id}><b>{option.id}</b> <em>{option.action}</em> {option.description}</li>)}</ul> : null}</div>)}</div></TabsContent>
