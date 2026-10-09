@@ -640,13 +640,11 @@ check_build_tools() {
     node_version=$(node --version | sed 's/^v//')
     node_major=$(printf '%s' "$node_version" | cut -d. -f1)
     node_supported=0
-    if [ "$node_major" = 20 ] && version_ge "$node_version" "20.19.0"; then
-        node_supported=1
-    elif [ "$node_major" -ge 22 ] && { [ "$node_major" -gt 22 ] || version_ge "$node_version" "22.12.0"; }; then
+    if [ "$node_major" -ge 22 ] && { [ "$node_major" -gt 22 ] || version_ge "$node_version" "22.12.0"; }; then
         node_supported=1
     fi
     [ "$node_supported" = 1 ] || die "Node $node_version cannot build the Centinel
-      browser workspace. Install Node 20.19+ or 22.12+, then re-run this."
+      browser workspace. Install Node 22.12+, then re-run this."
 
     check_disk
 }

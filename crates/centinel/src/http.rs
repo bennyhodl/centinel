@@ -92,7 +92,7 @@ fn web_page() -> Option<&'static [u8]> {
         .map(|asset| asset.2)
 }
 
-/// The version stamped into the served workspace page by `vite.config.ts`.
+/// The version stamped into the served workspace page by the Start root route.
 ///
 /// The build script refuses a bundle whose stamp differs from the crate, so on a binary
 /// built from source this always equals `CARGO_PKG_VERSION`. A release download cannot
@@ -101,7 +101,7 @@ pub fn web_version() -> Option<String> {
     stamped_version(std::str::from_utf8(web_page()?).ok()?)
 }
 
-/// The `centinel-version` meta tag in a page, as `vite.config.ts` writes it.
+/// The `centinel-version` meta tag in a page, as the Start root route writes it.
 pub fn stamped_version(html: &str) -> Option<String> {
     let start = html.find("name=\"centinel-version\"")?;
     let rest = &html[start..];

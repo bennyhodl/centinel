@@ -33,3 +33,7 @@
 # Local config (app preferences are per-machine)
 centinel.toml
 .claude
+
+# TanStack Start intermediate client/server build and route cache
+/.start/
+/.tanstack/

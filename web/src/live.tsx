@@ -93,8 +93,8 @@ export function LiveRun({ id, embedded, preview, onDismiss, onOutcome }: {
     ]),
   })
 
-  if (live.error) return <section className="live failed"><header><CircleAlert /><b>The run could not be read</b></header><ErrorBox error={live.error} /></section>
-  if (!run) return <section className="live running"><header><Spinner /><b>Starting the run…</b><span className="muted">Centinel is fixing the selection.</span></header></section>
+  if (live.error) return <section className="mb-4 grid gap-3 rounded-lg border bg-card p-4 [&>header]:flex [&>header]:flex-wrap [&>header]:items-center [&>header]:gap-2 [&>header]:text-sm [&_h4]:mb-2 [&_h4]:text-xs [&_h4]:font-semibold [&_footer]:text-xs border-destructive"><header><CircleAlert /><b>The run could not be read</b></header><ErrorBox error={live.error} /></section>
+  if (!run) return <section className="mb-4 grid gap-3 rounded-lg border bg-card p-4 [&>header]:flex [&>header]:flex-wrap [&>header]:items-center [&>header]:gap-2 [&>header]:text-sm [&_h4]:mb-2 [&_h4]:text-xs [&_h4]:font-semibold [&_footer]:text-xs"><header><Spinner /><b>Starting the run…</b><span className="text-muted-foreground">Centinel is fixing the selection.</span></header></section>
 
   const view = run.view
   const totals = view?.documents
@@ -109,71 +109,71 @@ export function LiveRun({ id, embedded, preview, onDismiss, onOutcome }: {
   const go = (outcome: ResultOutcome) => onOutcome ? onOutcome(outcome) : !preview && navigate({ to: '/runs', search: { run: id, page: 1, outcome } })
   const failureGroups = groupErrors(failures.data?.results || [])
 
-  return <section className={`live ${running ? 'running' : run.status === 'failed' ? 'failed' : 'done'}`} aria-live="polite">
+  return <section className={`mb-4 grid gap-3 rounded-lg border bg-card p-4 [&>header]:flex [&>header]:flex-wrap [&>header]:items-center [&>header]:gap-2 [&>header]:text-sm [&_h4]:mb-2 [&_h4]:text-xs [&_h4]:font-semibold [&_footer]:text-xs ${running ? '' : run.status === 'failed' ? 'border-destructive' : ''}`} aria-live="polite">
     <header>
       {running ? <Pulse /> : run.status === 'failed' ? <CircleAlert /> : <CircleCheck />}
       <b>{running ? 'Classifying' : run.status === 'failed' ? 'The run stopped' : preview ? 'Preview finished' : 'Finished'}</b>
       <span>{number(scored)} of {plural(total, 'document')}</span>
-      <span className="muted">{seconds(elapsed)}{running && rate ? ` · ${rate.toFixed(1)}/s · about ${seconds(left)} left` : ''}{!running && run.cost_usd != null ? ` · ${money(run.cost_usd)}` : ''}{!running && run.input_tokens ? ` · ${compact(run.input_tokens)} tokens` : ''}</span>
-      <span className="grow" />
+      <span className="text-muted-foreground">{seconds(elapsed)}{running && rate ? ` · ${rate.toFixed(1)}/s · about ${seconds(left)} left` : ''}{!running && run.cost_usd != null ? ` · ${money(run.cost_usd)}` : ''}{!running && run.input_tokens ? ` · ${compact(run.input_tokens)} tokens` : ''}</span>
+      <span className="flex-1" />
       {!embedded && !preview && <Button size="sm" variant="secondary" onClick={() => navigate({ to: '/runs', search: { run: id, page: 1, outcome: '' } })}>{running ? 'Watch in Runs' : 'See every result'}<ArrowRight /></Button>}
       {!embedded && onDismiss && !running && <Button size="sm" variant="ghost" aria-label="Dismiss" onClick={onDismiss}><X /></Button>}
     </header>
 
-    <div className="progress" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={scored}>
-      {totals && segments.map(([key, tone]) => totals[key] ? <i key={key} className={tone} style={{ width: `${totals[key] / Math.max(1, total) * 100}%` }} /> : null)}
-      {running && <i className="pending" style={{ width: `${(view?.in_flight?.length || 0) / Math.max(1, total) * 100}%` }} />}
+    <div className="flex h-2.5 overflow-hidden rounded bg-muted [&_i]:block [&_i]:h-full [&_i]:bg-primary [&_i:nth-child(2)]:opacity-70 [&_i:nth-child(3)]:opacity-50" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={scored}>
+      {totals && segments.map(([key, tone]) => totals[key] ? <i key={key} className={tone === 'error' ? 'bg-destructive' : 'bg-primary'} style={{ width: `${totals[key] / Math.max(1, total) * 100}%` }} /> : null)}
+      {running && <i className="animate-pulse bg-muted-foreground" style={{ width: `${(view?.in_flight?.length || 0) / Math.max(1, total) * 100}%` }} />}
     </div>
 
-    <div className="tiles">
-      {segments.map(([key, tone, label]) => <button type="button" key={key} className={`tile ${tone}`} disabled={!totals?.[key]} onClick={() => go(tone === 'keep' ? 'keep' : tone === 'error' ? 'error' : tone)}>
+    <div className="flex flex-wrap gap-2">
+      {segments.map(([key, tone, label]) => <button type="button" key={key} className={`grid min-w-24 gap-1 rounded-md border bg-card px-3 py-2 text-left hover:bg-accent disabled:opacity-50 [&_span]:text-xs [&_span]:text-muted-foreground [&_b]:text-lg ${tone === 'error' ? 'text-destructive' : ''}`} disabled={!totals?.[key]} onClick={() => go(tone === 'keep' ? 'keep' : tone === 'error' ? 'error' : tone)}>
         <span>{label}</span><b>{number(totals?.[key] ?? 0)}</b>
       </button>)}
-      <button type="button" className="tile tag" disabled={!totals?.tagged} onClick={() => go('tag')}><span>Tagged</span><b>{number(totals?.tagged ?? 0)}</b></button>
-      {!!totals?.sampled && <div className="tile note"><span>Sampled</span><b>{number(totals.sampled)}</b></div>}
+      <button type="button" className="grid min-w-24 gap-1 rounded-md border bg-card px-3 py-2 text-left hover:bg-accent disabled:opacity-50 [&_span]:text-xs [&_span]:text-muted-foreground [&_b]:text-lg" disabled={!totals?.tagged} onClick={() => go('tag')}><span>Tagged</span><b>{number(totals?.tagged ?? 0)}</b></button>
+      {!!totals?.sampled && <div className="grid min-w-24 gap-1 rounded-md border bg-card px-3 py-2 text-left hover:bg-accent disabled:opacity-50 [&_span]:text-xs [&_span]:text-muted-foreground [&_b]:text-lg bg-muted"><span>Sampled</span><b>{number(totals.sampled)}</b></div>}
     </div>
 
-    {running && <div className="live-columns">
+    {running && <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
       <div>
         <h4>Out to Jev now · {view?.in_flight?.length || 0}</h4>
-        <ul className="flights">
+        <ul className="grid gap-1 [&_li]:flex [&_li]:min-w-0 [&_li]:items-center [&_li]:gap-2 [&_li]:rounded [&_li]:bg-muted [&_li]:px-2 [&_li]:py-1 [&_li]:text-xs">
           {(view?.in_flight || []).map(flight => <li key={`${flight.source}:${flight.resource}`}>
-            <Spinner /><span className="doc" title={flight.resource}>{tail(flight.resource)}</span>
-            {flight.attempt > 1 && <span className="chip warn">request {flight.attempt}</span>}
-            {flight.sent_chars > 0 && <span className="muted">{compact(flight.sent_chars)} chars</span>}
-            <span className="mono">{seconds(now - flight.started_ms)}</span>
+            <Spinner /><span className="min-w-0 flex-1 truncate font-medium hover:underline" title={flight.resource}>{tail(flight.resource)}</span>
+            {flight.attempt > 1 && <span className="inline-flex rounded-full bg-secondary px-2 py-0.5 text-xs">request {flight.attempt}</span>}
+            {flight.sent_chars > 0 && <span className="text-muted-foreground">{compact(flight.sent_chars)} chars</span>}
+            <span className="font-mono">{seconds(now - flight.started_ms)}</span>
           </li>)}
-          {!view?.in_flight?.length && <li className="muted">{scored ? 'Waiting for the next documents…' : 'Sending the first documents…'}</li>}
+          {!view?.in_flight?.length && <li className="text-muted-foreground">{scored ? 'Waiting for the next documents…' : 'Sending the first documents…'}</li>}
         </ul>
       </div>
       <div>
         <h4>Latest answers</h4>
-        <ul className="feed">
-          {(view?.recent || []).map(result => <li key={`${result.source}:${result.resource}:${result.derived_sha}`} className={decisionOf(result)}>
+        <ul className="grid gap-1 [&_li]:flex [&_li]:min-w-0 [&_li]:items-center [&_li]:gap-2 [&_li]:rounded [&_li]:bg-muted [&_li]:px-2 [&_li]:py-1 [&_li]:text-xs">
+          {(view?.recent || []).map(result => <li key={`${result.source}:${result.resource}:${result.derived_sha}`}>
             <DecisionBadge decision={decisionOf(result)} />
-            <DocumentLink doc={result} className="doc">{tail(result.resource)}</DocumentLink>
-            <span className="summary" title={answerSummary(questions, result)}>{answerSummary(questions, result)}</span>
-            <span className="mono">{seconds(result.duration_ms)}</span>
+            <DocumentLink doc={result} className="min-w-0 flex-1 truncate font-medium hover:underline">{tail(result.resource)}</DocumentLink>
+            <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground" title={answerSummary(questions, result)}>{answerSummary(questions, result)}</span>
+            <span className="font-mono">{seconds(result.duration_ms)}</span>
           </li>)}
-          {!view?.recent?.length && <li className="muted">No answers yet. The first ones usually take a few seconds.</li>}
+          {!view?.recent?.length && <li className="text-muted-foreground">No answers yet. The first ones usually take a few seconds.</li>}
         </ul>
       </div>
     </div>}
 
-    {!running && <div className="next">
+    {!running && <div className="flex flex-wrap items-center gap-3 border-t pt-3 [&_p]:min-w-64 [&_p]:flex-1 [&_p]:text-sm">
       {preview && <p>This was a preview. The scores are below. Nothing was saved, so it cannot be committed.</p>}
       {!preview && run.status === 'completed' && (toExclude
         ? <p>Committing removes <b>{plural(toExclude, 'document')}</b> from search and future embedding. The archive does not change, and every document can be restored.</p>
         : <p>No document reaches an exclude threshold. Nothing needs committing.</p>)}
       {run.status === 'committed' && <p>The exclusions of this run are committed.{toExclude ? ` A policy change since then would exclude ${plural(toExclude, 'more document')}.` : ''}</p>}
-      {canCommit && <Button onClick={() => commit.mutate()} disabled={commit.isPending}>{commit.isPending ? <Spinner light /> : <ShieldCheck />}Commit {plural(toExclude, 'exclusion')}</Button>}
-      {commit.isSuccess && <span className="success-note">Committed.</span>}
+      {canCommit && <Button onClick={() => commit.mutate()} disabled={commit.isPending}>{commit.isPending ? <Spinner /> : <ShieldCheck />}Commit {plural(toExclude, 'exclusion')}</Button>}
+      {commit.isSuccess && <span className="mt-2 text-sm">Committed.</span>}
       {commit.error && <ErrorBox error={commit.error} />}
     </div>}
 
-    {!running && errors > 0 && <div className="failures">
+    {!running && errors > 0 && <div className="rounded-md border border-destructive bg-destructive/10 p-3 text-destructive [&_ul]:list-disc [&_ul]:pl-4 [&_li]:wrap-anywhere [&_li]:text-xs">
       <h4>{plural(errors, 'document')} failed</h4>
-      {failures.isLoading && <p className="muted">Reading the errors…</p>}
+      {failures.isLoading && <p className="text-muted-foreground">Reading the errors…</p>}
       <ul>{failureGroups.map(([message, count]) => <li key={message}><b>{number(count)}×</b> {message}</li>)}</ul>
     </div>}
   </section>

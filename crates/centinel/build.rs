@@ -48,7 +48,7 @@ fn main() {
         ),
         None => panic!(
             "web-dist/index.html carries no centinel-version meta tag; \
-             vite.config.ts must stamp it"
+             the Start root route must stamp it"
         ),
     }
     warn(&format!(
@@ -117,7 +117,7 @@ fn warn(line: &str) {
     println!("cargo:warning=web: {line}");
 }
 
-/// The version `vite.config.ts` stamped into the page head.
+/// The version the Start root route stamped into the page head.
 fn stamped_version(html: &str) -> Option<String> {
     let start = html.find("name=\"centinel-version\"")?;
     let rest = &html[start..];
@@ -148,7 +148,7 @@ fn require_node(root: &Path) {
         .current_dir(root)
         .output()
         .unwrap_or_else(|error| {
-            panic!("could not start `node`: {error}. Install Node.js 20.19 or newer")
+            panic!("could not start `node`: {error}. Install Node.js 22.12 or newer")
         });
     let version = String::from_utf8_lossy(&output.stdout);
     let parts: Vec<u64> = version
@@ -157,11 +157,10 @@ fn require_node(root: &Path) {
         .split('.')
         .filter_map(|p| p.parse().ok())
         .collect();
-    let supported = matches!(parts.as_slice(), [20, minor, ..] if *minor >= 19)
-        || matches!(parts.as_slice(), [major, minor, ..] if *major >= 22 && (*major > 22 || *minor >= 12));
+    let supported = matches!(parts.as_slice(), [major, minor, ..] if *major >= 22 && (*major > 22 || *minor >= 12));
     if !output.status.success() || !supported {
         panic!(
-            "Centinel web requires Node.js 20.19+ or 22.12+ to build; found `{}`",
+            "Centinel web requires Node.js 22.12+ to build; found `{}`",
             version.trim()
         );
     }

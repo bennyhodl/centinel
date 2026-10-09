@@ -96,7 +96,7 @@ pub fn check_bundle() -> Result<()> {
 
 /// `--rebuild`: rebuilds the web workspace from the source checkout this binary was
 /// compiled in, checks its version stamp, and serves that bundle instead of the one
-/// embedded at compile time. The Vite output streams to the terminal.
+/// embedded at compile time. The Start build output streams to the terminal.
 ///
 /// Only a source build can do this. The checkout path is the one Cargo saw at compile
 /// time, so a release download — built on another machine — finds no `web/` there and
@@ -121,7 +121,7 @@ pub fn rebuild_bundle() -> Result<()> {
         .current_dir(&root)
         .env("CENTINEL_VERSION", version)
         .status()
-        .with_context(|| "could not start `npm`; install Node.js 20.19 or newer")?;
+        .with_context(|| "could not start `npm`; install Node.js 22.12 or newer")?;
     if !status.success() {
         bail!("`npm run build` failed in {}", root.display());
     }

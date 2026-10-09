@@ -175,7 +175,7 @@ fn build_cli() -> Command {
                     .long("rebuild")
                     .action(ArgAction::SetTrue)
                     .help(
-                        "Rebuild the web page with Vite from this source checkout and serve \
+                        "Rebuild the web page with TanStack Start from this source checkout and serve \
                          it, instead of the page embedded at compile time. Source builds only",
                     ),
             ),

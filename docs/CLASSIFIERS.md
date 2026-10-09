@@ -256,7 +256,7 @@ Reviewed documents are the regression set for every later run.
 ```
 centinel web                    # serves http://127.0.0.1:8787/web and opens the browser
 centinel web --bind 127.0.0.1:9000
-centinel web --rebuild          # rebuilds the page with Vite from this checkout, then opens
+centinel web --rebuild          # rebuilds the Start SPA shell from this checkout, then opens
 ```
 
 `centinel web` reuses a server already on the port only when it is the same build of
@@ -267,31 +267,36 @@ by another process, so a rebuild running beside a live server slows a page inste
 failing it.
 
 `--rebuild` runs `npm run build` in the source checkout this binary was compiled in,
-streams the Vite output, checks the version stamp, and serves the rebuilt page for this
+streams the Start build output, checks the version stamp, and serves the rebuilt page for this
 process instead of the embedded one. It is the way to see a page change without a
 `cargo build`. It refuses to hand the browser to a server already on the port, because
 that server would show its own page. A release download has no checkout, so there the
 flag reports that and stops. The index is never touched; `centinel index --rebuild` is
 the command for that.
 
-A Vite React workspace is built into one HTML file and embedded in the binary. The
+The React workspace uses TanStack Start in SPA mode with file-based routes under
+`web/src/routes/`, Tailwind v4, and stock neutral shadcn/ui components. Start generates
+a static shell at build time; `web/build-shell.mjs` embeds its CSS and JavaScript as
+data URLs into `web-dist/index.html`. There is no SSR server at runtime.
+
+That one HTML file is embedded in the binary. The
 installed program ships no asset directory and needs no Node runtime. A source build
-uses Node 20.19 or newer to make that embedded file; `cargo build` relays the Vite
+uses Node 22.12 or newer to make that embedded file; `cargo build` relays the Start build
 output as `web:` warnings so the bundle step is visible.
 
 The page is stamped with the Centinel version it was built for. `build.rs` refuses a
 bundle whose stamp differs from the crate version, and `centinel web` checks the stamp
 before it probes a port, rebuilds an index, or opens a browser. A release download
 cannot rebuild the bundle, so there the check can only report a mismatch. The page shows
-its version in the rail and warns when the server it reached reports another one, which
+its version in the sidebar and warns when the server it reached reports another one, which
 is what a `centinel web` left running from an older build looks like.
 
 While a run scores, the page shows it live: progress by decision, the documents out to
 Jev with how long each has waited and which request it is on, and the latest answers as
 they land. When scoring stops, the same panel gives the counts by decision and the
-commit. The rail marks a running run from every page.
+commit. The sidebar marks a running run from every page.
 
-The workspace has three views:
+The workspace has four views:
 
 - **Corpus** pages through the index without loading it into browser memory. Full-text,
   address, Source, usage, and classifier filters can be combined. The reader resolves
