@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
-import { ArrowRight, ArrowUp, ChevronDown, ChevronLeft, ChevronRight, Search as SearchIcon, X } from 'lucide-react'
+import { ArrowUp, ChevronDown, ChevronLeft, ChevronRight, X } from 'lucide-react'
 import type { CorpusFacets, CorpusFilters, Document, Question } from '../api'
 import { classifierOptions } from '../classify'
 import { characters, compact, number, tail } from '../format'
@@ -50,9 +50,6 @@ const tone = {
 } as const
 type Tone = keyof typeof tone
 
-/** Questions a person might put to a city's records, to start from. */
-const suggestions = ['stormwater easement', 'procurement contract', 'zoning variance', 'public hearing notice', 'budget amendment']
-
 function SearchPage() {
   const search = useSearch({ from: '/' })
   const navigate = useNavigate({ from: '/' })
@@ -69,11 +66,7 @@ function SearchPage() {
       <h1 className="font-serif text-[52px] leading-[56px] tracking-[-0.01em]">What should we look for?</h1>
       <p className="text-[15px] text-muted-foreground">Search the words inside every document Centinel has collected.</p>
     </div>
-    <SearchBox key="opening" initial="" large onSearch={text => set({ text, page: 1 })} />
-    {filters}
-    <div className="flex flex-wrap justify-center gap-2">
-      {suggestions.map(text => <button type="button" key={text} onClick={() => set({ text, page: 1 })} className="inline-flex h-8 items-center gap-1.5 rounded-full border bg-background px-3 text-[13px] text-muted-foreground hover:border-foreground hover:text-foreground">{text}<ArrowRight className="size-3" /></button>)}
-    </div>
+    <SearchBox key="opening" initial="" large onSearch={text => set({ text, page: 1 })}>{filters}</SearchBox>
     {whole.data && <dl className="mt-6 flex flex-wrap justify-center gap-x-12 gap-y-4 text-center">
       <Stat value={number(whole.data.total)} label="documents" />
       <Stat value={big(whole.data.total_chars)} label="characters of text" />
@@ -87,13 +80,10 @@ function SearchPage() {
   const pages = Math.max(1, Math.ceil((data?.total || 0) / (data?.page_size || 25)))
   return <>
     <div className="mb-3 flex items-center gap-3">
-      <button type="button" onClick={() => navigate({ search: cleared })} className="inline-flex h-12 shrink-0 items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground" aria-label="New search"><ChevronLeft className="size-4" /><span className="hidden sm:inline">New</span></button>
-      <SearchBox key={search.text} initial={search.text} onSearch={text => set({ text, page: 1 })} />
+      <button type="button" onClick={() => navigate({ search: cleared })} className="inline-flex h-12 shrink-0 items-center gap-1 self-start text-[13px] text-muted-foreground hover:text-foreground" aria-label="New search"><ChevronLeft className="size-4" /><span className="hidden sm:inline">New</span></button>
+      <SearchBox key={search.text} initial={search.text} onSearch={text => set({ text, page: 1 })}>{filters}</SearchBox>
     </div>
-    <div className="flex flex-wrap items-center gap-3">
-      {filters}
-      <span className="ml-auto text-[13px] text-muted-foreground">{data ? `${number(data.total)} documents · ${characters(data.total_chars)}` : ''}</span>
-    </div>
+    <p className="pl-12 text-[13px] text-muted-foreground">{data ? `${number(data.total)} documents · ${characters(data.total_chars)}` : ''}</p>
     <section className="mt-6">
       <div className="flex h-8 items-center gap-6 border-b border-foreground text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
         <span className="flex-1">Document</span><span className="hidden w-56 md:block">Scores</span><span className="w-16 text-right">Blob</span>
@@ -115,51 +105,62 @@ function Stat({ value, label, flame }: { value: string; label: string; flame?: b
   return <div className="flex flex-col-reverse gap-0.5"><dt className="text-xs text-muted-foreground">{label}</dt><dd className={`text-[26px] leading-8 font-semibold tracking-[-0.02em] ${flame ? 'text-flame-ink' : ''}`}>{value}</dd></div>
 }
 
-/** The question box. Large on the opening page, a line above the results after. */
-function SearchBox({ initial, large, onSearch }: { initial: string; large?: boolean; onSearch: (text: string) => void }) {
+/**
+ * The question box: what to look for on top, the filters and the send button along its
+ * foot, one surface. Large on the opening page, compact above the results.
+ */
+function SearchBox({ initial, large, onSearch, children }: { initial: string; large?: boolean; onSearch: (text: string) => void; children: React.ReactNode }) {
   const [draft, setDraft] = useState(initial)
-  return <form className={`relative w-full max-w-[720px] ${large ? '' : 'flex-1'}`} onSubmit={event => { event.preventDefault(); if (draft.trim()) onSearch(draft.trim()) }}>
-    <label className={`flex items-center gap-3 rounded-2xl border border-input bg-background shadow-[0_1px_2px_rgba(26,23,18,0.04),0_8px_24px_rgba(26,23,18,0.05)] focus-within:border-flame focus-within:ring-[3px] focus-within:ring-flame/20 ${large ? 'h-16 pr-2 pl-5' : 'h-12 pr-1.5 pl-4'}`}>
-      <SearchIcon className="size-[18px] shrink-0 text-muted-foreground" />
-      <input autoFocus={large} className={`h-full flex-1 bg-transparent outline-none placeholder:text-muted-foreground ${large ? 'text-[17px]' : 'text-[15px]'}`} value={draft} onChange={event => setDraft(event.target.value)} placeholder="Search the corpus: a phrase, a name, a project" aria-label="Search the corpus" />
-      <button type="submit" disabled={!draft.trim()} aria-label="Search" className={`grid shrink-0 place-items-center rounded-xl bg-foreground text-parchment disabled:opacity-30 ${large ? 'size-11' : 'size-9'}`}><ArrowUp className="size-[18px]" /></button>
-    </label>
+  return <form className={`w-full max-w-[760px] ${large ? '' : 'flex-1'}`} onSubmit={event => { event.preventDefault(); if (draft.trim()) onSearch(draft.trim()) }}>
+    <div className="grid rounded-[22px] border border-input bg-background shadow-[0_1px_2px_rgba(26,23,18,0.04),0_10px_30px_rgba(26,23,18,0.06)] focus-within:border-[#CFC6B5]">
+      <input autoFocus={large} value={draft} onChange={event => setDraft(event.target.value)} placeholder="Search the corpus: a phrase, a name, a project" aria-label="Search the corpus"
+        className={`bg-transparent px-5 outline-none placeholder:text-muted-foreground ${large ? 'h-[72px] text-[18px]' : 'h-14 text-[15px]'}`} />
+      <div className="flex items-center gap-2 px-3 pb-3">
+        {children}
+        <button type="submit" disabled={!draft.trim()} aria-label="Search" className="ml-auto grid size-10 shrink-0 place-items-center rounded-full bg-foreground text-parchment transition-opacity duration-(--motion-micro) disabled:opacity-25"><ArrowUp className="size-[18px]" /></button>
+      </div>
+    </div>
   </form>
 }
 
-/** The filters as chips under the box: each opens its own panel and wears its own colour. */
+/** The filters along the foot of the box: each opens its own panel and wears its own colour once set. */
 function FilterBar({ search, set, classifiers, sources, facets }: { search: Search; set: Set; classifiers: Array<[string, string]>; sources: string[]; facets?: CorpusFacets }) {
   const chosen = sourcesIn(search.source)
   const classifier = classifiers.find(([key]) => key === search.classifier)?.[1] || search.classifier
   const any = Boolean(search.classifier || chosen.length || search.usage !== 'all' || search.address)
-  return <div className="flex flex-wrap items-center justify-center gap-2">
+  return <div className="flex min-w-0 flex-wrap items-center gap-1">
     <Filter kind="classifier" label="Classifiers" value={search.classifier ? `${classifier} ${search.minScore || '0'}–${search.maxScore || '1'}` : ''} onClear={() => set({ classifier: '', page: 1 })}>
       <ClassifierPanel search={search} set={set} classifiers={classifiers} facets={facets} />
     </Filter>
+    <Divider />
     <Filter kind="source" label="Sources" value={chosen.length ? `${chosen[0]}${chosen.length > 1 ? ` +${chosen.length - 1}` : ''}` : ''} onClear={() => set({ source: '', page: 1 })}>
       <SourcePanel chosen={chosen} set={set} sources={sources} counts={facets?.sources} />
     </Filter>
+    <Divider />
     <Filter kind="usage" label="Usage" value={search.usage !== 'all' ? search.usage : ''} onClear={() => set({ usage: 'all', page: 1 })}>
       <UsagePanel usage={search.usage} set={set} counts={facets?.usage} />
     </Filter>
-    <Filter kind="words" label="Address or title" value={search.address} onClear={() => set({ address: '', page: 1 })}>
+    <Divider />
+    <Filter kind="words" label="Address" value={search.address} onClear={() => set({ address: '', page: 1 })}>
       <AddressPanel address={search.address} set={set} />
     </Filter>
-    {any && <button type="button" onClick={() => set({ classifier: '', source: '', usage: 'all', address: '', page: 1 })} className="h-8 px-2 text-[13px] text-muted-foreground hover:text-foreground">Clear filters</button>}
+    {any && <button type="button" onClick={() => set({ classifier: '', source: '', usage: 'all', address: '', page: 1 })} className="ml-1 h-8 px-2 text-[13px] text-muted-foreground hover:text-foreground">Clear</button>}
   </div>
 }
 
+const Divider = () => <span aria-hidden className="mx-0.5 h-5 w-px bg-rule" />
+
 function Filter({ kind, label, value, onClear, children }: { kind: Tone; label: string; value: string; onClear: () => void; children: React.ReactNode }) {
   return <Popover>
-    <span className={`inline-flex h-8 items-center rounded-full text-[13px] ${value ? tone[kind].on : 'bg-background shadow-[inset_0_0_0_1px_var(--rule)] hover:shadow-[inset_0_0_0_1px_#CFC6B5]'}`}>
-      <PopoverTrigger className="inline-flex h-full items-center gap-2 pr-2 pl-3">
+    <span className={`inline-flex h-9 items-center rounded-full text-[14px] transition-colors duration-(--motion-micro) ${value ? tone[kind].on : 'text-muted-foreground hover:bg-[#FBF8F1] hover:text-foreground'}`}>
+      <PopoverTrigger type="button" className="inline-flex h-full items-center gap-2 pr-2 pl-3">
         <span className={`size-1.5 rounded-full ${tone[kind].dot}`} />
-        {value ? <><span className="opacity-70">{label}</span><b className="max-w-56 truncate font-semibold">{value}</b></> : <span>{label}</span>}
+        {value ? <b className="max-w-48 truncate font-semibold">{value}</b> : <span>{label}</span>}
         {!value && <ChevronDown className="size-3.5 opacity-60" />}
       </PopoverTrigger>
       {value && <button type="button" aria-label={`Clear ${label}`} onClick={onClear} className="pr-2.5 opacity-60 hover:opacity-100"><X className="size-3.5" /></button>}
     </span>
-    <PopoverContent align="start" className="w-80 p-3">{children}</PopoverContent>
+    <PopoverContent align="start" sideOffset={10} className="w-80 p-3">{children}</PopoverContent>
   </Popover>
 }
 
@@ -232,7 +233,8 @@ function UsagePanel({ usage, set, counts }: { usage: string; set: Set; counts?: 
 
 function AddressPanel({ address, set }: { address: string; set: Set }) {
   const [draft, setDraft] = useState(address)
-  return <form className="grid gap-2" onSubmit={event => { event.preventDefault(); set({ address: draft.trim(), page: 1 }) }}>
+  // Its own form, inside the search box's. React carries a submit up through the portal, so it stops here.
+  return <form className="grid gap-2" onSubmit={event => { event.preventDefault(); event.stopPropagation(); set({ address: draft.trim(), page: 1 }) }}>
     <PanelTitle kind="words">Address or title contains</PanelTitle>
     <div className="flex gap-2"><Input autoFocus className="h-8 text-[13px]" value={draft} onChange={event => setDraft(event.target.value)} placeholder="tampa.gov/agenda" /><Button size="sm" type="submit">Apply</Button></div>
   </form>
@@ -284,8 +286,7 @@ function Histogram({ bins, from, to, active }: { bins: number[]; from: number; t
 /** Search before its data arrives: the results page with every row masked. */
 function SearchSkeleton() {
   return <div aria-busy>
-    <Skeleton className="mb-3 h-12 max-w-[720px] rounded-2xl" />
-    <div className="flex gap-2"><Skeleton className="h-8 w-28 rounded-full" /><Skeleton className="h-8 w-24 rounded-full" /><Skeleton className="h-8 w-20 rounded-full" /></div>
+    <Skeleton className="mb-3 ml-12 h-[110px] max-w-[760px] rounded-[22px]" />
     <section className="mt-6">
       <div className="flex h-8 items-center border-b border-foreground text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Document</div>
       {Array.from({ length: 8 }, (_, i) => <ResultRow key={i} questions={[]} />)}
