@@ -1,15 +1,16 @@
 import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
-import { ChevronLeft, ChevronRight, Search as SearchIcon, X } from 'lucide-react'
+import { ArrowRight, ArrowUp, ChevronDown, ChevronLeft, ChevronRight, Search as SearchIcon, X } from 'lucide-react'
 import type { CorpusFacets, CorpusFilters, Document, Question } from '../api'
-import { queries } from '../queries'
 import { classifierOptions } from '../classify'
 import { characters, compact, number, tail } from '../format'
 import { classificationBadges, hasScores } from '../policy'
-import { DocumentLink, documentTransition, Empty, ErrorBox, PageHeader, shortSha } from '../ui'
+import { queries } from '../queries'
+import { DocumentLink, documentTransition, Empty, ErrorBox, shortSha } from '../ui'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Skeleton } from '@/components/ui/skeleton'
 
 export const Route = createFileRoute('/')({
@@ -22,85 +23,219 @@ export const Route = createFileRoute('/')({
   loaderDeps: ({ search }) => search,
   loader: ({ context: { queryClient }, deps }) => {
     void queryClient.prefetchQuery(queries.questions())
-    return queryClient.ensureQueryData(queries.corpus(filtersOf(deps), deps.page))
+    return queryClient.ensureQueryData(asking(deps) ? queries.corpus(filtersOf(deps), deps.page) : everything)
   },
   pendingComponent: SearchSkeleton,
   component: SearchPage,
 })
 
+type Search = ReturnType<typeof Route.useSearch>
+type Set = (next: Partial<Search>) => void
+
 /** The page's search params as the corpus filter. One mapping, for the loader and the page. */
 const filtersOf = (search: Search): CorpusFilters => ({ search: search.text, address: search.address, source: search.source, usage: search.usage, classifier: search.classifier, min_score: search.minScore, max_score: search.maxScore })
-
-type Search = ReturnType<typeof Route.useSearch>
+/** Whether anything has been asked. Until then the page is a question, not a list. */
+const asking = (search: Search) => Boolean(search.text || search.address || search.source || search.classifier || search.usage !== 'all')
+/** The whole corpus in one row: its counts and facets, for the opening page and the filters. */
+const everything = queries.corpus({}, 1, 1)
+const sourcesIn = (value: string) => value.split(',').map(source => source.trim()).filter(Boolean)
+const cleared: Search = { text: '', address: '', page: 1, source: '', usage: 'all', classifier: '', minScore: '0.5', maxScore: '' }
 
 /** One colour per kind of filter, so a chip says what it narrows by. */
 const tone = {
-  classifier: { chip: 'bg-flame-soft text-flame-ink shadow-[inset_0_0_0_1px_#F0D6B0]', dot: 'bg-flame', bar: 'bg-flame', faint: 'bg-[#EBD3B4]', label: 'text-flame-ink' },
-  source: { chip: 'bg-slate-soft text-slate shadow-[inset_0_0_0_1px_#C9D6E2]', dot: 'bg-slate', bar: 'bg-slate', faint: 'bg-[#C9D6E2]', label: 'text-slate' },
-  usage: { chip: 'bg-moss-soft text-moss shadow-[inset_0_0_0_1px_#C8DBC3]', dot: 'bg-moss', bar: 'bg-moss', faint: 'bg-[#C8DBC3]', label: 'text-moss' },
-  words: { chip: 'bg-parchment text-foreground shadow-[inset_0_0_0_1px_var(--rule)]', dot: 'bg-foreground', bar: 'bg-foreground', faint: 'bg-rule', label: 'text-foreground' },
+  classifier: { on: 'bg-flame-soft text-flame-ink shadow-[inset_0_0_0_1px_#F0D6B0]', dot: 'bg-flame', bar: 'bg-flame', faint: 'bg-[#EBD3B4]', label: 'text-flame-ink' },
+  source: { on: 'bg-slate-soft text-slate shadow-[inset_0_0_0_1px_#C9D6E2]', dot: 'bg-slate', bar: 'bg-slate', faint: 'bg-[#C9D6E2]', label: 'text-slate' },
+  usage: { on: 'bg-moss-soft text-moss shadow-[inset_0_0_0_1px_#C8DBC3]', dot: 'bg-moss', bar: 'bg-moss', faint: 'bg-[#C8DBC3]', label: 'text-moss' },
+  words: { on: 'bg-parchment text-foreground shadow-[inset_0_0_0_1px_var(--rule)]', dot: 'bg-foreground', bar: 'bg-foreground', faint: 'bg-rule', label: 'text-foreground' },
 } as const
 type Tone = keyof typeof tone
 
-const sourcesIn = (value: string) => value.split(',').map(source => source.trim()).filter(Boolean)
+/** Questions a person might put to a city's records, to start from. */
+const suggestions = ['stormwater easement', 'procurement contract', 'zoning variance', 'public hearing notice', 'budget amendment']
 
 function SearchPage() {
   const search = useSearch({ from: '/' })
   const navigate = useNavigate({ from: '/' })
-  const [draft, setDraft] = useState(search.text)
-  const filters = filtersOf(search)
-  const query = useQuery(queries.corpus(filters, search.page))
+  const set: Set = next => navigate({ search: previous => ({ ...previous, ...next }) })
+  const open = asking(search)
+  const query = useQuery(open ? queries.corpus(filtersOf(search), search.page) : everything)
+  const whole = useQuery(everything)
   const questions = useQuery(queries.questions())
-  const set = (next: Partial<Search>) => navigate({ search: previous => ({ ...previous, ...next }) })
-  const submit = (event: React.FormEvent) => { event.preventDefault(); set({ text: draft.trim(), page: 1 }) }
-  const pages = Math.max(1, Math.ceil((query.data?.total || 0) / (query.data?.page_size || 25)))
   const saved = questions.data?.questions || []
-  const classifiers = classifierOptions(saved)
-  const classifierLabel = classifiers.find(([key]) => key === search.classifier)?.[1] || search.classifier
-  const chosen = sourcesIn(search.source)
+  const filters = <FilterBar search={search} set={set} classifiers={classifierOptions(saved)} sources={whole.data?.sources || []} facets={query.data?.facets} />
+
+  if (!open) return <div className="flex min-h-[calc(100svh-8rem)] flex-col items-center justify-center gap-7 pb-16">
+    <div className="grid justify-items-center gap-2 text-center">
+      <h1 className="font-serif text-[52px] leading-[56px] tracking-[-0.01em]">What should we look for?</h1>
+      <p className="text-[15px] text-muted-foreground">Search the words inside every document Centinel has collected.</p>
+    </div>
+    <SearchBox key="opening" initial="" large onSearch={text => set({ text, page: 1 })} />
+    {filters}
+    <div className="flex flex-wrap justify-center gap-2">
+      {suggestions.map(text => <button type="button" key={text} onClick={() => set({ text, page: 1 })} className="inline-flex h-8 items-center gap-1.5 rounded-full border bg-background px-3 text-[13px] text-muted-foreground hover:border-foreground hover:text-foreground">{text}<ArrowRight className="size-3" /></button>)}
+    </div>
+    {whole.data && <dl className="mt-6 flex flex-wrap justify-center gap-x-12 gap-y-4 text-center">
+      <Stat value={number(whole.data.total)} label="documents" />
+      <Stat value={big(whole.data.total_chars)} label="characters of text" />
+      <Stat value={number(whole.data.sources.length)} label="sources" />
+      <Stat value={number(whole.data.pending)} label="waiting on a classifier" flame />
+    </dl>}
+    {whole.error && <ErrorBox error={whole.error} />}
+  </div>
+
   const data = query.data
-
+  const pages = Math.max(1, Math.ceil((data?.total || 0) / (data?.page_size || 25)))
   return <>
-    <PageHeader title="Search" detail={data ? `${number(data.total)} documents · ${characters(data.total_chars)} of text. ${number(data.pending)} waiting on a classifier.` : 'Reading the index…'} />
-    <form className="flex gap-2" onSubmit={submit}>
-      <label className="flex h-12 flex-1 items-center gap-3 rounded-xl border border-input bg-background px-4 shadow-[0_1px_2px_rgba(26,23,18,0.04)] focus-within:border-flame focus-within:ring-[3px] focus-within:ring-flame/20">
-        <SearchIcon className="size-[18px] shrink-0 text-muted-foreground" />
-        <input className="h-full flex-1 bg-transparent text-[15px] outline-none placeholder:text-muted-foreground" value={draft} onChange={event => setDraft(event.target.value)} placeholder="Words inside the documents" aria-label="Full-text search" />
-      </label>
-      <Button type="submit" className="h-12 rounded-xl px-6">Search</Button>
-    </form>
-    <div className="mt-3 flex min-h-8 flex-wrap items-center gap-2">
-      {search.text && <Chip tone="words" label="Words" value={search.text} onClear={() => { setDraft(''); set({ text: '', page: 1 }) }} />}
-      {search.address && <Chip tone="words" label="Address" value={search.address} onClear={() => set({ address: '', page: 1 })} />}
-      {chosen.map(source => <Chip key={source} tone="source" label="Source" value={source} onClear={() => set({ source: chosen.filter(s => s !== source).join(','), page: 1 })} />)}
-      {search.usage !== 'all' && <Chip tone="usage" label="Usage" value={search.usage} onClear={() => set({ usage: 'all', page: 1 })} />}
-      {search.classifier && <Chip tone="classifier" label={classifierLabel} value={`${search.minScore || '0'} – ${search.maxScore || '1'}`} onClear={() => set({ classifier: '', page: 1 })} />}
-      <span className="ml-auto text-[13px] text-muted-foreground">{data ? `${number(data.total)} documents` : ''}</span>
+    <div className="mb-3 flex items-center gap-3">
+      <button type="button" onClick={() => navigate({ search: cleared })} className="inline-flex h-12 shrink-0 items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground" aria-label="New search"><ChevronLeft className="size-4" /><span className="hidden sm:inline">New</span></button>
+      <SearchBox key={search.text} initial={search.text} onSearch={text => set({ text, page: 1 })} />
     </div>
-
-    <div className="mt-5 flex flex-col gap-10 lg:flex-row lg:items-start">
-      <section className="min-w-0 flex-1">
-        <div className="flex h-8 items-center gap-6 border-b border-foreground text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-          <span className="flex-1">Document</span><span className="hidden w-56 md:block">Scores</span><span className="w-16 text-right">Blob</span>
-        </div>
-        {query.error ? <ErrorBox error={query.error} /> : data?.documents.map(doc => <ResultRow key={`${doc.source}:${doc.resource}:${doc.derived_sha}`} doc={doc} questions={saved} />)}
-        {data && !data.documents.length && <Empty>No documents match. Clear a filter and try again.</Empty>}
-        {data && data.total > 0 && <div className="flex items-center justify-between py-4 text-[13px] text-muted-foreground">
-          <span>Page {search.page} of {number(pages)}</span>
-          <span className="flex gap-2"><Button variant="outline" size="sm" disabled={search.page === 1} onClick={() => set({ page: search.page - 1 })}><ChevronLeft />Previous</Button><Button variant="outline" size="sm" disabled={search.page >= pages} onClick={() => set({ page: search.page + 1 })}>Next<ChevronRight /></Button></span>
-        </div>}
-      </section>
-      <Refine search={search} set={set} classifiers={classifiers} sources={data?.sources || []} facets={data?.facets} />
+    <div className="flex flex-wrap items-center gap-3">
+      {filters}
+      <span className="ml-auto text-[13px] text-muted-foreground">{data ? `${number(data.total)} documents · ${characters(data.total_chars)}` : ''}</span>
     </div>
+    <section className="mt-6">
+      <div className="flex h-8 items-center gap-6 border-b border-foreground text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+        <span className="flex-1">Document</span><span className="hidden w-56 md:block">Scores</span><span className="w-16 text-right">Blob</span>
+      </div>
+      {query.error ? <ErrorBox error={query.error} /> : data?.documents.map(doc => <ResultRow key={`${doc.source}:${doc.resource}:${doc.derived_sha}`} doc={doc} questions={saved} />)}
+      {data && !data.documents.length && <Empty>No documents match. Loosen a filter or try other words.</Empty>}
+      {data && data.total > 0 && <div className="flex items-center justify-between py-4 text-[13px] text-muted-foreground">
+        <span>Page {search.page} of {number(pages)}</span>
+        <span className="flex gap-2"><Button variant="outline" size="sm" disabled={search.page === 1} onClick={() => set({ page: search.page - 1 })}><ChevronLeft />Previous</Button><Button variant="outline" size="sm" disabled={search.page >= pages} onClick={() => set({ page: search.page + 1 })}>Next<ChevronRight /></Button></span>
+      </div>}
+    </section>
   </>
 }
 
-function Chip({ tone: kind, label, value, onClear }: { tone: Tone; label: string; value: string; onClear: () => void }) {
-  return <span className={`inline-flex h-[30px] items-center gap-1.5 rounded-full px-2.5 text-[13px] ${tone[kind].chip}`}>
-    <span className={`size-1.5 rounded-full ${tone[kind].dot}`} />
-    <span className="opacity-75">{label}</span><b className="max-w-64 truncate font-semibold">{value}</b>
-    <button type="button" aria-label={`Clear ${label} ${value}`} className="opacity-60 hover:opacity-100" onClick={onClear}><X className="size-3.5" /></button>
-  </span>
+/** A large count at a glance: 1.35B, 312M, 48K. */
+const big = (n: number) => n >= 1e9 ? `${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `${Math.round(n / 1e6)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}K` : number(n)
+
+function Stat({ value, label, flame }: { value: string; label: string; flame?: boolean }) {
+  return <div className="flex flex-col-reverse gap-0.5"><dt className="text-xs text-muted-foreground">{label}</dt><dd className={`text-[26px] leading-8 font-semibold tracking-[-0.02em] ${flame ? 'text-flame-ink' : ''}`}>{value}</dd></div>
+}
+
+/** The question box. Large on the opening page, a line above the results after. */
+function SearchBox({ initial, large, onSearch }: { initial: string; large?: boolean; onSearch: (text: string) => void }) {
+  const [draft, setDraft] = useState(initial)
+  return <form className={`relative w-full max-w-[720px] ${large ? '' : 'flex-1'}`} onSubmit={event => { event.preventDefault(); if (draft.trim()) onSearch(draft.trim()) }}>
+    <label className={`flex items-center gap-3 rounded-2xl border border-input bg-background shadow-[0_1px_2px_rgba(26,23,18,0.04),0_8px_24px_rgba(26,23,18,0.05)] focus-within:border-flame focus-within:ring-[3px] focus-within:ring-flame/20 ${large ? 'h-16 pr-2 pl-5' : 'h-12 pr-1.5 pl-4'}`}>
+      <SearchIcon className="size-[18px] shrink-0 text-muted-foreground" />
+      <input autoFocus={large} className={`h-full flex-1 bg-transparent outline-none placeholder:text-muted-foreground ${large ? 'text-[17px]' : 'text-[15px]'}`} value={draft} onChange={event => setDraft(event.target.value)} placeholder="Search the corpus: a phrase, a name, a project" aria-label="Search the corpus" />
+      <button type="submit" disabled={!draft.trim()} aria-label="Search" className={`grid shrink-0 place-items-center rounded-xl bg-foreground text-parchment disabled:opacity-30 ${large ? 'size-11' : 'size-9'}`}><ArrowUp className="size-[18px]" /></button>
+    </label>
+  </form>
+}
+
+/** The filters as chips under the box: each opens its own panel and wears its own colour. */
+function FilterBar({ search, set, classifiers, sources, facets }: { search: Search; set: Set; classifiers: Array<[string, string]>; sources: string[]; facets?: CorpusFacets }) {
+  const chosen = sourcesIn(search.source)
+  const classifier = classifiers.find(([key]) => key === search.classifier)?.[1] || search.classifier
+  const any = Boolean(search.classifier || chosen.length || search.usage !== 'all' || search.address)
+  return <div className="flex flex-wrap items-center justify-center gap-2">
+    <Filter kind="classifier" label="Classifiers" value={search.classifier ? `${classifier} ${search.minScore || '0'}–${search.maxScore || '1'}` : ''} onClear={() => set({ classifier: '', page: 1 })}>
+      <ClassifierPanel search={search} set={set} classifiers={classifiers} facets={facets} />
+    </Filter>
+    <Filter kind="source" label="Sources" value={chosen.length ? `${chosen[0]}${chosen.length > 1 ? ` +${chosen.length - 1}` : ''}` : ''} onClear={() => set({ source: '', page: 1 })}>
+      <SourcePanel chosen={chosen} set={set} sources={sources} counts={facets?.sources} />
+    </Filter>
+    <Filter kind="usage" label="Usage" value={search.usage !== 'all' ? search.usage : ''} onClear={() => set({ usage: 'all', page: 1 })}>
+      <UsagePanel usage={search.usage} set={set} counts={facets?.usage} />
+    </Filter>
+    <Filter kind="words" label="Address or title" value={search.address} onClear={() => set({ address: '', page: 1 })}>
+      <AddressPanel address={search.address} set={set} />
+    </Filter>
+    {any && <button type="button" onClick={() => set({ classifier: '', source: '', usage: 'all', address: '', page: 1 })} className="h-8 px-2 text-[13px] text-muted-foreground hover:text-foreground">Clear filters</button>}
+  </div>
+}
+
+function Filter({ kind, label, value, onClear, children }: { kind: Tone; label: string; value: string; onClear: () => void; children: React.ReactNode }) {
+  return <Popover>
+    <span className={`inline-flex h-8 items-center rounded-full text-[13px] ${value ? tone[kind].on : 'bg-background shadow-[inset_0_0_0_1px_var(--rule)] hover:shadow-[inset_0_0_0_1px_#CFC6B5]'}`}>
+      <PopoverTrigger className="inline-flex h-full items-center gap-2 pr-2 pl-3">
+        <span className={`size-1.5 rounded-full ${tone[kind].dot}`} />
+        {value ? <><span className="opacity-70">{label}</span><b className="max-w-56 truncate font-semibold">{value}</b></> : <span>{label}</span>}
+        {!value && <ChevronDown className="size-3.5 opacity-60" />}
+      </PopoverTrigger>
+      {value && <button type="button" aria-label={`Clear ${label}`} onClick={onClear} className="pr-2.5 opacity-60 hover:opacity-100"><X className="size-3.5" /></button>}
+    </span>
+    <PopoverContent align="start" className="w-80 p-3">{children}</PopoverContent>
+  </Popover>
+}
+
+function PanelTitle({ kind, children }: { kind: Tone; children: React.ReactNode }) {
+  return <span className="mb-1 inline-flex items-center gap-2 px-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground"><span className={`size-1.5 rounded-full ${tone[kind].dot}`} />{children}</span>
+}
+
+function ClassifierPanel({ search, set, classifiers, facets }: { search: Search; set: Set; classifiers: Array<[string, string]>; facets?: CorpusFacets }) {
+  return <div className="grid gap-1">
+    <PanelTitle kind="classifier">Classifiers · score range</PanelTitle>
+    <div className="grid max-h-96 gap-1 overflow-y-auto">
+      {classifiers.map(([key, label]) => {
+        const bins = facets?.scores[key]
+        const active = key === search.classifier
+        const lo = Number(search.minScore) || 0, hi = search.maxScore === '' ? 1 : Number(search.maxScore)
+        return <div key={key} className={`grid gap-2 rounded-lg px-2 py-2 ${active ? 'bg-[#FFFBF4] shadow-[inset_0_0_0_1px_#F0D6B0]' : 'hover:bg-[#FBF9F4]'}`}>
+          <button type="button" className="flex items-baseline justify-between gap-2 text-left" onClick={() => set(active ? { classifier: '', page: 1 } : { classifier: key, page: 1 })}>
+            <span className={`truncate text-sm ${active ? 'font-semibold' : ''}`}>{label}</span>
+            <span className="shrink-0 font-mono text-xs text-muted-foreground">{active ? `${search.minScore || '0'} – ${search.maxScore || '1'}` : bins ? compact(bins.reduce((a, b) => a + b, 0)) : ''}</span>
+          </button>
+          {bins && <Histogram bins={bins} from={active ? lo : 0} to={active ? hi : 1} active={active} />}
+          {active && <div className="flex gap-2">
+            <Input aria-label="Lowest score" type="number" min="0" max="1" step="0.05" className="h-8 bg-background font-mono text-xs" value={search.minScore} onChange={event => set({ minScore: event.target.value, page: 1 })} />
+            <Input aria-label="Highest score" type="number" min="0" max="1" step="0.05" className="h-8 bg-background font-mono text-xs" placeholder="1" value={search.maxScore} onChange={event => set({ maxScore: event.target.value, page: 1 })} />
+          </div>}
+        </div>
+      })}
+      {!classifiers.length && <p className="px-2 py-2 text-sm text-muted-foreground">No classifiers yet. Write one on Classify.</p>}
+    </div>
+  </div>
+}
+
+function SourcePanel({ chosen, set, sources, counts }: { chosen: string[]; set: Set; sources: string[]; counts?: Record<string, number> }) {
+  const max = Math.max(1, ...Object.values(counts || {}))
+  const toggle = (source: string) => set({ source: (chosen.includes(source) ? chosen.filter(s => s !== source) : [...chosen, source]).join(','), page: 1 })
+  return <div className="grid gap-1">
+    <PanelTitle kind="source">Sources · pick any</PanelTitle>
+    <div className="grid max-h-96 overflow-y-auto">
+      {sources.map(source => {
+        const active = chosen.includes(source)
+        const count = counts?.[source]
+        return <button type="button" key={source} aria-pressed={active} onClick={() => toggle(source)} className={`grid gap-1 rounded-lg px-2 py-1.5 text-left ${active ? 'bg-slate-soft' : 'hover:bg-[#FBF9F4]'}`}>
+          <span className="flex items-center justify-between gap-2 text-sm">
+            <span className="flex min-w-0 items-center gap-2"><span className={`grid size-3.5 shrink-0 place-items-center rounded-[4px] ${active ? 'bg-slate text-white' : 'shadow-[inset_0_0_0_1.5px_#B9C6D3]'}`}>{active && <svg viewBox="0 0 24 24" className="size-2.5" fill="none" stroke="currentColor" strokeWidth="4"><path d="M5 12l5 5L20 7" /></svg>}</span><span className={`truncate ${active ? `font-semibold ${tone.source.label}` : ''}`}>{source}</span></span>
+            {count != null && <span className="font-mono text-xs text-muted-foreground">{number(count)}</span>}
+          </span>
+          {count != null && <Meter value={count} max={max} kind="source" strong={active} />}
+        </button>
+      })}
+    </div>
+  </div>
+}
+
+const usageOptions: Array<[string, string]> = [['all', 'All'], ['included', 'Included'], ['excluded', 'Excluded'], ['pending', 'Pending']]
+
+function UsagePanel({ usage, set, counts }: { usage: string; set: Set; counts?: Record<string, number> }) {
+  const all = counts ? (counts.included || 0) + (counts.excluded || 0) : 0
+  return <div className="grid gap-1">
+    <PanelTitle kind="usage">Usage</PanelTitle>
+    {usageOptions.map(([value, label]) => {
+      const count = !counts ? undefined : value === 'all' ? all : counts[value]
+      const active = usage === value
+      return <button type="button" key={value} onClick={() => set({ usage: value, page: 1 })} className={`grid gap-1 rounded-lg px-2 py-1.5 text-left ${active ? 'bg-moss-soft' : 'hover:bg-[#FBF9F4]'}`}>
+        <span className="flex justify-between text-sm"><span className={active ? `font-semibold ${tone.usage.label}` : ''}>{label}</span>{count != null && <span className="font-mono text-xs text-muted-foreground">{number(count)}</span>}</span>
+        {count != null && <Meter value={count} max={Math.max(1, all)} kind="usage" strong={active} />}
+      </button>
+    })}
+  </div>
+}
+
+function AddressPanel({ address, set }: { address: string; set: Set }) {
+  const [draft, setDraft] = useState(address)
+  return <form className="grid gap-2" onSubmit={event => { event.preventDefault(); set({ address: draft.trim(), page: 1 }) }}>
+    <PanelTitle kind="words">Address or title contains</PanelTitle>
+    <div className="flex gap-2"><Input autoFocus className="h-8 text-[13px]" value={draft} onChange={event => setDraft(event.target.value)} placeholder="tampa.gov/agenda" /><Button size="sm" type="submit">Apply</Button></div>
+  </form>
 }
 
 /** One result. Without a document it is the same row with every data slot masked, so the page and its skeleton share one layout. */
@@ -118,93 +253,16 @@ function ResultRow({ doc, questions }: { doc?: Document; questions: Question[] }
     <DocumentLink doc={doc} className="grid min-w-0 flex-1 gap-1.5">
       <b className="w-fit text-[15px] leading-5 font-semibold group-hover:underline" style={documentTransition(doc)}>{doc.title || tail(doc.resource)}</b>
       <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-        <span className={`shrink-0 rounded px-1.5 py-px font-medium ${tone.source.chip}`}>{doc.source}</span>
+        <span className={`shrink-0 rounded px-1.5 py-px font-medium ${tone.source.on}`}>{doc.source}</span>
         <span className="truncate">{doc.resource}</span>
         <span className="shrink-0">· {characters(doc.chars)}</span>
         {doc.excluded && <span className="shrink-0 rounded px-1.5 py-px font-medium text-destructive shadow-[inset_0_0_0_1px_#E2B1A8]">excluded</span>}
       </span>
     </DocumentLink>
     <span className="hidden w-56 flex-wrap gap-1.5 pt-0.5 md:flex">
-      {badges.length ? badges.map(badge => <span key={badge.key} className={`rounded px-2 py-0.5 text-xs font-semibold ${badge.tone === 'muted' ? 'text-muted-foreground shadow-[inset_0_0_0_1px_var(--rule)]' : tone.classifier.chip}`}>{badge.text}</span>) : <span className="text-xs text-muted-foreground">{hasScores(doc.classifications) ? 'No tags' : 'Not classified'}</span>}
+      {badges.length ? badges.map(badge => <span key={badge.key} className={`rounded px-2 py-0.5 text-xs font-semibold ${badge.tone === 'muted' ? 'text-muted-foreground shadow-[inset_0_0_0_1px_var(--rule)]' : tone.classifier.on}`}>{badge.text}</span>) : <span className="text-xs text-muted-foreground">{hasScores(doc.classifications) ? 'No tags' : 'Not classified'}</span>}
     </span>
     <span className="w-16 pt-0.5 text-right font-mono text-xs text-muted-foreground">{shortSha(doc.blob_sha)}</span>
-  </div>
-}
-
-const usageOptions: Array<[string, string]> = [['all', 'All'], ['included', 'Included'], ['excluded', 'Excluded'], ['pending', 'Pending']]
-
-/** Narrow a search by what the classifiers said, where it was collected, and its usage. */
-function Refine({ search, set, classifiers, sources, facets }: { search: Search; set: (next: Partial<Search>) => void; classifiers: Array<[string, string]>; sources: string[]; facets?: CorpusFacets }) {
-  const [address, setAddress] = useState(search.address)
-  const chosen = sourcesIn(search.source)
-  const sourceCounts = facets?.sources || {}
-  const sourceMax = Math.max(1, ...Object.values(sourceCounts))
-  const usageCounts = facets?.usage
-  const usageAll = usageCounts ? (usageCounts.included || 0) + (usageCounts.excluded || 0) : 0
-  const toggleSource = (source: string) => set({ source: (chosen.includes(source) ? chosen.filter(s => s !== source) : [...chosen, source]).join(','), page: 1 })
-
-  return <aside className="grid w-full shrink-0 gap-8 lg:w-[288px]">
-    <section className="grid gap-1">
-      <Rule kind="classifier" aside={search.classifier ? <button type="button" onClick={() => set({ classifier: '', page: 1 })}>Reset</button> : undefined}>Classifiers</Rule>
-      {classifiers.map(([key, label]) => {
-        const bins = facets?.scores[key]
-        const active = key === search.classifier
-        const lo = Number(search.minScore) || 0, hi = search.maxScore === '' ? 1 : Number(search.maxScore)
-        return <div key={key} className={`grid gap-2 rounded-lg px-2 py-2 ${active ? 'bg-[#FFFBF4] shadow-[inset_0_0_0_1px_#F0D6B0]' : 'hover:bg-[#FBF9F4]'}`}>
-          <button type="button" className="flex items-baseline justify-between gap-2 text-left" onClick={() => set(active ? { classifier: '', page: 1 } : { classifier: key, page: 1 })}>
-            <span className={`truncate text-sm ${active ? 'font-semibold' : ''}`}>{label}</span>
-            <span className="shrink-0 font-mono text-xs text-muted-foreground">{active ? `${search.minScore || '0'} – ${search.maxScore || '1'}` : bins ? compact(bins.reduce((a, b) => a + b, 0)) : ''}</span>
-          </button>
-          {bins && <Histogram bins={bins} from={active ? lo : 0} to={active ? hi : 1} active={active} />}
-          {active && <div className="flex gap-2">
-            <Input aria-label="Lowest score" type="number" min="0" max="1" step="0.05" className="h-8 bg-background font-mono text-xs" value={search.minScore} onChange={event => set({ minScore: event.target.value, page: 1 })} />
-            <Input aria-label="Highest score" type="number" min="0" max="1" step="0.05" className="h-8 bg-background font-mono text-xs" placeholder="1" value={search.maxScore} onChange={event => set({ maxScore: event.target.value, page: 1 })} />
-          </div>}
-        </div>
-      })}
-      {!classifiers.length && <p className="py-2 text-sm text-muted-foreground">No classifiers yet. Write one on Classify.</p>}
-    </section>
-
-    <section className="grid gap-1">
-      <Rule kind="usage">Usage</Rule>
-      {usageOptions.map(([value, label]) => {
-        const count = !usageCounts ? undefined : value === 'all' ? usageAll : usageCounts[value]
-        const active = search.usage === value
-        return <button type="button" key={value} onClick={() => set({ usage: value, page: 1 })} className={`grid gap-1 rounded-lg px-2 py-1.5 text-left ${active ? 'bg-moss-soft' : 'hover:bg-[#FBF9F4]'}`}>
-          <span className="flex justify-between text-sm"><span className={active ? `font-semibold ${tone.usage.label}` : ''}>{label}</span>{count != null && <span className="font-mono text-xs text-muted-foreground">{number(count)}</span>}</span>
-          {count != null && <Meter value={count} max={Math.max(1, usageAll)} kind="usage" strong={active} />}
-        </button>
-      })}
-    </section>
-
-    <section className="grid gap-1">
-      <Rule kind="source" aside={chosen.length ? <button type="button" onClick={() => set({ source: '', page: 1 })}>All</button> : `${sources.length}`}>Sources</Rule>
-      <div className="grid max-h-96 overflow-y-auto">
-        {sources.map(source => {
-          const active = chosen.includes(source)
-          const count = sourceCounts[source]
-          return <button type="button" key={source} aria-pressed={active} onClick={() => toggleSource(source)} className={`grid gap-1 rounded-lg px-2 py-1.5 text-left ${active ? 'bg-slate-soft' : 'hover:bg-[#FBF9F4]'}`}>
-            <span className="flex items-center justify-between gap-2 text-sm">
-              <span className="flex min-w-0 items-center gap-2"><span className={`grid size-3.5 shrink-0 place-items-center rounded-[4px] ${active ? 'bg-slate text-white' : 'shadow-[inset_0_0_0_1.5px_#B9C6D3]'}`}>{active && <svg viewBox="0 0 24 24" className="size-2.5" fill="none" stroke="currentColor" strokeWidth="4"><path d="M5 12l5 5L20 7" /></svg>}</span><span className={`truncate ${active ? `font-semibold ${tone.source.label}` : ''}`}>{source}</span></span>
-              {count != null && <span className="font-mono text-xs text-muted-foreground">{number(count)}</span>}
-            </span>
-            {count != null && <Meter value={count} max={sourceMax} kind="source" strong={active} />}
-          </button>
-        })}
-      </div>
-    </section>
-
-    <form className="grid gap-2" onSubmit={event => { event.preventDefault(); set({ address: address.trim(), page: 1 }) }}>
-      <Rule kind="words">Address or title</Rule>
-      <Input className="mt-1 h-8 text-[13px]" value={address} onChange={event => setAddress(event.target.value)} placeholder="tampa.gov/agenda" />
-    </form>
-  </aside>
-}
-
-function Rule({ kind, children, aside }: { kind: Tone; children: React.ReactNode; aside?: React.ReactNode }) {
-  return <div className="mb-1 flex h-8 items-center justify-between border-b border-foreground">
-    <span className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground"><span className={`size-1.5 rounded-full ${tone[kind].dot}`} />{children}</span>
-    {aside && <span className="text-xs text-muted-foreground">{aside}</span>}
   </div>
 }
 
@@ -223,17 +281,14 @@ function Histogram({ bins, from, to, active }: { bins: number[]; from: number; t
   </span>
 }
 
-/** Search before its first page arrives: the real chrome, the results masked. */
+/** Search before its data arrives: the results page with every row masked. */
 function SearchSkeleton() {
   return <div aria-busy>
-    <PageHeader title="Search" detail="Reading the index…" />
-    <Skeleton className="h-12 rounded-xl" />
-    <div className="mt-11 flex flex-col gap-10 lg:flex-row lg:items-start">
-      <section className="min-w-0 flex-1">
-        <div className="flex h-8 items-center border-b border-foreground text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Document</div>
-        {Array.from({ length: 8 }, (_, i) => <ResultRow key={i} questions={[]} />)}
-      </section>
-      <aside className="grid w-full shrink-0 gap-8 lg:w-[288px]">{[0, 1, 2].map(i => <div key={i} className="grid gap-2"><Skeleton className="h-8" /><Skeleton className="h-20" /></div>)}</aside>
-    </div>
+    <Skeleton className="mb-3 h-12 max-w-[720px] rounded-2xl" />
+    <div className="flex gap-2"><Skeleton className="h-8 w-28 rounded-full" /><Skeleton className="h-8 w-24 rounded-full" /><Skeleton className="h-8 w-20 rounded-full" /></div>
+    <section className="mt-6">
+      <div className="flex h-8 items-center border-b border-foreground text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Document</div>
+      {Array.from({ length: 8 }, (_, i) => <ResultRow key={i} questions={[]} />)}
+    </section>
   </div>
 }

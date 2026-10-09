@@ -298,7 +298,9 @@ commit. The sidebar marks a running run from every page.
 
 The workspace has six views, in a sidebar grouped Archive, Classifiers, and Agent:
 
-- **Search** pages through the index without loading it into browser memory. Full-text,
+- **Search** opens on one question box with the corpus at a glance, and lists nothing
+  until something is asked. It pages through the index without loading it into browser
+  memory. Full-text,
   address, any number of Sources, usage, and a classifier score range can be combined.
   Each filter shows what it would find: documents per Source, per usage, and each
   classifier's scores by tenth, every count taken with the other filters but not its own. The reader
