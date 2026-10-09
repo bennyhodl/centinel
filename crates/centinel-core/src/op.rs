@@ -385,21 +385,26 @@ fn log_event(event: &ProgressEvent) {
             .as_deref()
             .map(|d| format!(" — {d}"))
             .unwrap_or_default();
-        match item.produced {
-            Some(chars) => tracing::event!(
-                level,
-                { bytes = item.bytes, chars, ms = item.millis },
-                "{} {}{detail}",
-                item.tag,
-                item.address
-            ),
-            None => tracing::event!(
-                level,
-                { bytes = item.bytes, ms = item.millis },
-                "{} {}{detail}",
-                item.tag,
-                item.address
-            ),
+        // `tracing` fixes an event's level when it compiles, so the level chosen here
+        // picks which of three otherwise identical lines runs.
+        macro_rules! line {
+            ($at:ident) => {
+                tracing::$at!(
+                    bytes = item.bytes,
+                    chars = item.produced,
+                    ms = item.millis,
+                    "{} {}{detail}",
+                    item.tag,
+                    item.address
+                )
+            };
+        }
+        if level == Level::WARN {
+            line!(warn)
+        } else if level == Level::DEBUG {
+            line!(debug)
+        } else {
+            line!(info)
         }
         return;
     }

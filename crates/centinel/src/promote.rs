@@ -123,14 +123,11 @@ async fn add(ctx: &Arc<Ctx>, promote: &Promote, output: Output) -> Result<()> {
     if output.json {
         // stdout is carrying the investigation as one JSON document and must stay one, so
         // the outcome goes where progress goes.
-        tracing::info!(
-            id = %promote.id,
-            config = value
-                .get("config")
-                .and_then(Value::as_str)
-                .unwrap_or("the config"),
-            "added to the config"
-        );
+        let config = value
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap_or("the config");
+        tracing::info!(id = %promote.id, config, "added to the config");
         return Ok(());
     }
 
