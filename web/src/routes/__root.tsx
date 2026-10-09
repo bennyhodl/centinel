@@ -57,7 +57,7 @@ function Shell() {
   const [job, setJob] = useState('')
   const at = (path: string) => pathname === `/web${path}` || (path === '/' && pathname === '/web')
 
-  return <SidebarProvider className="bg-ground">
+  return <SidebarProvider defaultOpen={false} className="bg-ground">
     <ActivityBar />
     <Sidebar variant="floating" collapsible="icon">
       <SidebarHeader className="px-3 pt-4 pb-2">

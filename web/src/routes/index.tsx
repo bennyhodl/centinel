@@ -68,18 +68,15 @@ function SearchPage() {
   const stage: Set = next => setStaged((previous: Search) => ({ ...previous, ...next }))
   const filtersFor = (current: Search, change: Set) => <FilterBar search={current} set={change} classifiers={classifierOptions(saved)} sources={whole.data?.sources || []} facets={query.data?.facets} />
 
-  if (!open) return <div className="flex min-h-[calc(100svh-8rem)] flex-col items-center justify-center gap-7 pb-16">
-    <div className="grid justify-items-center gap-2 text-center">
-      <h1 className="font-serif text-[52px] leading-[56px] tracking-[-0.01em]">What should we look for?</h1>
-      <p className="text-[15px] text-muted-foreground">Search the words inside every document Centinel has collected.</p>
-    </div>
-    <SearchBox key="opening" initial="" large ready={asking(staged)} onSearch={text => set({ ...staged, text, page: 1 })}>{filtersFor(staged, stage)}</SearchBox>
-    {whole.data && <dl className="mt-6 flex flex-wrap justify-center gap-x-12 gap-y-4 text-center">
+  if (!open) return <div className="relative flex min-h-[calc(100svh-8rem)] flex-col items-center justify-center gap-7 pb-16">
+    {whole.data && <dl className="absolute top-0 right-0 flex flex-wrap justify-end gap-x-5 gap-y-1 font-serif text-[17px] text-muted-foreground">
       <Stat value={number(whole.data.total)} label="documents" />
-      <Stat value={big(whole.data.total_chars)} label="characters of text" />
+      <Stat value={big(whole.data.total_chars)} label="characters" />
       <Stat value={number(whole.data.sources.length)} label="sources" />
-      <Stat value={number(whole.data.pending)} label="waiting on a classifier" flame />
+      <Stat value={number(whole.data.pending)} label="waiting on a classifier" />
     </dl>}
+    <h1 className="text-center font-serif text-[52px] leading-[56px] tracking-[-0.01em]">What should we look for?</h1>
+    <SearchBox key="opening" initial="" large ready={asking(staged)} onSearch={text => set({ ...staged, text, page: 1 })}>{filtersFor(staged, stage)}</SearchBox>
     {whole.error && <ErrorBox error={whole.error} />}
   </div>
 
@@ -117,8 +114,8 @@ function Searching() {
 /** A large count at a glance: 1.35B, 312M, 48K. */
 const big = (n: number) => n >= 1e9 ? `${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `${Math.round(n / 1e6)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}K` : number(n)
 
-function Stat({ value, label, flame }: { value: string; label: string; flame?: boolean }) {
-  return <div className="flex flex-col-reverse gap-0.5"><dt className="text-xs text-muted-foreground">{label}</dt><dd className={`text-[26px] leading-8 font-semibold tracking-[-0.02em] ${flame ? 'text-flame-ink' : ''}`}>{value}</dd></div>
+function Stat({ value, label }: { value: string; label: string }) {
+  return <div className="flex flex-row-reverse gap-1.5"><dt>{label}</dt><dd>{value}</dd></div>
 }
 
 /**
