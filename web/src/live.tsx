@@ -41,11 +41,15 @@ export function answerSummary(questions: Question[], result: RunResult) {
   return parts.join(' · ') || 'nothing passed a threshold'
 }
 
-/** One colour per decision: ink is kept, the flame needs a person, faded ink is excluded. */
+/**
+ * One colour per decision: ink is kept, the flame needs a person, faded ink is excluded.
+ * "Not asked" only shows when a run has some: documents no question of the chain reached.
+ */
 const segments = [
   { key: 'kept', outcome: 'keep', label: 'keep', colour: 'bg-foreground' },
   { key: 'review', outcome: 'review', label: 'need you', colour: 'bg-flame' },
   { key: 'excluded', outcome: 'exclude', label: 'exclude', colour: 'bg-[#B9AE98]' },
+  { key: 'not_asked', outcome: 'not_asked', label: 'not asked', colour: 'bg-[#E4DCCB]', quiet: true },
   { key: 'errors', outcome: 'error', label: 'errors', colour: 'bg-destructive' },
 ] as const
 
@@ -136,11 +140,11 @@ export function LiveRun({ id, embedded, preview, actions, onDismiss, onOutcome }
 
     <div className="grid gap-3">
       <div className="flex h-2.5 overflow-hidden rounded-full bg-[#EFE9DC] [&_i]:block [&_i]:h-full" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={scored}>
-        {totals && segments.map(segment => totals[segment.key] ? <i key={segment.key} className={segment.colour} style={{ width: `${totals[segment.key] / Math.max(1, total) * 100}%` }} /> : null)}
+        {totals && segments.map(segment => totals[segment.key] ? <i key={segment.key} className={segment.colour} style={{ width: `${(totals[segment.key] ?? 0) / Math.max(1, total) * 100}%` }} /> : null)}
         {running && <i className="animate-pulse bg-[#D8CFBD]" style={{ width: `${(view?.in_flight?.length || 0) / Math.max(1, total) * 100}%` }} />}
       </div>
       <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-        {segments.map(segment => <Legend key={segment.key} colour={segment.colour} count={totals?.[segment.key] ?? 0} label={segment.label} onClick={() => go(segment.outcome)} />)}
+        {segments.map(segment => 'quiet' in segment && !totals?.[segment.key] ? null : <Legend key={segment.key} colour={segment.colour} count={totals?.[segment.key] ?? 0} label={segment.label} onClick={() => go(segment.outcome)} />)}
         <Legend colour="bg-moss" count={totals?.tagged ?? 0} label="tagged" onClick={() => go('tag')} />
         {!!totals?.sampled && <span className="text-[13px] text-muted-foreground">{number(totals.sampled)} sampled</span>}
         <span className="ml-auto text-[13px] text-muted-foreground">{number(scored)} of {number(total)}{running && left != null ? ` · ~${seconds(left)} left` : ''}{running ? ` · ${number(view?.in_flight?.length ?? 0)} in flight to Jev` : ''}</span>

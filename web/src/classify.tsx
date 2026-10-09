@@ -13,7 +13,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { compact, money, number, plural, seconds, tail } from './format'
 import { LiveRun, useRunDetail } from './live'
-import { decisionLabels, decisionOf, estimateRun, isChoice, missingOther, outcomesOf, questionProblem, questionSnapshot, tagsOf } from './policy'
+import { decisionLabels, decisionOf, estimateRun, isChoice, missingOther, outcomesOf, questionProblem, questionSnapshot, reachOf, tagsOf } from './policy'
 import { ResultsSection } from './results'
 import { ErrorBox, Empty, PageHeader, Segmented, Spinner } from './ui'
 
@@ -96,7 +96,8 @@ export function Classify() {
   const count = scope === 'all' ? Math.min(total, MAX_RUN_DOCUMENTS) : Math.min(sample, total)
   const recording = output === 'record'
   const rate = inputRate.trim() ? Number(inputRate) : model.startsWith('jev-') ? JEV_INPUT_RATE : null
-  const estimate = total ? estimateRun((available.data?.total_chars || 0) * count / total, count, checked.map(stripKey), rate ?? 0) : null
+  const reach = (question: Question) => reachOf(question, wire, available.data?.facets?.scores)
+  const estimate = total ? estimateRun((available.data?.total_chars || 0) * count / total, count, checked.map(stripKey), rate ?? 0, undefined, reach) : null
   const run = useMutation({
     mutationFn: async () => {
       let asked = checked.map(stripKey)
@@ -227,7 +228,7 @@ export function Classify() {
 
     <Dialog open={dialog === 'run'} onOpenChange={open => !open && setDialog('')}>
       <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-2xl">
-        <DialogHeader><DialogTitle className="font-serif text-2xl font-normal">Run</DialogTitle><DialogDescription>Ask Jev every checked question about a set of documents.</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle className="font-serif text-2xl font-normal">Run</DialogTitle><DialogDescription>Ask Jev the checked questions about a set of documents. A follow-up is asked only of the documents whose answer leads to it.</DialogDescription></DialogHeader>
         {active && <LiveRun key={active.id} id={active.id} preview={active.preview} onDismiss={() => setActive(null)} />}
         {active?.preview && <PreviewResults id={active.id} />}
         <div className="grid gap-3">
@@ -376,8 +377,8 @@ type Test = ReturnType<typeof useTest>
 
 /**
  * One document through the tree as a preview run: nothing is saved, and draft questions
- * are allowed. Jev answers every checked question today; the tree shows which ones the
- * document would have reached.
+ * are allowed. The server follows the chain the way a run does, so Jev is asked only the
+ * checked questions the document reaches; the rest come back unanswered and stay dimmed.
  */
 function useTest(questions: Question[], model: string, date: string) {
   const [doc, setDoc] = useState<Document | null>(null)
@@ -402,7 +403,7 @@ function TestPanel({ test, onPicked }: { test: Test; onPicked: () => void }) {
       </button>)}
     </div>
     {test.error && <ErrorBox error={test.error} />}
-    <p className="text-xs leading-relaxed text-muted-foreground">Jev answers every checked question today. Questions off the lit path are dimmed: once runs follow the tree, they will not be asked.</p>
+    <p className="text-xs leading-relaxed text-muted-foreground">Jev is asked only the questions on the lit path. The dimmed ones are not asked of this document, and cost nothing.</p>
   </div>
 }
 

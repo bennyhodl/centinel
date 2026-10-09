@@ -102,13 +102,16 @@ export type Outcome = {
 }
 
 export type RunResult = DocumentIdentity & {
-  /** A noul's probability under its id; a choice option's under `question:option`. */
+  /**
+   * A noul's probability under its id; a choice option's under `question:option`. A
+   * question with no key here was not asked: a follow-up whose parent landed elsewhere.
+   */
   answers: Record<string, number>
   choices?: Record<string, { choice: string; confidence?: number }>
   sampled?: { sent_chars: number; total_chars: number }
   /** Wall time for this document, retries and smaller resends included. */
   duration_ms?: number
-  /** Requests sent. More than one is a retry or a smaller resend. */
+  /** Requests sent: one for each level of the chain asked, plus any retry or smaller resend. */
   attempts?: number
   error?: string
   outcomes?: Record<string, Outcome>
@@ -129,6 +132,8 @@ export type OutcomeTotals = {
   review: number
   tagged: number
   kept: number
+  /** Documents no question of the run reached; nothing was sent for them. */
+  not_asked?: number
   errors: number
   sampled: number
 }
@@ -137,6 +142,8 @@ export type QuestionTotals = {
   excluded: number
   review: number
   tagged: number
+  /** Documents this question did not reach. Not a no: it was never asked. */
+  not_asked?: number
   top?: Record<string, number>
   tags?: Record<string, number>
 }
@@ -156,7 +163,7 @@ export type RunView = {
   recent?: RunResult[]
 }
 
-export type ResultOutcome = '' | 'exclude' | 'review' | 'tag' | 'keep' | 'error'
+export type ResultOutcome = '' | 'exclude' | 'review' | 'tag' | 'keep' | 'not_asked' | 'error'
 
 export type RunDetailQuery = {
   page: number

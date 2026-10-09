@@ -14,6 +14,7 @@ const outcomeTabs: Array<{ value: ResultOutcome; label: string; count: (run: Run
   { value: 'review', label: 'Review', count: run => run.view?.documents.review ?? 0 },
   { value: 'keep', label: 'Keep', count: run => run.view?.documents.kept ?? 0 },
   { value: 'tag', label: 'Tagged', count: run => run.view?.documents.tagged ?? 0 },
+  { value: 'not_asked', label: 'Not asked', count: run => run.view?.documents.not_asked ?? 0 },
   { value: 'error', label: 'Errors', count: run => run.view?.documents.errors ?? 0 },
 ]
 
@@ -141,6 +142,9 @@ function ResultDetail({ result, questions }: { result: RunResult; questions: Que
     {result.error && <p className="wrap-anywhere text-xs text-destructive">{result.error}</p>}
     {!result.error && <div className="grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-3">{questions.map(question => {
       const outcome = result.outcomes?.[question.id]
+      if (!outcome) return <div className="grid content-start gap-2 rounded-md border border-dashed p-3 text-xs text-muted-foreground [&_h4]:font-mono [&_h4]:font-semibold [&_h4]:text-foreground" key={question.id}>
+        <h4>{question.id}</h4><p>Not asked: {question.when ? <>this document’s answer did not lead to <code>{question.when}</code>.</> : 'no answer.'}</p>
+      </div>
       return <div className="grid content-start gap-2 rounded-md border bg-card p-3 [&_h4]:flex [&_h4]:flex-col [&_h4]:font-mono [&_h4]:text-xs [&_h4]:font-semibold [&_small]:font-normal [&_small]:text-muted-foreground [&_p]:text-xs" key={question.id}>
         <h4>{question.id}<small>{policyShort(question)}</small></h4>
         {isChoice(question)

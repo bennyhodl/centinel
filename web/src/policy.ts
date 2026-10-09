@@ -35,16 +35,40 @@ export const hasScores = (scores: Record<string, number>) => Object.keys(scores)
 
 /**
  * A rough price before a run starts. English runs near four characters to a token.
- * Every request also carries the questions, so their text is counted once per document.
- * Text above the sampling limit is counted at the limit.
+ * Text above the sampling limit is counted at the limit. A run follows the chain, so a
+ * question counts for the share of documents `reach` expects it to be asked of, and each
+ * group of follow-ups sharing a `when` is a request of its own that carries the text
+ * again. Mirrors the CLI's estimate in `ops/classify.rs`.
  */
-export function estimateRun(chars: number, documents: number, questions: Question[], ratePerMillion: number, maxTextChars = 80_000) {
+export function estimateRun(chars: number, documents: number, questions: Question[], ratePerMillion: number, maxTextChars = 80_000, reach: (question: Question) => number = () => 1) {
   if (!documents) return { tokens: 0, cost: 0 }
   const averageChars = Math.min(chars / documents, maxTextChars)
   const questionChars = questions.reduce((sum, question) =>
-    sum + question.instructions.length + 70 + (question.options || []).reduce((total, option) => total + option.id.length + option.description.length, 0), 0)
-  const tokens = Math.round(documents * (averageChars + questionChars) / 4)
+    sum + reach(question) * (question.instructions.length + 70 + (question.options || []).reduce((total, option) => total + option.id.length + option.description.length, 0)), 0)
+  const followUps = new Map(questions.flatMap(question => question.when ? [[question.when, reach(question)] as const] : []))
+  const sends = 1 + [...followUps.values()].reduce((sum, share) => sum + share, 0)
+  const tokens = Math.round(documents * (averageChars * sends + questionChars) / 4)
   return { tokens, cost: tokens * ratePerMillion / 1_000_000 }
+}
+
+/**
+ * The share of documents a run is expected to ask `question` of, from the Search score
+ * facets: one for a source; for a follow-up, its parent's share times the share of
+ * documents scored on its tag that score 0.5 or more there. A tag nobody has scored yet
+ * counts as every document, so the estimate errs high. The server prices the CLI's runs
+ * the same way.
+ */
+export function reachOf(question: Question, questions: Question[], scores: Record<string, number[]> = {}): number {
+  let share = 1
+  let current: Question | undefined = question
+  for (let step = 0; current?.when && step <= questions.length; step++) {
+    const tag: string = current.when
+    const tenths = scores[tag] || []
+    const scored = tenths.reduce((sum, count) => sum + count, 0)
+    if (scored) share *= tenths.slice(5).reduce((sum, count) => sum + count, 0) / scored
+    current = questions.find(candidate => outcomesOf(candidate).some(branch => branch.tag === tag))
+  }
+  return share
 }
 
 /** The parts of a question the server versions or applies, for a dirty check. */
