@@ -4,53 +4,55 @@
 //!
 //! **Where it goes.** Always stderr. Under `centinel mcp` stdout carries JSON-RPC frames
 //! and under an op it carries the report; a log line on either corrupts something a
-//! program is parsing.
+//! program is parsing. A command's *result* — search hits, `read` text, `--json` — is
+//! stdout's and never logged; what the command did on the way there is stderr's and
+//! never printed.
 //!
-//! **Whether it is on.** Decided by the surface, not by a flag. An op returns a report
-//! and draws its own progress bars, so it stays quiet unless `--verbose` asks. A server
-//! has neither — its stderr *is* its output — so `serve` and `mcp` log at info with no
-//! flag. `RUST_LOG` beats both.
+//! **How much.** Info on every surface, with no flag. Info is what a person watching
+//! wants to see — this source, this page, this batch, done — and it is the same lines
+//! whether they are watching a terminal, a scheduled run's journal, or an MCP client's
+//! captured stderr. `-v` adds the internals (which calls were made, how big, how long,
+//! which device) and `-q` keeps only warnings. `RUST_LOG` beats all three, because it is
+//! the only way to name a single module or a vendored library.
 //!
 //! **What one call looks like.** [`invoke`] is this crate's only call site of
-//! [`op::OpDef::invoke`], so an invocation reads the same however it arrived and
-//! `surface` is the only field that differs. It is also where a long-running op becomes
-//! a job in [`centinel_core::jobs`], for the same reason: one place, every surface.
+//! [`OpDef::invoke`], so an invocation reads the same however it arrived and
+//! `surface` is the only field that differs. It opens a span the op's every line sits
+//! under, it is where a long-running op becomes a job in [`centinel_core::jobs`], and
+//! it is where an op with nowhere else to report is handed a sink that writes to the
+//! log — for the same reason each time: one place, every surface.
 
 use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use centinel_core::op::{Cancel, Ctx, OpDef, Progress, ProgressEvent};
+use centinel_core::op::{Cancel, Ctx, OpDef, Progress};
 use serde_json::Value;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tracing::Instrument;
 use tracing_subscriber::EnvFilter;
 
-/// The default filter for a surface that returns a report to a person and draws its own
-/// progress. Silent, because both of those beat a log line — and because a stray line
-/// lands in the middle of an `indicatif` bar and stays there.
-const OP_DEFAULT: &str = "off";
+/// The filter with no flag: everything a person watching wants, nothing they would
+/// scroll past.
+const DEFAULT: &str = "centinel=info,centinel_core=info";
 
-/// The default filter for `serve` and `mcp`. A server that says nothing between
-/// "listening" and its next crash cannot be tested, which is the whole reason this
-/// module exists.
-const SERVER_DEFAULT: &str = "centinel=info,centinel_core=info";
+/// What `-v` selects. This crate and the library, not the dependencies: `llama.cpp`
+/// alone writes hundreds of lines per model load, and a debug run that drowned the batch
+/// it was asked about would be no use. `RUST_LOG` names a library when one is wanted.
+const VERBOSE: &str = "centinel=debug,centinel_core=debug";
 
-/// What `--verbose` selects, on every surface.
-const VERBOSE_DEFAULT: &str = "centinel=debug,centinel_core=debug";
+/// What `-q` selects: only what went wrong.
+const QUIET: &str = "centinel=warn,centinel_core=warn";
 
 /// Installs the subscriber. Call once, before anything worth logging.
 ///
-/// `surface` is the subcommand name rather than an enum, because the only distinction
-/// that matters is "is this one of the two server commands" — and those are already
-/// named once, in `SERVER_COMMANDS`.
-pub fn install(surface: &str, verbose: bool, no_color: bool) {
-    let default = match (surface, verbose) {
-        (_, true) => VERBOSE_DEFAULT,
-        // `web` is a server too: a person watching its terminal has no report coming
-        // and no progress bar to protect, so the log is the only thing to read.
-        ("serve" | "mcp" | "web", false) => SERVER_DEFAULT,
-        _ => OP_DEFAULT,
+/// `verbose` and `quiet` are the two flags, already known by clap to conflict, so the
+/// order of the match is never exercised.
+pub fn install(verbose: bool, quiet: bool, no_color: bool) {
+    let default = match (verbose, quiet) {
+        (true, _) => VERBOSE,
+        (_, true) => QUIET,
+        _ => DEFAULT,
     };
 
     tracing_subscriber::fmt()
@@ -59,6 +61,9 @@ pub fn install(surface: &str, verbose: bool, no_color: bool) {
         // two go to different places and `centinel serve > /dev/null` is a normal thing
         // to type.
         .with_ansi(std::io::stderr().is_terminal() && !no_color)
+        // The module path is noise to the person these lines are for; the span the op
+        // opens says which op and which surface, which is the context that matters.
+        .with_target(false)
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| default.into()))
         .init();
 }
@@ -66,11 +71,11 @@ pub fn install(surface: &str, verbose: bool, no_color: bool) {
 /// Invokes an op and records the call: a line when it starts, a line when it ends, and
 /// whatever it says in between.
 ///
-/// `progress` is `None` from the surfaces with nowhere to draw it — a plain
-/// `POST /ops/{name}` and every MCP tool call, both of which return exactly once. Those
-/// get a sink that writes each event to the log instead. It is the difference between a
-/// `run` over MCP being a silent hour and being watchable, and it costs the op nothing:
-/// it still never learns who invoked it.
+/// `progress` is `None` from every surface with nowhere to draw it — the CLI, a plain
+/// `POST /ops/{name}`, every MCP tool call, a scheduled run. Those get
+/// [`Progress::logged`], which writes each event to the log at the level
+/// `centinel_core::op` decides. Only `/ops/{name}/stream` passes a sink of its own,
+/// because it has a caller waiting for the frames.
 pub async fn invoke(
     surface: &'static str,
     def: &'static OpDef,
@@ -94,61 +99,38 @@ pub async fn invoke_cancellable(
     progress: Option<Progress>,
     cancel: Cancel,
 ) -> Result<Value> {
-    let (progress, drain) = match progress {
-        Some(sink) => (sink, None),
-        None => {
-            let (sink, rx) = Progress::channel();
-            (sink, Some(tokio::spawn(drain_to_log(def.name, rx))))
+    // Every line the op writes carries which op and from where. The name is the span's
+    // own field rather than its name so `op{run cli}` reads as one thing across a run
+    // that nests stages under it.
+    let span = tracing::info_span!("op", name = def.name, surface);
+    async move {
+        let progress = progress.unwrap_or_else(Progress::logged);
+
+        tracing::info!(args = %one_line(&args), "started");
+        let started = Instant::now();
+
+        // A long-running op is worth watching from elsewhere; a `list` is over before
+        // anyone could look.
+        let job = def.long_running.then(|| ctx.jobs.start(def.name, surface));
+        let progress = match &job {
+            Some(job) => job.watch(progress),
+            None => progress,
+        };
+
+        let result = (def.invoke)(ctx, args, progress, cancel).await;
+        if let Some(job) = job {
+            job.finish(&result);
         }
-    };
 
-    tracing::info!(surface, op = def.name, args = %one_line(&args), "op started");
-    let started = Instant::now();
-
-    // A long-running op is worth watching from elsewhere; a `list` is over before anyone
-    // could look.
-    let job = def.long_running.then(|| ctx.jobs.start(def.name, surface));
-    let progress = match &job {
-        Some(job) => job.watch(progress),
-        None => progress,
-    };
-
-    let result = (def.invoke)(ctx, args, progress, cancel).await;
-    if let Some(job) = job {
-        job.finish(&result);
-    }
-
-    // The sink was dropped with the invocation, so the drain has already ended or is
-    // about to; awaiting it just keeps the last progress line above the closing one.
-    if let Some(drain) = drain {
-        let _ = drain.await;
-    }
-
-    let elapsed_ms = started.elapsed().as_millis() as u64;
-    match &result {
-        Ok(_) => tracing::info!(surface, op = def.name, elapsed_ms, "op finished"),
-        Err(e) => {
-            tracing::warn!(surface, op = def.name, elapsed_ms, error = %format!("{e:#}"), "op failed")
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        match &result {
+            Ok(_) => tracing::info!(elapsed_ms, "finished"),
+            Err(e) => tracing::warn!(elapsed_ms, error = %format!("{e:#}"), "failed"),
         }
+        result
     }
-    result
-}
-
-/// Writes progress to the log for a surface that cannot draw it.
-///
-/// Split by what a [`ProgressEvent`] *is*: one with no `id` is a log line by
-/// construction, one with an id is a bar redrawing. A crawl emits thousands of the
-/// second kind, so they sit at debug and the info stream stays readable.
-async fn drain_to_log(op: &'static str, mut rx: UnboundedReceiver<ProgressEvent>) {
-    while let Some(event) = rx.recv().await {
-        match (event.id.as_deref(), event.done, event.total) {
-            (None, _, _) => tracing::info!(op, "{}", event.message),
-            (Some(track), Some(done), Some(total)) => {
-                tracing::debug!(op, track, done, total, "{}", event.message)
-            }
-            (Some(track), _, _) => tracing::debug!(op, track, "{}", event.message),
-        }
-    }
+    .instrument(span)
+    .await
 }
 
 /// An argument set as one line short enough to sit in a log field.

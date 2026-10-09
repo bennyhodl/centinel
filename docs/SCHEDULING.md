@@ -315,14 +315,13 @@ validator.
 
 #### The crate: `dialoguer`  *(built)*
 
-It is built on `console`, which is **already in the tree under `indicatif`** — the same
-reasoning, in the same words, that the binary's `Cargo.toml` already gives for depending on
-`console` directly: *"Already in the tree under indicatif, so this costs no new download."*
+It is built on `console`, which the binary already depends on directly for the terminal's
+width, so it costs no new download. (It was chosen when `indicatif` drew the progress bars;
+those are gone — progress is logged, not drawn — and the choice still holds.)
 
 `inquire` is the better-known one and its API is nicer, but it sits on `crossterm`. That
-puts a second terminal backend in a binary whose progress renderer already drives one, and
-two libraries deciding independently what to do about raw mode and cursor position is a
-class of bug nobody wants inside a tool that also prints hours of progress bars.
+puts a second terminal backend in the binary, and two libraries deciding independently
+what to do about raw mode and cursor position is a class of bug nobody wants.
 
 ### 4.1 Why cron and not an interval
 

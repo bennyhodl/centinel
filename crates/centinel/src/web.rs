@@ -62,7 +62,7 @@ pub async fn open(ctx: Arc<Ctx>, bind: &str, rebuilt: bool) -> Result<()> {
                 env!("CARGO_PKG_VERSION")
             );
         }
-        eprintln!("centinel web already serving on http://{bind}; opening the browser");
+        tracing::info!(url = %format!("http://{bind}"), "already serving; opening the browser");
         open_browser(url).await;
         return Ok(());
     }
@@ -115,7 +115,7 @@ pub fn rebuild_bundle() -> Result<()> {
         );
     }
     let root = std::fs::canonicalize(&root).unwrap_or(root);
-    eprintln!("rebuilding the web workspace in {}", root.display());
+    tracing::info!(root = %root.display(), "rebuilding the web workspace");
     let status = std::process::Command::new("npm")
         .args(["run", "build"])
         .current_dir(&root)
@@ -139,10 +139,7 @@ pub fn rebuild_bundle() -> Result<()> {
     }
     let bytes = page.len();
     super::http::serve_page_from(page);
-    eprintln!(
-        "web workspace v{version}: {bytes} bytes rebuilt from {}",
-        dist.display()
-    );
+    tracing::info!(version, bytes, from = %dist.display(), "web workspace rebuilt");
     Ok(())
 }
 
@@ -158,7 +155,7 @@ fn spawn_browser(url: String) {
             .await
         {
             Ok(_) => {}
-            Err(e) => eprintln!("could not open a browser ({e}); visit {url}"),
+            Err(e) => tracing::warn!(error = %e, "could not open a browser; visit {url}"),
         }
     });
 }
@@ -171,6 +168,6 @@ async fn open_browser(url: String) {
         .await
     {
         Ok(_) => {}
-        Err(error) => eprintln!("could not open a browser ({error}); visit {url}"),
+        Err(error) => tracing::warn!(%error, "could not open a browser; visit {url}"),
     }
 }
