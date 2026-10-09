@@ -59,14 +59,17 @@ function SearchPage() {
   const whole = useQuery(everything)
   const questions = useQuery(queries.questions())
   const saved = questions.data?.questions || []
-  const filters = <FilterBar search={search} set={set} classifiers={classifierOptions(saved)} sources={whole.data?.sources || []} facets={query.data?.facets} />
+  // Before a search, filters wait in the box and go with the words. After, they refine the results at once.
+  const [staged, setStaged] = useState<Search>(cleared)
+  const stage: Set = next => setStaged((previous: Search) => ({ ...previous, ...next }))
+  const filtersFor = (current: Search, change: Set) => <FilterBar search={current} set={change} classifiers={classifierOptions(saved)} sources={whole.data?.sources || []} facets={query.data?.facets} />
 
   if (!open) return <div className="flex min-h-[calc(100svh-8rem)] flex-col items-center justify-center gap-7 pb-16">
     <div className="grid justify-items-center gap-2 text-center">
       <h1 className="font-serif text-[52px] leading-[56px] tracking-[-0.01em]">What should we look for?</h1>
       <p className="text-[15px] text-muted-foreground">Search the words inside every document Centinel has collected.</p>
     </div>
-    <SearchBox key="opening" initial="" large onSearch={text => set({ text, page: 1 })}>{filters}</SearchBox>
+    <SearchBox key="opening" initial="" large ready={asking(staged)} onSearch={text => set({ ...staged, text, page: 1 })}>{filtersFor(staged, stage)}</SearchBox>
     {whole.data && <dl className="mt-6 flex flex-wrap justify-center gap-x-12 gap-y-4 text-center">
       <Stat value={number(whole.data.total)} label="documents" />
       <Stat value={big(whole.data.total_chars)} label="characters of text" />
@@ -81,7 +84,7 @@ function SearchPage() {
   return <>
     <div className="mb-3 flex items-center gap-3">
       <button type="button" onClick={() => navigate({ search: cleared })} className="inline-flex h-12 shrink-0 items-center gap-1 self-start text-[13px] text-muted-foreground hover:text-foreground" aria-label="New search"><ChevronLeft className="size-4" /><span className="hidden sm:inline">New</span></button>
-      <SearchBox key={search.text} initial={search.text} onSearch={text => set({ text, page: 1 })}>{filters}</SearchBox>
+      <SearchBox key={search.text} initial={search.text} ready onSearch={text => set({ text, page: 1 })}>{filtersFor(search, set)}</SearchBox>
     </div>
     <p className="pl-12 text-[13px] text-muted-foreground">{data ? `${number(data.total)} documents · ${characters(data.total_chars)}` : ''}</p>
     <section className="mt-6">
@@ -109,15 +112,15 @@ function Stat({ value, label, flame }: { value: string; label: string; flame?: b
  * The question box: what to look for on top, the filters and the send button along its
  * foot, one surface. Large on the opening page, compact above the results.
  */
-function SearchBox({ initial, large, onSearch, children }: { initial: string; large?: boolean; onSearch: (text: string) => void; children: React.ReactNode }) {
+function SearchBox({ initial, large, ready, onSearch, children }: { initial: string; large?: boolean; ready?: boolean; onSearch: (text: string) => void; children: React.ReactNode }) {
   const [draft, setDraft] = useState(initial)
-  return <form className={`w-full max-w-[760px] ${large ? '' : 'flex-1'}`} onSubmit={event => { event.preventDefault(); if (draft.trim()) onSearch(draft.trim()) }}>
+  return <form className={`w-full max-w-[760px] ${large ? '' : 'flex-1'}`} onSubmit={event => { event.preventDefault(); if (draft.trim() || ready) onSearch(draft.trim()) }}>
     <div className="grid rounded-[22px] border border-input bg-background shadow-[0_1px_2px_rgba(26,23,18,0.04),0_10px_30px_rgba(26,23,18,0.06)] focus-within:border-[#CFC6B5]">
       <input autoFocus={large} value={draft} onChange={event => setDraft(event.target.value)} placeholder="Search the corpus: a phrase, a name, a project" aria-label="Search the corpus"
         className={`bg-transparent px-5 outline-none placeholder:text-muted-foreground ${large ? 'h-[72px] text-[18px]' : 'h-14 text-[15px]'}`} />
       <div className="flex items-center gap-2 px-3 pb-3">
         {children}
-        <button type="submit" disabled={!draft.trim()} aria-label="Search" className="ml-auto grid size-10 shrink-0 place-items-center rounded-full bg-foreground text-parchment transition-opacity duration-(--motion-micro) disabled:opacity-25"><ArrowUp className="size-[18px]" /></button>
+        <button type="submit" disabled={!draft.trim() && !ready} aria-label="Search" className="ml-auto grid size-10 shrink-0 place-items-center rounded-full bg-foreground text-parchment transition-opacity duration-(--motion-micro) disabled:opacity-25"><ArrowUp className="size-[18px]" /></button>
       </div>
     </div>
   </form>
@@ -153,7 +156,7 @@ const Divider = () => <span aria-hidden className="mx-0.5 h-5 w-px bg-rule" />
 function Filter({ kind, label, value, onClear, children }: { kind: Tone; label: string; value: string; onClear: () => void; children: React.ReactNode }) {
   return <Popover>
     <span className={`inline-flex h-9 items-center rounded-full text-[14px] transition-colors duration-(--motion-micro) ${value ? tone[kind].on : 'text-muted-foreground hover:bg-[#FBF8F1] hover:text-foreground'}`}>
-      <PopoverTrigger type="button" className="inline-flex h-full items-center gap-2 pr-2 pl-3">
+      <PopoverTrigger type="button" className="inline-flex h-full items-center gap-2 rounded-full pr-2 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-flame/40">
         <span className={`size-1.5 rounded-full ${tone[kind].dot}`} />
         {value ? <b className="max-w-48 truncate font-semibold">{value}</b> : <span>{label}</span>}
         {!value && <ChevronDown className="size-3.5 opacity-60" />}
