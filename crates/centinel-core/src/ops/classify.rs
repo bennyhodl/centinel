@@ -24,7 +24,7 @@
 //! `centinel.toml` has a `[classify]` block. `--dry-run` prices the work and sends
 //! nothing; `--preview` sends and shows, and writes nothing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -115,11 +115,16 @@ pub struct ClassifyReport {
     pub review: usize,
     pub tagged: usize,
     pub kept: usize,
+    /// Documents none of the run's questions reached: each was a follow-up whose parent
+    /// landed elsewhere. Nothing was sent for them.
+    #[serde(default)]
+    pub not_asked: usize,
     /// Documents per tag. A yes-or-no question tags under its id; a choice option under
     /// `question:option`.
     pub tags: BTreeMap<String, usize>,
     /// Before sending: the characters that would go, counted at the sampling limit, plus
-    /// the questions, at about four characters a token.
+    /// the questions, at about four characters a token. A follow-up is counted for the
+    /// share of documents expected to reach it, and its text sent again.
     pub estimated_tokens: u64,
     /// At the model's published rate, when one is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,7 +195,8 @@ pub async fn classify(
             .unwrap_or(MAX_RUN_DOCUMENTS)
             .min(MAX_RUN_DOCUMENTS),
     );
-    let (estimated_tokens, estimated_cost_usd) = estimate(&pending, &questions, &model);
+    let reach = ws.reach(&questions)?;
+    let (estimated_tokens, estimated_cost_usd) = estimate(&pending, &questions, &reach, &model);
 
     let mut report = ClassifyReport {
         model: model.clone(),
@@ -203,6 +209,7 @@ pub async fn classify(
         review: 0,
         tagged: 0,
         kept: 0,
+        not_asked: 0,
         tags: BTreeMap::new(),
         estimated_tokens,
         estimated_cost_usd,
@@ -251,12 +258,13 @@ pub async fn classify(
         &RunDetailQuery::default(),
         false,
     );
-    report.scored = run.results.len() - view.documents.errors;
+    report.scored = run.results.len() - view.documents.errors - view.documents.not_asked;
     report.failed = view.documents.errors;
     report.excluded = view.documents.excluded;
     report.review = view.documents.review;
     report.tagged = view.documents.tagged;
     report.kept = view.documents.kept;
+    report.not_asked = view.documents.not_asked;
     report.tags = tag_counts(&questions, &view.questions);
     report.input_tokens = run.input_tokens;
     report.cost_usd = run.cost_usd;
@@ -296,29 +304,40 @@ fn chosen(saved: &[Question], ids: &[String]) -> anyhow::Result<Vec<Question>> {
 }
 
 /// Input tokens and cost before anything is sent. Mirrors the web page's estimate: each
-/// document's text at the sampling limit, plus the questions, which travel with every
-/// request, at about four characters a token.
+/// document's text at the sampling limit, plus the questions, at about four characters a
+/// token. A run follows the chain, so a follow-up costs only for the documents it reaches —
+/// `reach` gives that share by question id, one when absent — and every group of
+/// follow-ups sharing a `when` is its own request, carrying the text again. Two groups
+/// that reach the same document at the same depth share a request, so this errs high.
 fn estimate(
     pending: &[PendingDocument],
     questions: &[Question],
+    reach: &HashMap<String, f64>,
     model: &str,
 ) -> (u64, Option<f64>) {
-    let question_chars: usize = questions
+    let reach_of = |q: &Question| reach.get(&q.id).copied().unwrap_or(1.0);
+    let question_chars: f64 = questions
         .iter()
         .map(|q| {
-            q.instructions.len()
+            let chars = q.instructions.len()
                 + 70
                 + q.options
                     .iter()
                     .map(|o| o.id.len() + o.description.len())
-                    .sum::<usize>()
+                    .sum::<usize>();
+            reach_of(q) * chars as f64
         })
         .sum();
-    let chars: usize = pending
+    let follow_ups: HashMap<&str, f64> = questions
         .iter()
-        .map(|p| p.chars.min(MAX_TEXT_BYTES) + question_chars)
+        .filter_map(|q| Some((q.when.as_deref()?, reach_of(q))))
+        .collect();
+    let sends = 1.0 + follow_ups.values().sum::<f64>();
+    let chars: f64 = pending
+        .iter()
+        .map(|p| p.chars.min(MAX_TEXT_BYTES) as f64 * sends + question_chars)
         .sum();
-    let tokens = (chars / 4) as u64;
+    let tokens = (chars / 4.0) as u64;
     let cost = model
         .starts_with("jev-")
         .then(|| tokens as f64 * JEV_INPUT_RATE / 1_000_000.0);
@@ -403,6 +422,9 @@ impl Render for ClassifyReport {
                     (self.tagged as u64, "tagged"),
                     (self.kept as u64, "kept untagged"),
                 ];
+                if self.not_asked > 0 {
+                    figures.push((self.not_asked as u64, "not asked"));
+                }
                 if self.failed > 0 {
                     figures.push((self.failed as u64, "failed"));
                 }
@@ -475,86 +497,8 @@ mod tests {
     use crate::index::{Index, Placement};
     use crate::store::Store;
     use crate::workspace::DocumentId;
+    use crate::workspace::fake_jev::fake_jev;
     use jiff::Timestamp;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// A server that answers like Jev, on loopback. A yes-or-no question is 0.95; a
-    /// choice gives 0.95 to `navigation` when the text says MENU and to `record`
-    /// otherwise, so one document is junk and the other is not, and the test knows which.
-    async fn fake_jev() -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    return;
-                };
-                tokio::spawn(async move {
-                    let mut buf = Vec::new();
-                    let mut chunk = [0u8; 4096];
-                    let body_start = loop {
-                        let n = socket.read(&mut chunk).await.unwrap_or(0);
-                        if n == 0 {
-                            return;
-                        }
-                        buf.extend_from_slice(&chunk[..n]);
-                        if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                            break at + 4;
-                        }
-                    };
-                    let head = String::from_utf8_lossy(&buf[..body_start]).to_string();
-                    let length: usize = head
-                        .lines()
-                        .find_map(|l| {
-                            l.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .map(|v| v.trim().parse().unwrap())
-                        })
-                        .unwrap_or(0);
-                    while buf.len() < body_start + length {
-                        let n = socket.read(&mut chunk).await.unwrap_or(0);
-                        if n == 0 {
-                            break;
-                        }
-                        buf.extend_from_slice(&chunk[..n]);
-                    }
-                    let request: serde_json::Value =
-                        serde_json::from_slice(&buf[body_start..]).unwrap();
-                    let text = request["state"]["text"].as_str().unwrap_or_default();
-                    let junk = text.contains("MENU");
-                    let mut answers = serde_json::Map::new();
-                    for (id, question) in request["questions"].as_object().unwrap() {
-                        if question["type"] == "noul" {
-                            let yes = if junk { 0.05 } else { 0.95 };
-                            answers.insert(id.clone(), json!({ "noul": yes }));
-                            continue;
-                        }
-                        let options: Vec<&String> =
-                            question["criteria"].as_object().unwrap().keys().collect();
-                        let want = if junk { "navigation" } else { "record" };
-                        let pick = options
-                            .iter()
-                            .find(|o| o.as_str() == want)
-                            .unwrap_or(&options[0]);
-                        let rest = 0.05 / (options.len() - 1) as f64;
-                        let probabilities: serde_json::Map<String, serde_json::Value> = options
-                            .iter()
-                            .map(|o| ((*o).clone(), json!(if o == pick { 0.95 } else { rest })))
-                            .collect();
-                        answers.insert(id.clone(), json!({ "choice": pick, "probabilities": probabilities, "confidence": 0.9 }));
-                    }
-                    let body = json!({ "model": "jev-test", "answers": answers, "usage": { "input_tokens": 100, "output_tokens": 4 } }).to_string();
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
-                    let _ = socket.shutdown().await;
-                });
-            }
-        });
-        format!("http://{addr}/v1/systemone")
-    }
 
     /// Two documents the way a run leaves them: observed and derived in the log, the
     /// derived text in the pool, and chunked into the index. A budget record and a
@@ -829,14 +773,63 @@ mod tests {
             },
             chars,
         };
-        let (tokens, cost) = estimate(&[doc(4_000), doc(4_000)], &[], "jev-test");
+        let none = HashMap::new();
+        let (tokens, cost) = estimate(&[doc(4_000), doc(4_000)], &[], &none, "jev-test");
         assert_eq!(tokens, 2_000);
         assert!((cost.unwrap() - 2_000.0 * JEV_INPUT_RATE / 1e6).abs() < 1e-12);
-        let (capped, _) = estimate(&[doc(10 * MAX_TEXT_BYTES)], &[], "jev-test");
+        let (capped, _) = estimate(&[doc(10 * MAX_TEXT_BYTES)], &[], &none, "jev-test");
         assert_eq!(capped, (MAX_TEXT_BYTES / 4) as u64);
-        let with_questions = estimate(&[doc(4_000)], &workspace::default_questions(), "jev-test").0;
+        let with_questions = estimate(
+            &[doc(4_000)],
+            &workspace::default_questions(),
+            &none,
+            "jev-test",
+        )
+        .0;
         assert!(with_questions > 1_000);
-        assert_eq!(estimate(&[doc(4_000)], &[], "other-model").1, None);
+        assert_eq!(estimate(&[doc(4_000)], &[], &none, "other-model").1, None);
+    }
+
+    /// A follow-up sends the text again, but only for the documents expected to reach it:
+    /// priced at its share, and at every document while no share is known.
+    #[test]
+    fn a_follow_up_is_priced_for_the_share_of_documents_it_reaches() {
+        let doc = PendingDocument {
+            id: DocumentId {
+                source: "s".into(),
+                resource: "r".into(),
+                derived_sha: "d".into(),
+            },
+            chars: 40_000,
+        };
+        let defaults = workspace::default_questions();
+        let pick = |id: &str| defaults.iter().find(|q| q.id == id).unwrap().clone();
+        let gate = pick("page_kind");
+        let laws = Question {
+            when: Some("page_kind:record".into()),
+            ..pick("laws")
+        };
+        let chain = [gate.clone(), laws];
+        let estimate_with = |questions: &[Question], reach: &[(&str, f64)]| {
+            let reach = reach
+                .iter()
+                .map(|(id, share)| (id.to_string(), *share))
+                .collect();
+            estimate(std::slice::from_ref(&doc), questions, &reach, "jev-test").0
+        };
+
+        let gate_alone = estimate_with(std::slice::from_ref(&gate), &[]);
+        let unknown = estimate_with(&chain, &[]);
+        let quarter = estimate_with(&chain, &[("laws", 0.25)]);
+        assert!(
+            unknown >= gate_alone + 10_000,
+            "an unknown share sends the text twice: {unknown} against {gate_alone}"
+        );
+        assert!(gate_alone < quarter && quarter < unknown);
+        assert!(
+            quarter - gate_alone <= (unknown - gate_alone) / 4 + 2,
+            "a quarter of the documents cost a quarter of the follow-up"
+        );
     }
 
     #[test]
@@ -876,6 +869,7 @@ mod tests {
             review: 10,
             tagged: 50,
             kept: 18,
+            not_asked: 0,
             tags: BTreeMap::from([
                 ("laws".to_string(), 50),
                 ("record_type:minutes".to_string(), 7),
