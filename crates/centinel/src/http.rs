@@ -9,6 +9,8 @@
 //! | `POST /ops/{name}` | invoke, JSON in / JSON out |
 //! | `POST /ops/{name}/stream` | invoke with SSE progress, then the result |
 //! | `POST /mcp` | MCP JSON-RPC over HTTP |
+//! | `GET /workspace/jobs` | what this process is working on, and what it just finished |
+//! | `GET /workspace/jobs/events` | the same, then every job event as it happens (SSE) |
 //!
 //! ## Long-running operations
 //!
@@ -20,6 +22,13 @@
 //! `/stream` holds the connection open rather than returning a job id. That is honest
 //! for the spine and wrong for a multi-hour crawl; a durable job store belongs with
 //! scheduling (ticket #7), which owns resumability.
+//!
+//! What a watcher wants from a multi-hour crawl is not its result but its progress, and
+//! that is `/workspace/jobs/events`: every long-running op this process runs — a scheduled
+//! `run`, a classifier run started from the page — is a job in [`centinel_core::jobs`],
+//! and the stream opens on a snapshot of all of them before it follows. SSE rather than a
+//! WebSocket because nothing travels the other way: it is plain HTTP through any proxy
+//! in front of this one, and `EventSource` reconnects on its own.
 //!
 //! ## Access control
 //!
@@ -38,7 +47,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use centinel_core::op::{self, Ctx, Progress};
+use centinel_core::jobs::JobState;
+use centinel_core::op::{self, Cancel, Ctx, Progress};
 use centinel_core::workspace::{
     DocumentQuery, ReadQuery, RestoreRequest, Review, ReviewQuery, RunDetailQuery, RunQuery,
     RunRequest, Workspace,
@@ -190,6 +200,8 @@ fn router(ctx: Arc<Ctx>) -> Router {
         .route("/workspace/review/queue", get(workspace_review_queue))
         .route("/workspace/review", post(workspace_review))
         .route("/workspace/evaluation", get(workspace_evaluation))
+        .route("/workspace/jobs", get(workspace_jobs))
+        .route("/workspace/jobs/events", get(workspace_job_events))
         .route("/ops", get(list_ops))
         .route("/ops/{name}", post(invoke))
         .route("/ops/{name}/stream", post(invoke_streaming))
@@ -306,6 +318,18 @@ async fn workspace_original(
     response
 }
 
+/// The `snapshot` event: the jobs as they stand, or the one job asked for.
+fn job_snapshot(all: Vec<JobState>, wanted: Option<&str>) -> Event {
+    let jobs: Vec<JobState> = all
+        .into_iter()
+        .filter(|job| wanted.is_none_or(|id| id == job.id))
+        .collect();
+    Event::default()
+        .event("snapshot")
+        .json_data(json!({ "jobs": jobs }))
+        .expect("a job snapshot always serializes")
+}
+
 async fn workspace_system(State(ctx): State<Arc<Ctx>>) -> Response {
     let root =
         std::fs::canonicalize(ctx.store.root()).unwrap_or_else(|_| ctx.store.root().to_path_buf());
@@ -399,19 +423,28 @@ async fn workspace_run(
     if !same_origin(&headers) {
         return forbidden_origin();
     }
-    // Answer with the run as started, then score it on a task of its own. The browser
-    // polls the run detail for progress; a request held open for a thousand documents
-    // sat behind proxies, browser limits, and a person wondering whether anything was
-    // happening.
+    // Answer with the run as started, then score it on a task of its own, as a job under
+    // the run's id. The browser follows it on the job stream and reads the answers from
+    // the run detail; a request held open for a thousand documents sat behind proxies,
+    // browser limits, and a person wondering whether anything was happening.
     let prepared = match Workspace::new(&ctx.store).prepare(request) {
         Ok(prepared) => prepared,
         Err(error) => return workspace_error(error),
     };
     let started = prepared.run().clone();
+    let job = ctx.jobs.start_as(
+        started.id.clone(),
+        "classify",
+        format!("{} documents · {}", started.document_count, started.model),
+    );
     let worker = Arc::clone(&ctx);
     tokio::spawn(async move {
         let id = prepared.run().id.clone();
-        match Workspace::new(&worker.store).execute(prepared).await {
+        let progress = job.watch(Progress::none());
+        let result = Workspace::new(&worker.store)
+            .execute_with(prepared, &progress, &Cancel::none())
+            .await;
+        match &result {
             Ok(run) => tracing::info!(
                 run = %run.id,
                 documents = run.results.len(),
@@ -423,8 +456,67 @@ async fn workspace_run(
                 tracing::warn!(run = %id, error = %format!("{error:#}"), "classifier run failed")
             }
         }
+        job.finish(&result);
     });
     (StatusCode::ACCEPTED, Json(started)).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct JobsQuery {
+    /// One job's id. Absent is every job.
+    job: Option<String>,
+}
+
+/// Every active job, then the recently finished, each with its latest log lines.
+async fn workspace_jobs(State(ctx): State<Arc<Ctx>>) -> Response {
+    Json(json!({ "jobs": ctx.jobs.snapshot() })).into_response()
+}
+
+/// A `snapshot` event with the jobs as they stand, then one `job` event per thing that
+/// happens to them, for one job when `?job=` names it.
+///
+/// A subscriber that falls too far behind is sent a fresh snapshot rather than dropped:
+/// the events it missed are already folded into the state it is sent, and each carries a
+/// `seq` so the client skips any it then sees twice.
+async fn workspace_job_events(
+    State(ctx): State<Arc<Ctx>>,
+    Query(query): Query<JobsQuery>,
+) -> Response {
+    use tokio::sync::broadcast::error::RecvError;
+
+    let jobs = ctx.jobs.clone();
+    let (first, mut rx) = jobs.subscribe();
+    let wanted = query.job;
+    let stream = async_stream::stream! {
+        yield Ok(job_snapshot(first, wanted.as_deref()));
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if wanted.as_deref().is_none_or(|id| id == event.job) {
+                        yield Ok(Event::default()
+                            .event("job")
+                            .json_data(&event)
+                            .expect("a job event always serializes"));
+                    }
+                }
+                Err(RecvError::Lagged(_)) => yield Ok(job_snapshot(jobs.snapshot(), wanted.as_deref())),
+                Err(RecvError::Closed) => break,
+            }
+        }
+    };
+
+    let mut response = Sse::new(Box::pin(stream)
+        as std::pin::Pin<
+            Box<dyn Stream<Item = Result<Event, Infallible>> + Send>,
+        >)
+    .keep_alive(KeepAlive::default())
+    .into_response();
+    // A proxy that buffers responses would hold every event until the stream ends.
+    response.headers_mut().insert(
+        "x-accel-buffering",
+        axum::http::HeaderValue::from_static("no"),
+    );
+    response
 }
 
 async fn workspace_commit(
@@ -901,6 +993,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// A page opened after a run started is told about it at once: the list names every
+    /// job, and the stream opens on the one asked for as it stands — its count and the
+    /// page in hand — before anything new happens.
+    #[tokio::test]
+    async fn the_job_stream_opens_on_the_job_asked_for_as_it_stands() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(Ctx::new(Store::open(dir.path()).await.unwrap()));
+        let app = router(Arc::clone(&ctx));
+        let wanted = ctx.jobs.start("run", "schedule");
+        let _other = ctx.jobs.start("embed", "schedule");
+        wanted.watch(Progress::none()).step_on(
+            "0 stored, 0 failed",
+            0,
+            1005,
+            "https://www.tampa.gov/a",
+        );
+
+        let listed = body_json(
+            app.clone()
+                .oneshot(Request::get("/workspace/jobs").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(listed["jobs"].as_array().unwrap().len(), 2);
+
+        let resp = app
+            .oneshot(
+                Request::get(format!("/workspace/jobs/events?job={}", wanted.id()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.headers()["content-type"], "text/event-stream");
+        let mut body = resp.into_body().into_data_stream();
+        let frame = futures::StreamExt::next(&mut body).await.unwrap().unwrap();
+        let text = std::str::from_utf8(&frame).unwrap();
+        assert!(text.contains("event: snapshot"), "{text}");
+        let data: Value =
+            serde_json::from_str(text.lines().find_map(|l| l.strip_prefix("data: ")).unwrap())
+                .unwrap();
+        let jobs = data["jobs"].as_array().unwrap();
+        assert_eq!(jobs.len(), 1, "only the job asked for");
+        assert_eq!(jobs[0]["id"], wanted.id());
+        assert_eq!(jobs[0]["current"], "https://www.tampa.gov/a");
+        assert_eq!(jobs[0]["total"], 1005);
     }
 
     #[test]
