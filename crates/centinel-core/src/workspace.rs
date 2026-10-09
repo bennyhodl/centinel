@@ -546,6 +546,9 @@ pub struct CorpusFacets {
     pub usage: BTreeMap<String, usize>,
     /// For each classifier key, matching documents in each tenth of score, low to high.
     pub scores: BTreeMap<String, [usize; 10]>,
+    /// Matching documents by what they were read as: `pdf`, `web_page`, `spreadsheet`,
+    /// … and `other` for text no reader produced, such as a transcription.
+    pub kinds: BTreeMap<String, usize>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -2918,6 +2921,19 @@ fn facets(conn: &Connection, q: &DocumentQuery) -> anyhow::Result<CorpusFacets> 
     for row in rows {
         let (key, tenth, count) = row?;
         facets.scores.entry(key).or_insert([0; 10])[tenth.clamp(0, 9) as usize] = count;
+    }
+
+    // The reader that produced a document's text says what it was, so the count needs no
+    // look at the original bytes.
+    let (from, values) = filter_from(q, None);
+    let mut stmt = conn.prepare(&format!("SELECT d.tool,COUNT(*) {from} GROUP BY d.tool"))?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
+    })?;
+    for row in rows {
+        let (tool, count) = row?;
+        let kind = crate::extract::Reader::named(&tool).map_or("other", crate::extract::Reader::reads);
+        *facets.kinds.entry(kind.to_string()).or_default() += count;
     }
     Ok(facets)
 }
@@ -5320,6 +5336,8 @@ mod tests {
         // Every other facet keeps it.
         assert_eq!(page.facets.usage["included"], 3);
         assert_eq!(page.facets.usage["excluded"], 0);
+        // `test 1` is no reader, so the three are counted as something else.
+        assert_eq!(page.facets.kinds, BTreeMap::from([("other".to_string(), 3)]));
     }
 
     #[tokio::test]

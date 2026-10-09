@@ -69,11 +69,9 @@ function SearchPage() {
   const filtersFor = (current: Search, change: Set) => <FilterBar search={current} set={change} classifiers={classifierOptions(saved)} sources={whole.data?.sources || []} facets={query.data?.facets} />
 
   if (!open) return <div className="relative flex min-h-[calc(100svh-8rem)] flex-col items-center justify-center gap-7 pb-16">
-    {whole.data && <dl className="absolute top-0 right-0 flex flex-wrap justify-end gap-x-5 gap-y-1 font-serif text-[17px] text-muted-foreground">
-      <Stat value={number(whole.data.total)} label="documents" />
-      <Stat value={big(whole.data.total_chars)} label="characters" />
+    {whole.data && <dl className="absolute -top-3 -right-2 flex flex-wrap justify-end gap-x-3 font-serif text-[15px] text-foreground/25">
+      {kindsOf(whole.data.facets?.kinds, whole.data.total).map(([label, count]) => <Stat key={label} value={number(count)} label={label} />)}
       <Stat value={number(whole.data.sources.length)} label="sources" />
-      <Stat value={number(whole.data.pending)} label="waiting on a classifier" />
     </dl>}
     <h1 className="text-center font-serif text-[52px] leading-[56px] tracking-[-0.01em]">What should we look for?</h1>
     <SearchBox key="opening" initial="" large ready={asking(staged)} onSearch={text => set({ ...staged, text, page: 1 })}>{filtersFor(staged, stage)}</SearchBox>
@@ -111,11 +109,16 @@ function Searching() {
   return <><Candle /><span className="text-flame-ink">Searching every document{seconds >= 1 ? ` · ${seconds}s` : '…'}</span>{seconds >= 8 && <span>Long searches across the whole archive can take a minute.</span>}</>
 }
 
-/** A large count at a glance: 1.35B, 312M, 48K. */
-const big = (n: number) => n >= 1e9 ? `${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `${Math.round(n / 1e6)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}K` : number(n)
+/** What a count of each kind reads as. */
+const kindLabels: Record<string, string> = { pdf: 'PDFs', web_page: 'web pages', spreadsheet: 'spreadsheets', document: 'office documents', video: 'video transcripts', text: 'text files', other: 'other' }
+
+/** The corpus by kind, largest first. A server without the count still gives the total. */
+const kindsOf = (kinds: Record<string, number> | undefined, total: number): Array<[string, number]> => kinds
+  ? Object.entries(kinds).filter(([, count]) => count > 0).sort((a, b) => b[1] - a[1]).map(([kind, count]) => [kindLabels[kind] || kind, count])
+  : [['documents', total]]
 
 function Stat({ value, label }: { value: string; label: string }) {
-  return <div className="flex flex-row-reverse gap-1.5"><dt>{label}</dt><dd>{value}</dd></div>
+  return <div className="flex flex-row-reverse gap-1"><dt>{label}</dt><dd>{value}</dd></div>
 }
 
 /**

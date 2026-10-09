@@ -44,6 +44,8 @@ export type CorpusFacets = {
   usage: Record<string, number>
   /** Per classifier key: matching documents in each tenth of score, low to high. */
   scores: Record<string, number[]>
+  /** Matching documents by what they were read as: `pdf`, `web_page`, `spreadsheet`, … `other`. Absent from servers older than this field. */
+  kinds?: Record<string, number>
 }
 
 export type QuestionAction = 'exclude' | 'tag' | 'keep'
