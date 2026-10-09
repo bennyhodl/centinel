@@ -114,11 +114,11 @@ function Stat({ value, label, flame }: { value: string; label: string; flame?: b
  */
 function SearchBox({ initial, large, ready, onSearch, children }: { initial: string; large?: boolean; ready?: boolean; onSearch: (text: string) => void; children: React.ReactNode }) {
   const [draft, setDraft] = useState(initial)
-  return <form className={`w-full max-w-[760px] ${large ? '' : 'flex-1'}`} onSubmit={event => { event.preventDefault(); if (draft.trim() || ready) onSearch(draft.trim()) }}>
+  return <form className={`w-full ${large ? 'max-w-[760px]' : 'flex-1'}`} onSubmit={event => { event.preventDefault(); if (draft.trim() || ready) onSearch(draft.trim()) }}>
     <div className="grid rounded-[22px] border border-input bg-background shadow-[0_1px_2px_rgba(26,23,18,0.04),0_10px_30px_rgba(26,23,18,0.06)] focus-within:border-[#CFC6B5]">
       <input autoFocus={large} value={draft} onChange={event => setDraft(event.target.value)} placeholder="Search the corpus: a phrase, a name, a project" aria-label="Search the corpus"
         className={`bg-transparent px-5 outline-none placeholder:text-muted-foreground ${large ? 'h-[72px] text-[18px]' : 'h-14 text-[15px]'}`} />
-      <div className="flex items-center gap-2 px-3 pb-3">
+      <div className="flex min-w-0 items-center gap-2 px-3 pb-3">
         {children}
         <button type="submit" disabled={!draft.trim() && !ready} aria-label="Search" className="ml-auto grid size-10 shrink-0 place-items-center rounded-full bg-foreground text-parchment transition-opacity duration-(--motion-micro) disabled:opacity-25"><ArrowUp className="size-[18px]" /></button>
       </div>
@@ -131,7 +131,7 @@ function FilterBar({ search, set, classifiers, sources, facets }: { search: Sear
   const chosen = sourcesIn(search.source)
   const classifier = classifiers.find(([key]) => key === search.classifier)?.[1] || search.classifier
   const any = Boolean(search.classifier || chosen.length || search.usage !== 'all' || search.address)
-  return <div className="flex min-w-0 flex-wrap items-center gap-1">
+  return <div className="flex min-w-0 flex-1 flex-nowrap items-center gap-1">
     <Filter kind="classifier" label="Classifiers" value={search.classifier ? `${classifier} ${search.minScore || '0'}–${search.maxScore || '1'}` : ''} onClear={() => set({ classifier: '', page: 1 })}>
       <ClassifierPanel search={search} set={set} classifiers={classifiers} facets={facets} />
     </Filter>
@@ -147,21 +147,21 @@ function FilterBar({ search, set, classifiers, sources, facets }: { search: Sear
     <Filter kind="words" label="Address" value={search.address} onClear={() => set({ address: '', page: 1 })}>
       <AddressPanel address={search.address} set={set} />
     </Filter>
-    {any && <button type="button" onClick={() => set({ classifier: '', source: '', usage: 'all', address: '', page: 1 })} className="ml-1 h-8 px-2 text-[13px] text-muted-foreground hover:text-foreground">Clear</button>}
+    {any && <button type="button" onClick={() => set({ classifier: '', source: '', usage: 'all', address: '', page: 1 })} className="ml-1 h-8 shrink-0 px-2 text-[13px] text-muted-foreground hover:text-foreground">Clear</button>}
   </div>
 }
 
-const Divider = () => <span aria-hidden className="mx-0.5 h-5 w-px bg-rule" />
+const Divider = () => <span aria-hidden className="mx-0.5 h-5 w-px shrink-0 bg-rule" />
 
 function Filter({ kind, label, value, onClear, children }: { kind: Tone; label: string; value: string; onClear: () => void; children: React.ReactNode }) {
   return <Popover>
-    <span className={`inline-flex h-9 items-center rounded-full text-[14px] transition-colors duration-(--motion-micro) ${value ? tone[kind].on : 'text-muted-foreground hover:bg-[#FBF8F1] hover:text-foreground'}`}>
-      <PopoverTrigger type="button" className="inline-flex h-full items-center gap-2 rounded-full pr-2 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-flame/40">
-        <span className={`size-1.5 rounded-full ${tone[kind].dot}`} />
-        {value ? <b className="max-w-48 truncate font-semibold">{value}</b> : <span>{label}</span>}
+    <span className={`inline-flex h-9 min-w-0 items-center rounded-full text-[14px] transition-colors duration-(--motion-micro) ${value.length > 14 ? 'shrink' : 'shrink-0'} ${value ? tone[kind].on : 'text-muted-foreground hover:bg-[#FBF8F1] hover:text-foreground'}`}>
+      <PopoverTrigger type="button" className="inline-flex h-full min-w-0 items-center gap-2 rounded-full pr-2 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-flame/40">
+        <span className={`size-1.5 shrink-0 rounded-full ${tone[kind].dot}`} />
+        {value ? <b className="min-w-0 truncate font-semibold" title={value}>{value}</b> : <span>{label}</span>}
         {!value && <ChevronDown className="size-3.5 opacity-60" />}
       </PopoverTrigger>
-      {value && <button type="button" aria-label={`Clear ${label}`} onClick={onClear} className="pr-2.5 opacity-60 hover:opacity-100"><X className="size-3.5" /></button>}
+      {value && <button type="button" aria-label={`Clear ${label}`} onClick={onClear} className="shrink-0 pr-2.5 opacity-60 hover:opacity-100"><X className="size-3.5" /></button>}
     </span>
     <PopoverContent align="start" sideOffset={10} className="w-80 p-3">{children}</PopoverContent>
   </Popover>
