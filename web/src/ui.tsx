@@ -7,9 +7,27 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import type { DocumentIdentity } from './api'
 import { decisionLabels, type Decision } from './policy'
 
-export function PageHeader({ eyebrow, title, detail, children }: { eyebrow: string; title: string; detail?: string; children?: React.ReactNode }) {
-  return <header className="mb-6 flex flex-col justify-between gap-6 sm:flex-row sm:items-end [&_h1]:text-3xl [&_h1]:font-semibold [&_p]:mt-2 [&_p]:text-sm [&_p]:text-muted-foreground"><div><span className="text-xs font-medium text-muted-foreground">{eyebrow}</span><h1>{title}</h1>{detail && <p>{detail}</p>}</div>{children}</header>
+export function PageHeader({ eyebrow, title, detail, children }: { eyebrow?: React.ReactNode; title: string; detail?: string; children?: React.ReactNode }) {
+  return <header className="mb-7 flex flex-col justify-between gap-6 sm:flex-row sm:items-end">
+    <div className="min-w-0">
+      {eyebrow && <div className="mb-2 text-[13px] text-muted-foreground">{eyebrow}</div>}
+      <h1 className="font-serif text-[40px] leading-[44px] tracking-[-0.01em] wrap-anywhere">{title}</h1>
+      {detail && <p className="mt-2 text-sm text-muted-foreground">{detail}</p>}
+    </div>
+    {children}
+  </header>
 }
+
+/** A ruled section label, the small caps line every list and panel starts with. */
+export function SectionRule({ children, aside }: { children: React.ReactNode; aside?: React.ReactNode }) {
+  return <div className="flex h-8 items-center justify-between border-b border-foreground">
+    <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{children}</span>
+    {aside && <span className="text-xs text-muted-foreground">{aside}</span>}
+  </div>
+}
+
+/** The first seven characters of a hash: what Centinel prints, and takes back. */
+export const shortSha = (sha: string) => sha.slice(0, 7)
 export function ErrorBox({ error }: { error: Error }) { return <Alert variant="destructive" className="my-3"><AlertDescription>{error.message}</AlertDescription></Alert> }
 export function Empty({ children }: { children: React.ReactNode }) { return <div className="grid place-items-center gap-3 p-12 text-center text-sm text-muted-foreground [&_svg]:size-6"><CircleHelp /><p>{children}</p></div> }
 

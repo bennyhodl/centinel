@@ -138,7 +138,7 @@ export function Classify() {
 
   return <>
     <div ref={top} />
-    <PageHeader eyebrow="Jev classifiers" title="Classify" detail="Choose the questions, choose the documents, and run. Every answer shows here as it comes back." />
+    <PageHeader title="Classify" detail="Choose the questions, choose the documents, and run. Every answer shows here as it comes back." />
     {active && <LiveRun key={active.id} id={active.id} preview={active.preview} onDismiss={() => setActive(null)} />}
     {active?.preview && <PreviewResults id={active.id} />}
 

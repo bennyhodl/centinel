@@ -104,10 +104,25 @@ pub struct DownloadReport {
     pub other_matches: Vec<String>,
 }
 
-/// Download a collected document's bytes, base64-encoded, for saving elsewhere.
-#[op(group = "corpus")]
-pub async fn download(ctx: &Ctx, args: DownloadArgs) -> anyhow::Result<DownloadReport> {
-    let found = resolve(ctx, &args.target, args.source.as_deref()).await?;
+/// One collected document's whole bytes and what they are. What `download` pages and
+/// encodes for a JSON transport, and what the web workspace serves raw.
+pub struct Original {
+    pub url: String,
+    pub source: String,
+    pub kind: ContentKind,
+    pub blob_sha: String,
+    pub data_sha: String,
+    pub derived: bool,
+    pub filename: String,
+    pub media_type: Option<String>,
+    pub observed_at: String,
+    pub bytes: Vec<u8>,
+    pub other_matches: Vec<String>,
+}
+
+/// Resolve `target` the way `download` does and load its whole bytes.
+pub async fn original(ctx: &Ctx, target: &str, source: Option<&str>) -> anyhow::Result<Original> {
+    let found = resolve(ctx, target, source).await?;
     let (source, resource, obs) = (found.source, found.resource, found.observation);
     let other_matches = found.other_matches;
 
@@ -121,7 +136,6 @@ pub async fn download(ctx: &Ctx, args: DownloadArgs) -> anyhow::Result<DownloadR
     // The whole blob, verified against its address — these bytes leave the machine and
     // will be saved as the document, which is exactly the case `blob_head` is not for.
     let whole = ctx.store.get_blob(&data_sha).await?;
-    let total_bytes = whole.len();
 
     let kind = if derived {
         ContentKind::Markdown
@@ -143,31 +157,51 @@ pub async fn download(ctx: &Ctx, args: DownloadArgs) -> anyhow::Result<DownloadR
         obs.meta.get("content-type").cloned()
     };
 
-    let start = args.offset.min(total_bytes);
-    let end = if args.max_bytes == 0 {
-        total_bytes
-    } else {
-        total_bytes.min(start.saturating_add(args.max_bytes))
-    };
-    let page = &whole[start..end];
-
-    Ok(DownloadReport {
+    Ok(Original {
         url: resource.natural_key,
         source: source.to_string(),
-        kind: kind.to_string(),
+        kind,
         blob_sha: obs.blob_sha.to_string(),
         data_sha: data_sha.to_string(),
         derived,
         filename,
         media_type,
         observed_at: obs.at.to_string(),
+        bytes: whole,
+        other_matches,
+    })
+}
+
+/// Download a collected document's bytes, base64-encoded, for saving elsewhere.
+#[op(group = "corpus")]
+pub async fn download(ctx: &Ctx, args: DownloadArgs) -> anyhow::Result<DownloadReport> {
+    let doc = original(ctx, &args.target, args.source.as_deref()).await?;
+    let total_bytes = doc.bytes.len();
+    let start = args.offset.min(total_bytes);
+    let end = if args.max_bytes == 0 {
+        total_bytes
+    } else {
+        total_bytes.min(start.saturating_add(args.max_bytes))
+    };
+    let page = &doc.bytes[start..end];
+
+    Ok(DownloadReport {
+        url: doc.url,
+        source: doc.source,
+        kind: doc.kind.to_string(),
+        blob_sha: doc.blob_sha,
+        data_sha: doc.data_sha,
+        derived: doc.derived,
+        filename: doc.filename,
+        media_type: doc.media_type,
+        observed_at: doc.observed_at,
         encoding: "base64".to_string(),
         data: base64::engine::general_purpose::STANDARD.encode(page),
         bytes: page.len(),
         total_bytes,
         offset: start,
         truncated: start + page.len() < total_bytes,
-        other_matches,
+        other_matches: doc.other_matches,
     })
 }
 

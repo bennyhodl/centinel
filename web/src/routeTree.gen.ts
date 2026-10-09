@@ -11,8 +11,10 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ClassifiersRouteImport } from './routes/classifiers'
+import { Route as ConnectRouteImport } from './routes/connect'
 import { Route as ReviewRouteImport } from './routes/review'
 import { Route as RunsRouteImport } from './routes/runs'
+import { Route as SkillsRouteImport } from './routes/skills'
 import { Route as DocumentShaRouteImport } from './routes/document.$sha'
 
 const IndexRoute = IndexRouteImport.update({
@@ -25,6 +27,11 @@ const ClassifiersRoute = ClassifiersRouteImport.update({
   path: '/classifiers',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ConnectRoute = ConnectRouteImport.update({
+  id: '/connect',
+  path: '/connect',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ReviewRoute = ReviewRouteImport.update({
   id: '/review',
   path: '/review',
@@ -33,6 +40,11 @@ const ReviewRoute = ReviewRouteImport.update({
 const RunsRoute = RunsRouteImport.update({
   id: '/runs',
   path: '/runs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SkillsRoute = SkillsRouteImport.update({
+  id: '/skills',
+  path: '/skills',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DocumentShaRoute = DocumentShaRouteImport.update({
@@ -44,38 +56,68 @@ const DocumentShaRoute = DocumentShaRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/classifiers': typeof ClassifiersRoute
+  '/connect': typeof ConnectRoute
   '/review': typeof ReviewRoute
   '/runs': typeof RunsRoute
+  '/skills': typeof SkillsRoute
   '/document/$sha': typeof DocumentShaRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/classifiers': typeof ClassifiersRoute
+  '/connect': typeof ConnectRoute
   '/review': typeof ReviewRoute
   '/runs': typeof RunsRoute
+  '/skills': typeof SkillsRoute
   '/document/$sha': typeof DocumentShaRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/classifiers': typeof ClassifiersRoute
+  '/connect': typeof ConnectRoute
   '/review': typeof ReviewRoute
   '/runs': typeof RunsRoute
+  '/skills': typeof SkillsRoute
   '/document/$sha': typeof DocumentShaRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/classifiers' | '/review' | '/runs' | '/document/$sha'
+  fullPaths:
+    | '/'
+    | '/classifiers'
+    | '/connect'
+    | '/review'
+    | '/runs'
+    | '/skills'
+    | '/document/$sha'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/classifiers' | '/review' | '/runs' | '/document/$sha'
-  id: '__root__' | '/' | '/classifiers' | '/review' | '/runs' | '/document/$sha'
+  to:
+    | '/'
+    | '/classifiers'
+    | '/connect'
+    | '/review'
+    | '/runs'
+    | '/skills'
+    | '/document/$sha'
+  id:
+    | '__root__'
+    | '/'
+    | '/classifiers'
+    | '/connect'
+    | '/review'
+    | '/runs'
+    | '/skills'
+    | '/document/$sha'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ClassifiersRoute: typeof ClassifiersRoute
+  ConnectRoute: typeof ConnectRoute
   ReviewRoute: typeof ReviewRoute
   RunsRoute: typeof RunsRoute
+  SkillsRoute: typeof SkillsRoute
   DocumentShaRoute: typeof DocumentShaRoute
 }
 
@@ -95,6 +137,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ClassifiersRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/connect': {
+      id: '/connect'
+      path: '/connect'
+      fullPath: '/connect'
+      preLoaderRoute: typeof ConnectRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/review': {
       id: '/review'
       path: '/review'
@@ -107,6 +156,13 @@ declare module '@tanstack/react-router' {
       path: '/runs'
       fullPath: '/runs'
       preLoaderRoute: typeof RunsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/skills': {
+      id: '/skills'
+      path: '/skills'
+      fullPath: '/skills'
+      preLoaderRoute: typeof SkillsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/document/$sha': {
@@ -122,8 +178,10 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ClassifiersRoute: ClassifiersRoute,
+  ConnectRoute: ConnectRoute,
   ReviewRoute: ReviewRoute,
   RunsRoute: RunsRoute,
+  SkillsRoute: SkillsRoute,
   DocumentShaRoute: DocumentShaRoute,
 }
 export const routeTree = rootRouteImport

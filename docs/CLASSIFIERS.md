@@ -103,7 +103,7 @@ forced into a wrong one. Write options by purpose, with the words a reader sees 
 page, and name the one or two options each is most likely confused with.
 
 The answers are stored as `question` for a noul and `question:option` for each option of a
-choice. The Corpus can filter on either. For a choice, the Corpus score under its own id
+choice. Search can filter on either. For a choice, the score Search filters under its own id
 is the summed probability of its exclude options under the current actions.
 
 ### The junk gate
@@ -296,13 +296,17 @@ Jev with how long each has waited and which request it is on, and the latest ans
 they land. When scoring stops, the same panel gives the counts by decision and the
 commit. The sidebar marks a running run from every page.
 
-The workspace has four views:
+The workspace has six views, in a sidebar grouped Archive, Classifiers, and Agent:
 
-- **Corpus** pages through the index without loading it into browser memory. Full-text,
-  address, Source, usage, and classifier filters can be combined. The reader resolves
-  the exact Source, Resource, and derived text identity, including shared text.
-- **Classifiers** edits atomic Jev questions and their policy thresholds. A trial sends
-  the Corpus filter and a count; the server resolves the top matches in one query and
+- **Search** pages through the index without loading it into browser memory. Full-text,
+  address, Source, usage, and a classifier score range can be combined. The reader
+  resolves the exact Source, Resource, and derived text identity, including shared text.
+  It shows the document as collected beside its extracted text: a PDF in the browser's
+  viewer, a CSV as a table, HTML as the page and as its source. `GET
+  /workspace/original` serves those bytes, and Download saves them. Collected HTML is
+  served with a sandbox policy, so a page never runs on the workspace's origin.
+- **Classify** edits atomic Jev questions and their policy thresholds. A trial sends
+  the Search filter and a count; the server resolves the top matches in one query and
   stores the exact identities with the run, so the browser never pages the corpus back
   and forth. The start request is answered at once with the run as started. Scoring
   continues on the server with a bounded number of documents in flight to Jev at a time
@@ -332,6 +336,10 @@ The workspace has four views:
   A repeat names the run it repeats, and the server copies its inputs.
   An exact selection can be repeated for a comparable benchmark. A run with durable
   progress but no completion record is shown as interrupted after a server restart.
+- **Review** puts one document beside every answer Jev gave it, for a person's verdict.
+- **Connect** shows how to add Centinel's MCP server to an agent, and lists the tools
+  the registry offers it. **Skills** shows `npx skills add bennyhodl/centinel` and what
+  each skill in `contrib/skills/` does.
 
 Run and Commit are separate operations. A run stores scores and previews the documents,
 placements, characters, and unique chunks affected by its exclusion rules. Commit writes

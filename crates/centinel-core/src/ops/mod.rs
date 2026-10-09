@@ -60,7 +60,7 @@ pub use collect::{CollectArgs, CollectFailure, CollectReport, collect};
 pub use crumbs::{CrumbsAction, CrumbsArgs, CrumbsReport, RuleArgs, ShowArgs, crumbs};
 pub use discover::{DiscoverArgs, DiscoverReport, discover};
 pub use doctor::{Binary, DoctorArgs, DoctorReport, GateStatus, Weights, doctor};
-pub use download::{DownloadArgs, DownloadReport, download};
+pub use download::{DownloadArgs, DownloadReport, Original, download, original};
 pub use embed::{BatchSize, EmbedArgs, EmbedReport, Skipped, embed};
 pub use evaluate::{EvaluateArgs, evaluate};
 pub use extract::{ExtractArgs, ExtractReport, ExtractSample, Unreadable, extract};

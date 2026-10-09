@@ -46,6 +46,9 @@ export function answerSummary(questions: Question[], result: RunResult) {
   return parts.join(' · ') || 'nothing passed a threshold'
 }
 
+/** One colour per decision: ink is kept, the flame needs a person, faded ink is excluded. */
+const barTone: Record<string, string> = { exclude: 'bg-[#B9AE98]', review: 'bg-flame', keep: 'bg-foreground', error: 'bg-destructive' }
+
 const segments = [
   ['excluded', 'exclude', 'Exclude'],
   ['review', 'review', 'Review'],
@@ -109,7 +112,7 @@ export function LiveRun({ id, embedded, preview, onDismiss, onOutcome }: {
   const go = (outcome: ResultOutcome) => onOutcome ? onOutcome(outcome) : !preview && navigate({ to: '/runs', search: { run: id, page: 1, outcome } })
   const failureGroups = groupErrors(failures.data?.results || [])
 
-  return <section className={`mb-4 grid gap-3 rounded-lg border bg-card p-4 [&>header]:flex [&>header]:flex-wrap [&>header]:items-center [&>header]:gap-2 [&>header]:text-sm [&_h4]:mb-2 [&_h4]:text-xs [&_h4]:font-semibold [&_footer]:text-xs ${running ? '' : run.status === 'failed' ? 'border-destructive' : ''}`} aria-live="polite">
+  return <section className={`mb-4 grid gap-3 rounded-[10px] border p-5 [&>header]:flex [&>header]:flex-wrap [&>header]:items-center [&>header]:gap-2 [&>header]:text-sm [&_h4]:mb-2 [&_h4]:text-xs [&_h4]:font-semibold [&_footer]:text-xs ${running ? 'border-[#F0D6B0] bg-[#FFFBF4] [&>header>b]:text-flame-ink' : run.status === 'failed' ? 'border-destructive bg-card' : 'bg-card'}`} aria-live="polite">
     <header>
       {running ? <Pulse /> : run.status === 'failed' ? <CircleAlert /> : <CircleCheck />}
       <b>{running ? 'Classifying' : run.status === 'failed' ? 'The run stopped' : preview ? 'Preview finished' : 'Finished'}</b>
@@ -120,8 +123,8 @@ export function LiveRun({ id, embedded, preview, onDismiss, onOutcome }: {
       {!embedded && onDismiss && !running && <Button size="sm" variant="ghost" aria-label="Dismiss" onClick={onDismiss}><X /></Button>}
     </header>
 
-    <div className="flex h-2.5 overflow-hidden rounded bg-muted [&_i]:block [&_i]:h-full [&_i]:bg-primary [&_i:nth-child(2)]:opacity-70 [&_i:nth-child(3)]:opacity-50" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={scored}>
-      {totals && segments.map(([key, tone]) => totals[key] ? <i key={key} className={tone === 'error' ? 'bg-destructive' : 'bg-primary'} style={{ width: `${totals[key] / Math.max(1, total) * 100}%` }} /> : null)}
+    <div className="flex h-2.5 overflow-hidden rounded-full bg-[#EFE9DC] [&_i]:block [&_i]:h-full" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={scored}>
+      {totals && segments.map(([key, tone]) => totals[key] ? <i key={key} className={barTone[tone]} style={{ width: `${totals[key] / Math.max(1, total) * 100}%` }} /> : null)}
       {running && <i className="animate-pulse bg-muted-foreground" style={{ width: `${(view?.in_flight?.length || 0) / Math.max(1, total) * 100}%` }} />}
     </div>
 

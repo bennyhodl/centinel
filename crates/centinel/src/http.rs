@@ -177,6 +177,7 @@ fn router(ctx: Arc<Ctx>) -> Router {
         .route("/workspace/documents", get(workspace_documents))
         .route("/workspace/system", get(workspace_system))
         .route("/workspace/document", get(workspace_document))
+        .route("/workspace/original", get(workspace_original))
         .route(
             "/workspace/questions",
             get(workspace_questions).put(workspace_save_questions),
@@ -240,6 +241,69 @@ async fn workspace_document(
     Query(query): Query<ReadQuery>,
 ) -> Response {
     workspace_response(Workspace::new(&ctx.store).read(query).await)
+}
+
+#[derive(serde::Deserialize)]
+struct OriginalQuery {
+    /// A blob hash, full or short, as the reader holds it.
+    blob: String,
+    source: Option<String>,
+    /// Ask the browser to save the file rather than show it.
+    #[serde(default)]
+    download: bool,
+}
+
+/// A document's original bytes, for the reader to show and to save.
+///
+/// Collected HTML is another site's page served from this origin, beside the workspace's
+/// writes, so nothing served here may run: every response carries a sandbox policy and
+/// `nosniff`. A PDF is the one exception, because the browser's own viewer will not open
+/// a sandboxed document, and a PDF viewer runs no page script on this origin.
+async fn workspace_original(
+    State(ctx): State<Arc<Ctx>>,
+    Query(query): Query<OriginalQuery>,
+) -> Response {
+    use axum::http::header;
+    use centinel_core::content::ContentKind;
+
+    let doc = match centinel_core::ops::original(&ctx, &query.blob, query.source.as_deref()).await {
+        Ok(doc) => doc,
+        Err(error) => return workspace_error(error),
+    };
+    let content_type = doc
+        .media_type
+        .clone()
+        .or_else(|| {
+            ContentKind::declared_type_for_path(std::path::Path::new(&doc.filename))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let name: String = doc
+        .filename
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .filter(|c| *c != '"' && *c != '\\')
+        .collect();
+    let disposition = format!(
+        "{}; filename=\"{name}\"",
+        if query.download { "attachment" } else { "inline" }
+    );
+    let mut response = (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
+        doc.bytes,
+    )
+        .into_response();
+    if doc.kind != ContentKind::Pdf {
+        response.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            axum::http::HeaderValue::from_static("sandbox"),
+        );
+    }
+    response
 }
 
 async fn workspace_system(State(ctx): State<Arc<Ctx>>) -> Response {

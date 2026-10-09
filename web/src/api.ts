@@ -313,8 +313,16 @@ export type SystemInfo = {
   store_root: string
 }
 
+/** One op the registry offers a remote caller. `mcp` says whether agents see it as a tool. */
+export type RemoteOp = { name: string; about: string; mcp: boolean; long_running: boolean }
+
+/** Where the reader fetches a document's bytes as collected. */
+export const originalUrl = (blob: string, source: string, download = false) =>
+  `/workspace/original?${new URLSearchParams({ blob, source, ...(download ? { download: 'true' } : {}) })}`
+
 export const api = {
   system: () => request<SystemInfo>('/workspace/system'),
+  ops: () => request<{ ops: RemoteOp[] }>('/ops').then(value => withArray(value, 'ops', '/ops')),
   corpus: (params: URLSearchParams) => {
     const path = `/workspace/documents?${params}`
     return request<CorpusPage>(path).then(value => withArray(withArray(value, 'documents', path), 'sources', path))

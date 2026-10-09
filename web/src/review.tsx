@@ -52,7 +52,7 @@ export function Review() {
   })
 
   return <>
-    <PageHeader eyebrow="Human in the loop" title="Review" detail="Read the document, say what it is. Right arrow for a record, left for junk, Enter to record the card as it stands.">
+    <PageHeader title="Review" detail="Read the document, say what it is. Right arrow for a record, left for junk, Enter to record the card as it stands.">
       <div className="grid gap-1 border-l pl-4 text-sm [&_span]:text-muted-foreground [&_b]:text-2xl"><span>In the review band</span><b>{queue.data ? number(queue.data.in_review_band) : '—'}</b></div>
       <div className="grid gap-1 border-l pl-4 text-sm [&_span]:text-muted-foreground [&_b]:text-2xl"><span>Reviewed</span><b>{queue.data ? number(queue.data.reviewed) : '—'}</b></div>
     </PageHeader>

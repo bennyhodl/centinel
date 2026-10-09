@@ -1,18 +1,19 @@
 import type { ReactNode } from 'react'
 import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useLocation } from '@tanstack/react-router'
 import { QueryClientProvider, useQuery, type QueryClient } from '@tanstack/react-query'
-import { Archive, Eye, FlaskConical, History, ShieldCheck } from 'lucide-react'
-import { api } from '../api'
-import { Pulse } from '../ui'
+import { Eye, FlaskConical, History, Plug, Search, ShieldCheck, Sparkles } from 'lucide-react'
+import { api, corpusParams } from '../api'
+import { number } from '../format'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
+import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
+import crest from '../assets/crest.jpg'
 import styles from '../styles.css?url'
 
 export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()({
   head: () => ({
     meta: [
       { charSet: 'utf-8' },
-      { title: 'Centinel corpus workspace' },
+      { title: 'Centinel' },
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
       { name: 'color-scheme', content: 'light' },
       { name: 'centinel-version', content: __CENTINEL_VERSION__ },
@@ -32,9 +33,15 @@ function App() {
   return <QueryClientProvider client={queryClient}><Shell /></QueryClientProvider>
 }
 
+const searchDefaults = { text: '', address: '', page: 1, source: '', usage: 'all', classifier: '', minScore: '0.5', maxScore: '' }
+
 function Shell() {
   const pathname = useLocation({ select: location => location.pathname })
   const system = useQuery({ queryKey: ['system'], queryFn: api.system, staleTime: 60_000 })
+  const corpus = useQuery({ queryKey: ['corpus', 'count'], queryFn: () => api.corpus(corpusParams({ search: '', address: '', source: '', usage: 'all', classifier: '', min_score: '', max_score: '' }, 1, 1)), staleTime: 60_000 })
+  const questions = useQuery({ queryKey: ['questions'], queryFn: api.questions })
+  const review = useQuery({ queryKey: ['review', 'count'], queryFn: () => api.reviewQueue({ page_size: 1 }), staleTime: 30_000 })
+  // The rail says when a run is going, from any page.
   const recent = useQuery({
     queryKey: ['runs', 'rail'],
     queryFn: () => api.runs(1, 10),
@@ -43,20 +50,94 @@ function Shell() {
   const running = recent.data?.runs.filter(run => run.status === 'running') || []
   const serverVersion = system.data?.version
   const stale = Boolean(serverVersion && serverVersion !== __CENTINEL_VERSION__)
-  return <SidebarProvider>
-    <Sidebar collapsible="icon">
-      <SidebarHeader className="p-4 group-data-[collapsible=icon]:hidden"><b>Centinel</b><small className="text-muted-foreground">Corpus workspace · v{__CENTINEL_VERSION__}</small></SidebarHeader>
-      <SidebarContent><SidebarMenu className="px-2">
-        <SidebarMenuItem><SidebarMenuButton asChild isActive={pathname === '/web' || pathname === '/web/'} tooltip="Corpus"><Link to="/" search={{ text: '', address: '', page: 1, source: '', usage: 'all', classifier: '', minScore: '0.5', maxScore: '' }}><Archive /><span>Corpus</span></Link></SidebarMenuButton></SidebarMenuItem>
-        <SidebarMenuItem><SidebarMenuButton asChild isActive={pathname === '/web/classifiers'} tooltip="Classify"><Link to="/classifiers"><FlaskConical /><span>Classify</span></Link></SidebarMenuButton></SidebarMenuItem>
-        <SidebarMenuItem><SidebarMenuButton asChild isActive={pathname === '/web/runs'} tooltip="Runs"><Link to="/runs" search={{ run: running[0]?.id || '', page: 1, outcome: '' }}><History /><span>Runs</span>{running.length > 0 && <span className="ml-auto inline-flex items-center gap-1 text-xs"><Pulse />{running.length} running</span>}</Link></SidebarMenuButton></SidebarMenuItem>
-        <SidebarMenuItem><SidebarMenuButton asChild isActive={pathname === '/web/review'} tooltip="Review"><Link to="/review"><Eye /><span>Review</span></Link></SidebarMenuButton></SidebarMenuItem>
-      </SidebarMenu></SidebarContent>
-      <SidebarFooter className="p-4 group-data-[collapsible=icon]:hidden"><div className="flex gap-2 text-xs"><ShieldCheck className="size-4 shrink-0" /><div><b>Archive stays intact</b><p className="mt-1 text-muted-foreground">Classification changes corpus usage. Collected bytes and the log do not change.</p></div></div></SidebarFooter>
+  const at = (path: string) => pathname === `/web${path}` || (path === '/' && pathname === '/web')
+
+  return <SidebarProvider className="bg-ground">
+    <Sidebar variant="floating" collapsible="icon">
+      <SidebarHeader className="px-3 pt-4 pb-2">
+        <div className="flex items-center gap-3 px-1">
+          <img src={crest} alt="" className="size-11 shrink-0 rounded-md border border-foreground object-cover group-data-[collapsible=icon]:size-8" />
+          <div className="grid group-data-[collapsible=icon]:hidden">
+            <span className="font-display text-[22px] leading-6 tracking-[0.08em]">Centinel</span>
+            <span className="text-[11px] text-muted-foreground">v{__CENTINEL_VERSION__}</span>
+          </div>
+        </div>
+      </SidebarHeader>
+      <SidebarContent>
+        <NavGroup label="Archive">
+          <NavItem active={at('/')} label="Search" icon={<Search />} count={corpus.data && number(corpus.data.total)}>
+            <Link to="/" search={searchDefaults}><Search /><span>Search</span></Link>
+          </NavItem>
+        </NavGroup>
+        <NavGroup label="Classifiers">
+          <NavItem active={at('/classifiers')} label="Classify" count={questions.data && number(questions.data.questions.length)}>
+            <Link to="/classifiers"><FlaskConical /><span>Classify</span></Link>
+          </NavItem>
+          <NavItem active={at('/runs')} label="Runs" count={running.length ? <LivePill>{running.length} live</LivePill> : recent.data && number(recent.data.total)}>
+            <Link to="/runs" search={{ run: '', page: 1, outcome: '' }}><History /><span>Runs</span></Link>
+          </NavItem>
+          <NavItem active={at('/review')} label="Review" count={review.data?.in_review_band ? <span className="font-semibold text-flame-ink">{number(review.data.in_review_band)}</span> : undefined}>
+            <Link to="/review"><Eye /><span>Review</span></Link>
+          </NavItem>
+        </NavGroup>
+        <NavGroup label="Agent">
+          <NavItem active={at('/connect')} label="Connect" count={<span className="inline-flex items-center gap-1.5"><span className="size-1.5 rounded-full bg-[#4F7A4A]" />MCP</span>}>
+            <Link to="/connect"><Plug /><span>Connect</span></Link>
+          </NavItem>
+          <NavItem active={at('/skills')} label="Skills" count="1">
+            <Link to="/skills"><Sparkles /><span>Skills</span></Link>
+          </NavItem>
+        </NavGroup>
+      </SidebarContent>
+      <SidebarFooter className="gap-3 px-3 pb-3">
+        {running.length > 0 && <WorkingNow runs={running} />}
+        <div className="flex items-center justify-between gap-2 border-t pt-3 text-xs text-muted-foreground">
+          <span className="truncate group-data-[collapsible=icon]:hidden">{system.data?.store_root || '…'}</span>
+          <SidebarTrigger className="size-7" />
+        </div>
+      </SidebarFooter>
     </Sidebar>
-    <SidebarInset className="min-w-0"><header className="flex h-12 items-center border-b px-4"><SidebarTrigger /></header><div className="min-w-0 p-4 md:p-8">
-      {stale && <Alert className="mb-4"><ShieldCheck /><AlertTitle>Server is v{serverVersion}</AlertTitle><AlertDescription>This page is v{__CENTINEL_VERSION__}. Stop the old `centinel web` and start it again, then reload.</AlertDescription></Alert>}
-      <Outlet />
-    </div></SidebarInset>
+    <SidebarInset className="min-w-0 bg-background md:my-2.5 md:mr-2.5 md:rounded-2xl md:border md:border-sidebar-border md:shadow-[0_1px_2px_rgba(26,23,18,0.06),0_8px_24px_rgba(26,23,18,0.05)]">
+      <div className="flex h-12 items-center px-4 md:hidden"><SidebarTrigger /></div>
+      <div className="min-w-0 px-5 py-6 md:px-10 md:py-8">
+        {stale && <Alert className="mb-6"><ShieldCheck /><AlertTitle>Server is v{serverVersion}</AlertTitle><AlertDescription>This page is v{__CENTINEL_VERSION__}. Stop the old `centinel web` and start it again, then reload.</AlertDescription></Alert>}
+        <Outlet />
+      </div>
+    </SidebarInset>
   </SidebarProvider>
+}
+
+function NavGroup({ label, children }: { label: string; children: ReactNode }) {
+  return <SidebarGroup className="py-1">
+    <SidebarGroupLabel className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{label}</SidebarGroupLabel>
+    <SidebarMenu>{children}</SidebarMenu>
+  </SidebarGroup>
+}
+
+function NavItem({ active, label, count, children }: { active: boolean; label: string; icon?: ReactNode; count?: ReactNode; children: ReactNode }) {
+  return <SidebarMenuItem>
+    <SidebarMenuButton asChild isActive={active} tooltip={label} className="h-9 text-[14px] data-[active=true]:bg-background data-[active=true]:font-semibold data-[active=true]:shadow-[0_0_0_1px_var(--rule)]">{children}</SidebarMenuButton>
+    {count !== undefined && <SidebarMenuBadge className="top-2 font-mono text-xs font-normal text-muted-foreground">{count}</SidebarMenuBadge>}
+  </SidebarMenuItem>
+}
+
+function LivePill({ children }: { children: ReactNode }) {
+  return <span className="inline-flex items-center gap-1.5 rounded-full bg-flame-soft px-2 py-0.5 font-sans text-[11px] font-semibold text-flame-ink"><span className="size-1.5 rounded-full bg-flame shadow-[0_0_0_3px_#F6D9B4]" />{children}</span>
+}
+
+/** What is running right now, from any page. Only classify runs report progress today. */
+function WorkingNow({ runs }: { runs: Array<{ id: string; document_count: number }> }) {
+  return <div className="grid gap-2 border-t pt-3 group-data-[collapsible=icon]:hidden">
+    <span className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-flame-ink"><span className="size-1.5 rounded-full bg-flame shadow-[0_0_0_3px_#F6D9B4]" />Working now</span>
+    {runs.map(run => <RunProgress key={run.id} id={run.id} total={run.document_count} />)}
+  </div>
+}
+
+function RunProgress({ id, total }: { id: string; total: number }) {
+  const detail = useQuery({ queryKey: ['run', id, 'rail'], queryFn: () => api.runDetail(id, { page: 1, page_size: 1 }), refetchInterval: 2000 })
+  const scored = detail.data?.view?.scored ?? 0
+  const all = detail.data?.view?.input_total ?? total
+  return <Link to="/runs" search={{ run: id, page: 1, outcome: '' }} className="flex justify-between rounded-md px-1.5 py-1 text-[13px] hover:bg-background">
+    <span>Classifying</span><span className="font-mono text-xs text-muted-foreground">{all ? Math.floor(scored / all * 100) : 0}%</span>
+  </Link>
 }

@@ -2,14 +2,13 @@ import React, { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react'
-import { api, type ResultOutcome, type Run, type RunDetailQuery } from './api'
-import { Badge } from '@/components/ui/badge'
+import { api, type ResultOutcome, type Run, type RunDetailQuery, type RunSummary } from './api'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { money, number, plural, seconds, tail } from './format'
 import { LiveRun, useRunDetail } from './live'
 import { ResultsSection } from './results'
-import { DocumentLink, Empty, ErrorBox, PageHeader, Pulse, Spinner } from './ui'
+import { DocumentLink, Empty, ErrorBox, PageHeader, Spinner } from './ui'
 
 const startView = (outcome: string): RunDetailQuery => ({ page: 1, page_size: 100, outcome: outcome as ResultOutcome, sort: 'decision', direction: '' })
 
@@ -21,24 +20,52 @@ export function Runs() {
     queryFn: () => api.runs(search.page, 25),
     refetchInterval: current => current.state.data?.runs.some(run => run.status === 'running') ? 2000 : false,
   })
-  const selectedId = search.run || query.data?.runs[0]?.id || ''
   const [view, setView] = useState<RunDetailQuery>(() => startView(search.outcome))
-  useEffect(() => setView(startView(search.outcome)), [selectedId, search.outcome])
-  const detail = useRunDetail(selectedId, view)
+  useEffect(() => setView(startView(search.outcome)), [search.run, search.outcome])
+  const detail = useRunDetail(search.run, view)
   const pages = Math.max(1, Math.ceil((query.data?.total || 0) / (query.data?.page_size || 25)))
-  return <><PageHeader eyebrow="Run ledger" title="Runs" detail="Every run keeps its questions, its documents, and every answer. Check the decisions, then commit the exclusions." />
-    {query.error ? <ErrorBox error={query.error} /> : <div className="grid items-start gap-4 xl:grid-cols-[220px_minmax(0,1fr)]"><section className="rounded-lg border bg-card text-card-foreground shadow-sm p-1 [&_button]:w-full [&_button]:text-left [&_button]:rounded-md [&_button]:p-3 [&_button]:flex [&_button]:items-center [&_button]:justify-between [&_button]:gap-2 [&_button]:hover:bg-accent [&_small]:block [&_small]:text-xs [&_small]:text-muted-foreground">
-      <div className="flex min-h-11 items-center justify-between border-b px-4 text-sm font-medium [&_small]:text-muted-foreground"><span>Runs</span><small>{number(query.data?.total)}</small></div>
-      {query.data?.runs.map(item => <button key={item.id} className={item.id === selectedId ? 'bg-accent' : ''} onClick={() => navigate({ search: previous => ({ ...previous, run: item.id, outcome: '' }) })}>
-        <span><b>{item.created_at.slice(0, 16).replace('T', ' ')}</b><small>{plural(item.document_count, 'doc')} · {item.errors ? `${number(item.errors)} errors · ` : ''}{item.model}</small></span>
-        {item.status === 'running' ? <span className="inline-flex items-center gap-1 text-xs"><Pulse />running</span> : <Badge variant={item.status === 'failed' || item.status === 'interrupted' ? 'outline' : item.status === 'committed' ? 'default' : 'secondary'}>{item.status}</Badge>}
-      </button>)}
-      {query.data && !query.data.runs.length && <Empty>No runs yet. Start one on the Classify page.</Empty>}
-      {query.data && pages > 1 && <div className="flex items-center justify-center gap-2 border-t p-2 text-xs"><Button aria-label="Previous run page" variant="ghost" size="icon" disabled={search.page === 1} onClick={() => navigate({ search: { run: '', page: search.page - 1, outcome: '' } })}><ChevronLeft /></Button><span>{search.page} / {pages}</span><Button aria-label="Next run page" variant="ghost" size="icon" disabled={search.page >= pages} onClick={() => navigate({ search: { run: '', page: search.page + 1, outcome: '' } })}><ChevronRight /></Button></div>}
-    </section>
-      {detail.error ? <ErrorBox error={detail.error} /> : detail.data ? <RunDetail run={detail.data} view={view} setView={setView} loading={detail.isFetching} /> : selectedId ? <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground"><Spinner /> Reading the run…</div> : null}
-    </div>}
+  const open = (run: string) => navigate({ search: { run, page: search.page, outcome: '' } })
+
+  if (search.run) return <>
+    <PageHeader eyebrow={<button type="button" onClick={() => open('')} className="inline-flex items-center gap-1 hover:text-foreground"><ChevronLeft className="size-3.5" />All runs</button>} title="Run" />
+    {detail.error ? <ErrorBox error={detail.error} /> : detail.data ? <RunDetail run={detail.data} view={view} setView={setView} loading={detail.isFetching} /> : <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground"><Spinner /> Reading the run…</div>}
   </>
+
+  const running = query.data?.runs.filter(run => run.status === 'running') || []
+  return <>
+    <PageHeader title="Runs" detail="Each run asks Jev your questions about a set of documents. Nothing changes in the corpus until you commit it." />
+    {query.error && <ErrorBox error={query.error} />}
+    {running.map(run => <LiveRun key={run.id} id={run.id} />)}
+    <section className="mt-4">
+      <div className="flex h-8 items-center gap-6 border-b border-foreground text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+        <span className="w-36 shrink-0">Started</span><span className="flex-1">Asked</span><span className="hidden w-52 shrink-0 md:block">Outcome</span><span className="w-44 shrink-0 text-right">Next</span>
+      </div>
+      {query.data?.runs.map(run => <div key={run.id} role="button" tabIndex={0} onClick={() => open(run.id)} onKeyDown={event => event.key === 'Enter' && open(run.id)} className="flex cursor-pointer items-center gap-6 border-b py-4 hover:bg-[#FBF9F4]">
+        <span className="grid w-36 shrink-0 gap-0.5"><b className="text-sm font-semibold">{run.created_at.slice(0, 16).replace('T', ' ')}</b><span className="text-xs text-muted-foreground">{seconds(run.duration_ms)}{run.cost_usd != null ? ` · ${money(run.cost_usd)}` : ''}</span></span>
+        <span className="grid min-w-0 flex-1 gap-0.5"><span className="truncate text-sm">{plural(run.document_count, 'document')}</span><span className="truncate font-mono text-xs text-muted-foreground">{run.id} · {run.model}</span></span>
+        <span className={`hidden w-52 shrink-0 text-[13px] md:block ${run.status === 'failed' || run.status === 'interrupted' ? 'text-destructive' : run.status === 'committed' ? 'text-muted-foreground' : ''}`}>{outcomeLine(run)}</span>
+        <span className="flex w-44 shrink-0 justify-end"><NextStep run={run} /></span>
+      </div>)}
+      {query.data && !query.data.runs.length && <Empty>No runs yet. Start one on the Classify page.</Empty>}
+      {query.data && pages > 1 && <div className="flex items-center justify-end gap-2 py-4 text-[13px]"><Button variant="outline" size="sm" disabled={search.page === 1} onClick={() => navigate({ search: { run: '', page: search.page - 1, outcome: '' } })}><ChevronLeft />Previous</Button><span>{search.page} / {pages}</span><Button variant="outline" size="sm" disabled={search.page >= pages} onClick={() => navigate({ search: { run: '', page: search.page + 1, outcome: '' } })}>Next<ChevronRight /></Button></div>}
+    </section>
+  </>
+}
+
+/** What a run came to, in words. */
+function outcomeLine(run: RunSummary) {
+  if (run.status === 'running') return 'Scoring now'
+  if (run.status === 'committed') return 'Committed'
+  if (run.status === 'failed' || run.status === 'interrupted') return `Stopped${run.errors ? ` · ${plural(run.errors, 'error')}` : ''}`
+  return run.errors ? `Finished · ${plural(run.errors, 'error')}` : 'Finished'
+}
+
+/** The one thing to do with a run next. Commit and review happen on the run itself. */
+function NextStep({ run }: { run: RunSummary }) {
+  if (run.status === 'running') return <span className="text-xs font-semibold text-flame-ink">Watch →</span>
+  if (run.status === 'completed') return <Button size="sm">Open results</Button>
+  if (run.status === 'failed' || run.status === 'interrupted') return <Button size="sm" variant="outline">See what failed</Button>
+  return <Button size="sm" variant="outline">Open</Button>
 }
 
 function RunDetail({ run, view, setView, loading }: { run: Run; view: RunDetailQuery; setView: (view: RunDetailQuery) => void; loading: boolean }) {

@@ -1,79 +1,67 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+/* Latin only: every font is inlined into the one HTML file the binary embeds. */
+@import "@fontsource/im-fell-english/latin-400.css";
+@import "@fontsource/im-fell-english/latin-400-italic.css";
+@import "@fontsource/im-fell-english-sc/latin-400.css";
+@import "@fontsource/jetbrains-mono/latin-400.css";
 
-@custom-variant dark (&:is(.dark *));
 
 :root {
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
-    --radius: 0.625rem;
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
+    /* Candlelit: the watchman's candle on a dark rampart, ink on parchment. */
+    --ground: #E9E1CF;
+    --parchment: #F4EEE1;
+    --flame: #C8761E;
+    --flame-ink: #8A4A0E;
+    --flame-soft: #FBEBD6;
+    --rule: #E2DACB;
+    --sidebar: #F4EEE1;
+    --sidebar-foreground: #1A1712;
+    --sidebar-primary: #1A1712;
+    --sidebar-primary-foreground: #F4EEE1;
+    --sidebar-accent: #FFFFFF;
+    --sidebar-accent-foreground: #1A1712;
+    --sidebar-border: #DCD2BE;
+    --sidebar-ring: #C8761E;
+    --radius: 0.5rem;
+    --background: #FFFFFF;
+    --foreground: #1A1712;
+    --card: #FFFFFF;
+    --card-foreground: #1A1712;
+    --popover: #FFFFFF;
+    --popover-foreground: #1A1712;
+    --primary: #1A1712;
+    --primary-foreground: #F4EEE1;
+    --secondary: #F4EEE1;
+    --secondary-foreground: #1A1712;
+    --muted: #F4EEE1;
+    --muted-foreground: #6B6458;
+    --accent: #F4EEE1;
+    --accent-foreground: #1A1712;
+    --destructive: #9B2C1F;
+    --border: #E2DACB;
+    --input: #CFC6B5;
+    --ring: #C8761E;
+    --chart-1: #1A1712;
+    --chart-2: #C8761E;
+    --chart-3: #B9AE98;
+    --chart-4: #9B2C1F;
+    --chart-5: #6B6458;
 }
 
-.dark {
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-}
 
 @theme inline {
+    --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+    --font-serif: "IM Fell English", Georgia, serif;
+    --font-display: "IM Fell English SC", "IM Fell English", Georgia, serif;
+    --font-mono: "JetBrains Mono", ui-monospace, monospace;
+    --color-ground: var(--ground);
+    --color-parchment: var(--parchment);
+    --color-flame: var(--flame);
+    --color-flame-ink: var(--flame-ink);
+    --color-flame-soft: var(--flame-soft);
+    --color-rule: var(--rule);
     --color-sidebar: var(--sidebar);
     --color-sidebar-foreground: var(--sidebar-foreground);
     --color-sidebar-primary: var(--sidebar-primary);
@@ -114,11 +102,19 @@
     --radius-4xl: calc(var(--radius) + 16px);
 }
 
+@font-face {
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2") format("woff2-variations");
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
     }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-ground font-sans text-foreground antialiased;
     }
 }
