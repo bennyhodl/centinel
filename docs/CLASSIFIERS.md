@@ -305,7 +305,13 @@ The workspace has six views, in a sidebar grouped Archive, Classifiers, and Agen
   viewer, a CSV as a table, HTML as the page and as its source. `GET
   /workspace/original` serves those bytes, and Download saves them. Collected HTML is
   served with a sandbox policy, so a page never runs on the workspace's origin.
-- **Classify** edits atomic Jev questions and their policy thresholds. A trial sends
+- **Classify** draws the questions as a tree: each question on the left, its answers to
+  the right, and a follow-up hanging off the answer it is asked after. A question's
+  `when` names that answer as a tag (`page_kind:record`, or `spending` for a noul's yes);
+  it is policy, so changing it makes no new version. Runs do not follow the tree yet:
+  every checked question is asked of every document. Test sends one document through
+  as a preview and lights the answers Jev gave along the path. The page edits atomic
+  Jev questions and their policy thresholds. A trial sends
   the Search filter and a count; the server resolves the top matches in one query and
   stores the exact identities with the run, so the browser never pages the corpus back
   and forth. The start request is answered at once with the run as started. Scoring
@@ -337,8 +343,9 @@ The workspace has six views, in a sidebar grouped Archive, Classifiers, and Agen
   An exact selection can be repeated for a comparable benchmark. A run with durable
   progress but no completion record is shown as interrupted after a server restart.
 - **Review** puts one document beside every answer Jev gave it, for a person's verdict.
-- **Connect** shows how to add Centinel's MCP server to an agent, and lists the tools
-  the registry offers it. **Skills** shows `npx skills add bennyhodl/centinel` and what
+- **Connect** shows how to add Centinel's MCP server to an agent over HTTP, and lists
+  the tools the registry offers it. The address is `CENTINEL_PUBLIC_URL` when the server
+  sits behind another address, and the page's own host otherwise. **Skills** shows `npx skills add bennyhodl/centinel` and what
   each skill in `contrib/skills/` does.
 
 Run and Commit are separate operations. A run stores scores and previews the documents,

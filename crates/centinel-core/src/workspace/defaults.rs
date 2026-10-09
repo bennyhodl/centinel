@@ -116,6 +116,7 @@ fn choice(id: &str, threshold: f64, instructions: &str, options: Vec<ChoiceOptio
         threshold,
         review: Some(0.5),
         action: QuestionAction::Tag,
+        when: None,
     }
 }
 
@@ -129,6 +130,7 @@ fn noul(id: &str, instructions: &str) -> Question {
         threshold: 0.8,
         review: Some(0.5),
         action: QuestionAction::Tag,
+        when: None,
     }
 }
 

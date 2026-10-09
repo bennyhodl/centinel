@@ -38,6 +38,7 @@ export default defineConfig({
     proxy: {
       '/workspace': apiProxy(),
       '/ops': apiProxy(),
+      '/mcp': apiProxy(),
     },
   },
   environments: { client: { build: { cssCodeSplit: false, rollupOptions: { output: { inlineDynamicImports: true } } } } },

@@ -264,6 +264,12 @@ pub struct Question {
     /// The action of a `noul`. A `choice` takes its actions from its options.
     #[serde(default = "tag_action")]
     pub action: QuestionAction,
+    /// Ask this question only of documents that carry this tag: an earlier answer,
+    /// `page_kind:record` for a choice option or `spending` for a noul's yes. `None` is a
+    /// root, asked of every document. Policy, not meaning: changing it makes no new
+    /// version. Saved and drawn as a tree today; runs do not act on it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
 }
 
 /// `noul` asks yes or no and answers with one probability. `choice` picks one option out
@@ -3777,6 +3783,7 @@ mod tests {
             threshold: 0.9,
             review: None,
             action: QuestionAction::Exclude,
+            when: None,
         }
     }
 
@@ -4436,6 +4443,7 @@ mod tests {
             threshold: 0.9,
             review: Some(0.5),
             action: QuestionAction::Tag,
+            when: None,
         }
     }
 

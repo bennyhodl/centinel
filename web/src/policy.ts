@@ -56,6 +56,7 @@ export const questionSnapshot = (questions: Question[]) => JSON.stringify(questi
   threshold: question.threshold,
   review: question.review ?? null,
   action: question.action,
+  when: question.when ?? null,
 })))
 
 /** What would stop the server accepting this question; empty when it would. */

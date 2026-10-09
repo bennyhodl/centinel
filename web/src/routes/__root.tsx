@@ -1,8 +1,9 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useLocation } from '@tanstack/react-router'
 import { QueryClientProvider, useQuery, type QueryClient } from '@tanstack/react-query'
 import { Eye, FlaskConical, History, Plug, Search, ShieldCheck, Sparkles } from 'lucide-react'
 import { api, corpusParams } from '../api'
+import { JobDrawer } from '../jobs'
 import { number } from '../format'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
@@ -50,17 +51,19 @@ function Shell() {
   const running = recent.data?.runs.filter(run => run.status === 'running') || []
   const serverVersion = system.data?.version
   const stale = Boolean(serverVersion && serverVersion !== __CENTINEL_VERSION__)
+  const [job, setJob] = useState('')
   const at = (path: string) => pathname === `/web${path}` || (path === '/' && pathname === '/web')
 
   return <SidebarProvider className="bg-ground">
     <Sidebar variant="floating" collapsible="icon">
       <SidebarHeader className="px-3 pt-4 pb-2">
-        <div className="flex items-center gap-3 px-1">
+        <div className="flex items-center gap-3 px-1 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:px-0">
           <img src={crest} alt="" className="size-11 shrink-0 rounded-md border border-foreground object-cover group-data-[collapsible=icon]:size-8" />
-          <div className="grid group-data-[collapsible=icon]:hidden">
+          <div className="grid flex-1 group-data-[collapsible=icon]:hidden">
             <span className="font-display text-[22px] leading-6 tracking-[0.08em]">Centinel</span>
             <span className="text-[11px] text-muted-foreground">v{__CENTINEL_VERSION__}</span>
           </div>
+          <SidebarTrigger className="size-7 self-start text-muted-foreground group-data-[collapsible=icon]:self-center" />
         </div>
       </SidebarHeader>
       <SidebarContent>
@@ -89,13 +92,7 @@ function Shell() {
           </NavItem>
         </NavGroup>
       </SidebarContent>
-      <SidebarFooter className="gap-3 px-3 pb-3">
-        {running.length > 0 && <WorkingNow runs={running} />}
-        <div className="flex items-center justify-between gap-2 border-t pt-3 text-xs text-muted-foreground">
-          <span className="truncate group-data-[collapsible=icon]:hidden">{system.data?.store_root || '…'}</span>
-          <SidebarTrigger className="size-7" />
-        </div>
-      </SidebarFooter>
+      {running.length > 0 && <SidebarFooter className="px-3 pb-3"><WorkingNow runs={running} onOpen={setJob} /></SidebarFooter>}
     </Sidebar>
     <SidebarInset className="min-w-0 bg-background md:my-2.5 md:mr-2.5 md:rounded-2xl md:border md:border-sidebar-border md:shadow-[0_1px_2px_rgba(26,23,18,0.06),0_8px_24px_rgba(26,23,18,0.05)]">
       <div className="flex h-12 items-center px-4 md:hidden"><SidebarTrigger /></div>
@@ -104,6 +101,7 @@ function Shell() {
         <Outlet />
       </div>
     </SidebarInset>
+    {job && <JobDrawer id={job} onClose={() => setJob('')} />}
   </SidebarProvider>
 }
 
@@ -126,18 +124,18 @@ function LivePill({ children }: { children: ReactNode }) {
 }
 
 /** What is running right now, from any page. Only classify runs report progress today. */
-function WorkingNow({ runs }: { runs: Array<{ id: string; document_count: number }> }) {
+function WorkingNow({ runs, onOpen }: { runs: Array<{ id: string; document_count: number }>; onOpen: (id: string) => void }) {
   return <div className="grid gap-2 border-t pt-3 group-data-[collapsible=icon]:hidden">
     <span className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-flame-ink"><span className="size-1.5 rounded-full bg-flame shadow-[0_0_0_3px_#F6D9B4]" />Working now</span>
-    {runs.map(run => <RunProgress key={run.id} id={run.id} total={run.document_count} />)}
+    {runs.map(run => <RunProgress key={run.id} id={run.id} total={run.document_count} onOpen={() => onOpen(run.id)} />)}
   </div>
 }
 
-function RunProgress({ id, total }: { id: string; total: number }) {
+function RunProgress({ id, total, onOpen }: { id: string; total: number; onOpen: () => void }) {
   const detail = useQuery({ queryKey: ['run', id, 'rail'], queryFn: () => api.runDetail(id, { page: 1, page_size: 1 }), refetchInterval: 2000 })
   const scored = detail.data?.view?.scored ?? 0
   const all = detail.data?.view?.input_total ?? total
-  return <Link to="/runs" search={{ run: id, page: 1, outcome: '' }} className="flex justify-between rounded-md px-1.5 py-1 text-[13px] hover:bg-background">
+  return <button type="button" onClick={onOpen} className="flex justify-between rounded-md px-1.5 py-1 text-left text-[13px] hover:bg-background">
     <span>Classifying</span><span className="font-mono text-xs text-muted-foreground">{all ? Math.floor(scored / all * 100) : 0}%</span>
-  </Link>
+  </button>
 }

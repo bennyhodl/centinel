@@ -57,6 +57,8 @@ export type Question = {
   /** Scores from here up to the threshold are held for review. Absent is no review band. */
   review?: number | null
   action: QuestionAction
+  /** Ask only of documents carrying this tag: `question:option` or a noul's `question`. Absent is a root. */
+  when?: string
 }
 
 /** A group of shipped default questions, as the server offers them for adding. */
@@ -305,6 +307,8 @@ export function corpusParams(filters: CorpusFilters, page: number, pageSize: num
 }
 
 export type SystemInfo = {
+  /** `CENTINEL_PUBLIC_URL` on the server, when it sits behind another address. */
+  public_url?: string | null
   product: string
   api_version: number
   version: string

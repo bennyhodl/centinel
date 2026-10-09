@@ -316,6 +316,9 @@ async fn workspace_system(State(ctx): State<Arc<Ctx>>) -> Response {
         "web_version": web_version(),
         "build_id": build_id(),
         "store_root": root,
+        // Where an agent reaches MCP when this server sits behind another address. Unset,
+        // the page offers the address it was loaded from.
+        "public_url": std::env::var("CENTINEL_PUBLIC_URL").ok().filter(|url| !url.trim().is_empty()),
     }))
     .into_response()
 }
