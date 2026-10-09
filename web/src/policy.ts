@@ -107,11 +107,13 @@ export function questionProblem(question: Question): string {
 export const missingOther = (question: Question) =>
   isChoice(question) && !(question.options || []).some(option => option.id === 'other' || option.id === 'none')
 
-export type Decision = 'exclude' | 'review' | 'tag' | 'keep' | 'error'
+export type Decision = 'exclude' | 'review' | 'tag' | 'keep' | 'not_asked' | 'error'
 
 /** One word for what the current policy did with a document, strongest first. */
 export function decisionOf(result: RunResult): Decision {
   if (result.error) return 'error'
+  // Asked nothing: every question of the run was a follow-up its parent did not lead to.
+  if (!Object.keys(result.answers || {}).length && !Object.keys(result.outcomes || {}).length) return 'not_asked'
   const outcomes = Object.values(result.outcomes || {})
   if (outcomes.some(outcome => outcome.excluded)) return 'exclude'
   if (outcomes.some(outcome => outcome.review)) return 'review'
@@ -119,7 +121,7 @@ export function decisionOf(result: RunResult): Decision {
   return 'keep'
 }
 
-export const decisionLabels: Record<Decision, string> = { exclude: 'Exclude', review: 'Review', tag: 'Tagged', keep: 'Keep', error: 'Error' }
+export const decisionLabels: Record<Decision, string> = { exclude: 'Exclude', review: 'Review', tag: 'Tagged', keep: 'Keep', not_asked: 'Not asked', error: 'Error' }
 
 /** Every tag the policy gave a document, across questions. */
 export const tagsOf = (result: RunResult) => Object.values(result.outcomes || {}).flatMap(outcome => outcome.tags || [])

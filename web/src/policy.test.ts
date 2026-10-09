@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { Question } from './api'
-import { classificationBadges, decisionOf, estimateRun, optionScores, policyShort, reachOf, sortKeys } from './policy'
+import { classificationBadges, decisionLabels, decisionOf, estimateRun, optionScores, policyShort, reachOf, sortKeys } from './policy'
 
 /**
  * The shapes the shipped defaults take, small enough to read here. The defaults
@@ -75,6 +75,12 @@ describe('decisions', () => {
     expect(decisionOf({ ...base, outcomes: { a: { excluded: false, review: true, tags: ['laws'] } } })).toBe('review')
     expect(decisionOf({ ...base, outcomes: { a: { excluded: false, review: false, tags: ['laws'] } } })).toBe('tag')
     expect(decisionOf({ ...base, outcomes: { a: { excluded: false, review: false } } })).toBe('keep')
+  })
+
+  it('says not asked of a document no question reached, never keep', () => {
+    expect(decisionOf(base)).toBe('not_asked')
+    expect(decisionLabels.not_asked).toBe('Not asked')
+    expect(decisionOf({ ...base, answers: { laws: 0.1 }, outcomes: { laws: { excluded: false, review: false } } })).toBe('keep')
   })
 
   it('lists choice options most likely first', () => {

@@ -56,7 +56,7 @@ export function Spinner() { return <span className="inline-block size-3.5 shrink
 export function Pulse() { return <span className="inline-block size-2 shrink-0 animate-pulse rounded-full bg-current motion-reduce:animate-none" aria-hidden /> }
 
 export function DecisionBadge({ decision }: { decision: Decision }) {
-  return <Badge variant={decision === 'error' ? 'destructive' : 'secondary'}>{decisionLabels[decision]}</Badge>
+  return <Badge variant={decision === 'error' ? 'destructive' : decision === 'not_asked' ? 'outline' : 'secondary'}>{decisionLabels[decision]}</Badge>
 }
 
 /**
