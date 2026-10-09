@@ -2,8 +2,9 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useLocation } from '@tanstack/react-router'
 import { QueryClientProvider, useQuery, type QueryClient } from '@tanstack/react-query'
 import { Eye, FlaskConical, History, Plug, Search, ShieldCheck, Sparkles } from 'lucide-react'
-import { api, corpusParams } from '../api'
+import { queries } from '../queries'
 import { JobDrawer } from '../jobs'
+import { ActivityBar } from '../feedback'
 import { quotes } from '../quotes'
 import { number } from '../format'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -39,14 +40,14 @@ const searchDefaults = { text: '', address: '', page: 1, source: '', usage: 'all
 
 function Shell() {
   const pathname = useLocation({ select: location => location.pathname })
-  const system = useQuery({ queryKey: ['system'], queryFn: api.system, staleTime: 60_000 })
-  const corpus = useQuery({ queryKey: ['corpus', 'count'], queryFn: () => api.corpus(corpusParams({ search: '', address: '', source: '', usage: 'all', classifier: '', min_score: '', max_score: '' }, 1, 1)), staleTime: 60_000 })
-  const questions = useQuery({ queryKey: ['questions'], queryFn: api.questions })
-  const review = useQuery({ queryKey: ['review', 'count'], queryFn: () => api.reviewQueue({ page_size: 1 }), staleTime: 30_000 })
+  const system = useQuery(queries.system())
+  const corpus = useQuery(queries.corpus({}, 1, 1))
+  const questions = useQuery(queries.questions())
+  const review = useQuery(queries.reviewQueue('', false, 1))
   // The rail says when a run is going, from any page.
   const recent = useQuery({
-    queryKey: ['runs', 'rail'],
-    queryFn: () => api.runs(1, 10),
+    ...queries.runs(1, 10),
+    // Slower while nothing scores, so a run started elsewhere still shows up.
     refetchInterval: query => query.state.data?.runs.some(run => run.status === 'running') ? 2000 : 15000,
   })
   const running = recent.data?.runs.filter(run => run.status === 'running') || []
@@ -56,6 +57,7 @@ function Shell() {
   const at = (path: string) => pathname === `/web${path}` || (path === '/' && pathname === '/web')
 
   return <SidebarProvider className="bg-ground">
+    <ActivityBar />
     <Sidebar variant="floating" collapsible="icon">
       <SidebarHeader className="px-3 pt-4 pb-2">
         <div className="flex items-center gap-3 px-1 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:px-0">
@@ -100,7 +102,7 @@ function Shell() {
     </Sidebar>
     <SidebarInset className="min-w-0 bg-background md:my-2.5 md:mr-2.5 md:rounded-2xl md:border md:border-sidebar-border md:shadow-[0_1px_2px_rgba(26,23,18,0.06),0_8px_24px_rgba(26,23,18,0.05)]">
       <div className="flex h-12 items-center px-4 md:hidden"><SidebarTrigger /></div>
-      <div className="min-w-0 px-5 py-6 md:px-10 md:py-8">
+      <div className="min-w-0 px-5 py-6 [view-transition-name:page] md:px-10 md:py-8">
         {stale && <Alert className="mb-6"><ShieldCheck /><AlertTitle>Server is v{serverVersion}</AlertTitle><AlertDescription>This page is v{__CENTINEL_VERSION__}. Stop the old `centinel web` and start it again, then reload.</AlertDescription></Alert>}
         <Outlet />
       </div>
@@ -136,7 +138,7 @@ function WorkingNow({ runs, onOpen }: { runs: Array<{ id: string; document_count
 }
 
 function RunProgress({ id, total, onOpen }: { id: string; total: number; onOpen: () => void }) {
-  const detail = useQuery({ queryKey: ['run', id, 'rail'], queryFn: () => api.runDetail(id, { page: 1, page_size: 1 }), refetchInterval: 2000 })
+  const detail = useQuery(queries.run(id, { page: 1, page_size: 1 }, 2000))
   const scored = detail.data?.view?.scored ?? 0
   const all = detail.data?.view?.input_total ?? total
   return <button type="button" onClick={onOpen} className="flex justify-between rounded-md px-1.5 py-1 text-left text-[13px] hover:bg-background">

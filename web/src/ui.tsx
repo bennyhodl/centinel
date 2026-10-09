@@ -7,11 +7,21 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import type { DocumentIdentity } from './api'
 import { decisionLabels, type Decision } from './policy'
 
-export function PageHeader({ eyebrow, title, detail, children }: { eyebrow?: React.ReactNode; title: string; detail?: string; children?: React.ReactNode }) {
+/**
+ * The view-transition name a document's title carries, so the title glides from a search
+ * result into the reader. Unique per Source, Resource and text, as a page needs.
+ */
+export function documentTransition(doc: DocumentIdentity): React.CSSProperties {
+  let hash = 5381
+  for (const ch of `${doc.source}\u0000${doc.resource}\u0000${doc.derived_sha}`) hash = (hash * 33 + ch.charCodeAt(0)) >>> 0
+  return { viewTransitionName: `doc-${hash.toString(36)}` }
+}
+
+export function PageHeader({ eyebrow, title, detail, titleStyle, children }: { eyebrow?: React.ReactNode; title: string; detail?: string; titleStyle?: React.CSSProperties; children?: React.ReactNode }) {
   return <header className="mb-7 flex flex-col justify-between gap-6 sm:flex-row sm:items-end">
     <div className="min-w-0">
       {eyebrow && <div className="mb-2 text-[13px] text-muted-foreground">{eyebrow}</div>}
-      <h1 className="font-serif text-[40px] leading-[44px] tracking-[-0.01em] wrap-anywhere">{title}</h1>
+      <h1 className="w-fit font-serif text-[40px] leading-[44px] tracking-[-0.01em] wrap-anywhere" style={titleStyle}>{title}</h1>
       {detail && <p className="mt-2 text-sm text-muted-foreground">{detail}</p>}
     </div>
     {children}

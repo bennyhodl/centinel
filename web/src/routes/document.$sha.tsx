@@ -3,15 +3,20 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute } from '@tanstack/react-router'
 import { ArrowLeft, Download, ExternalLink, RotateCcw } from 'lucide-react'
 import { api, originalUrl, type ReadReport } from '../api'
+import { queries } from '../queries'
 import { parseCsv } from '../csv'
 import { number, tail } from '../format'
-import { ErrorBox, PageHeader, SectionRule, shortSha } from '../ui'
+import { documentTransition, ErrorBox, PageHeader, SectionRule, shortSha } from '../ui'
 import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
 export const Route = createFileRoute('/document/$sha')({
   validateSearch: (search: Record<string, unknown>) => ({ source: String(search.source || ''), resource: String(search.resource || '') }),
+  loaderDeps: ({ search }) => search,
+  loader: ({ context: { queryClient }, params, deps }) => queryClient.ensureQueryData(queries.read({ derived_sha: params.sha, source: deps.source, resource: deps.resource })),
+  pendingComponent: ReaderSkeleton,
   component: Reader,
 })
 
@@ -22,7 +27,7 @@ function Reader() {
   const { sha } = Route.useParams()
   const search = Route.useSearch()
   const doc = { derived_sha: sha, source: search.source, resource: search.resource }
-  const query = useQuery({ queryKey: ['read', doc], queryFn: () => api.read(doc) })
+  const query = useQuery(queries.read(doc))
   const client = useQueryClient()
   const restore = useMutation({ mutationFn: () => api.restore(doc), onSuccess: () => client.invalidateQueries({ queryKey: ['corpus'] }) })
   const read = query.data
@@ -34,6 +39,7 @@ function Reader() {
     <PageHeader
       eyebrow={<button type="button" onClick={() => history.back()} className="inline-flex items-center gap-1 hover:text-foreground"><ArrowLeft className="size-3.5" />Back</button>}
       title={read ? tail(read.url) : tail(search.resource || sha)}
+      titleStyle={documentTransition(doc)}
     >
       {read && <div className="flex shrink-0 gap-2">
         <Button variant="outline" asChild><a href={read.url} target="_blank" rel="noreferrer">Open source<ExternalLink /></a></Button>
@@ -123,5 +129,19 @@ function CsvTable({ read }: { read: ReadReport }) {
       </Table>
     </div>
     {matching.length > csvRowCap && <div className="border-t bg-[#FBF9F4] px-3.5 py-3 text-[13px] text-muted-foreground">Showing the first {number(csvRowCap)} rows. Filter, or download the CSV for all of them.</div>}
+  </div>
+}
+
+/** The reader before the text arrives: its header, tabs and panel, the text masked. */
+function ReaderSkeleton() {
+  return <div aria-busy>
+    <div className="mb-2 text-[13px] text-muted-foreground">Back</div>
+    <h1 className="mb-3 font-serif text-[40px] leading-[44px]"><Skeleton mask="Resolution 2025-418 Easement" /></h1>
+    <div className="mb-5 text-[13px]"><Skeleton mask="tampa.gov · https://www.tampa.gov/agendas/res-2025-418.pdf · 14,200 characters" /></div>
+    <div className="mb-5 flex gap-6 border-b pb-2.5 text-sm text-muted-foreground"><span>Original</span><span>Text</span></div>
+    <div className="flex flex-col gap-6 xl:flex-row xl:items-start">
+      <Skeleton className="h-[70vh] min-w-0 flex-1 rounded-[10px]" />
+      <div className="grid w-full shrink-0 gap-3 xl:w-[260px]"><Skeleton className="h-8" /><Skeleton className="h-10" /><Skeleton className="h-10" /><Skeleton className="h-10" /></div>
+    </div>
   </div>
 }

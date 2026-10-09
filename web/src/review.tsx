@@ -3,7 +3,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, Keyboard, ThumbsDown, ThumbsUp } from 'lucide-react'
 import { api, type Evaluation, type Question, type ReviewCandidate } from './api'
+import { queries } from './queries'
 import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -12,7 +14,8 @@ import { isChoice } from './policy'
 import { type Answers, buildReview, gateOf, gateOption, modelAnswers } from './review-logic'
 import { DocumentLink, Empty, ErrorBox, PageHeader, Segmented, Spinner } from './ui'
 
-const QUEUE = 20
+/** How many cards Review takes at once. The route's loader warms the same page. */
+export const REVIEW_QUEUE = 20
 
 /**
  * One document at a time. The text on the left, the policy's decisions on the right, and
@@ -21,16 +24,12 @@ const QUEUE = 20
  */
 export function Review() {
   const client = useQueryClient()
-  const questions = useQuery({ queryKey: ['questions'], queryFn: api.questions })
+  const questions = useQuery(queries.questions())
   const [source, setSource] = useState('')
   const [includeReviewed, setIncludeReviewed] = useState(false)
-  const queue = useQuery({
-    queryKey: ['review-queue', source, includeReviewed],
-    queryFn: () => api.reviewQueue({ source, page_size: QUEUE, include_reviewed: includeReviewed }),
-    staleTime: Infinity,
-  })
-  const sources = useQuery({ queryKey: ['review-sources'], queryFn: () => api.corpus(new URLSearchParams({ page: '1', page_size: '1' })), staleTime: 60_000 })
-  const evaluation = useQuery({ queryKey: ['evaluation'], queryFn: api.evaluation })
+  const queue = useQuery(queries.reviewQueue(source, includeReviewed, REVIEW_QUEUE))
+  const sources = useQuery(queries.corpus({}, 1, 1))
+  const evaluation = useQuery(queries.evaluation())
   const [cursor, setCursor] = useState(0)
   const [last, setLast] = useState('')
   const candidate = queue.data?.documents[cursor]
@@ -80,7 +79,7 @@ function Card({ candidate, questions, gate, busy, error, position, onSkip, onSub
   onSkip: () => void
   onSubmit: (answers: Answers, proposed: string, note: string) => void
 }) {
-  const text = useQuery({ queryKey: ['read', candidate.derived_sha, candidate.source, candidate.resource], queryFn: () => api.read({ source: candidate.source, resource: candidate.resource, derived_sha: candidate.derived_sha }) })
+  const text = useQuery(queries.read(candidate))
   const model = useMemo(() => modelAnswers(questions, candidate), [questions, candidate])
   const [edits, setEdits] = useState<Answers>({})
   const [proposed, setProposed] = useState('')
@@ -165,4 +164,20 @@ function Agreement({ evaluation }: { evaluation: Evaluation }) {
     </TableBody></Table></div>
     {Object.keys(evaluation.proposed).length > 0 && <p className="border-t px-4 py-3 text-xs text-muted-foreground">Proposed tags: {Object.entries(evaluation.proposed).sort((a, b) => b[1] - a[1]).map(([name, count]) => `${name} ×${count}`).join(' · ')}</p>}
   </section>
+}
+
+/** Review before its queue arrives: the real header, the card and its panel masked. */
+export function ReviewSkeleton() {
+  return <div aria-busy>
+    <PageHeader title="Review" detail="Read the document, say what it is. Right arrow for a record, left for junk, Enter to record the card as it stands." />
+    <Skeleton className="mb-4 h-9 w-40" />
+    <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="grid gap-4 rounded-lg border p-6">
+        <Skeleton mask="Community Foundation Tampa Bay Speaker Series" className="text-2xl font-semibold" />
+        <Skeleton mask="https://www.cftampabay.org/events/outstanding-speaker-series" className="font-mono text-xs" />
+        {Array.from({ length: 6 }, (_, i) => <Skeleton key={i} className="h-4" />)}
+      </div>
+      <div className="grid gap-4"><Skeleton className="h-32 rounded-lg" /><Skeleton className="h-48 rounded-lg" /></div>
+    </div>
+  </div>
 }

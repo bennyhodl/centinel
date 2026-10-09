@@ -4,8 +4,10 @@ import { Check, ListPlus, Play, Plus, Trash2, X } from 'lucide-react'
 import { Panel, ReactFlowProvider } from '@xyflow/react'
 import { chainOf, QuestionFlow, sourcesOf, type TreeQuestion } from './tree'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { api, corpusParams, type ChoiceOption, type CorpusFilters, type Document, type Preset, type Question, type QuestionAction, type RunDetailQuery } from './api'
+import { api, type ChoiceOption, type CorpusFilters, type Document, type Preset, type Question, type QuestionAction, type RunDetailQuery } from './api'
+import { queries } from './queries'
 import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -45,10 +47,10 @@ const blankChoice = (count: number): Question => ({
 
 export function Classify() {
   const client = useQueryClient()
-  const saved = useQuery({ queryKey: ['questions'], queryFn: api.questions })
+  const saved = useQuery(queries.questions())
   // The shipped defaults come from the server, which is also what seeded the saved set,
   // so the page never carries a second copy of the questions.
-  const shipped = useQuery({ queryKey: ['presets'], queryFn: api.presets, staleTime: Infinity })
+  const shipped = useQuery(queries.presets())
   const [questions, setQuestions] = useState<LocalQuestion[]>([])
   const [savedQuestions, setSavedQuestions] = useState<Question[] | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -72,8 +74,7 @@ export function Classify() {
     }
   }, [loaded, saved.data])
 
-  const countParams = corpusParams(filters, 1, 1)
-  const available = useQuery({ queryKey: ['selection-count', countParams.toString()], queryFn: () => api.corpus(countParams) })
+  const available = useQuery(queries.corpus(filters, 1, 1))
   const wire = questions.map(stripKey)
   const checked = questions.filter(question => !question.skip)
   const dirty = savedQuestions == null || questionSnapshot(wire) !== questionSnapshot(savedQuestions)
@@ -392,8 +393,7 @@ function useTest(questions: Question[], model: string, date: string) {
 
 function TestPanel({ test, onPicked }: { test: Test; onPicked: () => void }) {
   const [text, setText] = useState('')
-  const params = corpusParams({ search: '', address: text.trim(), source: '', usage: 'all', classifier: '', min_score: '', max_score: '' }, 1, 8)
-  const found = useQuery({ queryKey: ['corpus', 'test-pick', params.toString()], queryFn: () => api.corpus(params) })
+  const found = useQuery(queries.corpus({ address: text.trim() }, 1, 8))
   return <div className="grid gap-3">
     <Input value={text} onChange={event => setText(event.target.value)} placeholder="Find a document by address or title" />
     <div className="grid">
@@ -403,5 +403,17 @@ function TestPanel({ test, onPicked }: { test: Test; onPicked: () => void }) {
     </div>
     {test.error && <ErrorBox error={test.error} />}
     <p className="text-xs leading-relaxed text-muted-foreground">Jev answers every checked question today. Questions off the lit path are dimmed: once runs follow the tree, they will not be asked.</p>
+  </div>
+}
+
+/** The canvas before the questions arrive: the same full-bleed frame, a source card masked. */
+export function ClassifySkeleton() {
+  return <div aria-busy className="relative -mx-5 -my-6 grid h-[calc(100svh-3rem)] place-items-center overflow-hidden bg-[#FBF8F1] bg-[radial-gradient(#D8CFBD_1.4px,transparent_1.4px)] [background-size:18px_18px] md:-mx-10 md:-my-8 md:h-[calc(100svh-1.25rem-2px)] md:rounded-2xl">
+    <span className="absolute top-4 left-4 rounded-xl bg-background/95 px-4 py-2.5 font-serif text-[28px] leading-none shadow-[0_0_0_1px_var(--rule)]">Classify</span>
+    <div className="grid w-80 gap-3 rounded-xl bg-background p-4 shadow-[0_0_0_1.5px_var(--rule)]">
+      <Skeleton mask="SOURCE · NOUL · v1" className="text-[10px]" />
+      <Skeleton mask="Is this page unusable because it is empty or garbled?" className="text-[15px] leading-[21px]" />
+      <div className="grid grid-cols-2 gap-1.5 border-t pt-3"><Skeleton className="h-[34px]" /><Skeleton className="h-[34px]" /></div>
+    </div>
   </div>
 }

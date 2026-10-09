@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { ArrowRight, CircleAlert, CircleCheck, ShieldCheck, X } from 'lucide-react'
 import { api, type Question, type ResultOutcome, type Run, type RunDetailQuery, type RunResult } from './api'
+import { queries } from './queries'
 import { Button } from '@/components/ui/button'
 import { compact, money, number, plural, seconds, tail } from './format'
 import { decisionOf, isChoice } from './policy'
@@ -10,13 +11,7 @@ import { DecisionBadge, DocumentLink, ErrorBox, Pulse, Spinner } from './ui'
 
 /** A run detail as a view asks for it; polls while the run is scoring. */
 export function useRunDetail(id: string, view: Partial<RunDetailQuery>, every = 1000) {
-  return useQuery({
-    queryKey: ['run', id, view],
-    queryFn: () => api.runDetail(id, view),
-    enabled: Boolean(id),
-    placeholderData: keepPreviousData,
-    refetchInterval: query => query.state.data?.status === 'running' ? every : false,
-  })
+  return useQuery(queries.run(id, view, every))
 }
 
 /** Re-renders once a second while `on`, so waiting times count up between polls. */

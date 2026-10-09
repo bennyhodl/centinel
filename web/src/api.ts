@@ -286,7 +286,19 @@ export type Evaluation = {
   proposed: Record<string, number>
 }
 
+/**
+ * Development only: hold every request for `VITE_DEV_DELAY_MS`, or for
+ * `localStorage['centinel.delayMs']`, to see skeletons and transitions at a slow
+ * server's pace. Production builds drop it.
+ */
+const devDelay = () => {
+  if (!import.meta.env.DEV) return 0
+  return Number(import.meta.env.VITE_DEV_DELAY_MS || globalThis.localStorage?.getItem('centinel.delayMs') || 0)
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const delay = devDelay()
+  if (delay) await new Promise(done => setTimeout(done, delay))
   let res: Response
   try {
     res = await fetch(path, { ...init, headers: { 'content-type': 'application/json', ...init?.headers } })

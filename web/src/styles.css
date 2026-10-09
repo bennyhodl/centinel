@@ -16,6 +16,10 @@
     --flame-ink: #8A4A0E;
     --flame-soft: #FBEBD6;
     --rule: #E2DACB;
+    /* Motion: a press, an indicator, a progress fill. Every animation uses one. */
+    --motion-micro: 180ms;
+    --motion-indicator: 250ms;
+    --motion-progress: 400ms;
     /* One colour per kind of filter: the candle for classifiers, the night sky for
        sources, the moss on the rampart for usage. */
     --slate: #2F4A62;
@@ -68,6 +72,7 @@
     --color-flame-ink: var(--flame-ink);
     --color-flame-soft: var(--flame-soft);
     --color-rule: var(--rule);
+    --animate-activity-creep: activity-creep 8s cubic-bezier(0.1, 0.6, 0.2, 1) forwards;
     --color-slate: var(--slate);
     --color-slate-soft: var(--slate-soft);
     --color-moss: var(--moss);
@@ -127,4 +132,36 @@
   body {
     @apply bg-ground font-sans text-foreground antialiased;
     }
+}
+
+/* The activity line creeps toward the end and holds, so a long wait still reads as work. */
+@keyframes activity-creep {
+  from { width: 0; }
+  to { width: 90%; }
+}
+
+/* Page changes: the page panel slides the way history moves while the sidebar holds
+   still. The panel carries its own transition name; the rest of the window is root. */
+html { background: var(--ground); }
+::view-transition-old(root),
+::view-transition-new(root) { animation: none; }
+::view-transition-old(page),
+::view-transition-new(page) {
+  animation-duration: var(--motion-indicator);
+  animation-timing-function: ease-out;
+}
+html:active-view-transition-type(forward)::view-transition-old(page) { animation-name: route-leave-forward; }
+html:active-view-transition-type(forward)::view-transition-new(page) { animation-name: route-enter-forward; }
+html:active-view-transition-type(back)::view-transition-old(page) { animation-name: route-leave-back; }
+html:active-view-transition-type(back)::view-transition-new(page) { animation-name: route-enter-back; }
+@keyframes route-leave-forward { to { opacity: 0; transform: translateX(-12px); } }
+@keyframes route-enter-forward { from { opacity: 0; transform: translateX(12px); } }
+@keyframes route-leave-back { to { opacity: 0; transform: translateX(12px); } }
+@keyframes route-enter-back { from { opacity: 0; transform: translateX(-12px); } }
+::view-transition-group(*) { animation-duration: var(--motion-indicator); }
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(page),
+  ::view-transition-new(page),
+  ::view-transition-group(*) { animation: none; }
 }

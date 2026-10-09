@@ -2,13 +2,15 @@ import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
 import { ChevronLeft, ChevronRight, Search as SearchIcon, X } from 'lucide-react'
-import { api, corpusParams, type CorpusFacets, type CorpusFilters, type Document, type Question } from '../api'
+import type { CorpusFacets, CorpusFilters, Document, Question } from '../api'
+import { queries } from '../queries'
 import { classifierOptions } from '../classify'
 import { characters, compact, number, tail } from '../format'
 import { classificationBadges, hasScores } from '../policy'
-import { DocumentLink, Empty, ErrorBox, PageHeader, shortSha } from '../ui'
+import { DocumentLink, documentTransition, Empty, ErrorBox, PageHeader, shortSha } from '../ui'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Skeleton } from '@/components/ui/skeleton'
 
 export const Route = createFileRoute('/')({
   validateSearch: (search: Record<string, unknown>) => ({
@@ -17,8 +19,17 @@ export const Route = createFileRoute('/')({
     usage: String(search.usage || 'all'), classifier: String(search.classifier || ''),
     minScore: String(search.minScore || '0.5'), maxScore: String(search.maxScore || ''),
   }),
+  loaderDeps: ({ search }) => search,
+  loader: ({ context: { queryClient }, deps }) => {
+    void queryClient.prefetchQuery(queries.questions())
+    return queryClient.ensureQueryData(queries.corpus(filtersOf(deps), deps.page))
+  },
+  pendingComponent: SearchSkeleton,
   component: SearchPage,
 })
+
+/** The page's search params as the corpus filter. One mapping, for the loader and the page. */
+const filtersOf = (search: Search): CorpusFilters => ({ search: search.text, address: search.address, source: search.source, usage: search.usage, classifier: search.classifier, min_score: search.minScore, max_score: search.maxScore })
 
 type Search = ReturnType<typeof Route.useSearch>
 
@@ -37,10 +48,9 @@ function SearchPage() {
   const search = useSearch({ from: '/' })
   const navigate = useNavigate({ from: '/' })
   const [draft, setDraft] = useState(search.text)
-  const filters: CorpusFilters = { search: search.text, address: search.address, source: search.source, usage: search.usage, classifier: search.classifier, min_score: search.minScore, max_score: search.maxScore }
-  const params = corpusParams(filters, search.page, 25)
-  const query = useQuery({ queryKey: ['corpus', params.toString()], queryFn: () => api.corpus(params) })
-  const questions = useQuery({ queryKey: ['questions'], queryFn: api.questions })
+  const filters = filtersOf(search)
+  const query = useQuery(queries.corpus(filters, search.page))
+  const questions = useQuery(queries.questions())
   const set = (next: Partial<Search>) => navigate({ search: previous => ({ ...previous, ...next }) })
   const submit = (event: React.FormEvent) => { event.preventDefault(); set({ text: draft.trim(), page: 1 }) }
   const pages = Math.max(1, Math.ceil((query.data?.total || 0) / (query.data?.page_size || 25)))
@@ -93,11 +103,20 @@ function Chip({ tone: kind, label, value, onClear }: { tone: Tone; label: string
   </span>
 }
 
-function ResultRow({ doc, questions }: { doc: Document; questions: Question[] }) {
+/** One result. Without a document it is the same row with every data slot masked, so the page and its skeleton share one layout. */
+function ResultRow({ doc, questions }: { doc?: Document; questions: Question[] }) {
+  if (!doc) return <div aria-busy className="flex items-start gap-6 border-b py-4">
+    <span className="grid min-w-0 flex-1 gap-1.5">
+      <b className="text-[15px] leading-5 font-semibold"><Skeleton mask="City Council Regular Session — Minutes" /></b>
+      <span className="text-xs"><Skeleton mask="tampa.gov · https://www.tampa.gov/agendas/2025/res.pdf · 14.2k chars" /></span>
+    </span>
+    <span className="hidden w-56 gap-1.5 pt-0.5 md:flex"><Skeleton className="h-5 w-20" /><Skeleton className="h-5 w-24" /></span>
+    <span className="w-16 pt-0.5 text-right font-mono text-xs"><Skeleton mask="a3f91c2" /></span>
+  </div>
   const badges = classificationBadges(doc.classifications, questions).slice(0, 3)
   return <div className={`group flex items-start gap-6 border-b py-4 ${doc.excluded ? 'opacity-55' : ''}`}>
     <DocumentLink doc={doc} className="grid min-w-0 flex-1 gap-1.5">
-      <b className="text-[15px] leading-5 font-semibold group-hover:underline">{doc.title || tail(doc.resource)}</b>
+      <b className="w-fit text-[15px] leading-5 font-semibold group-hover:underline" style={documentTransition(doc)}>{doc.title || tail(doc.resource)}</b>
       <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
         <span className={`shrink-0 rounded px-1.5 py-px font-medium ${tone.source.chip}`}>{doc.source}</span>
         <span className="truncate">{doc.resource}</span>
@@ -202,4 +221,19 @@ function Histogram({ bins, from, to, active }: { bins: number[]; from: number; t
       return <i key={tenth} title={`${(tenth / 10).toFixed(1)}–${((tenth + 1) / 10).toFixed(1)}: ${count}`} className={`flex-1 rounded-t-[2px] ${active && inside ? tone.classifier.bar : active ? 'bg-rule' : tone.classifier.faint}`} style={{ height: `${Math.max(count ? 8 : 3, count / top * 100)}%` }} />
     })}
   </span>
+}
+
+/** Search before its first page arrives: the real chrome, the results masked. */
+function SearchSkeleton() {
+  return <div aria-busy>
+    <PageHeader title="Search" detail="Reading the index…" />
+    <Skeleton className="h-12 rounded-xl" />
+    <div className="mt-11 flex flex-col gap-10 lg:flex-row lg:items-start">
+      <section className="min-w-0 flex-1">
+        <div className="flex h-8 items-center border-b border-foreground text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Document</div>
+        {Array.from({ length: 8 }, (_, i) => <ResultRow key={i} questions={[]} />)}
+      </section>
+      <aside className="grid w-full shrink-0 gap-8 lg:w-[288px]">{[0, 1, 2].map(i => <div key={i} className="grid gap-2"><Skeleton className="h-8" /><Skeleton className="h-20" /></div>)}</aside>
+    </div>
+  </div>
 }

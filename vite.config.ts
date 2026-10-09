@@ -28,7 +28,7 @@ const apiProxy = (): ProxyOptions => ({
 })
 
 export default defineConfig({
-  plugins: [tailwindcss(), tanstackStart({ srcDirectory: 'web/src', router: { basepath: '/web' }, spa: { enabled: true, prerender: { outputPath: '/index.html' } } }), react()],
+  plugins: [tailwindcss(), tanstackStart({ srcDirectory: 'web/src', router: { basepath: '/web' }, spa: { enabled: true, prerender: { outputPath: '/index.html' } } }), react({ babel: { plugins: ['babel-plugin-react-compiler'] } })],
   define: { __CENTINEL_VERSION__: JSON.stringify(version) },
   base: '/web/',
   resolve: {

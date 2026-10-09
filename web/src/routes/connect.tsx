@@ -2,10 +2,14 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { createFileRoute } from '@tanstack/react-router'
 import { api } from '../api'
+import { queries } from '../queries'
 import { ErrorBox, PageHeader, SectionRule } from '../ui'
 import { CopyBlock } from '../copy'
 
-export const Route = createFileRoute('/connect')({ component: Connect })
+export const Route = createFileRoute('/connect')({
+  loader: ({ context: { queryClient } }) => Promise.all([queryClient.ensureQueryData(queries.ops()), queryClient.ensureQueryData(queries.system())]),
+  component: Connect,
+})
 
 /** How each client adds an MCP server that speaks HTTP. */
 const clients = [
@@ -18,8 +22,8 @@ const json = (server: Record<string, unknown>) => JSON.stringify({ mcpServers: {
 
 function Connect() {
   const [client, setClient] = useState(clients[0].id)
-  const system = useQuery({ queryKey: ['system'], queryFn: api.system, staleTime: 60_000 })
-  const ops = useQuery({ queryKey: ['ops'], queryFn: api.ops, staleTime: Infinity })
+  const system = useQuery(queries.system())
+  const ops = useQuery(queries.ops())
   const tools = (ops.data?.ops || []).filter(op => op.mcp)
   const base = (system.data?.public_url || location.origin).replace(/\/+$/, '')
   const url = `${base}/mcp`

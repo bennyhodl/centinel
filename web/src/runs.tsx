@@ -3,23 +3,21 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react'
 import { api, type ResultOutcome, type Run, type RunDetailQuery, type RunSummary } from './api'
+import { queries } from './queries'
 import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { money, number, plural, seconds, tail } from './format'
 import { LiveRun, useRunDetail } from './live'
 import { ResultsSection } from './results'
 import { DocumentLink, Empty, ErrorBox, PageHeader, Spinner } from './ui'
 
-const startView = (outcome: string): RunDetailQuery => ({ page: 1, page_size: 100, outcome: outcome as ResultOutcome, sort: 'decision', direction: '' })
+export const startView = (outcome: string): RunDetailQuery => ({ page: 1, page_size: 100, outcome: outcome as ResultOutcome, sort: 'decision', direction: '' })
 
 export function Runs() {
   const search = useSearch({ from: '/runs' })
   const navigate = useNavigate({ from: '/runs' })
-  const query = useQuery({
-    queryKey: ['runs', search.page],
-    queryFn: () => api.runs(search.page, 25),
-    refetchInterval: current => current.state.data?.runs.some(run => run.status === 'running') ? 2000 : false,
-  })
+  const query = useQuery(queries.runs(search.page))
   const [view, setView] = useState<RunDetailQuery>(() => startView(search.outcome))
   useEffect(() => setView(startView(search.outcome)), [search.run, search.outcome])
   const detail = useRunDetail(search.run, view)
@@ -164,4 +162,22 @@ function RunDetail({ run, view, setView, loading }: { run: Run; view: RunDetailQ
       <TabsContent value="settings"><dl className="grid grid-cols-[160px_minmax(0,1fr)] text-sm [&_dt]:border-t [&_dt]:p-2 [&_dt]:text-muted-foreground [&_dd]:border-t [&_dd]:p-2 [&_dd]:wrap-anywhere"><dt>Model</dt><dd>{run.model}</dd><dt>Input tokens</dt><dd>{number(run.input_tokens)}</dd><dt>Cost</dt><dd>{money(run.cost_usd)}</dd><dt>Duration</dt><dd>{seconds(run.duration_ms)}</dd><dt>Throughput</dt><dd>{run.throughput_docs_sec == null ? 'Unknown' : `${run.throughput_docs_sec.toFixed(2)} documents a second`}</dd>{Object.entries(run.settings || {}).map(([key, value]) => <React.Fragment key={key}><dt>{key.replaceAll('_', ' ')}</dt><dd className="font-mono">{typeof value === 'string' ? value || 'Any' : JSON.stringify(value)}</dd></React.Fragment>)}</dl></TabsContent>
     </Tabs>
   </section>
+}
+
+/** The ledger before it arrives: the real header and columns, each row masked. */
+export function RunsSkeleton() {
+  return <div aria-busy>
+    <PageHeader title="Runs" detail="Each run asks Jev your questions about a set of documents. Nothing changes in the corpus until you commit it." />
+    <section className="mt-6">
+      <div className="flex h-8 items-center gap-6 border-b border-foreground text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+        <span className="w-36 shrink-0">Started</span><span className="flex-1">Asked</span><span className="hidden w-56 shrink-0 md:block">Outcome</span><span className="w-52 shrink-0 text-right">Next</span>
+      </div>
+      {Array.from({ length: 5 }, (_, i) => <div key={i} className="flex items-center gap-6 border-b py-4">
+        <span className="grid w-36 shrink-0 gap-0.5"><b className="text-sm font-semibold"><Skeleton mask="2026-09-17 16:41" /></b><span className="text-xs"><Skeleton mask="21.0 s · $0.03" /></span></span>
+        <span className="grid min-w-0 flex-1 gap-0.5"><span className="text-sm"><Skeleton mask="poor_extraction · navigation_shell · 200 documents" /></span><span className="font-mono text-xs"><Skeleton mask="run-1789663310435115000 · jev-1.13.0" /></span></span>
+        <span className="hidden w-56 shrink-0 text-[13px] md:block"><Skeleton mask="148 keep · 60 tagged" /></span>
+        <span className="flex w-52 shrink-0 justify-end"><Skeleton className="h-8 w-16" /></span>
+      </div>)}
+    </section>
+  </div>
 }
