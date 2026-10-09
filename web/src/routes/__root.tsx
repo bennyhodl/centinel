@@ -1,9 +1,10 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useLocation } from '@tanstack/react-router'
 import { QueryClientProvider, useQuery, type QueryClient } from '@tanstack/react-query'
 import { Eye, FlaskConical, History, Plug, Search, ShieldCheck, Sparkles } from 'lucide-react'
 import { api, corpusParams } from '../api'
 import { JobDrawer } from '../jobs'
+import { quotes } from '../quotes'
 import { number } from '../format'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
@@ -92,7 +93,10 @@ function Shell() {
           </NavItem>
         </NavGroup>
       </SidebarContent>
-      {running.length > 0 && <SidebarFooter className="px-3 pb-3"><WorkingNow runs={running} onOpen={setJob} /></SidebarFooter>}
+      <SidebarFooter className="gap-3 px-3 pb-3">
+        {running.length > 0 && <WorkingNow runs={running} onOpen={setJob} />}
+        <Quote />
+      </SidebarFooter>
     </Sidebar>
     <SidebarInset className="min-w-0 bg-background md:my-2.5 md:mr-2.5 md:rounded-2xl md:border md:border-sidebar-border md:shadow-[0_1px_2px_rgba(26,23,18,0.06),0_8px_24px_rgba(26,23,18,0.05)]">
       <div className="flex h-12 items-center px-4 md:hidden"><SidebarTrigger /></div>
@@ -138,4 +142,19 @@ function RunProgress({ id, total, onOpen }: { id: string; total: number; onOpen:
   return <button type="button" onClick={onOpen} className="flex justify-between rounded-md px-1.5 py-1 text-left text-[13px] hover:bg-background">
     <span>Classifying</span><span className="font-mono text-xs text-muted-foreground">{all ? Math.floor(scored / all * 100) : 0}%</span>
   </button>
+}
+
+/**
+ * One of the Founders, a different one each time the page loads. Chosen after mount: the
+ * shell is rendered once at build time, and a pick made there would disagree with the
+ * browser's.
+ */
+function Quote() {
+  const [quote, setQuote] = useState<(typeof quotes)[number]>()
+  useEffect(() => setQuote(quotes[Math.floor(Math.random() * quotes.length)]), [])
+  if (!quote) return null
+  return <figure className="grid gap-1.5 border-t px-1 pt-3 group-data-[collapsible=icon]:hidden">
+    <blockquote className="font-serif text-[14px] leading-[19px] italic text-[#3A352D]">“{quote.text}”</blockquote>
+    <figcaption className="text-[11px] text-muted-foreground">{quote.who}, {quote.where}</figcaption>
+  </figure>
 }

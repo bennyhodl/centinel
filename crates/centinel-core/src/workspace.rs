@@ -464,6 +464,7 @@ pub struct DocumentQuery {
     pub search: String,
     #[serde(default)]
     pub address: String,
+    /// One source, or several separated by commas.
     #[serde(default)]
     pub source: String,
     #[serde(default)]
@@ -496,6 +497,19 @@ pub struct CorpusPage {
     pub page_size: usize,
     pub sources: Vec<String>,
     pub pending: usize,
+    pub facets: CorpusFacets,
+}
+
+/// What each filter would find. Every count leaves out its own filter and keeps the
+/// rest, so choosing a source shows what adding another one would add.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CorpusFacets {
+    /// Matching documents in each source.
+    pub sources: BTreeMap<String, usize>,
+    /// Matching documents by usage: `included`, `excluded`, and `pending`.
+    pub usage: BTreeMap<String, usize>,
+    /// For each classifier key, matching documents in each tenth of score, low to high.
+    pub scores: BTreeMap<String, [usize; 10]>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1135,6 +1149,7 @@ impl<'a> Workspace<'a> {
             |r| r.get(0),
         )?;
         let (total, total_chars, page) = select_identities(&conn, &query)?;
+        let facets = facets(&conn, &query)?;
         let mut documents = Vec::with_capacity(page.len());
         for mut doc in page {
             doc.classifications = classifications_of(&conn, &doc)?;
@@ -1148,6 +1163,7 @@ impl<'a> Workspace<'a> {
             page_size: query.page_size,
             sources,
             pending: pending as usize,
+            facets,
         })
     }
 
@@ -2570,11 +2586,20 @@ fn prepare_projection(conn: &Connection) -> anyhow::Result<()> {
 }
 
 /// The matching documents' count, their summed characters, and the page asked for.
-fn select_identities(
-    conn: &Connection,
+/// One part of the corpus filter. A facet counts with every part but its own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Filter {
+    Source,
+    Usage,
+    Classifier,
+}
+
+/// The corpus filter as a `FROM … WHERE` over documents `d` and their exclusions `x`,
+/// with one part left out when a facet is counting it.
+fn filter_from(
     q: &DocumentQuery,
-) -> anyhow::Result<(usize, usize, Vec<Document>)> {
-    let joins = String::new();
+    except: Option<Filter>,
+) -> (String, Vec<rusqlite::types::Value>) {
     let mut where_parts = vec!["1=1".to_string()];
     let mut values: Vec<rusqlite::types::Value> = Vec::new();
     if !q.search.trim().is_empty() {
@@ -2594,26 +2619,94 @@ fn select_identities(
         values.push(like.clone().into());
         values.push(like.into());
     }
-    if !q.source.trim().is_empty() {
-        where_parts.push("d.source=?".into());
-        values.push(q.source.clone().into());
+    let sources: Vec<&str> = q
+        .source
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if except != Some(Filter::Source) && !sources.is_empty() {
+        where_parts.push(format!(
+            "d.source IN ({})",
+            vec!["?"; sources.len()].join(",")
+        ));
+        values.extend(sources.iter().map(|s| s.to_string().into()));
     }
-    if !q.classifier.trim().is_empty() {
+    if except != Some(Filter::Classifier) && !q.classifier.trim().is_empty() {
         where_parts.push("EXISTS (SELECT 1 FROM workspace_classification wc JOIN workspace_current_key ck ON ck.key=wc.question WHERE wc.source=d.source AND wc.resource=d.resource AND wc.derived_sha=d.derived_sha AND substr(ck.key,1,instr(ck.key,'@')-1)=? AND wc.score>=? AND wc.score<=?)".into());
         values.push(q.classifier.clone().into());
         values.push(q.min_score.unwrap_or(0.5).clamp(0.0, 1.0).into());
         values.push(q.max_score.unwrap_or(1.0).clamp(0.0, 1.0).into());
     }
-    match q.usage.as_str() {
-        "excluded" => where_parts.push("x.source IS NOT NULL".into()),
-        "included" => where_parts.push("x.source IS NULL".into()),
-        "pending" => where_parts.push(pending_sql("d")),
-        _ => {}
+    if except != Some(Filter::Usage) {
+        match q.usage.as_str() {
+            "excluded" => where_parts.push("x.source IS NOT NULL".into()),
+            "included" => where_parts.push("x.source IS NULL".into()),
+            "pending" => where_parts.push(pending_sql("d")),
+            _ => {}
+        }
     }
     let from = format!(
-        " FROM workspace_document d LEFT JOIN workspace_exclusion x ON x.source=d.source AND x.resource=d.resource AND x.derived_sha=d.derived_sha {joins} WHERE {}",
+        " FROM workspace_document d LEFT JOIN workspace_exclusion x ON x.source=d.source AND x.resource=d.resource AND x.derived_sha=d.derived_sha WHERE {}",
         where_parts.join(" AND ")
     );
+    (from, values)
+}
+
+/// The counts behind each filter: sources, usage, and every classifier's scores.
+fn facets(conn: &Connection, q: &DocumentQuery) -> anyhow::Result<CorpusFacets> {
+    let mut facets = CorpusFacets::default();
+
+    let (from, values) = filter_from(q, Some(Filter::Source));
+    let mut stmt = conn.prepare(&format!(
+        "SELECT d.source,COUNT(*) {from} GROUP BY d.source"
+    ))?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
+    })?;
+    facets.sources = rows.collect::<Result<_, _>>()?;
+
+    let (from, values) = filter_from(q, Some(Filter::Usage));
+    let (included, excluded, pending): (i64, i64, i64) = conn.query_row(
+        &format!(
+            "SELECT COALESCE(SUM(x.source IS NULL),0),COALESCE(SUM(x.source IS NOT NULL),0),COALESCE(SUM(CASE WHEN {} THEN 1 ELSE 0 END),0) {from}",
+            pending_sql("d")
+        ),
+        params_from_iter(values.iter()),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    facets.usage = BTreeMap::from([
+        ("included".to_string(), included as usize),
+        ("excluded".to_string(), excluded as usize),
+        ("pending".to_string(), pending as usize),
+    ]);
+
+    let (from, values) = filter_from(q, Some(Filter::Classifier));
+    let mut stmt = conn.prepare(&format!(
+        "SELECT substr(ck.key,1,instr(ck.key,'@')-1),MIN(CAST(wc.score*10 AS INTEGER),9),COUNT(*)
+         FROM workspace_classification wc JOIN workspace_current_key ck ON ck.key=wc.question
+         WHERE (wc.source,wc.resource,wc.derived_sha) IN (SELECT d.source,d.resource,d.derived_sha {from})
+         GROUP BY 1,2"
+    ))?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)? as usize,
+        ))
+    })?;
+    for row in rows {
+        let (key, tenth, count) = row?;
+        facets.scores.entry(key).or_insert([0; 10])[tenth.clamp(0, 9) as usize] = count;
+    }
+    Ok(facets)
+}
+
+fn select_identities(
+    conn: &Connection,
+    q: &DocumentQuery,
+) -> anyhow::Result<(usize, usize, Vec<Document>)> {
+    let (from, values) = filter_from(q, None);
     let count_sql = format!("SELECT COUNT(*),COALESCE(SUM(d.chars),0) {from}");
     let (total, total_chars): (i64, i64) =
         conn.query_row(&count_sql, params_from_iter(values.iter()), |r| {
@@ -4846,6 +4939,63 @@ mod tests {
             ..RunResult::default()
         };
         assert!(affected(&[tag, exclude], &[result]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn sources_combine_and_each_facet_counts_without_its_own_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let text = b"# Budget hearing\n\nResidents may speak about the proposed budget.";
+        let derived = store.put_blob(text).await.unwrap().to_string();
+        let mut index = Index::open(store.index_path()).unwrap();
+        for (source, resource) in [
+            ("city", "https://city.gov/a"),
+            ("city", "https://city.gov/b"),
+            ("county", "https://county.gov/c"),
+            ("port", "https://port.gov/d"),
+        ] {
+            for chunk in chunk_markdown(&String::from_utf8_lossy(text), &ChunkConfig::default()) {
+                index
+                    .insert(
+                        &chunk,
+                        &Placement {
+                            source: source.into(),
+                            resource: resource.into(),
+                            blob_sha: "aa".repeat(32),
+                            derived_sha: derived.clone(),
+                            ordinal: chunk.ordinal,
+                            heading: chunk.heading.clone(),
+                            char_start: chunk.char_start,
+                            char_end: chunk.char_end,
+                            observed_at: "2026-09-16T12:00:00Z".into(),
+                            tool: "test 1".into(),
+                            title: Some(resource.into()),
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+        drop(index);
+
+        let page = Workspace::new(&store)
+            .documents(DocumentQuery {
+                source: "city, county".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 3);
+        // The source facet ignores the source filter, so `port` still shows what adding it gives.
+        assert_eq!(
+            page.facets.sources,
+            BTreeMap::from([
+                ("city".to_string(), 2),
+                ("county".to_string(), 1),
+                ("port".to_string(), 1)
+            ])
+        );
+        // Every other facet keeps it.
+        assert_eq!(page.facets.usage["included"], 3);
+        assert_eq!(page.facets.usage["excluded"], 0);
     }
 
     #[tokio::test]

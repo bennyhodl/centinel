@@ -35,6 +35,15 @@ export type CorpusPage = {
   page_size: number
   sources: string[]
   pending: number
+  /** What each filter would find, counted without its own filter. Absent from servers before facets. */
+  facets?: CorpusFacets
+}
+
+export type CorpusFacets = {
+  sources: Record<string, number>
+  usage: Record<string, number>
+  /** Per classifier key: matching documents in each tenth of score, low to high. */
+  scores: Record<string, number[]>
 }
 
 export type QuestionAction = 'exclude' | 'tag' | 'keep'

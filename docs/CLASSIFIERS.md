@@ -299,7 +299,9 @@ commit. The sidebar marks a running run from every page.
 The workspace has six views, in a sidebar grouped Archive, Classifiers, and Agent:
 
 - **Search** pages through the index without loading it into browser memory. Full-text,
-  address, Source, usage, and a classifier score range can be combined. The reader
+  address, any number of Sources, usage, and a classifier score range can be combined.
+  Each filter shows what it would find: documents per Source, per usage, and each
+  classifier's scores by tenth, every count taken with the other filters but not its own. The reader
   resolves the exact Source, Resource, and derived text identity, including shared text.
   It shows the document as collected beside its extracted text: a PDF in the browser's
   viewer, a CSV as a table, HTML as the page and as its source. `GET

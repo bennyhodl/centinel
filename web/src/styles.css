@@ -16,6 +16,12 @@
     --flame-ink: #8A4A0E;
     --flame-soft: #FBEBD6;
     --rule: #E2DACB;
+    /* One colour per kind of filter: the candle for classifiers, the night sky for
+       sources, the moss on the rampart for usage. */
+    --slate: #2F4A62;
+    --slate-soft: #E3EAF1;
+    --moss: #3E6539;
+    --moss-soft: #E6EFE3;
     --sidebar: #F4EEE1;
     --sidebar-foreground: #1A1712;
     --sidebar-primary: #1A1712;
@@ -62,6 +68,10 @@
     --color-flame-ink: var(--flame-ink);
     --color-flame-soft: var(--flame-soft);
     --color-rule: var(--rule);
+    --color-slate: var(--slate);
+    --color-slate-soft: var(--slate-soft);
+    --color-moss: var(--moss);
+    --color-moss-soft: var(--moss-soft);
     --color-sidebar: var(--sidebar);
     --color-sidebar-foreground: var(--sidebar-foreground);
     --color-sidebar-primary: var(--sidebar-primary);
