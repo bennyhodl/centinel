@@ -198,11 +198,12 @@ impl<'q> Chain<'q> {
     /// Drops a document's stored answers to every follow-up the chain no longer reaches.
     /// `stored` is keyed `key@version`, as the runs ledger folds it.
     ///
-    /// This is the one place answers are removed. The fold applies it after every result,
-    /// in ledger order, so a parent whose answer changes takes its follow-ups' answers with
-    /// it — they are asked again if the new answer leads back to them, never revived. A
-    /// person's verdict counts as the parent's answer, and a reworded parent has no answer
-    /// at its new version until it is asked again.
+    /// This is the one place answers are removed. The fold applies it after every run
+    /// result and every review, in the order they happened, so a parent whose answer
+    /// changes — by Jev or by a person's verdict, which counts as the parent's answer from
+    /// the moment it is given — takes its follow-ups' answers with it. They are asked again
+    /// if the parent comes back to their tag, never revived. A reworded parent has no
+    /// answer at its new version until it is asked again.
     pub(super) fn retain_reached(
         &self,
         stored: &mut BTreeMap<String, f64>,

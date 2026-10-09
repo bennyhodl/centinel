@@ -1591,8 +1591,8 @@ impl<'a> Workspace<'a> {
         let latest = latest_reviews(&path)?;
         let scores = latest_scores(
             &self.store.workspace_runs_path(),
+            &path,
             &Chain::new(&questions),
-            &latest,
         )?;
         let mut proposed = BTreeMap::new();
         for review in &all {
@@ -1824,8 +1824,8 @@ impl<'a> Workspace<'a> {
         let reviews = latest_reviews(&self.store.workspace_reviews_path())?;
         let mut scores = latest_scores(
             &self.store.workspace_runs_path(),
+            &self.store.workspace_reviews_path(),
             &Chain::new(&saved),
-            &reviews,
         )?;
         let priors: HashMap<DocumentId, Prior> = {
             let chain = Chain::new(&tree);
@@ -3048,7 +3048,12 @@ fn answered(result: &RunResult) -> crate::op::ItemOutcome {
     use crate::op::Verdict;
     crate::op::ItemOutcome {
         address: result.resource.clone(),
-        tag: if result.error.is_some() { "error" } else { "scored" }.into(),
+        tag: if result.error.is_some() {
+            "error"
+        } else {
+            "scored"
+        }
+        .into(),
         verdict: if result.error.is_some() {
             Verdict::Fail
         } else {
@@ -3468,8 +3473,8 @@ fn sync_score_projection(
     if recorded.as_deref() == Some(&fingerprint) {
         return Ok(());
     }
+    let scores = latest_scores(&runs, &reviews, &Chain::new(current))?;
     let reviews = latest_reviews(&reviews)?;
-    let scores = latest_scores(&runs, &Chain::new(current), &reviews)?;
     project_scores(conn, &scores, current, &reviews)?;
     conn.execute(
         "INSERT INTO workspace_meta(key,value) VALUES ('scores_fingerprint',?1)
@@ -3502,18 +3507,25 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> anyhow::Result
     Ok(names.iter().any(|name| name == column))
 }
 
-/// Every document's answers as the runs ledger leaves them, keyed `key@version`: the
-/// latest answer to each key, in ledger order, with the chain applied after each result.
-/// A result that moves a parent's answer elsewhere takes its follow-ups' answers with it
-/// — see [`Chain::retain_reached`] — so what is held is what the chain reaches today,
-/// under the saved `when`s and the people's verdicts.
+/// Every document's answers as the ledgers leave them, keyed `key@version`.
+///
+/// The runs ledger and the reviews ledger are read as one history per document, in the
+/// order things happened: a run's results at the time the run started, a review at the
+/// time it was recorded, ledger order among equal times, and a record with no readable
+/// time as the oldest. After every step the chain is applied — see
+/// [`Chain::retain_reached`] — with the verdicts of the latest review so far. So any
+/// change of a parent's landed answer, by a run or by a person, drops the answers under
+/// it, and only answers recorded after the latest change count. Moving the parent back
+/// later revives nothing; the follow-up is owed and asked again.
 fn latest_scores(
-    path: &Path,
+    runs: &Path,
+    reviews: &Path,
     chain: &Chain,
-    reviews: &HashMap<DocumentId, Review>,
 ) -> anyhow::Result<HashMap<DocumentId, BTreeMap<String, f64>>> {
-    let mut out = HashMap::new();
-    for run in read_runs(path)?.into_values() {
+    let recorded_at = |at: &str| at.parse::<Timestamp>().unwrap_or(Timestamp::MIN);
+    let mut history: HashMap<DocumentId, Vec<(Timestamp, Step)>> = HashMap::new();
+    for run in read_runs(runs)?.into_values() {
+        let at = recorded_at(&run.created_at);
         let versions: HashMap<_, _> = run
             .questions
             .iter()
@@ -3523,24 +3535,57 @@ fn latest_scores(
             if result.error.is_some() {
                 continue;
             }
+            // `question:option` carries the version of its question.
+            let answers = result
+                .answers
+                .into_iter()
+                .filter_map(|(key, score)| {
+                    let version = versions.get(question_of(&key))?;
+                    Some((question_version(&key, *version), score))
+                })
+                .collect();
             let id = DocumentId {
                 source: result.source,
                 resource: result.resource,
                 derived_sha: result.derived_sha,
             };
-            let verdicts = reviews.get(&id).map(|review| &review.verdicts);
-            let saved = out.entry(id).or_insert_with(BTreeMap::new);
-            for (key, score) in result.answers {
-                // `question:option` carries the version of its question.
-                let question = key.split_once(':').map_or(key.as_str(), |(q, _)| q);
-                if let Some(version) = versions.get(question) {
-                    saved.insert(question_version(&key, *version), score);
-                }
+            history
+                .entry(id)
+                .or_default()
+                .push((at, Step::Answers(answers)));
+        }
+    }
+    for review in read_json_lines::<Review>(reviews)? {
+        history
+            .entry(review.id())
+            .or_default()
+            .push((recorded_at(&review.at), Step::Review(review.verdicts)));
+    }
+    let mut out = HashMap::new();
+    for (id, mut steps) in history {
+        // Stable, so steps at one time keep their ledger order.
+        steps.sort_by_key(|(at, _)| *at);
+        let mut stored = BTreeMap::new();
+        let mut verdicts: Option<Verdicts> = None;
+        for (_, step) in steps {
+            match step {
+                Step::Answers(answers) => stored.extend(answers),
+                Step::Review(latest) => verdicts = Some(latest),
             }
-            chain.retain_reached(saved, verdicts);
+            chain.retain_reached(&mut stored, verdicts.as_ref());
+        }
+        if !stored.is_empty() {
+            out.insert(id, stored);
         }
     }
     Ok(out)
+}
+
+/// One thing that can move a document's answers: a run's answers, keyed `key@version`,
+/// or a person's review, whose verdicts stand until the next review replaces them.
+enum Step {
+    Answers(BTreeMap<String, f64>),
+    Review(Verdicts),
 }
 
 fn read_runs(path: &Path) -> anyhow::Result<BTreeMap<String, ClassifierRun>> {
@@ -5648,8 +5693,8 @@ mod tests {
     }
 
     /// A parent's answer that moves takes its follow-ups' answers with it, whether a later
-    /// run moves it or a person does. Moving back does not revive them: the follow-up is
-    /// owed again and asked again.
+    /// run moves it or a person does. Moving back, by either, does not revive them: the
+    /// follow-up is owed again and asked again.
     #[tokio::test]
     async fn a_parent_answer_that_moves_removes_its_follow_ups_answers() {
         let dir = tempfile::tempdir().unwrap();
@@ -5677,6 +5722,25 @@ mod tests {
                 .classifications
                 .clone()
         };
+        let review = |kind: &str| {
+            ws.review(Review {
+                at: String::new(),
+                source: ids[0].source.clone(),
+                resource: ids[0].resource.clone(),
+                derived_sha: ids[0].derived_sha.clone(),
+                verdicts: BTreeMap::from([(
+                    "page_kind".to_string(),
+                    Verdict {
+                        model: Some(json!("record")),
+                        human: json!(kind),
+                    },
+                )]),
+                proposed: Vec::new(),
+                note: String::new(),
+                reviewer: "ben".into(),
+            })
+            .unwrap()
+        };
 
         append(
             "run-1",
@@ -5702,32 +5766,29 @@ mod tests {
         // Asked again; then a person says it is navigation after all.
         append("run-4", &[], Some(0.85));
         assert_eq!(scores()["laws"], 0.85);
-        ws.review(Review {
-            at: String::new(),
-            source: ids[0].source.clone(),
-            resource: ids[0].resource.clone(),
-            derived_sha: ids[0].derived_sha.clone(),
-            verdicts: BTreeMap::from([(
-                "page_kind".to_string(),
-                Verdict {
-                    model: Some(json!("record")),
-                    human: json!("navigation"),
-                },
-            )]),
-            proposed: Vec::new(),
-            note: String::new(),
-            reviewer: "ben".into(),
-        })
-        .unwrap();
+        review("navigation");
         assert!(!scores().contains_key("laws"));
-        let index = Index::open(store.index_path()).unwrap();
-        assert!(
-            index
-                .document_tags("city", &ids[0].resource, &ids[0].derived_sha)
-                .unwrap()
-                .is_empty(),
-            "the model's `laws` tag goes with its answer"
-        );
+        {
+            let index = Index::open(store.index_path()).unwrap();
+            assert!(
+                index
+                    .document_tags("city", &ids[0].resource, &ids[0].derived_sha)
+                    .unwrap()
+                    .is_empty(),
+                "the model's `laws` tag goes with its answer"
+            );
+        }
+
+        // The person changes their mind back to a record. The answer the verdict took away
+        // stays gone: the follow-up is owed again, not restored.
+        review("record");
+        assert!(!scores().contains_key("laws"));
+        assert_eq!(ws.pending_documents(laws, None, false).unwrap().len(), 1);
+
+        // Only an answer recorded after the latest change counts.
+        append("run-5", &[], Some(0.7));
+        assert_eq!(scores()["laws"], 0.7);
+        assert!(ws.pending_documents(laws, None, false).unwrap().is_empty());
     }
 
     /// Answers stored before runs followed the chain asked every question of every
