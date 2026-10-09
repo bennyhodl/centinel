@@ -305,8 +305,9 @@ The workspace has six views, in a sidebar grouped Archive, Classifiers, and Agen
   viewer, a CSV as a table, HTML as the page and as its source. `GET
   /workspace/original` serves those bytes, and Download saves them. Collected HTML is
   served with a sandbox policy, so a page never runs on the workspace's origin.
-- **Classify** draws the questions as a tree: each question on the left, its answers to
-  the right, and a follow-up hanging off the answer it is asked after. A question's
+- **Classify** draws one chain at a time on a canvas you can pan and zoom: a source
+  question on top, its answers along its foot, and each follow-up below the answer it
+  is asked after. Deleting a question moves its follow-ups up to the answer it followed. A question's
   `when` names that answer as a tag (`page_kind:record`, or `spending` for a noul's yes);
   it is policy, so changing it makes no new version. Runs do not follow the tree yet:
   every checked question is asked of every document. Test sends one document through

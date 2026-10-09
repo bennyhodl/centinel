@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, ListPlus, Play, Plus, Trash2, X } from 'lucide-react'
+import { Panel, ReactFlowProvider } from '@xyflow/react'
+import { chainOf, QuestionFlow, sourcesOf, type TreeQuestion } from './tree'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { api, corpusParams, type ChoiceOption, type CorpusFilters, type Document, type Preset, type Question, type QuestionAction, type RunDetailQuery } from './api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -8,7 +11,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { compact, money, number, plural, seconds, tail } from './format'
 import { LiveRun, useRunDetail } from './live'
-import { decisionLabels, decisionOf, estimateRun, isChoice, missingOther, policyShort, questionProblem, questionSnapshot, tagsOf } from './policy'
+import { decisionLabels, decisionOf, estimateRun, isChoice, missingOther, outcomesOf, questionProblem, questionSnapshot, tagsOf } from './policy'
 import { ResultsSection } from './results'
 import { ErrorBox, Empty, PageHeader, Segmented, Spinner } from './ui'
 
@@ -19,8 +22,7 @@ const MAX_RUN_DOCUMENTS = 50_000
 const usageOptions: Array<[string, string]> = [['all', 'All usage'], ['included', 'Included'], ['excluded', 'Excluded'], ['pending', 'Pending']]
 const actionOptions: Array<[QuestionAction, string]> = [['exclude', 'Exclude'], ['tag', 'Tag'], ['keep', 'Score only']]
 
-/** A question as edited here: a stable key for React, and whether the next run uses it. */
-type LocalQuestion = Question & { localKey: string; skip?: boolean }
+type LocalQuestion = TreeQuestion
 const newKey = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
 const withKeys = (questions: Question[], previous: LocalQuestion[] = []) => questions.map(question => {
   const before = previous.find(item => item.id === question.id)
@@ -49,7 +51,6 @@ export function Classify() {
   const shipped = useQuery({ queryKey: ['presets'], queryFn: api.presets, staleTime: Infinity })
   const [questions, setQuestions] = useState<LocalQuestion[]>([])
   const [savedQuestions, setSavedQuestions] = useState<Question[] | null>(null)
-  const [openKey, setOpenKey] = useState('')
   const [loaded, setLoaded] = useState(false)
   const [scope, setScope] = useState<'all' | 'sample'>('sample')
   const [sample, setSample] = useState(25)
@@ -60,8 +61,6 @@ export function Classify() {
   const [output, setOutput] = useState<'record' | 'preview'>('record')
   const [concurrency, setConcurrency] = useState(8)
   const [active, setActive] = useState<{ id: string; preview: boolean } | null>(null)
-  const [panel, setPanel] = useState<'edit' | 'test' | 'run'>('edit')
-  const top = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!loaded && saved.data) {
@@ -119,25 +118,16 @@ export function Classify() {
         settings: { concurrency, ...(inputRate.trim() ? { input_cost_per_million: Number(inputRate) } : {}) },
       })
     },
-    onSuccess: response => {
-      setActive({ id: response.id, preview: !recording })
-      top.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    },
+    onSuccess: response => setActive({ id: response.id, preview: !recording }),
   })
   // The same query the live panel polls, so the button knows when the run ends.
   const activeRun = useRunDetail(active?.id || '', { page: 1, page_size: 1 }, 700)
   const busy = Boolean(active) && (!activeRun.data || activeRun.data.status === 'running')
 
   const edit = (localKey: string, patch: Partial<LocalQuestion>) => setQuestions(current => current.map(question => question.localKey === localKey ? { ...question, ...patch } : question))
-  const add = (added: Question[]) => {
-    const fresh = withKeys(added.filter(question => !questions.some(existing => existing.id === question.id)))
-    setQuestions(current => [...current, ...fresh])
-    if (fresh.length === 1) setOpenKey(fresh[0].localKey)
-  }
   const blocked = problems.length > 0 || !count || !checked.length || !model.trim() || run.isPending || Boolean(busy)
   const label = run.isPending ? 'Starting…' : `${recording ? (dirty ? 'Save and classify' : 'Classify') : 'Preview'} ${scope === 'all' ? 'all ' : ''}${plural(count, 'document')}`
 
-  const select = (localKey: string) => { setOpenKey(localKey); setPanel('edit') }
   // Renaming a question keeps the follow-ups that hang off its answers.
   const editQuestion = (localKey: string, patch: Partial<LocalQuestion>) => setQuestions(current => {
     const before = current.find(question => question.localKey === localKey)
@@ -148,51 +138,98 @@ export function Classify() {
       return question
     })
   })
-  const remove = (localKey: string) => setQuestions(current => {
-    const gone = current.find(question => question.localKey === localKey)
-    const tags = new Set(gone ? outcomesOf(gone).flatMap(outcome => outcome.tag ? [outcome.tag] : []) : [])
-    return current.filter(question => question.localKey !== localKey).map(question => question.when && tags.has(question.when) ? { ...question, when: undefined } : question)
-  })
+  const [editKey, setEditKey] = useState('')
+  const [dialog, setDialog] = useState<'' | 'test' | 'run'>('')
+  const [sourceKey, setSourceKey] = useState('')
+  const sources = sourcesOf(questions)
+  const source = sources.find(question => question.localKey === sourceKey) || sources[0]
+  const chain = useMemo(() => source ? chainOf(source, questions) : [], [source, questions])
+  const editing = questions.find(question => question.localKey === editKey)
+  // Deleting a question keeps its chain: its follow-ups move up to the answer it followed.
+  const remove = (localKey: string) => {
+    const gone = questions.find(question => question.localKey === localKey)
+    if (!gone) return
+    const tags = new Set(outcomesOf(gone).flatMap(branch => branch.tag ? [branch.tag] : []))
+    const next = questions.filter(question => question.localKey !== localKey).map(question => question.when && tags.has(question.when) ? { ...question, when: gone.when } : question)
+    setQuestions(next)
+    // A deleted source hands the chain to its first follow-up.
+    if (source?.localKey === localKey) setSourceKey(questions.find(question => question.when && tags.has(question.when))?.localKey || '')
+    if (editKey === localKey) setEditKey('')
+  }
   const follow = (tag: string) => {
     const fresh = withKeys([{ ...blankNoul(questions.length), id: uniqueId(questions, `${tag.replace(':', '_')}_follow_up`), when: tag }])
     setQuestions(current => [...current, ...fresh])
-    select(fresh[0].localKey)
+    setEditKey(fresh[0].localKey)
   }
-  const selected = questions.find(question => question.localKey === openKey)
+  const addSource = (added: Question[]) => {
+    const fresh = withKeys(added.filter(question => !questions.some(existing => existing.id === question.id)))
+    setQuestions(current => [...current, ...fresh])
+    const root = fresh.find(question => !question.when)
+    if (root) setSourceKey(root.localKey)
+    if (fresh.length === 1) setEditKey(fresh[0].localKey)
+  }
+  const toggle = (localKey: string, runIt: boolean) => edit(localKey, { skip: !runIt })
   const test = useTest(checked.map(stripKey), model, date)
+  const error = shipped.error || saved.error || save.error
 
-  return <>
-    <div ref={top} />
-    <PageHeader title="Classify" detail="Jev answers the questions. The tree decides what happens. Test a document and watch the path it takes.">
-      <div className="flex shrink-0 gap-2">
-        <AddMenu onAdd={add} count={questions.length} existing={questions.map(question => question.id)} presets={shipped.data?.presets || []} />
-        <Button variant="outline" size="sm" disabled={save.isPending || !dirty || problems.length > 0} onClick={() => save.mutate()}>{save.isPending ? <Spinner /> : <Check />}{dirty ? 'Save tree' : 'Saved'}</Button>
-      </div>
-    </PageHeader>
-    {active && <LiveRun key={active.id} id={active.id} preview={active.preview} onDismiss={() => setActive(null)} />}
-    {active?.preview && <PreviewResults id={active.id} />}
-    {shipped.error && <ErrorBox error={shipped.error} />}{saved.error && <ErrorBox error={saved.error} />}{save.error && <ErrorBox error={save.error} />}
+  return <div className="relative -mx-5 -my-6 h-[calc(100svh-3rem)] overflow-hidden md:-mx-10 md:-my-8 md:h-[calc(100svh-1.25rem-2px)] md:rounded-2xl">
+    <ReactFlowProvider>
+      <QuestionFlow chain={chain} isDirty={isDirty} answers={test.answers} onEdit={setEditKey} onDelete={remove} onFollow={follow} onToggle={toggle}>
+        <Panel position="top-left" className="!m-4 flex flex-wrap items-center gap-3 rounded-xl bg-background/95 px-4 py-2.5 shadow-[0_0_0_1px_var(--rule),0_4px_14px_rgba(26,23,18,0.06)]">
+          <span className="font-serif text-[28px] leading-none">Classify</span>
+          <span className="h-6 w-px bg-rule" />
+          <span className="text-xs text-muted-foreground">Source</span>
+          <Select value={source?.localKey || ''} onValueChange={setSourceKey}>
+            <SelectTrigger className="h-8 w-80 text-[13px]"><SelectValue placeholder="No source yet" /></SelectTrigger>
+            <SelectContent>{sources.map(question => <SelectItem key={question.localKey} value={question.localKey}><span className="font-mono">{question.id}</span><span className="text-muted-foreground"> · {plural(chainOf(question, questions).length, 'question')}</span></SelectItem>)}</SelectContent>
+          </Select>
+          <AddMenu onAdd={addSource} count={questions.length} existing={questions.map(question => question.id)} presets={shipped.data?.presets || []} />
+        </Panel>
+        <Panel position="top-right" className="!m-4 flex items-center gap-2">
+          <button type="button" onClick={() => setDialog('test')} className="inline-flex h-9 max-w-80 items-center gap-2.5 rounded-full bg-foreground pr-3 pl-3 text-[13px] text-parchment shadow-[0_4px_14px_rgba(26,23,18,0.18)]">
+            <span className={`size-2 shrink-0 rounded-full ${test.doc ? 'bg-flame shadow-[0_0_0_3px_rgba(200,118,30,0.35)]' : 'bg-[#6B6458]'}`} />
+            <span className="text-[#B9AE98]">{test.running ? 'Asking Jev…' : test.doc ? 'Testing' : 'Test a document'}</span>
+            {test.doc && <span className="truncate font-semibold">{test.doc.title || tail(test.doc.resource)}</span>}
+          </button>
+          <Button variant="outline" className="bg-background" onClick={() => setDialog('run')}>{busy ? <span className="size-2 rounded-full bg-flame" /> : <Play />}Run</Button>
+          <Button disabled={save.isPending || !dirty || problems.length > 0} onClick={() => save.mutate()}>{save.isPending ? <Spinner /> : <Check />}{dirty ? 'Save tree' : 'Saved'}</Button>
+        </Panel>
+        {test.result && <Panel position="bottom-right" className="!m-4 grid w-72 gap-1.5 rounded-xl bg-background p-4 shadow-[0_0_0_1px_var(--rule),0_4px_14px_rgba(26,23,18,0.08)]">
+          <span className="text-[10px] font-bold tracking-[0.1em] text-muted-foreground">OUTCOME FOR THIS DOCUMENT</span>
+          <b className="text-[15px]">{test.result.error ? 'Jev could not answer' : `${decisionLabels[decisionOf(test.result)]}${tagsOf(test.result).length ? ` · ${tagsOf(test.result).join(', ')}` : ''}`}</b>
+          <span className="text-xs text-muted-foreground">{test.result.error || `${seconds(test.result.duration_ms)} · a preview, nothing saved`}</span>
+          <span className="mt-1 flex gap-2"><Button size="sm" variant="outline" disabled={test.running} onClick={test.again}>Ask again</Button><Button size="sm" variant="ghost" onClick={test.clear}>Clear</Button></span>
+        </Panel>}
+        <Panel position="bottom-center" className="!mb-4 grid justify-items-center gap-2">
+          {error && <ErrorBox error={error} />}
+          <span className="rounded-full bg-background/90 px-3 py-1 text-xs text-muted-foreground shadow-[0_0_0_1px_var(--rule)]">Drag to move · scroll to zoom · hover an answer and press + to ask a follow-up</span>
+        </Panel>
+      </QuestionFlow>
+    </ReactFlowProvider>
+    {!questions.length && saved.data && <div className="absolute inset-0 grid place-items-center"><div className="grid justify-items-center gap-3 rounded-xl bg-background p-8 text-center shadow-[0_0_0_1px_var(--rule)]"><span className="font-serif text-2xl">Start a chain</span><p className="max-w-72 text-sm text-muted-foreground">Add the junk gate or another preset as a source, then ask follow-ups of its answers.</p><AddMenu onAdd={addSource} count={0} existing={[]} presets={shipped.data?.presets || []} /></div></div>}
 
-    <div className="flex flex-col gap-5 xl:flex-row xl:items-start">
-      <section className="min-h-[560px] min-w-0 flex-1 overflow-auto rounded-xl border bg-[#FBF8F1] bg-[radial-gradient(#E2DACB_1px,transparent_1px)] [background-size:18px_18px] p-5">
-        <TestBar test={test} onPick={() => setPanel('test')} />
-        {questions.length ? <Tree questions={questions} selected={openKey} answers={test.answers} isDirty={isDirty} onSelect={select} onFollow={follow} onToggle={(localKey, run) => edit(localKey, { skip: !run })} /> : <Empty>Add the junk gate or another preset to start the tree.</Empty>}
-        <div className="mt-8 flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
-          <span className="inline-flex items-center gap-1.5"><i className="h-[3px] w-4 rounded bg-flame" />path Jev took</span>
-          <span className="inline-flex items-center gap-1.5"><i className="w-4 border-t-[1.5px] border-dashed border-[#CFC6B5]" />off the path</span>
-          <span>Hover an answer and press + to ask a follow-up of the documents that get it.</span>
-        </div>
-      </section>
+    <Dialog open={Boolean(editing)} onOpenChange={open => !open && setEditKey('')}>
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-xl">
+        {editing && <>
+          <DialogHeader><DialogTitle className="font-serif text-2xl font-normal">{editing.id}</DialogTitle><DialogDescription>{editing.when ? `Asked only of documents tagged ${editing.when}.` : 'A source: asked of every document.'}</DialogDescription></DialogHeader>
+          <QuestionEditor question={editing} questions={questions} edit={patch => editQuestion(editing.localKey, patch)} remove={() => remove(editing.localKey)} problem={questionProblem(editing)} />
+        </>}
+      </DialogContent>
+    </Dialog>
 
-      <aside className="grid w-full shrink-0 gap-4 rounded-xl border bg-card p-4 xl:sticky xl:top-5 xl:w-[380px]">
-        <div className="inline-flex w-fit gap-0.5 rounded-lg bg-parchment p-1" role="tablist">
-          {(['edit', 'test', 'run'] as const).map(name => <button type="button" role="tab" aria-selected={panel === name} key={name} onClick={() => setPanel(name)} className={`h-[30px] rounded-md px-3 text-[13px] ${panel === name ? 'bg-background font-semibold shadow-xs' : 'text-muted-foreground hover:text-foreground'}`}>{{ edit: 'Question', test: 'Test', run: 'Run' }[name]}</button>)}
-        </div>
-        {panel === 'edit' && (selected
-          ? <QuestionEditor question={selected} questions={questions} edit={patch => editQuestion(selected.localKey, patch)} remove={() => { remove(selected.localKey); setOpenKey('') }} problem={questionProblem(selected)} />
-          : <p className="text-sm text-muted-foreground">Click a question in the tree to edit it.</p>)}
-        {panel === 'test' && <TestPanel test={test} />}
-        {panel === 'run' && <>
+    <Dialog open={dialog === 'test'} onOpenChange={open => !open && setDialog('')}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader><DialogTitle className="font-serif text-2xl font-normal">Test a document</DialogTitle><DialogDescription>Jev answers this chain for one document. Nothing is saved.</DialogDescription></DialogHeader>
+        <TestPanel test={test} onPicked={() => setDialog('')} />
+      </DialogContent>
+    </Dialog>
+
+    <Dialog open={dialog === 'run'} onOpenChange={open => !open && setDialog('')}>
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader><DialogTitle className="font-serif text-2xl font-normal">Run</DialogTitle><DialogDescription>Ask Jev every checked question about a set of documents.</DialogDescription></DialogHeader>
+        {active && <LiveRun key={active.id} id={active.id} preview={active.preview} onDismiss={() => setActive(null)} />}
+        {active?.preview && <PreviewResults id={active.id} />}
+        <div className="grid gap-3">
         <div className="grid min-w-0 gap-2 text-xs font-medium [&_[data-slot=select-trigger]]:w-full"><span>Documents</span><Segmented label="Run scope" value={scope} onChange={setScope} options={[['sample', 'A sample'], ['all', 'All matching']]} /></div>
           {scope === 'sample' && <label className="grid min-w-0 gap-2 text-xs font-medium [&_[data-slot=select-trigger]]:w-full"><span>How many</span><Input type="number" min="1" max={MAX_RUN_DOCUMENTS} value={sample} onChange={event => setSample(Math.min(MAX_RUN_DOCUMENTS, Math.max(1, Number(event.target.value) || 1)))} /></label>}
           <div className="grid grid-cols-2 gap-3">
@@ -227,13 +264,13 @@ export function Classify() {
           {problems.length > 0 && <p className="rounded-md border bg-muted p-3 text-xs">Fix {problems[0][0]}: {problems[0][1]}</p>}
           {!checked.length && <p className="rounded-md border bg-muted p-3 text-xs">Check at least one question.</p>}
           <Button className="w-full h-11" disabled={blocked} onClick={() => run.mutate()}>{run.isPending ? <Spinner /> : <Play />}{label}</Button>
-          {busy && <p className="text-xs leading-relaxed text-muted-foreground">A run is going. It shows at the top of the page.</p>}
+          {busy && <p className="text-xs leading-relaxed text-muted-foreground">A run is going. It shows above.</p>}
           {available.error && <ErrorBox error={available.error} />}{run.error && <ErrorBox error={run.error} />}
           <p className="text-xs leading-relaxed text-muted-foreground">{recording ? 'A saved run does not change what search returns until you commit it.' : 'A preview is not saved and cannot be committed.'}</p>
-        </>}
-      </aside>
-    </div>
-  </>
+        </div>
+      </DialogContent>
+    </Dialog>
+  </div>
 }
 
 function PreviewResults({ id }: { id: string }) {
@@ -319,29 +356,6 @@ function PolicyControl({ question, edit }: { question: Question; edit: (patch: P
   </div>
 }
 
-/** One answer a question can give, and the tag a follow-up hangs off. A noul's "no" tags nothing. */
-type Branch = { label: string; tag?: string; action: QuestionAction }
-
-export function outcomesOf(question: Question): Branch[] {
-  return isChoice(question)
-    ? (question.options || []).map(option => ({ label: option.id, tag: `${question.id}:${option.id}`, action: option.action }))
-    : [{ label: 'yes', tag: question.id, action: question.action }, { label: 'no', action: 'keep' }]
-}
-
-/** Jev's probability for one answer, from a document's stored answers. */
-function probabilityOf(question: Question, branch: Branch, answers: Record<string, number>) {
-  if (isChoice(question)) return answers[`${question.id}:${branch.label}`]
-  const yes = answers[question.id]
-  return yes == null ? undefined : branch.label === 'yes' ? yes : 1 - yes
-}
-
-/** The answer Jev gave: a choice's likeliest option, or a noul's side of one half. */
-function answered(question: Question, answers?: Record<string, number>) {
-  if (!answers) return undefined
-  const scored = outcomesOf(question).map(branch => [branch.label, probabilityOf(question, branch, answers)] as const).filter(([, p]) => p != null)
-  return scored.sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))[0]?.[0]
-}
-
 function descendants(question: LocalQuestion, questions: LocalQuestion[]): Set<string> {
   const found = new Set<string>()
   const walk = (from: Question) => outcomesOf(from).forEach(branch => questions.filter(q => branch.tag && q.when === branch.tag && !found.has(q.localKey)).forEach(child => { found.add(child.localKey); walk(child) }))
@@ -355,70 +369,6 @@ function uniqueId(questions: Question[], base: string) {
   let n = 2
   while (ids.has(`${base}_${n}`)) n++
   return `${base}_${n}`
-}
-
-type TreeProps = {
-  questions: LocalQuestion[]
-  selected: string
-  answers?: Record<string, number>
-  isDirty: (question: LocalQuestion) => boolean
-  onSelect: (localKey: string) => void
-  onFollow: (tag: string) => void
-  onToggle: (localKey: string, run: boolean) => void
-}
-
-/** Questions on the left, their answers to the right, follow-ups hanging off an answer. */
-function Tree(props: TreeProps) {
-  const tags = new Set(props.questions.flatMap(question => outcomesOf(question).flatMap(branch => branch.tag ? [branch.tag] : [])))
-  const roots = props.questions.filter(question => !question.when || !tags.has(question.when))
-  return <div className="flex flex-col gap-10">{roots.map(question => <Node key={question.localKey} question={question} reached {...props} />)}</div>
-}
-
-function Node({ question, reached, ...props }: TreeProps & { question: LocalQuestion; reached: boolean }) {
-  const lit = reached ? answered(question, props.answers) : undefined
-  const tested = Boolean(props.answers)
-  const dim = tested && !reached
-  return <div className="flex items-start">
-    <QuestionCard question={question} selected={props.selected === question.localKey} dirty={props.isDirty(question)} dim={dim} live={tested && reached} onSelect={() => props.onSelect(question.localKey)} onToggle={run => props.onToggle(question.localKey, run)} />
-    <span className={`mt-[25px] w-4 shrink-0 border-t-[1.5px] ${lit ? 'border-flame' : 'border-[#D8CFBD]'}`} />
-    <div className="flex flex-col gap-1.5 pt-2">
-      {outcomesOf(question).map((branch, index, all) => {
-        const on = lit === branch.label
-        const children = branch.tag ? props.questions.filter(child => child.when === branch.tag) : []
-        const p = props.answers ? probabilityOf(question, branch, props.answers) : undefined
-        const first = index === 0, last = index === all.length - 1
-        return <div key={branch.label} className="group/branch relative flex items-start">
-          {all.length > 1 && <span className={`absolute left-0 border-l-[1.5px] border-[#D8CFBD] ${first ? 'top-[17px]' : '-top-1.5'} ${last ? (first ? 'h-0' : 'h-[23px]') : 'bottom-0'}`} />}
-          <span className={`mt-[17px] h-0 w-5 shrink-0 border-t-[1.5px] ${on ? 'border-flame' : dim ? 'border-dashed border-[#CFC6B5]' : 'border-[#D8CFBD]'}`} />
-          <span className={`flex h-[34px] w-44 shrink-0 items-center gap-2 rounded-lg px-2.5 text-[13px] ${on ? 'bg-flame-soft font-bold shadow-[0_0_0_1.5px_var(--flame)]' : 'bg-background shadow-[0_0_0_1px_var(--rule)]'} ${dim ? 'opacity-55' : ''}`}>
-            <span className="min-w-0 flex-1 truncate">{branch.label}</span>
-            <span className={`text-[10px] ${branch.action === 'exclude' ? 'text-destructive' : on ? 'text-flame-ink' : 'text-muted-foreground'}`}>{children.length ? '→ next' : actionWord[branch.action]}</span>
-            {p != null && <span className={`w-9 text-right font-mono ${on ? 'text-flame-ink' : 'text-muted-foreground'}`}>{Math.round(p * 100)}%</span>}
-          </span>
-          {branch.tag && !children.length && <button type="button" aria-label={`Ask a follow-up on ${branch.label}`} onClick={() => props.onFollow(branch.tag!)} className="ml-2 mt-[5px] grid size-6 place-items-center rounded-md border border-dashed border-[#CFC6B5] bg-background text-muted-foreground opacity-0 group-hover/branch:opacity-100 focus:opacity-100 hover:text-foreground"><Plus className="size-3.5" /></button>}
-          {children.length > 0 && <div className="flex flex-col gap-6">
-            {children.map(child => <div key={child.localKey} className="flex items-start"><span className={`mt-[17px] h-0 w-8 shrink-0 border-t-[1.5px] ${on ? 'border-flame' : 'border-dashed border-[#CFC6B5]'}`} /><Node question={child} reached={reached && on} {...props} /></div>)}
-            <button type="button" onClick={() => props.onFollow(branch.tag!)} className="ml-8 hidden h-8 w-56 items-center justify-center rounded-lg border border-dashed border-[#CFC6B5] text-xs text-muted-foreground group-hover/branch:flex hover:text-foreground">+ Another follow-up on “{branch.label}”</button>
-          </div>}
-        </div>
-      })}
-    </div>
-  </div>
-}
-
-const actionWord: Record<QuestionAction, string> = { exclude: 'exclude', tag: 'tag', keep: 'keep' }
-
-function QuestionCard({ question, selected, dirty, dim, live, onSelect, onToggle }: { question: LocalQuestion; selected: boolean; dirty: boolean; dim: boolean; live: boolean; onSelect: () => void; onToggle: (run: boolean) => void }) {
-  const problem = questionProblem(question)
-  return <div role="button" tabIndex={0} onClick={onSelect} onKeyDown={event => event.key === 'Enter' && onSelect()} className={`grid w-56 shrink-0 cursor-pointer gap-1.5 rounded-[10px] bg-background px-3.5 py-3 text-left ${selected ? 'shadow-[0_0_0_2px_var(--flame),0_4px_14px_rgba(26,23,18,0.08)]' : live ? 'shadow-[0_0_0_1.5px_var(--flame),0_4px_14px_rgba(26,23,18,0.08)]' : 'shadow-[0_0_0_1.5px_var(--foreground),0_4px_14px_rgba(26,23,18,0.08)]'} ${dim || question.skip ? 'opacity-55' : ''}`}>
-    <div className="flex items-center gap-2">
-      <input type="checkbox" checked={!question.skip} onClick={event => event.stopPropagation()} onChange={event => onToggle(event.target.checked)} aria-label={`Run ${question.id}`} className="accent-foreground" />
-      <span className={`shrink-0 text-[10px] font-bold tracking-[0.1em] ${problem ? 'text-destructive' : dirty ? 'text-flame-ink' : 'text-muted-foreground'}`}>{isChoice(question) ? 'CHOICE' : 'NOUL'} · {problem ? 'fix' : dirty ? 'unsaved' : `v${question.version}`}</span>
-      <span className="ml-auto min-w-0 truncate font-mono text-[11px] text-muted-foreground">{question.id}</span>
-    </div>
-    <span className="line-clamp-2 text-[15px] leading-[19px] font-semibold">{question.instructions || 'Write the question'}</span>
-    <span className="text-xs text-muted-foreground">{policyShort(question)}</span>
-  </div>
 }
 
 type Test = ReturnType<typeof useTest>
@@ -436,36 +386,22 @@ function useTest(questions: Question[], model: string, date: string) {
   const detail = useRunDetail(start.data?.id || '', { page: 1, page_size: 1 }, 700)
   const result = detail.data?.status !== 'running' ? detail.data?.results?.[0] : undefined
   const pick = (picked: Document) => { setDoc(picked); start.mutate(picked) }
-  return { doc, pick, result, answers: result && !result.error ? result.answers : undefined, running: start.isPending || detail.data?.status === 'running', error: start.error || detail.error, again: () => doc && start.mutate(doc) }
+  const clear = () => { setDoc(null); start.reset() }
+  return { doc, pick, clear, result, answers: result && !result.error ? result.answers : undefined, running: start.isPending || detail.data?.status === 'running', error: start.error || detail.error, again: () => doc && start.mutate(doc) }
 }
 
-function TestBar({ test, onPick }: { test: Test; onPick: () => void }) {
-  return <div className="mb-6 inline-flex h-9 items-center gap-2.5 rounded-full bg-foreground py-0 pr-1.5 pl-3 shadow-[0_4px_14px_rgba(26,23,18,0.18)]">
-    <span className={`size-2 rounded-full ${test.doc ? 'bg-flame shadow-[0_0_0_3px_rgba(200,118,30,0.35)]' : 'bg-[#6B6458]'}`} />
-    <span className="text-[13px] text-[#B9AE98]">{test.running ? 'Asking Jev…' : test.doc ? 'Testing' : 'No document under test'}</span>
-    {test.doc && <span className="max-w-80 truncate text-[13px] font-semibold text-parchment">{test.doc.title || tail(test.doc.resource)}</span>}
-    <button type="button" onClick={onPick} className="h-[26px] rounded-full bg-[#3A352D] px-2.5 text-xs text-parchment">{test.doc ? 'Pick another' : 'Pick a document'} ▾</button>
-  </div>
-}
-
-function TestPanel({ test }: { test: Test }) {
+function TestPanel({ test, onPicked }: { test: Test; onPicked: () => void }) {
   const [text, setText] = useState('')
   const params = corpusParams({ search: '', address: text.trim(), source: '', usage: 'all', classifier: '', min_score: '', max_score: '' }, 1, 8)
   const found = useQuery({ queryKey: ['corpus', 'test-pick', params.toString()], queryFn: () => api.corpus(params) })
   return <div className="grid gap-3">
     <Input value={text} onChange={event => setText(event.target.value)} placeholder="Find a document by address or title" />
     <div className="grid">
-      {(found.data?.documents || []).map(doc => <button type="button" key={`${doc.source}:${doc.resource}`} onClick={() => test.pick(doc)} className={`grid gap-0.5 border-b py-2 text-left hover:bg-[#FBF9F4] ${test.doc?.resource === doc.resource ? 'font-semibold' : ''}`}>
+      {(found.data?.documents || []).map(doc => <button type="button" key={`${doc.source}:${doc.resource}`} onClick={() => { test.pick(doc); onPicked() }} className={`grid gap-0.5 border-b py-2 text-left hover:bg-[#FBF9F4] ${test.doc?.resource === doc.resource ? 'font-semibold' : ''}`}>
         <span className="truncate text-sm">{doc.title || tail(doc.resource)}</span><span className="truncate text-xs text-muted-foreground">{doc.source} · {doc.resource}</span>
       </button>)}
     </div>
     {test.error && <ErrorBox error={test.error} />}
-    {test.result && <div className="grid gap-2 rounded-[10px] border p-3.5">
-      <span className="text-[10px] font-bold tracking-[0.1em] text-muted-foreground">OUTCOME FOR THIS DOCUMENT</span>
-      <b className="text-[15px]">{test.result.error ? 'Jev could not answer' : `${decisionLabels[decisionOf(test.result)]}${tagsOf(test.result).length ? ` · ${tagsOf(test.result).join(', ')}` : ''}`}</b>
-      <span className="text-xs text-muted-foreground">{test.result.error || `${seconds(test.result.duration_ms)} · a preview, nothing saved.`}</span>
-      <Button size="sm" variant="outline" disabled={test.running} onClick={test.again}>Ask again with these questions</Button>
-    </div>}
-    <p className="text-xs leading-relaxed text-muted-foreground">Jev answers every checked question today. Branches off the lit path show what it would have said; once runs follow the tree, they will not be asked.</p>
+    <p className="text-xs leading-relaxed text-muted-foreground">Jev answers every checked question today. Questions off the lit path are dimmed: once runs follow the tree, they will not be asked.</p>
   </div>
 }

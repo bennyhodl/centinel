@@ -1,4 +1,4 @@
-import type { ChoiceOption, Question, RunResult } from './api'
+import type { ChoiceOption, Question, QuestionAction, RunResult } from './api'
 
 export const isChoice = (question: Question) => question.kind === 'choice'
 
@@ -134,4 +134,27 @@ export function sortKeys(questions: Question[]): Array<[string, string]> {
     for (const option of question.options || []) keys.push([`${question.id}:${option.id}`, `${question.id} · ${option.id}`])
   }
   return keys
+}
+
+/** One answer a question can give, and the tag a follow-up hangs off. A noul's "no" tags nothing. */
+export type Branch = { label: string; tag?: string; action: QuestionAction }
+
+export function outcomesOf(question: Question): Branch[] {
+  return isChoice(question)
+    ? (question.options || []).map(option => ({ label: option.id, tag: `${question.id}:${option.id}`, action: option.action }))
+    : [{ label: 'yes', tag: question.id, action: question.action }, { label: 'no', action: 'keep' }]
+}
+
+/** Jev's probability for one answer, from a document's stored answers. */
+export function probabilityOf(question: Question, branch: Branch, answers: Record<string, number>) {
+  if (isChoice(question)) return answers[`${question.id}:${branch.label}`]
+  const yes = answers[question.id]
+  return yes == null ? undefined : branch.label === 'yes' ? yes : 1 - yes
+}
+
+/** The answer Jev gave: a choice's likeliest option, or a noul's side of one half. */
+export function answered(question: Question, answers?: Record<string, number>) {
+  if (!answers) return undefined
+  const scored = outcomesOf(question).map(branch => [branch.label, probabilityOf(question, branch, answers)] as const).filter(([, p]) => p != null)
+  return scored.sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))[0]?.[0]
 }
