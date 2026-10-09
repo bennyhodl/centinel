@@ -134,12 +134,16 @@ makes no new version.
   document that no question of the run reached as `not_asked` in the run's totals, with a
   filter of its own.
 - **When a parent's answer moves, its follow-ups' answers go.** The scores are a fold over
-  `workspace/runs.jsonl` in ledger order. After every result the fold drops the answers to
-  every follow-up the chain no longer reaches, recursively. A later run that moves the
-  parent elsewhere, a person's verdict that does, an edit to `when`, or a reworded parent
-  that has no answer at its new version yet all remove the follow-ups' answers from Search,
-  the review queue and the evaluation. They are never revived: if the parent comes back to
-  the tag, the follow-up is owed again and asked again. The ledger itself is never edited.
+  `workspace/runs.jsonl` and `workspace/reviews.jsonl` together, per document, in the order
+  things happened: a run's results at the time the run started, a review at the time it
+  was recorded. After every step the fold drops the answers to every follow-up the chain no
+  longer reaches, recursively, with the latest verdicts so far standing for the parent. A
+  later run that moves the parent elsewhere, a person's verdict that does, an edit to
+  `when`, or a reworded parent that has no answer at its new version yet all remove the
+  follow-ups' answers from Search, the review queue and the evaluation. They are never
+  revived, whether a run or a person moves the parent back: the follow-up is owed again
+  and asked again, and only answers recorded after the latest change count. The ledgers
+  themselves are never edited.
 - **Saving checks the chain.** A `when` that names no answer of a question in the set, and
   a chain that leads back to its own answers, are refused with the question's id.
 - **The estimate follows the chain too.** Before a run, a follow-up is priced for the share
