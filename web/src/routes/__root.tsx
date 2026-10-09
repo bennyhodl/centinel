@@ -3,7 +3,7 @@ import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useLoca
 import { QueryClientProvider, useQuery, type QueryClient } from '@tanstack/react-query'
 import { Eye, FlaskConical, History, Plug, Search, ShieldCheck, Sparkles } from 'lucide-react'
 import { queries } from '../queries'
-import { JobDrawer } from '../jobs'
+import { JobDrawer, WorkingNow, useJobEvents } from '../jobs'
 import { ActivityBar } from '../feedback'
 import { quotes } from '../quotes'
 import { number } from '../format'
@@ -51,6 +51,7 @@ function Shell() {
     refetchInterval: query => query.state.data?.runs.some(run => run.status === 'running') ? 2000 : 15000,
   })
   const running = recent.data?.runs.filter(run => run.status === 'running') || []
+  useJobEvents()
   const serverVersion = system.data?.version
   const stale = Boolean(serverVersion && serverVersion !== __CENTINEL_VERSION__)
   const [job, setJob] = useState('')
@@ -96,7 +97,7 @@ function Shell() {
         </NavGroup>
       </SidebarContent>
       <SidebarFooter className="gap-3 px-3 pb-3">
-        {running.length > 0 && <WorkingNow runs={running} onOpen={setJob} />}
+        <WorkingNow onOpen={setJob} />
         <Quote />
       </SidebarFooter>
     </Sidebar>
@@ -127,23 +128,6 @@ function NavItem({ active, label, count, children }: { active: boolean; label: s
 
 function LivePill({ children }: { children: ReactNode }) {
   return <span className="inline-flex items-center gap-1.5 rounded-full bg-flame-soft px-2 py-0.5 font-sans text-[11px] font-semibold text-flame-ink"><span className="size-1.5 rounded-full bg-flame shadow-[0_0_0_3px_#F6D9B4]" />{children}</span>
-}
-
-/** What is running right now, from any page. Only classify runs report progress today. */
-function WorkingNow({ runs, onOpen }: { runs: Array<{ id: string; document_count: number }>; onOpen: (id: string) => void }) {
-  return <div className="grid gap-2 border-t pt-3 group-data-[collapsible=icon]:hidden">
-    <span className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-flame-ink"><span className="size-1.5 rounded-full bg-flame shadow-[0_0_0_3px_#F6D9B4]" />Working now</span>
-    {runs.map(run => <RunProgress key={run.id} id={run.id} total={run.document_count} onOpen={() => onOpen(run.id)} />)}
-  </div>
-}
-
-function RunProgress({ id, total, onOpen }: { id: string; total: number; onOpen: () => void }) {
-  const detail = useQuery(queries.run(id, { page: 1, page_size: 1 }, 2000))
-  const scored = detail.data?.view?.scored ?? 0
-  const all = detail.data?.view?.input_total ?? total
-  return <button type="button" onClick={onOpen} className="flex justify-between rounded-md px-1.5 py-1 text-left text-[13px] hover:bg-background">
-    <span>Classifying</span><span className="font-mono text-xs text-muted-foreground">{all ? Math.floor(scored / all * 100) : 0}%</span>
-  </button>
 }
 
 /**

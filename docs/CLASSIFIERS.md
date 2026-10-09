@@ -296,6 +296,41 @@ Jev with how long each has waited and which request it is on, and the latest ans
 they land. When scoring stops, the same panel gives the counts by decision and the
 commit. The sidebar marks a running run from every page.
 
+### Jobs, live
+
+Every long-running op the server process runs is a job: a scheduled `run` under
+`centinel serve`, and a classifier run started from the page (its job id is the run's id).
+The sidebar's **Working now** lists each active job with what it is doing (`Collecting
+tampa.gov`, `Embedding`), its count through the current stage, and the item in hand;
+clicking one opens its log: every page fetched, document read or document scored, on
+the server's clock, failures in their own colour. Nothing polls for this. The page holds
+one stream open and folds its events into the cache.
+
+| Route | Answers |
+|---|---|
+| `GET /workspace/jobs` | `{ "jobs": [JobState] }`: active jobs in the order they started, then the last twenty finished, newest first |
+| `GET /workspace/jobs/events` | Server-Sent Events: one `snapshot` event (the same body), then a `job` event per change. `?job=<id>` narrows both to one job |
+
+A `job` event carries `seq` (grows by one per event across every job), `at`
+(milliseconds since the epoch, server clock), `job` (the id, which is the topic), and a
+`type`:
+
+| `type` | Fields | From |
+|---|---|---|
+| `started` | `kind` (the op, or `classify`), `label` | the job starting |
+| `step` | `step`, e.g. `tampa.gov · collect` | `run` entering a stage |
+| `progress` | `message`, `done`, `total`, `current` (the item in hand) | a stage's count |
+| `item` | `item`: `address`, `tag`, `verdict` (`ok`, `warn`, `missing`, `fail`), `bytes`, `millis`, `detail` | one finished page or document |
+| `note` | `message` | a log line |
+| `finished` | `outcome` (`ok`, `failed`, `cancelled`), `error` | the job ending |
+
+A `JobState` is those events folded: `step`, `done`, `total`, `current`, `ok` and
+`failed` item counts, `outcome`, and `log`, the last two hundred events other than
+`progress`. A client that falls behind the stream is sent a fresh `snapshot`; any event
+whose `seq` is not above its job's `seq` is already in it. Jobs live in the server's
+memory: a restart empties the list, and a `centinel run` typed in another terminal is
+another process and does not appear.
+
 The workspace has six views, in a sidebar grouped Archive, Classifiers, and Agent:
 
 - **Search** opens on one question box with the corpus at a glance, and lists nothing

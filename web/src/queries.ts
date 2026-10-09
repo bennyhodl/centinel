@@ -1,5 +1,5 @@
-import { keepPreviousData, queryOptions } from '@tanstack/react-query'
-import { api, corpusParams, type CorpusFilters, type DocumentIdentity, type RunDetailQuery } from './api'
+import { keepPreviousData, queryOptions, skipToken } from '@tanstack/react-query'
+import { api, corpusParams, type CorpusFilters, type DocumentIdentity, type JobState, type RunDetailQuery } from './api'
 
 /**
  * Every read the workspace makes, one builder each. A route's loader warms the cache
@@ -12,6 +12,11 @@ export const queries = {
   questions: () => queryOptions({ queryKey: ['questions'], queryFn: api.questions }),
   presets: () => queryOptions({ queryKey: ['presets'], queryFn: api.presets, staleTime: Infinity }),
   evaluation: () => queryOptions({ queryKey: ['evaluation'], queryFn: api.evaluation }),
+  /**
+   * Every job. Written only by `useJobEvents`, from the stream's own snapshot and then its
+   * events: a separate read could land after newer events and put the jobs back in time.
+   */
+  jobs: () => queryOptions<JobState[]>({ queryKey: ['jobs'], queryFn: skipToken, staleTime: Infinity }),
 
   /** A page of the corpus, as the filters and page ask for it. */
   corpus: (filters: Partial<CorpusFilters>, page = 1, pageSize = 25) => {
