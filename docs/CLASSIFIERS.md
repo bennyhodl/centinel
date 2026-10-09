@@ -106,6 +106,50 @@ The answers are stored as `question` for a noul and `question:option` for each o
 choice. Search can filter on either. For a choice, the score Search filters under its own id
 is the summed probability of its exclude options under the current actions.
 
+### Follow-ups: the question chain
+
+A question can be asked only after another one. Its `when` names one answer of another
+question in the set as a tag: `page_kind:record` for an option of a choice, or `spending`
+for a yes-or-no question's yes. A no is no tag, so nothing follows it. A question with no
+`when` is a **root** and is asked of every document; a question with one is a
+**follow-up**, asked of a document only when the document's answer to its parent landed on
+that tag and the parent was itself asked. `when` is policy, like a threshold: changing it
+makes no new version.
+
+- **Landed** means the answer, not the policy. A choice lands on its likeliest option, the
+  first in order on a tie; a yes-or-no question lands on yes at 0.5 or above. A person's
+  verdict in Review beats the model's. Moving a threshold never changes which follow-ups
+  apply.
+- **A run walks the chain one level at a time.** For each document, the questions that
+  reach it go in one request; the follow-ups its answers lead to go in the next, and so on
+  until nothing is left that applies. A document is never sent a question its parent did
+  not lead to, so it costs nothing. Each level is a request of its own and carries the
+  text again. A follow-up whose parent the run does not ask hangs off the answer the
+  document already holds. A failure at any level fails the document whole; it stays
+  pending and the next run asks it from the top. Every path follows the same rule: a saved
+  run, a preview, the CLI and the pipeline stage, and the Test on the Classify canvas.
+- **Not asked is not no.** A follow-up that did not reach a document has no answer at all.
+  It does not count as a no, holds no score in Search's facets, sits in no review band, and
+  leaves nothing pending. A run counts it apart: per question as `not_asked`, and a
+  document that no question of the run reached as `not_asked` in the run's totals, with a
+  filter of its own.
+- **When a parent's answer moves, its follow-ups' answers go.** The scores are a fold over
+  `workspace/runs.jsonl` in ledger order. After every result the fold drops the answers to
+  every follow-up the chain no longer reaches, recursively. A later run that moves the
+  parent elsewhere, a person's verdict that does, an edit to `when`, or a reworded parent
+  that has no answer at its new version yet all remove the follow-ups' answers from Search,
+  the review queue and the evaluation. They are never revived: if the parent comes back to
+  the tag, the follow-up is owed again and asked again. The ledger itself is never edited.
+- **Saving checks the chain.** A `when` that names no answer of a question in the set, and
+  a chain that leads back to its own answers, are refused with the question's id.
+- **The estimate follows the chain too.** Before a run, a follow-up is priced for the share
+  of documents expected to reach it: its parent's share times the share of documents
+  scored on its tag that score 0.5 or more there today. That is exact for a yes, and a
+  floor under "landed on this option" for a choice, since an option can win below even
+  odds. A tag no document has an answer for yet counts as every document. Each group of
+  follow-ups sharing a `when` is priced as a request that sends the text again; two groups
+  that reach the same document at the same depth share one, so the estimate errs high.
+
 ### The junk gate
 
 The **junk gate** is one choice, `page_kind`. Its options are `record`, `service_info`,
@@ -172,8 +216,9 @@ centinel questions                               # the saved set, versions, poli
 centinel questions --add-defaults                # append any shipped question the set lacks
 ```
 
-A document is **pending** when it is included and has no answer for some saved question
-at that question's current version. That is the work list, and it is a subtraction like
+A document is **pending** when it is included and has no answer for some saved root at
+that question's current version, or for a follow-up its answers reach. A follow-up its
+parent did not lead to is not owed. That is the work list, and it is a subtraction like
 every other stage's: a run that stops leaves the rest for the next one, rewording a
 question queues every document for that question alone, and a document the gate excluded
 is not sent again to be tagged.
@@ -348,9 +393,12 @@ The workspace has six views, in a sidebar grouped Archive, Classifiers, and Agen
   question on top, its answers along its foot, and each follow-up below the answer it
   is asked after. Deleting a question moves its follow-ups up to the answer it followed. A question's
   `when` names that answer as a tag (`page_kind:record`, or `spending` for a noul's yes);
-  it is policy, so changing it makes no new version. Runs do not follow the tree yet:
-  every checked question is asked of every document. Test sends one document through
-  as a preview and lights the answers Jev gave along the path. The page edits atomic
+  it is policy, so changing it makes no new version. Runs follow the tree: a checked
+  follow-up is asked only of the documents whose answer leads to it (see
+  [Follow-ups](#follow-ups-the-question-chain)). Test sends one document through as a
+  preview, asks only the questions on its path, and lights the answers Jev gave. The
+  run card and the results show documents nothing reached as **not asked**, and a
+  question a document was not asked as not asked rather than a score. The page edits atomic
   Jev questions and their policy thresholds. A trial sends
   the Search filter and a count; the server resolves the top matches in one query and
   stores the exact identities with the run, so the browser never pages the corpus back
@@ -377,7 +425,7 @@ The workspace has six views, in a sidebar grouped Archive, Classifiers, and Agen
   date, settings, tokens, duration, throughput, errors, and cost when a rate is known.
   The paged list returns small summaries. One run detail returns its exact evaluated
   questions, the current effective policy, a fresh commit preview, the counts of excluded,
-  review, kept, tagged, and failed documents, and one page of results. The server filters
+  review, kept, tagged, not asked, and failed documents, and one page of results. The server filters
   and sorts the results, so a run over the whole corpus never goes to the browser at once.
   A repeat names the run it repeats, and the server copies its inputs.
   An exact selection can be repeated for a comparable benchmark. A run with durable
@@ -400,8 +448,8 @@ projections. Deleting and rebuilding `centinel.db` replays durable usage decisio
 Corpus text leaves the machine only after the operator starts a run, and only for the
 selected documents. The server reads `TYPESAFE_API_KEY` from the process environment,
 then from `.env` in the working directory, then from `.env` in the corpus root; the key
-is never sent to the browser. It posts one complete document and all of the run's questions to
-`https://api.typesafe.ai/v1/systemone` per request.
+is never sent to the browser. It posts one complete document and the run's questions that
+reach it at one level of the chain to `https://api.typesafe.ai/v1/systemone` per request.
 
 ## The boundary that matters
 
