@@ -286,6 +286,59 @@ export type Evaluation = {
   proposed: Record<string, number>
 }
 
+/** One unit of work a stage finished: a page fetched, a document read or scored. */
+export type JobItem = {
+  address: string
+  /** An HTTP status for a fetch, a content kind for a read, `scored` or `error` for a run. */
+  tag: string
+  verdict: 'ok' | 'warn' | 'missing' | 'fail'
+  noun: string
+  bytes: number
+  /** Characters of text, where the stage produces some. */
+  produced?: number
+  millis: number
+  detail?: string
+  /** Found inside a page rather than declared by the source. */
+  nested?: boolean
+}
+
+export type JobOutcome = 'ok' | 'failed' | 'cancelled'
+
+/** What happened to a job, as the server stamped it. `seq` only grows, across every job. */
+export type JobEvent = { seq: number; at: number; job: string } & (
+  | { type: 'started'; kind: string; label: string }
+  | { type: 'step'; step: string }
+  | { type: 'progress'; message: string; done: number; total: number; current?: string }
+  | { type: 'item'; item: JobItem }
+  | { type: 'note'; message: string }
+  | { type: 'finished'; outcome: JobOutcome; error?: string }
+)
+
+/** A job as it stands: every event folded in, and the latest readable ones. */
+export type JobState = {
+  id: string
+  /** The op it runs, or `classify` for a workspace run (whose id is the run's). */
+  kind: string
+  label: string
+  started_at: number
+  finished_at?: number
+  /** The last event folded in. */
+  seq: number
+  /** The stage it is in: `tampa.gov · collect`, `embed`. */
+  step?: string
+  message?: string
+  done?: number
+  total?: number
+  /** The item in hand. */
+  current?: string
+  ok: number
+  failed: number
+  outcome?: JobOutcome
+  error?: string
+  /** Oldest first. Counter ticks are not kept here. */
+  log: JobEvent[]
+}
+
 /**
  * Development only: hold every request for `VITE_DEV_DELAY_MS`, or for
  * `localStorage['centinel.delayMs']`, to see skeletons and transitions at a slow
@@ -405,3 +458,9 @@ export const api = {
   review: (review: Review) => request<ReviewReport>('/workspace/review', { method: 'POST', body: JSON.stringify(review) }),
   evaluation: () => request<Evaluation>('/workspace/evaluation').then(value => withArray(value, 'questions', '/workspace/evaluation')),
 }
+
+/**
+ * The live job stream: a `snapshot` event with every job as it stands, then a `job` event
+ * per change; `?job=` for one. `GET /workspace/jobs` answers the snapshot alone.
+ */
+export const jobEventsUrl = '/workspace/jobs/events'

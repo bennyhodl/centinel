@@ -13,7 +13,8 @@
 //!
 //! **What one call looks like.** [`invoke`] is this crate's only call site of
 //! [`op::OpDef::invoke`], so an invocation reads the same however it arrived and
-//! `surface` is the only field that differs.
+//! `surface` is the only field that differs. It is also where a long-running op becomes
+//! a job in [`centinel_core::jobs`], for the same reason: one place, every surface.
 
 use std::io::IsTerminal;
 use std::sync::Arc;
@@ -104,7 +105,18 @@ pub async fn invoke_cancellable(
     tracing::info!(surface, op = def.name, args = %one_line(&args), "op started");
     let started = Instant::now();
 
+    // A long-running op is worth watching from elsewhere; a `list` is over before anyone
+    // could look.
+    let job = def.long_running.then(|| ctx.jobs.start(def.name, surface));
+    let progress = match &job {
+        Some(job) => job.watch(progress),
+        None => progress,
+    };
+
     let result = (def.invoke)(ctx, args, progress, cancel).await;
+    if let Some(job) = job {
+        job.finish(&result);
+    }
 
     // The sink was dropped with the invocation, so the drain has already ended or is
     // about to; awaiting it just keeps the last progress line above the closing one.

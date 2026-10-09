@@ -41,6 +41,8 @@ pub struct Ctx {
     /// One model per role, shared across requests to bound GPU residency.
     pub(crate) query_reranker: Arc<std::sync::Mutex<Option<crate::rerank::Reranker>>>,
     pub(crate) query_embedder: Arc<std::sync::Mutex<Option<crate::embed::Embedder>>>,
+    /// What this process is working on, for whoever is watching. See [`crate::jobs`].
+    pub jobs: crate::jobs::Jobs,
 }
 
 impl Ctx {
@@ -49,6 +51,7 @@ impl Ctx {
             store,
             query_reranker: Arc::new(std::sync::Mutex::new(None)),
             query_embedder: Arc::new(std::sync::Mutex::new(None)),
+            jobs: crate::jobs::Jobs::default(),
         }
     }
 }
@@ -194,6 +197,11 @@ pub struct ProgressEvent {
     /// field sees the message and behaves exactly as it did before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<ItemOutcome>,
+    /// The item a counted step is now working on: the page being fetched, the document
+    /// being read. Said ahead of the outcome, so a watcher can name what a slow step is
+    /// waiting on; the outcome itself still arrives as an `item`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
 }
 
 /// The sink an op reports progress into.
@@ -207,23 +215,41 @@ pub struct ProgressEvent {
 #[derive(Clone, Debug, Default)]
 pub struct Progress {
     tx: Option<tokio::sync::mpsc::UnboundedSender<ProgressEvent>>,
+    /// The job this invocation is, when one is being kept. A second listener rather than
+    /// a second channel: the op still says each thing once.
+    job: Option<crate::jobs::JobSink>,
 }
 
 impl Progress {
     /// A sink that discards events.
     pub fn none() -> Self {
-        Self { tx: None }
+        Self::default()
     }
 
     /// A sink plus the receiver a surface drains.
     pub fn channel() -> (Self, tokio::sync::mpsc::UnboundedReceiver<ProgressEvent>) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        (Self { tx: Some(tx) }, rx)
+        (
+            Self {
+                tx: Some(tx),
+                job: None,
+            },
+            rx,
+        )
+    }
+
+    /// This sink, also reporting into `job`. See [`crate::jobs::Job::watch`].
+    pub(crate) fn reporting_to(mut self, job: crate::jobs::JobSink) -> Self {
+        self.job = Some(job);
+        self
     }
 
     /// Reports progress. Never blocks, never fails — a dropped receiver is not an
     /// op's problem, and must not turn into an error in the op's own result.
     pub fn send(&self, event: ProgressEvent) {
+        if let Some(job) = &self.job {
+            job.record(&event);
+        }
         if let Some(tx) = &self.tx {
             let _ = tx.send(event);
         }
@@ -253,6 +279,23 @@ impl Progress {
             message: message.into(),
             done: Some(done),
             total: Some(total),
+            ..Default::default()
+        });
+    }
+
+    /// [`Progress::step`], naming the item the step is now working on.
+    pub fn step_on(
+        &self,
+        message: impl Into<String>,
+        done: u64,
+        total: u64,
+        current: impl Into<String>,
+    ) {
+        self.send(ProgressEvent {
+            message: message.into(),
+            done: Some(done),
+            total: Some(total),
+            current: Some(current.into()),
             ..Default::default()
         });
     }

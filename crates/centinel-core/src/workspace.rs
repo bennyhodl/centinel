@@ -1913,6 +1913,7 @@ impl<'a> Workspace<'a> {
                 }
                 slots[index] = Some(scored.result.clone());
                 run.results.push(scored.result.clone());
+                progress.item(answered(&scored.result));
                 run.duration_ms = Some(start.elapsed().as_millis() as u64);
                 if request.record {
                     append_json(
@@ -2829,6 +2830,27 @@ fn failed_result(input: &DocumentId, error: String) -> RunResult {
         derived_sha: input.derived_sha.clone(),
         error: Some(error),
         ..RunResult::default()
+    }
+}
+
+/// One scored document as a stage's finished item, for whoever is watching the run. What
+/// the answers mean is policy, read from the run itself; this says only that it went.
+fn answered(result: &RunResult) -> crate::op::ItemOutcome {
+    use crate::op::Verdict;
+    crate::op::ItemOutcome {
+        address: result.resource.clone(),
+        tag: if result.error.is_some() { "error" } else { "scored" }.into(),
+        verdict: if result.error.is_some() {
+            Verdict::Fail
+        } else {
+            Verdict::Ok
+        },
+        noun: "documents".into(),
+        bytes: 0,
+        produced: None,
+        millis: result.duration_ms.unwrap_or_default(),
+        detail: result.error.clone(),
+        nested: false,
     }
 }
 
