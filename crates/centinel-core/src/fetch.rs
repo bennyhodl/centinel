@@ -68,17 +68,36 @@ impl Fetcher {
 
     /// GETs a URL, classifying any non-success status into a [`Liveness`].
     pub async fn get(&self, url: &str) -> Result<Fetched, FetchFailure> {
+        let started = std::time::Instant::now();
         let resp = self
             .client
             .get(url)
             .send()
             .await
-            .map_err(|e| FetchFailure {
-                state: Liveness::Error,
-                detail: e.to_string(),
+            .map_err(|e| {
+                let ms = started.elapsed().as_millis() as u64;
+                tracing::debug!(url, error = %e, ms, "GET failed");
+                FetchFailure {
+                    state: Liveness::Error,
+                    detail: e.to_string(),
+                }
             })?;
 
+        // The call as the wire saw it: the status, where the redirects ended, the type
+        // claimed. What the op makes of it is reported as the item's outcome.
         let status = resp.status();
+        tracing::debug!(
+            url,
+            status = status.as_u16(),
+            final_url = %resp.url(),
+            content_type = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-"),
+            ms = started.elapsed().as_millis() as u64,
+            "GET"
+        );
         if !status.is_success() {
             return Err(FetchFailure {
                 state: classify(status.as_u16()),

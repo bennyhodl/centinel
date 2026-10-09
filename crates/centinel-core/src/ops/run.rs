@@ -40,6 +40,7 @@ use std::time::Instant;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 
 use crate::acquire::{self, CollectOpts, DiscoverOpts};
 use crate::config::Config;
@@ -458,8 +459,8 @@ pub async fn run(
         )?);
     }
 
-    // The aggregate bar's denominator: two acquisition stages per source, plus the
-    // corpus-wide tail. Counted before anything runs so the bar never grows a total
+    // The aggregate track's denominator: two acquisition stages per source, plus the
+    // corpus-wide tail. Counted before anything runs so the total never grows
     // underneath someone watching it.
     let yields_audio = built.iter().any(|s| s.yields_audio());
     // Classify sits between index and embed on purpose: a document the gate excludes is
@@ -507,7 +508,11 @@ pub async fn run(
                 // *previous* snapshot and report success. Better to say why it stopped.
                 StageRun::skipped(stage, "discover failed")
             } else {
-                run_acquisition(ctx, source.as_ref(), &args, stage, progress, cancel).await?
+                // A span per stage, so every line a crawl writes says which source and
+                // which stage it belongs to without each site repeating it.
+                run_acquisition(ctx, source.as_ref(), &args, stage, progress, cancel)
+                    .instrument(tracing::info_span!("stage", source = %id, stage = stage.name()))
+                    .await?
             };
             stages.push(outcome);
         }
@@ -546,7 +551,9 @@ pub async fn run(
         } else if args.dry_run {
             StageRun::skipped(stage, "--dry-run")
         } else {
-            run_derivation(ctx, &config, &args, stage, &scope, progress, cancel).await?
+            run_derivation(ctx, &config, &args, stage, &scope, progress, cancel)
+                .instrument(tracing::info_span!("stage", stage = stage.name()))
+                .await?
         };
         if stage == Stage::Embed {
             report.new_chunks += outcome.new;

@@ -82,6 +82,9 @@ llama-cpp-2 = { version = "0.1.153", default-features = false, features = ["open
 
 [dev-dependencies]
 tempfile = "3"
+# A capturing subscriber for the tests of `op::log_event`, which is where a progress
+# event becomes a log line. The binary installs the real one.
+tracing-subscriber.workspace = true
 # Office documents are built in the tests rather than committed as fixtures, matching how
 # the rest of this crate tests: the input is readable beside the assertion. Already in the
 # tree through anydoc, so it costs no build time.

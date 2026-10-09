@@ -521,10 +521,9 @@ async fn apply(origin: &Origin, report: &UpdateReport) -> anyhow::Result<Applied
     }
 
     let command = tool.display();
-    // Printed rather than logged. The CLI runs ops with logging off (see the binary's
-    // `logging` module), and a command that is about to compile and replace the program
-    // you are running has to name itself on the way past.
-    eprintln!("\n  {command}\n");
+    // A command that is about to compile and replace the program you are running has to
+    // name itself on the way past.
+    tracing::info!(%command, "running the installer");
 
     let status = tool.interactive().await?;
     anyhow::ensure!(
@@ -556,10 +555,10 @@ async fn download_installer(rev: &str) -> anyhow::Result<(PathBuf, tempfile::Tem
         .await
         .map_err(|refusal| anyhow::anyhow!("fetching {url}: {refusal}"))?;
 
-    // Said out loud, at the moment it is true: this is a script from the network that is
-    // about to run on this machine, and the address it came from is the only thing that
-    // makes that reviewable.
-    eprintln!("\n  installer  {url}");
+    // Said at the moment it is true: this is a script from the network that is about to
+    // run on this machine, and the address it came from is the only thing that makes
+    // that reviewable.
+    tracing::info!(%url, bytes = fetched.bytes.len(), "installer fetched");
 
     let scratch = tempfile::tempdir()?;
     let path = scratch.path().join("install.sh");

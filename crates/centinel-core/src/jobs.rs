@@ -1,9 +1,9 @@
 //! Jobs: what this process is working on, as it happens, for whoever is watching.
 //!
-//! An op reports into [`Progress`] and never learns who listens. The CLI draws bars from
-//! that stream and `/ops/{name}/stream` forwards it to the one caller that asked; neither
-//! outlives the invocation, and a browser opened after a scheduled run started has no way
-//! in. This module is the listener that does: every long-running invocation in the
+//! An op reports into [`Progress`] and never learns who listens. The CLI writes that
+//! stream to its log and `/ops/{name}/stream` forwards it to the one caller that asked;
+//! neither outlives the invocation, and a browser opened after a scheduled run started
+//! has no way in. This module is the listener that does: every long-running invocation in the
 //! process is a *job*, its events are folded into a small current state and a bounded
 //! tail, and any number of subscribers can join at any point and read the same thing.
 //!

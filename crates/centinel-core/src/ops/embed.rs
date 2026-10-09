@@ -712,7 +712,7 @@ struct Host {
 
 /// Batches either side of the decode may run ahead: the reader keeps this many read,
 /// the writer this many not yet committed. One would do; two absorbs jitter. More buys
-/// nothing and widens the gap between the progress bar and the table.
+/// nothing and widens the gap between the progress count and the table.
 const PIPELINE_SLACK: usize = 2;
 
 /// The pipeline: read → decode → append, each on its own thread.
@@ -724,7 +724,7 @@ const PIPELINE_SLACK: usize = 2;
 ///
 /// The durable count is the writer's. Lance commits a version per append, chunk identity
 /// is the hash of its text, and the next run subtracts what is stored — so stopping
-/// mid-corpus costs nothing but what was in flight. The progress bar runs at most
+/// mid-corpus costs nothing but what was in flight. The progress count runs at most
 /// [`PIPELINE_SLACK`] batches ahead of the table; the report's `embedded` is what
 /// actually landed.
 fn run(

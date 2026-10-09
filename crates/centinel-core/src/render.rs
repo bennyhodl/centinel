@@ -25,8 +25,7 @@
 //!
 //! ## The vocabulary
 //!
-//! Deliberately small, and shared with the progress renderer so a command does not change
-//! its visual language halfway through:
+//! Deliberately small, and the same across every report so a reader learns it once:
 //!
 //! | | Meaning |
 //! |---|---|

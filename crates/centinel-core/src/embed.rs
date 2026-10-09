@@ -154,8 +154,9 @@ impl Default for SessionOptions {
 ///
 /// Its logging is routed into `tracing` and **off by default**. Left alone, `llama.cpp`
 /// writes graph and buffer diagnostics straight to stderr — which would corrupt nothing
-/// under `centinel mcp` (that protocol owns stdout) but would bury every progress bar
-/// and every op's output under hundreds of lines. `--verbose` is the way to see it.
+/// under `centinel mcp` (that protocol owns stdout) but would bury every line this crate
+/// writes under hundreds of its own. `RUST_LOG` naming the `llama_cpp_2` crate is the
+/// way to see it; what this crate says about the device and the batch is at debug.
 pub(crate) fn backend() -> anyhow::Result<&'static LlamaBackend> {
     static BACKEND: OnceLock<Result<LlamaBackend, String>> = OnceLock::new();
     BACKEND
@@ -200,9 +201,20 @@ impl Embedder {
         // llama.cpp rather than naming the model to pull.
         let found = models::resolve(model_id, ModelRole::Embedding, variant, root)?;
 
+        let started = std::time::Instant::now();
         let params = LlamaModelParams::default().with_n_gpu_layers(GPU_LAYERS);
         let model = LlamaModel::load_from_file(backend()?, &found.path, &params)
             .map_err(|e| anyhow::anyhow!("loading {}: {e}", found.path.display()))?;
+        tracing::debug!(
+            model = model_id,
+            variant = %found.variant,
+            path = %found.path.display(),
+            gpu_layers = GPU_LAYERS,
+            dims = model.n_embd(),
+            layers = model.n_layer(),
+            ms = started.elapsed().as_millis() as u64,
+            "embedding model loaded"
+        );
 
         Ok(Self {
             model,
@@ -366,10 +378,16 @@ impl Embedder {
     /// currentAllocatedSize`, CUDA reports `cudaMemGetInfo` — so nothing here needs the
     /// model's size on disk or a guess at what the backend did with it.
     pub fn auto_batch(&self) -> Option<usize> {
-        Some(batch_for_budget(
-            free_device_memory()?,
-            self.kv_bytes_per_cell(),
-        ))
+        let free = free_device_memory()?;
+        let per_cell = self.kv_bytes_per_cell();
+        let batch = batch_for_budget(free, per_cell);
+        tracing::debug!(
+            free_bytes = free,
+            kv_bytes_per_cell = per_cell,
+            batch,
+            "batch sized from the device's free memory"
+        );
+        Some(batch)
     }
 
     /// Bytes of KV cache one context cell costs.
@@ -404,6 +422,14 @@ impl Embedder {
             .model
             .new_context(backend()?, params)
             .map_err(|e| anyhow::anyhow!("creating session context: {e}"))?;
+        tracing::debug!(
+            sequences = seqs,
+            n_ctx = cells * seqs as u32,
+            n_batch = cells * seqs as u32,
+            n_ubatch = options.ubatch.max(cells),
+            flash = ?options.flash,
+            "embedding session opened"
+        );
         Ok(EmbedSession {
             embedder: self,
             ctx,
@@ -439,7 +465,9 @@ impl EmbedSession<'_> {
         let mut out = Vec::with_capacity(texts.len());
         for group in tokenized.chunks(self.seqs) {
             let longest = group.iter().map(Vec::len).max().unwrap_or(0);
-            if longest <= NOMINAL_SEQ_CELLS as usize {
+            let started = std::time::Instant::now();
+            let bespoke = longest > NOMINAL_SEQ_CELLS as usize;
+            if !bespoke {
                 // Metadata only, never a wipe of the buffers themselves — clearing data
                 // would memset gigabytes between every pair of batches. Stale cells left
                 // behind by a failed clear would enter the next decode as context, so a
@@ -453,6 +481,16 @@ impl EmbedSession<'_> {
             } else {
                 out.extend(self.embedder.decode_group(group, self.flash)?);
             }
+            // Per decode, which is per batch on the throughput path: the one number that
+            // says whether a machine is embedding at the rate its device should.
+            tracing::debug!(
+                sequences = group.len(),
+                tokens = group.iter().map(Vec::len).sum::<usize>(),
+                longest,
+                bespoke,
+                ms = started.elapsed().as_millis() as u64,
+                "decoded"
+            );
         }
         Ok(out)
     }

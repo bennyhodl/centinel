@@ -240,6 +240,7 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
     // Checked before the vector arm so a missing index fails immediately rather than
     // after a multi-gigabyte model load. This is a path, not a connection.
     let index_path = ctx.store.require_index()?;
+    let started = std::time::Instant::now();
 
     // A missing model or an unbuilt table is a normal state, not a failure: the corpus
     // is keyword-searchable long before it is embedded. It degrades to one arm and says
@@ -248,6 +249,15 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
         Ok(arm) => (arm.hits, arm.stored, None),
         Err(reason) => (Vec::new(), 0, Some(reason)),
     };
+    match &no_vectors {
+        None => tracing::debug!(
+            hits = vector.len(),
+            stored = vectors_indexed,
+            ms = started.elapsed().as_millis() as u64,
+            "vector arm"
+        ),
+        Some(reason) => tracing::debug!(reason, "no vector arm"),
+    }
 
     // Every SQLite call is inside here. `Index` owns a `rusqlite::Connection` and so is
     // not `Send`; one merely *alive* across an `await` makes this op's future
@@ -257,14 +267,35 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
     // It retrieves to `RERANK_DEPTH`, not to `args.limit`: the reranker's whole value is
     // reordering a set larger than the one returned (§6.3).
     let (mut hits, total_chunks_indexed) = retrieve(&index_path, &args, vector)?;
+    tracing::debug!(
+        candidates = hits.len(),
+        chunks_indexed = total_chunks_indexed,
+        ms = started.elapsed().as_millis() as u64,
+        "retrieved"
+    );
 
     let no_rerank = match crate::models::models_dir() {
         Ok(models) => rerank_arm(ctx, &models, &args.query, &mut hits).await.err(),
         Err(e) => Some(format!("{e:#}")),
     };
+    if let Some(reason) = &no_rerank {
+        tracing::debug!(reason, "not reranked");
+    }
     hits.truncate(args.limit);
 
     let method = method(no_vectors.is_none(), no_rerank.is_none());
+    // The one line a server's log keeps per search: what was asked, under which filter,
+    // what came back and how long it took. The hits themselves are the caller's.
+    tracing::info!(
+        query = %args.query,
+        source = args.source.as_deref().unwrap_or("*"),
+        tags = ?args.tags,
+        not_tags = ?args.not_tags,
+        results = hits.len(),
+        %method,
+        ms = started.elapsed().as_millis() as u64,
+        "searched"
+    );
 
     let results = hits
         .into_iter()
