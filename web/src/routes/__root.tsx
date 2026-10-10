@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useLocation } from '@tanstack/react-router'
 import { QueryClientProvider, useQuery, type QueryClient } from '@tanstack/react-query'
-import { Eye, FlaskConical, History, Moon, Plug, Search, ShieldCheck, Sparkles, Sun } from 'lucide-react'
+import { CircleDollarSign, Eye, FlaskConical, History, Moon, Plug, Search, ShieldCheck, Sparkles, Sun } from 'lucide-react'
 import { queries } from '../queries'
 import { JobDrawer, WorkingNow, useJobEvents } from '../jobs'
 import { ActivityBar } from '../feedback'
@@ -75,6 +75,9 @@ function Shell() {
         <NavGroup label="Archive">
           <NavItem active={at('/')} label="Search" icon={<Search />} count={corpus.data && number(corpus.data.total)}>
             <Link to="/" search={searchDefaults}><Search /><span>Search</span></Link>
+          </NavItem>
+          <NavItem active={at('/spend')} label="Spend">
+            <Link to="/spend" search={{ metric: 'cost', days: 30 }}><CircleDollarSign /><span>Spend</span></Link>
           </NavItem>
         </NavGroup>
         <NavGroup label="Classifiers">

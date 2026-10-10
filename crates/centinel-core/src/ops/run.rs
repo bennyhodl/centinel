@@ -1078,9 +1078,9 @@ fn missing_embedder(id: &str) -> Option<String> {
     match crate::remote::backend_for(id) {
         Err(e) => Some(format!("{e:#}")),
         Ok(EmbeddingBackend::Local(_)) => missing_model(id, crate::models::ModelRole::Embedding),
-        Ok(EmbeddingBackend::Remote(spec)) => crate::remote::RemoteEmbedder::new(spec)
-            .err()
-            .map(|e| format!("{e:#}")),
+        Ok(EmbeddingBackend::Remote(spec)) => {
+            crate::remote::api_key(spec).err().map(|e| format!("{e:#}"))
+        }
     }
 }
 

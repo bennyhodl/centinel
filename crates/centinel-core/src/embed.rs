@@ -37,6 +37,7 @@ use llama_cpp_2::token::LlamaToken;
 use llama_cpp_2::{LlamaBackendDeviceType, list_llama_ggml_backend_devices};
 
 use crate::models::{self, ModelRole, ModelSpec};
+use crate::spend::{self, Spend};
 
 /// The task description prepended to **queries**.
 ///
@@ -176,6 +177,7 @@ pub struct Embedder {
     model: LlamaModel,
     spec: &'static ModelSpec,
     variant: &'static str,
+    ledger: spend::Ledger,
 }
 
 impl std::fmt::Debug for Embedder {
@@ -189,12 +191,18 @@ impl std::fmt::Debug for Embedder {
 }
 
 impl Embedder {
-    /// Loads an embedder from the weights cache.
+    /// Loads an embedder from the weights cache. Every batch it embeds is written to
+    /// `ledger`, priced as the cloud model with the same weights ([`crate::spend`]).
     ///
     /// Fails loudly when weights are absent rather than downloading them — SPEC §3.2
     /// makes fetching an explicit operator action, so that a scheduled run can fail on a
     /// missing model but never decide to pull gigabytes on its own.
-    pub fn load(root: &Path, model_id: &str, variant: Option<&str>) -> anyhow::Result<Self> {
+    pub fn load(
+        root: &Path,
+        model_id: &str,
+        variant: Option<&str>,
+        ledger: spend::Ledger,
+    ) -> anyhow::Result<Self> {
         // Through `models::resolve`, which checks each file against its *pinned size*.
         // This used to test `path.is_file()`, so a truncated download read as installed
         // here and as missing to `doctor`, and the load failed somewhere inside
@@ -224,6 +232,7 @@ impl Embedder {
                 .variant(Some(&found.variant))
                 .expect("a resolved variant is a spec variant")
                 .name,
+            ledger,
         })
     }
 
@@ -263,13 +272,13 @@ impl Embedder {
     /// Embeds a query, applying the instruction prefix.
     pub fn embed_query(&self, query: &str) -> anyhow::Result<Vec<f32>> {
         let prompt = format!("Instruct: {QUERY_INSTRUCTION}\nQuery:{query}");
-        Ok(self.embed_batch(&[prompt])?.remove(0))
+        Ok(self.embed_batch(&[prompt], spend::Stage::Query)?.remove(0))
     }
 
     /// Embeds documents, bare. Order is preserved.
     pub fn embed_documents<S: AsRef<str>>(&self, texts: &[S]) -> anyhow::Result<Vec<Vec<f32>>> {
         let owned: Vec<String> = texts.iter().map(|t| t.as_ref().to_string()).collect();
-        self.embed_batch(&owned)
+        self.embed_batch(&owned, spend::Stage::Embed)
     }
 
     /// The single inference path. Both public entry points route through here so a query
@@ -277,7 +286,7 @@ impl Embedder {
     ///
     /// Split at [`MAX_SEQUENCES`] rather than refused above it, so the public contract
     /// stays "any number of texts, order preserved" whatever llama.cpp's batch limit is.
-    fn embed_batch(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+    fn embed_batch(&self, texts: &[String], stage: spend::Stage) -> anyhow::Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -286,7 +295,16 @@ impl Embedder {
         for group in tokenized.chunks(MAX_SEQUENCES) {
             out.extend(self.decode_group(group, FlashAttention::default())?);
         }
+        self.record(stage, &tokenized);
         Ok(out)
+    }
+
+    /// Writes what a batch that embedded cost in tokens. Only after it embedded: a group
+    /// that failed is retried a chunk at a time, and counting it too would count twice.
+    fn record(&self, stage: spend::Stage, tokenized: &[Vec<LlamaToken>]) {
+        let tokens = tokenized.iter().map(Vec::len).sum::<usize>() as u64;
+        self.ledger
+            .record(Spend::new(stage, self.spec.id, tokens, 0));
     }
 
     /// Tokenizes every text, refusing any that runs too long.
@@ -492,6 +510,7 @@ impl EmbedSession<'_> {
                 "decoded"
             );
         }
+        self.embedder.record(spend::Stage::Embed, &tokenized);
         Ok(out)
     }
 }
@@ -594,7 +613,14 @@ mod tests {
             return None;
         }
         let root = models::models_dir().ok()?;
-        Embedder::load(&root, "qwen3-embedding-4b", None).ok()
+        Embedder::load(&root, "qwen3-embedding-4b", None, scratch_ledger()).ok()
+    }
+
+    /// A ledger nobody reads, for tests about something else.
+    fn scratch_ledger() -> spend::Ledger {
+        spend::Ledger::new(&crate::store::Store::at(
+            std::env::temp_dir().join("centinel-embed-tests"),
+        ))
     }
 
     #[test]
@@ -639,7 +665,7 @@ mod tests {
     #[test]
     fn loading_a_reranker_as_an_embedder_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let err = Embedder::load(dir.path(), "qwen3-reranker-0.6b", None)
+        let err = Embedder::load(dir.path(), "qwen3-reranker-0.6b", None, scratch_ledger())
             .unwrap_err()
             .to_string();
         assert!(err.contains("not an embedder"), "{err}");
@@ -650,7 +676,7 @@ mod tests {
     #[test]
     fn missing_weights_name_the_pull_command() {
         let dir = tempfile::tempdir().unwrap();
-        let err = Embedder::load(dir.path(), "qwen3-embedding-4b", None)
+        let err = Embedder::load(dir.path(), "qwen3-embedding-4b", None, scratch_ledger())
             .unwrap_err()
             .to_string();
         assert!(err.contains("weights missing"), "{err}");
@@ -663,10 +689,65 @@ mod tests {
     #[test]
     fn an_unknown_variant_is_refused_before_touching_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let err = Embedder::load(dir.path(), "qwen3-embedding-4b", Some("q2_k"))
-            .unwrap_err()
-            .to_string();
+        let err = Embedder::load(
+            dir.path(),
+            "qwen3-embedding-4b",
+            Some("q2_k"),
+            scratch_ledger(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("q8_0"), "should list real variants: {err}");
+    }
+
+    /// Every path that embeds writes a line — the query, a one-off batch, and the session
+    /// a corpus runs through — with the tokens llama.cpp counted, at the cloud price.
+    #[test]
+    fn every_local_batch_is_written_with_its_tokens_at_the_cloud_price() {
+        if std::env::var("CENTINEL_TEST_MODELS").is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::at(dir.path());
+        let root = models::models_dir().unwrap();
+        let embedder = Embedder::load(
+            &root,
+            "qwen3-embedding-4b",
+            None,
+            spend::Ledger::new(&store),
+        )
+        .unwrap();
+        embedder.embed_query("budget").unwrap();
+        embedder
+            .embed_documents(&["The council approved the budget."])
+            .unwrap();
+        embedder
+            .session(SessionOptions::default())
+            .unwrap()
+            .embed(&["Bins are collected on Tuesdays.", "Parks close at dusk."])
+            .unwrap();
+
+        let spent = spend::Ledger::new(&store)
+            .read(jiff::Timestamp::UNIX_EPOCH)
+            .unwrap();
+        let stages: Vec<_> = spent.iter().map(|s| s.stage).collect();
+        assert_eq!(
+            stages,
+            [
+                spend::Stage::Query,
+                spend::Stage::Embed,
+                spend::Stage::Embed
+            ]
+        );
+        for line in &spent {
+            assert_eq!(line.model, "qwen3-embedding-4b");
+            assert_eq!(line.provider, spend::Provider::Local);
+            assert!(line.input_tokens > 0);
+            assert_eq!(
+                line.cost_usd,
+                spend::cost("openrouter/qwen/qwen3-embedding-4b", line.input_tokens, 0)
+            );
+        }
     }
 
     /// The test that would catch a wrong recipe.

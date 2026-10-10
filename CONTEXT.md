@@ -137,7 +137,8 @@ and edits no renderer.
 quiet run writes nothing to `log/`, so "the schedule fired and everything was current"
 lives only here), `decisions.jsonl` holds corpus-wide crumb rulings, and `workspace/`
 holds saved classifier questions, classifier attempts and scores, and reversible usage
-decisions. `current/`, `centinel.db` and `vectors.lance/` are derived and can be rebuilt
+decisions. `spend/` holds every model call — Jev, OpenRouter and local — with its tokens and
+what it cost on the day. `current/`, `centinel.db` and `vectors.lance/` are derived and can be rebuilt
 from them. *Why it matters:* it is what makes the index disposable and the corpus
 something you can hand to somebody with `rsync`.
 

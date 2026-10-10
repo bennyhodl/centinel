@@ -11,6 +11,8 @@
 //! | `POST /mcp` | MCP JSON-RPC over HTTP |
 //! | `GET /workspace/jobs` | what this process is working on, and what it just finished |
 //! | `GET /workspace/jobs/events` | the same, then every job event as it happens (SSE) |
+//! | `GET /workspace/spend?since=` | every model call since then, by hour and model |
+//! | `GET /workspace/prices` | what each model is priced at, and where the price came from |
 //!
 //! ## Long-running operations
 //!
@@ -244,6 +246,8 @@ fn router(ctx: Arc<Ctx>) -> Router {
         .route("/workspace/review/queue", get(workspace_review_queue))
         .route("/workspace/review", post(workspace_review))
         .route("/workspace/evaluation", get(workspace_evaluation))
+        .route("/workspace/spend", get(workspace_spend))
+        .route("/workspace/prices", get(workspace_prices))
         .route("/workspace/jobs", get(workspace_jobs))
         .route("/workspace/jobs/events", get(workspace_job_events))
         .route("/ops", get(list_ops))
@@ -447,6 +451,26 @@ async fn workspace_review(
 
 async fn workspace_evaluation(State(ctx): State<Arc<Ctx>>) -> Response {
     workspace_response(Workspace::new(&ctx.store).evaluation())
+}
+
+#[derive(serde::Deserialize)]
+struct SpendQuery {
+    /// RFC 3339. The page asks from the start of its window in the reader's own zone.
+    since: String,
+}
+
+async fn workspace_spend(State(ctx): State<Arc<Ctx>>, Query(query): Query<SpendQuery>) -> Response {
+    workspace_response(
+        query
+            .since
+            .parse::<jiff::Timestamp>()
+            .with_context(|| format!("`since` is not a timestamp: {}", query.since))
+            .and_then(|since| centinel_core::spend::summary(&ctx.store, since)),
+    )
+}
+
+async fn workspace_prices() -> Response {
+    Json(json!({ "prices": centinel_core::spend::prices() })).into_response()
 }
 
 /// The shipped question groups, for the Add menu. The saved set is seeded from these on
@@ -1052,6 +1076,67 @@ mod tests {
                 "SPA route {path}"
             );
         }
+    }
+
+    /// The spend page reads what the ledger holds from its window on and every price, and a
+    /// window it cannot read is refused with the reason.
+    #[tokio::test]
+    async fn spend_answers_from_the_ledger_and_refuses_a_bad_window() {
+        use centinel_core::spend::{Ledger, Spend, Stage};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        Ledger::new(&store).record(Spend::new(Stage::Classify, "jev-1.13.0", 1_000, 0));
+        let app = router(Arc::new(Ctx::new(store)));
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/workspace/spend?since=2000-01-01T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let summary = body_json(resp).await;
+        assert_eq!(summary["buckets"][0]["model"], "jev-1.13.0");
+        assert_eq!(summary["buckets"][0]["provider"], "jev");
+        assert_eq!(summary["buckets"][0]["requests"], 1);
+
+        let prices = body_json(
+            app.clone()
+                .oneshot(
+                    Request::get("/workspace/prices")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            prices["prices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["model"] == "qwen3-embedding-4b" && p["priced_as"].is_string())
+        );
+
+        let resp = app
+            .oneshot(
+                Request::get("/workspace/spend?since=last-week")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            body_json(resp).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("last-week")
+        );
     }
 
     /// The review surfaces read before anything is written: an empty store has an empty

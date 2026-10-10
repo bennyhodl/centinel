@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 
 use crate::index::to_fts_query;
 use crate::op::{Cancel, Progress};
+use crate::spend::{self, Ledger, Spend, Stage};
 use crate::store::Store;
 
 mod chain;
@@ -1899,20 +1900,6 @@ impl<'a> Workspace<'a> {
             .values
             .entry("requested_model".into())
             .or_insert(json!(request.model));
-        if request.model.starts_with("jev-") {
-            run.settings
-                .values
-                .entry("input_cost_per_million".into())
-                .or_insert(json!(0.042));
-            run.settings
-                .values
-                .entry("output_cost_per_million".into())
-                .or_insert(json!(0.0));
-            run.settings
-                .values
-                .entry("pricing_source".into())
-                .or_insert(json!("TypeSafe published price, 2026-09-14"));
-        }
         if request.record {
             append_json(
                 &self.store.workspace_runs_path(),
@@ -2002,6 +1989,7 @@ impl<'a> Workspace<'a> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
+        let ledger = Ledger::new(self.store);
         let start = Instant::now();
         let mut slots: Vec<Option<RunResult>> = vec![None; request.documents.len()];
 
@@ -2045,6 +2033,9 @@ impl<'a> Workspace<'a> {
         let outcome: anyhow::Result<()> = async {
             while let Some((index, scored)) = scored.next().await {
                 if let Some((input, output)) = scored.usage {
+                    // Previews too: a preview is a paid call like any other.
+                    let model = scored.model.as_deref().unwrap_or(&request.model);
+                    ledger.record(Spend::new(Stage::Classify, model, input, output).run(&run.id));
                     add_usage(&mut run.input_tokens, input);
                     add_usage(&mut run.output_tokens, output);
                     run.usage_documents += 1;
@@ -2121,7 +2112,10 @@ impl<'a> Workspace<'a> {
         run.throughput_docs_sec =
             (duration_ms > 0).then(|| run.results.len() as f64 / (duration_ms as f64 / 1000.0));
         run.preview = preview(&request.questions, &run.results, self.store)?;
-        run.cost_usd = estimated_cost(&run.settings, run.input_tokens, run.output_tokens);
+        run.cost_usd = match (run.input_tokens, run.output_tokens) {
+            (Some(input), Some(output)) => spend::cost(&run.model, input, output),
+            _ => None,
+        };
         run.cost_estimated = run.cost_usd.is_some();
         if request.record {
             append_json(
@@ -3220,15 +3214,6 @@ fn validated_answers<'q>(
         }
     }
     Ok((out, choices))
-}
-
-fn estimated_cost(settings: &RunSettings, input: Option<u64>, output: Option<u64>) -> Option<f64> {
-    let rate = |key: &str| settings.values.get(key).and_then(Value::as_f64);
-    let (input, output) = (input?, output?);
-    Some(
-        input as f64 * rate("input_cost_per_million")? / 1_000_000.0
-            + output as f64 * rate("output_cost_per_million")? / 1_000_000.0,
-    )
 }
 
 fn add_usage(total: &mut Option<u64>, value: u64) {
@@ -5245,24 +5230,6 @@ mod tests {
         add_usage(&mut total, 4);
         add_usage(&mut total, 3);
         assert_eq!(total, Some(7));
-    }
-
-    #[test]
-    fn explicit_rates_produce_a_cost_estimate() {
-        let settings = RunSettings {
-            values: BTreeMap::from([
-                ("input_cost_per_million".into(), json!(0.042)),
-                ("output_cost_per_million".into(), json!(0.0)),
-            ]),
-        };
-        assert_eq!(
-            estimated_cost(&settings, Some(1_000_000), Some(100)),
-            Some(0.042)
-        );
-        assert_eq!(
-            estimated_cost(&RunSettings::default(), Some(10), Some(1)),
-            None
-        );
     }
 
     #[test]

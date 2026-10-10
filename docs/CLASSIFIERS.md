@@ -425,12 +425,14 @@ The workspace has six views, in a sidebar grouped Archive, Classifiers, and Agen
   Score columns sort by a click on their header, high to low first. The Output selector
   chooses between a saved run and a preview. A saved run accepts only the current saved
   question set, so a stale browser tab cannot change its meaning. A preview scores the
-  same selection, shows the scores on the page, and writes nothing to the run ledger;
+  same selection, shows the scores on the page, and writes nothing to the run ledger
+  (its calls are paid for, so they still land in `spend/`, like every Jev answer);
   it accepts draft questions because it records no meaning, and it cannot be committed
   or repeated. Saving a question versions model-evaluated meaning; changing an action
   threshold re-decides stored scores without sending the text again.
 - **Runs** keeps the question versions, selected input identities, model, evaluation
-  date, settings, tokens, duration, throughput, errors, and cost when a rate is known.
+  date, settings, tokens, duration, throughput, errors, and cost when the model has a
+  price. Prices live in one table, `spend::PRICES`; the Spend page shows every call.
   The paged list returns small summaries. One run detail returns its exact evaluated
   questions, the current effective policy, a fresh commit preview, the counts of excluded,
   review, kept, tagged, not asked, and failed documents, and one page of results. The server filters

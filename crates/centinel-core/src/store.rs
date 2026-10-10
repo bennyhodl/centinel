@@ -9,6 +9,7 @@
 //!   workspace/questions.jsonl  TRUTH    saved classifier question sets
 //!   workspace/runs.jsonl       TRUTH    classifier attempts and scores
 //!   workspace/decisions.jsonl  TRUTH    reversible corpus usage decisions
+//!   spend/YYYY-MM.jsonl        TRUTH    every model call, its tokens and its cost
 //!   crumbs/<source>.jsonl      DERIVED  the off-host links each page dropped
 //!   current/<source>/…         DERIVED  URL-mirroring tree. Regenerable.
 //!   centinel.db                DERIVED  SQLite: metadata + FTS5   — the BM25 arm
@@ -292,6 +293,20 @@ impl Store {
     /// against, so it is truth: no replay of the runs can recover a human's verdict.
     pub fn workspace_reviews_path(&self) -> PathBuf {
         self.workspace_dir().join("reviews.jsonl")
+    }
+
+    /// `spend/` — every model call this store paid for, or ran locally. See
+    /// [`crate::spend`].
+    pub fn spend_dir(&self) -> PathBuf {
+        self.root.join("spend")
+    }
+
+    /// `spend/YYYY-MM.jsonl` — month-partitioned like `runs/`: it grows with every
+    /// embedding batch, and a month is the window the page reads.
+    pub fn spend_path(&self, at: Timestamp) -> PathBuf {
+        let zoned = at.to_zoned(TimeZone::UTC);
+        self.spend_dir()
+            .join(format!("{:04}-{:02}.jsonl", zoned.year(), zoned.month()))
     }
 
     /// `run.lock` — the run in flight, if any.

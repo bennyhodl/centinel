@@ -150,10 +150,6 @@ pub struct ClassifyReport {
 /// How many failures the report names before it counts the rest.
 const FAILURES_SHOWN: usize = 10;
 
-/// TypeSafe's published Jev input rate, per million tokens, for the estimate before a run.
-/// A run records the rate it was actually priced at in its settings.
-const JEV_INPUT_RATE: f64 = 0.042;
-
 /// Score indexed documents with Jev: exclude junk, tag the rest.
 #[op(long_running, reach = "operator", group = "stage")]
 pub async fn classify(
@@ -338,10 +334,7 @@ fn estimate(
         .map(|p| p.chars.min(MAX_TEXT_BYTES) as f64 * sends + question_chars)
         .sum();
     let tokens = (chars / 4.0) as u64;
-    let cost = model
-        .starts_with("jev-")
-        .then(|| tokens as f64 * JEV_INPUT_RATE / 1_000_000.0);
-    (tokens, cost)
+    (tokens, crate::spend::cost(model, tokens, 0))
 }
 
 /// Documents per tag, keyed the way search filters: a yes-or-no question under its own
@@ -614,6 +607,7 @@ mod tests {
             !ctx.store.workspace_runs_path().exists(),
             "a dry run writes nothing"
         );
+        assert!(!ctx.store.spend_dir().exists(), "a dry run spends nothing");
 
         let preview = classify(
             &ctx,
@@ -660,6 +654,24 @@ mod tests {
         );
         assert_eq!(run.input_tokens, Some(200));
         assert!(run.run_id.is_some());
+
+        // A line per document Jev answered — the preview's two as well, since a preview is
+        // paid for — priced as the run is.
+        let spent = crate::spend::Ledger::new(&ctx.store)
+            .read(jiff::Timestamp::UNIX_EPOCH)
+            .unwrap();
+        assert_eq!(spent.len(), 4, "{spent:#?}");
+        assert!(
+            spent
+                .iter()
+                .all(|s| s.stage == crate::spend::Stage::Classify
+                    && s.provider == crate::spend::Provider::Jev
+                    && s.input_tokens == 100)
+        );
+        let this_run: Vec<_> = spent.iter().filter(|s| s.run_id == run.run_id).collect();
+        assert_eq!(this_run.len(), 2);
+        let ledger_cost: f64 = this_run.iter().filter_map(|s| s.cost_usd).sum();
+        assert!((ledger_cost - run.cost_usd.unwrap()).abs() < 1e-12);
         assert_eq!(run.questions, ["page_kind", "laws"]);
 
         let decisions = std::fs::read_to_string(ctx.store.workspace_decisions_path()).unwrap();
@@ -776,7 +788,7 @@ mod tests {
         let none = HashMap::new();
         let (tokens, cost) = estimate(&[doc(4_000), doc(4_000)], &[], &none, "jev-test");
         assert_eq!(tokens, 2_000);
-        assert!((cost.unwrap() - 2_000.0 * JEV_INPUT_RATE / 1e6).abs() < 1e-12);
+        assert!((cost.unwrap() - 2_000.0 * 0.042 / 1e6).abs() < 1e-12);
         let (capped, _) = estimate(&[doc(10 * MAX_TEXT_BYTES)], &[], &none, "jev-test");
         assert_eq!(capped, (MAX_TEXT_BYTES / 4) as u64);
         let with_questions = estimate(
