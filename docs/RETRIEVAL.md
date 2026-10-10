@@ -375,24 +375,29 @@ to a complete one.
 This is the same error shape as `pages_needing_ocr`: a chunk's absence from an arm is a
 fact about what has been *processed*, never about whether it answers the question.
 
-So every report says what actually happened:
+So every report says what actually ran:
 
 | field | what it carries |
 |---|---|
 | `method` | which stages ran: `bm25`, `bm25→rerank`, `bm25+vector→rrf`, `bm25+vector→rrf→rerank` |
-| `total_chunks_indexed` | the corpus |
-| `vectors_indexed` | how much of it the vector arm could see |
 | `no_vectors` | why the vector arm did not run |
 | `no_rerank` | why the ordering was not reranked |
 
 `method` is assembled from what ran, never hard-coded — it is the one field a reader
 trusts to know what they are looking at, and a stale literal there is worse than no field.
-The terminal prints the coverage share whenever it is not 100%.
 
 ```
-stormwater drainage fee    2 results · bm25→rerank · 397,830 chunks indexed
+stormwater drainage fee    2 results · bm25→rerank
 ! keyword search only — no vectors at ~/.centinel/vectors.lance — run `centinel embed` first
 ```
+
+What the report does not say is how much of the corpus the vector arm could see. It used
+to carry a chunk count beside the vector count and print the share; the count was a
+`COUNT(*)` over every chunk, 99 s cold at 21.7 million, paid by every search, and the
+share ignored `--source` and `--tag`, counted stale vectors, and read as zero whenever
+the vector arm failed. Coverage is a set difference — indexed chunks against stored
+vectors — and `centinel embed --dry-run` computes exactly that: `indexed`,
+`already_embedded`, `remaining`, `stale`.
 
 **Always on is not the same as always available.** §6.3 forbids a *flag* that silently
 returns worse results. It does not promise that a machine with no reranker weights refuses

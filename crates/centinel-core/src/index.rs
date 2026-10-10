@@ -688,31 +688,13 @@ impl Index {
         Ok(out)
     }
 
-    /// How many distinct chunks the index holds.
-    ///
-    /// Separate from [`Self::stats`] because that one sums `chars`, and summing a column
-    /// means reading every row: on a 397,830-chunk corpus holding 330 MB of text it
-    /// measured **6.0 s cold** against **0.29 s** for the count alone, which `COUNT(*)`
-    /// answers from an index without touching the text.
-    ///
-    /// `search` needs the count on every query — it is the denominator of the vector
-    /// arm's coverage — and needs none of the other three figures. Paying six seconds
-    /// for a number in a report footer made the corpus size the most expensive part of
-    /// asking the corpus a question.
-    pub fn chunk_count(&self) -> anyhow::Result<usize> {
-        let n: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM chunk c WHERE EXISTS (
-                SELECT 1 FROM placement p WHERE p.chunk_hash=c.chunk_hash
-                AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x
-                  WHERE x.source=p.source AND x.resource=p.resource AND x.derived_sha=p.derived_sha))", [], |r| r.get(0))?;
-        Ok(n as usize)
-    }
-
     /// Every figure about the index, including the expensive one.
     ///
-    /// For `index`, which reports on the store it just built. A caller that wants only
-    /// the chunk count wants [`Self::chunk_count`].
+    /// For `index`, which reports on the store it just built. Summing `chars` reads every
+    /// row — 6.0 s cold on a 397,830-chunk corpus holding 330 MB of text — so nothing
+    /// that answers a query asks for this. Not even the count alone: a `COUNT(*)` over
+    /// the chunks measured 99 s cold at 21.7 million, which is why `search` no longer
+    /// reports the corpus size and `embed --dry-run` is where coverage is read.
     pub fn stats(&self) -> anyhow::Result<IndexStats> {
         let (chunks, chars): (i64, i64) = self.conn.query_row(
             "SELECT COUNT(*), COALESCE(SUM(chars), 0) FROM chunk",
@@ -1089,25 +1071,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-    }
-
-    /// `chunk_count` has to agree with `stats`, because it exists only to avoid the
-    /// `SUM(chars)` that makes `stats` read every row.
-    #[test]
-    fn chunk_count_agrees_with_stats_without_summing_text() {
-        let idx = indexed(&[
-            (
-                "https://x/a",
-                "# A\n\nThe stormwater plan for the coming year.",
-            ),
-            (
-                "https://x/b",
-                "# B\n\nA notice of public hearing on rezoning.",
-            ),
-        ]);
-        assert_eq!(idx.chunk_count().unwrap(), idx.stats().unwrap().chunks);
-        assert!(idx.chunk_count().unwrap() > 0);
-        assert_eq!(Index::in_memory().unwrap().chunk_count().unwrap(), 0);
     }
 
     #[test]

@@ -184,8 +184,6 @@ A call, and what comes back:
   "method": "bm25→rerank",
   "no_vectors": "no vectors at /data/agartha/vectors.lance — run `centinel embed` first",
   "query": "stormwater assessment",
-  "total_chunks_indexed": 11923,
-  "vectors_indexed": 0,
   "results": [
     {
       "rank": 1,
@@ -211,8 +209,8 @@ Over MCP that object arrives twice — once as `structuredContent`, once pretty-
 `content[0].text` for a model that only reads text. Over HTTP it is the response body,
 alone.
 
-**Read the envelope before the results.** Three fields tell you how much of the corpus the
-answer could actually see:
+**Read the envelope before the results.** Two fields tell you which of the retrieval the
+answer came from:
 
 `method` is the retrieval path that really ran. The full path is
 `bm25 + vector → RRF fuse → rerank`. This one says `bm25→rerank`, and `no_vectors` says
@@ -220,10 +218,11 @@ why: the corpus is indexed but not embedded, so only the keyword arm existed. A 
 is never allowed to look complete when half the retrieval was missing. See
 [Search](../internals/search.md).
 
-`total_chunks_indexed` and `vectors_indexed` are the two denominators. `vectors_indexed: 0`
-against `11923` chunks is a corpus mid-build, and the vocabulary gap is wide open — a water
-quality report says `PWSName` and `Analyte`, and no keyword query for *drinking water
-sampling results* will ever reach it.
+What the envelope does not say is how much of the corpus has a vector; that is a figure
+for the operator, printed by `centinel embed --dry-run`. A corpus mid-build has the
+vocabulary gap wide open — a water quality report says `PWSName` and `Analyte`, and no
+keyword query for *drinking water sampling results* will ever reach it — and `no_vectors`
+is how a search tells you it is in that state.
 
 `score` is the **reranker's** score, not a keyword score. A cross-encoder read the passage
 against the question and reordered the candidates. That step is worth more than either
@@ -292,7 +291,7 @@ Give the agent the handle discipline and it will use it:
 > *That result is a transcript. Read a window around `char_start` and tell me what was said
 > either side of it.*
 
-> *Before you answer, tell me `method` and `vectors_indexed`. If the vector arm did not run,
+> *Before you answer, tell me `method` and `no_vectors`. If the vector arm did not run,
 > say so in your answer.*
 
 What no prompt can do is collect. If the answer is "nothing in the corpus matches", the fix

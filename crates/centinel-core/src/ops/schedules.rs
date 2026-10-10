@@ -5,9 +5,9 @@
 //! came in — and qualify its answer accordingly: *"the last collection of `tampa-gov` was
 //! nine days ago and it was blocked."*
 //!
-//! It is the same honesty as reporting `vectors_indexed` beside `total_chunks_indexed`: an
-//! absent stage is a different answer, not a slower one, and a stale corpus is a different
-//! answer from a current one.
+//! It is the same honesty as `search` naming an absent arm in `no_vectors`: an absent
+//! stage is a different answer, not a slower one, and a stale corpus is a different answer
+//! from a current one.
 //!
 //! What it cannot do is send the watchman out. Both ops are `Public` and read-only; every
 //! op that causes collection is `Operator` and invisible from here (`op::Reach`).

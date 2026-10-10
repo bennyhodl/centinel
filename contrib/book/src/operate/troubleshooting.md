@@ -36,13 +36,15 @@ its own coverage:
 
 1. **Collected?** `centinel list` — resource counts and liveness per source.
 2. **Text derived?** The `extract` report counts unreadable documents and names them.
-3. **Indexed?** `total_chunks_indexed` in the search report.
-4. **Embedded?** `vectors_indexed` in the same report, beside it.
+3. **Indexed?** `centinel embed --dry-run` — `chunks indexed`.
+4. **Embedded?** The same report — `already embedded` and `remaining`, beside it.
 
 Step 4 is the one people miss. RRF weights by rank alone, so a corpus with 2,309 vectors
 out of 397,830 chunks does not degrade gently — it promotes confident results from a tiny
-pool and looks identical to a complete one. The terminal prints the share whenever it is
-not 100%.
+pool and looks identical to a complete one. The search report does not print that share
+(a chunk count on every query cost 99 s at 21.7 million chunks, and the share it fed was
+wrong under filters); `no_vectors` tells you when the arm did not run at all, and the dry
+run tells you how far along it is.
 
 ## A source stopped returning anything
 

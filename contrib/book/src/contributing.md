@@ -166,9 +166,9 @@ you know and tell us where it fails.
 - **A site that will not extract.** Run `centinel check <url>` and paste the output. That
   transcript shows the reader that won, the characters it produced, and whether an
   enclosure was found — which is usually the whole diagnosis.
-- **A search that misses something you know is in the corpus.** Include `method`,
-  `total_chunks_indexed` and `vectors_indexed` from the result envelope, because half of
-  these turn out to be a corpus that was never embedded.
+- **A search that misses something you know is in the corpus.** Include `method` and
+  `no_vectors` from the result envelope, and the figures `centinel embed --dry-run`
+  prints, because half of these turn out to be a corpus that was never embedded.
 - **A host nothing recognises.** `centinel investigate <url>` printing nothing is a real
   finding, not a dead end.
 - **A vendor product seen in the wild.** Recognising Hyland OnBase collects every city

@@ -538,11 +538,13 @@ query
 
 RRF weights by **rank**, and a rank says nothing about the size of the pool it came from —
 so a corpus that is 0.6% embedded returns confident results that look exactly like a
-complete one's. `search` therefore reports `vectors_indexed` beside `total_chunks_indexed`,
-prints the share, and names in `method` exactly which stages ran (`bm25`, `bm25→rerank`,
-`bm25+vector→rrf`, `bm25+vector→rrf→rerank`). A stage that did not run says why, in
-`no_vectors` or `no_rerank`. Missing weights degrade the answer; they never turn a query
-into an error.
+complete one's. `search` therefore names in `method` exactly which stages ran (`bm25`,
+`bm25→rerank`, `bm25+vector→rrf`, `bm25+vector→rrf→rerank`), and a stage that did not
+run says why, in `no_vectors` or `no_rerank`. Missing weights degrade the answer; they
+never turn a query into an error. How much of the corpus the vector arm can see is
+`centinel embed --dry-run`'s answer, not the search report's: a per-query chunk count was
+99 s cold at 21.7 million chunks, and wrong besides (it ignored the filters and counted
+stale vectors).
 
 ## Not built yet
 

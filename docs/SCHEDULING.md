@@ -699,9 +699,9 @@ collision that eventually costs somebody a 3am incident.
 
 An agent can now ask **when the corpus was last collected, whether the last attempt failed,
 and how much came in** — and qualify its answer accordingly: *"the last collection of
-`tampa-gov` was nine days ago and it was blocked."* That is the same honesty as reporting
-`vectors_indexed` beside `total_chunks_indexed` (CONTEXT.md, on rank vs pool): an absent
-stage is a different answer, not a slower one.
+`tampa-gov` was nine days ago and it was blocked."* That is the same honesty as `search` naming an absent
+arm in `no_vectors` (CONTEXT.md, on rank vs pool): an absent stage is a different answer,
+not a slower one.
 
 What it cannot do is send the watchman out. **It can ask what he saw and when he last
 walked.**
