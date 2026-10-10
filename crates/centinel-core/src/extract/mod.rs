@@ -113,9 +113,14 @@ impl Extracted {
         }
     }
 
-    /// Removes every `data:` URI from the derived text, and says how much that was.
+    /// Cleans what a reader produced, once, before anything downstream sees it.
     ///
-    /// A `data:` URI is a file spelled out in the document — almost always an image, and
+    /// Two things go, and both are properties of the *text* rather than of the reader
+    /// that produced it — which is why they are removed here, for every kind, and not
+    /// inside each reader. The text is hashed and stored as it leaves this function, so
+    /// the derived blob, the chunks, and the vectors all describe the same clean text.
+    ///
+    /// **`data:` URIs.** A file spelled out in the document — almost always an image, and
     /// never searchable text. `htmd` writes one into the markdown as the image's target,
     /// so it survives into the derived blob, into the chunks, and into an embedding:
     ///
@@ -126,25 +131,49 @@ impl Extracted {
     /// One set of OnBase minutes carried **53,345 of its 123,172 characters** as two such
     /// URIs — a city letterhead, spelled out. That is 43% of a document, and it inflates
     /// every cost downstream of extraction while quietly poisoning whichever chunk it lands
-    /// in with a vector that means nothing.
-    ///
-    /// Applied to every kind rather than to HTML, because it is a property of the *text*
-    /// and not of the reader that produced it: `anydoc` reads the same Word export, and a
+    /// in with a vector that means nothing. `anydoc` reads the same Word export, and a
     /// passthrough `.txt` can hold one too. The alt text is left where it is — a page's
     /// description of its own image is real content, and it is the URI that is not.
-    fn strip_data_uris(&mut self) {
+    ///
+    /// **NUL characters.** Some PDFs keep their strings as UTF-16 and are read one byte at
+    /// a time, so `form` arrives as `\0f\0o\0r\0m`. A NUL is never content, and llama.cpp
+    /// takes C strings: one anywhere in a chunk fails the tokenize, and in `embed` the
+    /// whole batch it rode in with — on a large batch that bisection has run a GPU out of
+    /// memory — and `rerank` fails on the same chunk at query time. Removing the zeros
+    /// gives back the text the page shows. What it does *not* give back is the other
+    /// byte of each UTF-16 pair for anything outside ASCII; that is lost before this
+    /// function has a `String`, and belongs to the reader that lost it.
+    ///
+    /// Runs before [`produced_text`] is asked, not after: a page whose only "text" was a
+    /// spelled-out image, or a run of zero bytes, has produced nothing, and the next
+    /// reader deserves its turn.
+    fn normalize_text(&mut self) {
         if let Self::Text(e) | Self::Partial { extraction: e, .. } = self {
-            let Some(stripped) = without_data_uris(&e.text) else {
-                return;
-            };
-            // Counted rather than merely dropped. A document that was mostly base64 is
-            // worth knowing about, and once the text is clean this note is the only
-            // evidence left that it ever was.
-            e.notes.push(format!(
-                "{} chars removed from {} `data:` URI(s)",
-                stripped.removed, stripped.count
-            ));
-            e.text = stripped.text;
+            if let Some(stripped) = without_data_uris(&e.text) {
+                // Counted rather than merely dropped. A document that was mostly base64 is
+                // worth knowing about, and once the text is clean this note is the only
+                // evidence left that it ever was.
+                e.notes.push(format!(
+                    "{} chars removed from {} `data:` URI(s)",
+                    stripped.removed, stripped.count
+                ));
+                e.text = stripped.text;
+            }
+
+            // The title too: it is written into the text as a heading downstream, and a
+            // heading with zeros in it would put them back.
+            let nuls = e.text.matches('\0').count()
+                + e.title.as_deref().map_or(0, |t| t.matches('\0').count());
+            if nuls > 0 {
+                e.text.retain(|c| c != '\0');
+                if let Some(title) = &mut e.title {
+                    title.retain(|c| c != '\0');
+                }
+                // The same reason as above: the note is the only sign left that the
+                // reader handed over bytes rather than text, and the one lead toward
+                // which reader to fix.
+                e.notes.push(format!("{nuls} NUL character(s) removed"));
+            }
         }
     }
 
@@ -369,7 +398,7 @@ pub fn extract(
         let mut outcome = reader.read_in_process(&blob);
         // Before the check, not after: a page whose only "text" was a spelled-out image
         // has produced nothing, and the next reader deserves its turn.
-        outcome.strip_data_uris();
+        outcome.normalize_text();
         if produced_text(&outcome) {
             outcome.note_all(&notes_of(&carried));
             return outcome;
@@ -414,7 +443,7 @@ pub async fn derive(
         let mut outcome = reader.read(&blob).await;
         // Before the check, not after: a page whose only "text" was a spelled-out image
         // has produced nothing, and the next reader deserves its turn.
-        outcome.strip_data_uris();
+        outcome.normalize_text();
         if produced_text(&outcome) {
             // What the readers before it came up against. On HTML this is the note the
             // old code wrote by hand — "readability found only 90 chars" — and on PDF it
@@ -1013,6 +1042,37 @@ mod tests {
         assert!(
             text.contains("A logo of a city"),
             "alt text was lost:\n{text}"
+        );
+    }
+
+    /// Reader output is cleaned once, at the point every reader's text converges, so a
+    /// chunk is hashed, stored and embedded as the same text. The case this was built
+    /// for: a PDF whose UTF-16 strings were read a byte at a time, so every ASCII
+    /// character arrives beside a zero and llama.cpp refuses the whole batch.
+    #[test]
+    fn reader_output_is_normalized_before_acceptance() {
+        let clean = "City Hall — Übersicht ✓ 市役所";
+        let out = extract(ContentKind::Text, clean.as_bytes(), None, None);
+        assert_eq!(out.text(), Some(clean), "every real character survives");
+
+        let read_as_bytes: String = "form1[0]".chars().flat_map(|c| ['\0', c]).collect();
+        let out = extract(ContentKind::Text, read_as_bytes.as_bytes(), None, None);
+        assert_eq!(out.text(), Some("form1[0]"));
+        let Extracted::Text(extraction) = &out else {
+            panic!("passthrough yields text");
+        };
+        assert!(
+            extraction.notes.iter().any(|n| n.contains("8 NUL")),
+            "the removal is on the record: {:?}",
+            extraction.notes
+        );
+
+        // Zeros alone are not text. The reader's output is empty once they are gone,
+        // and empty is the one meaning of "produced nothing" every reader shares.
+        let out = extract(ContentKind::Text, b"\0\0\0\0", None, None);
+        assert!(
+            matches!(out, Extracted::Unextractable { .. }),
+            "NUL-only bytes must not become a derivation: {out:?}"
         );
     }
 
@@ -1673,7 +1733,7 @@ mod tests {
     }
 
     /// A `data:` image inside a marked region never becomes text at all, which is the
-    /// `strip_data_uris` case answered one stage earlier. One OnBase document was 43%
+    /// `normalize_text` case answered one stage earlier. One OnBase document was 43%
     /// base64 by this route.
     #[test]
     fn a_base64_image_never_reaches_the_text() {

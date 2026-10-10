@@ -82,6 +82,28 @@ carrying the pipeline version that reached it. Bumping that version is how a bet
 extractor gets another go at what an older one gave up on. `--refresh` re-derives
 everything, which is expensive and deliberate.
 
+## Embedding fails on `nul byte found in provided data`
+
+The text of a chunk holds a NUL character. Some PDFs keep their strings as UTF-16 and
+were read a byte at a time, so `form` arrived as `\0f\0o\0r\0m`; llama.cpp refuses any
+text with a zero in it, and `embed` fails the whole batch the chunk was in. Extraction
+now removes NULs before text is stored, so new derivations are clean. Derivations made
+before that fix still carry them, and so do the chunks built from them.
+
+Re-derive, rebuild the index, then embed:
+
+```bash
+centinel extract --refresh --kind pdf --source agartha
+centinel index --rebuild --source agartha
+centinel embed
+```
+
+`--source` scopes the first two to one source; drop it to do the whole store. The
+`index --rebuild` is not optional: incremental indexing only inserts, so the old
+NUL-bearing chunks would stay in the index beside the clean ones, and `embed` would keep
+finding them. A rebuild clears the source's chunks first, and `embed` then prunes the
+vectors whose chunks are gone before it embeds the new ones.
+
 ## Things that are safe to delete
 
 Only `blobs/` and `log/` are truth. Everything else rebuilds.

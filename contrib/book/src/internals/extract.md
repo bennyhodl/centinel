@@ -92,6 +92,28 @@ A page that carries its document at a separate address is handled during
 [acquisition](acquire.md#enclosures), not here. By the time extraction runs, the enclosure
 is its own artifact with its own Observation, and it reads like any other PDF.
 
+## Cleanup happens once
+
+Whatever a reader hands back is cleaned at the one point every reader's output converges,
+before the *produced nothing* check and before the text is hashed or stored. So the
+derived blob, the chunks and the vectors all describe the same text, and a reader that
+produces only junk falls through to the next one instead of being accepted.
+
+Two things go, and both are properties of the text rather than of any one reader:
+
+- **`data:` URIs.** A file spelled out in the document, almost always an image. One set
+  of OnBase minutes carried 53,345 of its 123,172 characters as two of them — a city
+  letterhead, base64. The alt text stays; the URI does not.
+- **NUL characters.** Some PDFs keep their strings as UTF-16 and are read a byte at a
+  time, so `form` arrives as `\0f\0o\0r\0m`. llama.cpp takes C strings, so one NUL
+  anywhere in a chunk fails the tokenize for the whole embedding batch it rode in with,
+  and fails the reranker on the same chunk at query time. The zeros go; every other
+  character is kept. The reader still lost the second byte of every non-ASCII pair, and
+  that is the reader's bug to fix, not something this pass can undo.
+
+Each removal leaves a note on the derivation, because once the text is clean the note is
+the only evidence that it ever was not.
+
 ## What "nothing" is recorded as
 
 An extraction that was attempted and produced nothing is an **Underivable**, carrying the

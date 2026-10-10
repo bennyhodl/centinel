@@ -131,7 +131,7 @@ fn anchor_text_only(
 /// image and sometimes the only caption a page gives. Where it is empty this leaves nothing,
 /// which is the right answer for a decorative image that declared itself as one.
 ///
-/// This also reaches the [`Extraction::strip_data_uris`] case at its source for any document
+/// This also reaches the `Extracted::normalize_text` case at its source for any document
 /// read from a marked region: a base64 `data:` image never becomes text to begin with. That
 /// pass stays, because the readers outside this converter still need it.
 fn image_alt_only(
