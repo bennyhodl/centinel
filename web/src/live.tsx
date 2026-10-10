@@ -48,8 +48,8 @@ export function answerSummary(questions: Question[], result: RunResult) {
 const segments = [
   { key: 'kept', outcome: 'keep', label: 'keep', colour: 'bg-foreground' },
   { key: 'review', outcome: 'review', label: 'need you', colour: 'bg-flame' },
-  { key: 'excluded', outcome: 'exclude', label: 'exclude', colour: 'bg-[#B9AE98]' },
-  { key: 'not_asked', outcome: 'not_asked', label: 'not asked', colour: 'bg-[#E4DCCB]', quiet: true },
+  { key: 'excluded', outcome: 'exclude', label: 'exclude', colour: 'bg-stone' },
+  { key: 'not_asked', outcome: 'not_asked', label: 'not asked', colour: 'bg-rule', quiet: true },
   { key: 'errors', outcome: 'error', label: 'errors', colour: 'bg-destructive' },
 ] as const
 
@@ -100,7 +100,7 @@ export function LiveRun({ id, embedded, preview, actions, onDismiss, onOutcome }
   })
 
   if (live.error) return <section className="mb-6 grid gap-3 rounded-xl border border-destructive p-6"><b className="inline-flex items-center gap-2 text-destructive"><CircleAlert className="size-4" />The run could not be read</b><ErrorBox error={live.error} /></section>
-  if (!run) return <section className="mb-6 flex items-center gap-2 rounded-xl border border-[#F0D6B0] bg-[#FFFBF4] p-6 text-sm text-flame-ink"><Spinner />Starting the run. Centinel is fixing the selection.</section>
+  if (!run) return <section className="mb-6 flex items-center gap-2 rounded-xl border border-flame-line bg-flame-wash p-6 text-sm text-flame-ink"><Spinner />Starting the run. Centinel is fixing the selection.</section>
 
   const view = run.view
   const totals = view?.documents
@@ -116,13 +116,13 @@ export function LiveRun({ id, embedded, preview, actions, onDismiss, onOutcome }
   const go = (outcome: ResultOutcome) => onOutcome ? onOutcome(outcome) : !preview && navigate({ to: '/runs', search: { run: id, page: 1, outcome } })
   const failureGroups = groupErrors(failures.data?.results || [])
   const state = running
-    ? { text: 'Scoring now', tone: 'text-flame-ink', mark: <span className="size-2 rounded-full bg-flame shadow-[0_0_0_4px_#F6D9B4]" /> }
+    ? { text: 'Scoring now', tone: 'text-flame-ink', mark: <span className="size-2 rounded-full bg-flame shadow-[0_0_0_4px_var(--flame-halo)]" /> }
     : failed ? { text: 'Stopped', tone: 'text-destructive', mark: <CircleAlert className="size-3.5" /> }
       : run.status === 'committed' ? { text: 'Committed', tone: 'text-moss', mark: <ShieldCheck className="size-3.5" /> }
         : { text: preview ? 'Preview finished' : 'Finished', tone: 'text-moss', mark: <CircleCheck className="size-3.5" /> }
   const facts = [seconds(elapsed), run.cost_usd != null && money(run.cost_usd), run.input_tokens && `${compact(run.input_tokens)} tokens`].filter(Boolean).join(' · ')
 
-  return <section aria-live="polite" className={`mb-6 grid gap-5 rounded-xl border p-6 ${running ? 'border-[#F0D6B0] bg-[#FFFBF4]' : failed ? 'border-[#E2B1A8] bg-background' : 'bg-background'}`}>
+  return <section aria-live="polite" className={`mb-6 grid gap-5 rounded-xl border p-6 ${running ? 'border-flame-line bg-flame-wash' : failed ? 'border-destructive-line bg-background' : 'bg-background'}`}>
     <div className="flex flex-wrap items-start justify-between gap-6">
       <div className="grid min-w-0 flex-1 gap-1.5">
         <span className={`inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.08em] ${state.tone}`}>{state.mark}{state.text} · {facts}</span>
@@ -139,9 +139,9 @@ export function LiveRun({ id, embedded, preview, actions, onDismiss, onOutcome }
     </div>
 
     <div className="grid gap-3">
-      <div className="flex h-2.5 overflow-hidden rounded-full bg-[#EFE9DC] [&_i]:block [&_i]:h-full" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={scored}>
+      <div className="flex h-2.5 overflow-hidden rounded-full bg-track [&_i]:block [&_i]:h-full" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={scored}>
         {totals && segments.map(segment => totals[segment.key] ? <i key={segment.key} className={segment.colour} style={{ width: `${(totals[segment.key] ?? 0) / Math.max(1, total) * 100}%` }} /> : null)}
-        {running && <i className="animate-pulse bg-[#D8CFBD]" style={{ width: `${(view?.in_flight?.length || 0) / Math.max(1, total) * 100}%` }} />}
+        {running && <i className="animate-pulse bg-dot" style={{ width: `${(view?.in_flight?.length || 0) / Math.max(1, total) * 100}%` }} />}
       </div>
       <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
         {segments.map(segment => 'quiet' in segment && !totals?.[segment.key] ? null : <Legend key={segment.key} colour={segment.colour} count={totals?.[segment.key] ?? 0} label={segment.label} onClick={() => go(segment.outcome)} />)}

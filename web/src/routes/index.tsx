@@ -47,9 +47,9 @@ const cleared: Search = { text: '', address: '', page: 1, source: '', usage: 'al
 
 /** One colour per kind of filter, so a chip says what it narrows by. */
 const tone = {
-  classifier: { on: 'bg-flame-soft text-flame-ink shadow-[inset_0_0_0_1px_#F0D6B0]', dot: 'bg-flame', bar: 'bg-flame', faint: 'bg-[#EBD3B4]', label: 'text-flame-ink' },
-  source: { on: 'bg-slate-soft text-slate shadow-[inset_0_0_0_1px_#C9D6E2]', dot: 'bg-slate', bar: 'bg-slate', faint: 'bg-[#C9D6E2]', label: 'text-slate' },
-  usage: { on: 'bg-moss-soft text-moss shadow-[inset_0_0_0_1px_#C8DBC3]', dot: 'bg-moss', bar: 'bg-moss', faint: 'bg-[#C8DBC3]', label: 'text-moss' },
+  classifier: { on: 'bg-flame-soft text-flame-ink shadow-[inset_0_0_0_1px_var(--flame-line)]', dot: 'bg-flame', bar: 'bg-flame', faint: 'bg-flame-faint', label: 'text-flame-ink' },
+  source: { on: 'bg-slate-soft text-slate shadow-[inset_0_0_0_1px_var(--slate-line)]', dot: 'bg-slate', bar: 'bg-slate', faint: 'bg-slate-line', label: 'text-slate' },
+  usage: { on: 'bg-moss-soft text-moss shadow-[inset_0_0_0_1px_var(--moss-line)]', dot: 'bg-moss', bar: 'bg-moss', faint: 'bg-moss-line', label: 'text-moss' },
   words: { on: 'bg-parchment text-foreground shadow-[inset_0_0_0_1px_var(--rule)]', dot: 'bg-foreground', bar: 'bg-foreground', faint: 'bg-rule', label: 'text-foreground' },
 } as const
 type Tone = keyof typeof tone
@@ -128,7 +128,7 @@ function Stat({ value, label }: { value: string; label: string }) {
 function SearchBox({ initial, large, ready, busy, onSearch, children }: { initial: string; large?: boolean; ready?: boolean; busy?: boolean; onSearch: (text: string) => void; children: React.ReactNode }) {
   const [draft, setDraft] = useState(initial)
   return <form className={`w-full ${large ? 'max-w-[760px]' : 'flex-1'}`} onSubmit={event => { event.preventDefault(); if (draft.trim() || ready) onSearch(draft.trim()) }}>
-    <div className="grid rounded-[22px] border border-input bg-background shadow-[0_1px_2px_rgba(26,23,18,0.04),0_10px_30px_rgba(26,23,18,0.06)] focus-within:border-[#CFC6B5]">
+    <div className="grid rounded-[22px] border border-input bg-background shadow-[0_1px_2px_rgba(26,23,18,0.04),0_10px_30px_rgba(26,23,18,0.06)] focus-within:border-stone">
       <input autoFocus={large} value={draft} onChange={event => setDraft(event.target.value)} placeholder="Search the corpus: a phrase, a name, a project" aria-label="Search the corpus"
         className={`bg-transparent px-5 outline-none placeholder:text-muted-foreground ${large ? 'h-[72px] text-[18px]' : 'h-14 text-[15px]'}`} />
       <div className="flex min-w-0 items-center gap-2 px-3 pb-3">
@@ -170,7 +170,7 @@ const Divider = () => <span aria-hidden className="mx-0.5 h-5 w-px shrink-0 bg-r
 
 function Filter({ kind, label, value, onClear, children }: { kind: Tone; label: string; value: string; onClear: () => void; children: React.ReactNode }) {
   return <Popover>
-    <span className={`inline-flex h-9 min-w-0 items-center rounded-full text-[14px] transition-colors duration-(--motion-micro) ${value.length > 14 ? 'shrink' : 'shrink-0'} ${value ? tone[kind].on : 'text-muted-foreground hover:bg-[#FBF8F1] hover:text-foreground'}`}>
+    <span className={`inline-flex h-9 min-w-0 items-center rounded-full text-[14px] transition-colors duration-(--motion-micro) ${value.length > 14 ? 'shrink' : 'shrink-0'} ${value ? tone[kind].on : 'text-muted-foreground hover:bg-canvas hover:text-foreground'}`}>
       <PopoverTrigger type="button" className="inline-flex h-full min-w-0 items-center gap-2 rounded-full pr-2 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-flame/40">
         <span className={`size-1.5 shrink-0 rounded-full ${tone[kind].dot}`} />
         {value ? <b className="min-w-0 truncate font-semibold" title={value}>{value}</b> : <span>{label}</span>}
@@ -194,7 +194,7 @@ function ClassifierPanel({ search, set, classifiers, facets }: { search: Search;
         const bins = facets?.scores[key]
         const active = key === search.classifier
         const lo = Number(search.minScore) || 0, hi = search.maxScore === '' ? 1 : Number(search.maxScore)
-        return <div key={key} className={`grid gap-2 rounded-lg px-2 py-2 ${active ? 'bg-[#FFFBF4] shadow-[inset_0_0_0_1px_#F0D6B0]' : 'hover:bg-[#FBF9F4]'}`}>
+        return <div key={key} className={`grid gap-2 rounded-lg px-2 py-2 ${active ? 'bg-flame-wash shadow-[inset_0_0_0_1px_var(--flame-line)]' : 'hover:bg-hover'}`}>
           <button type="button" className="flex items-baseline justify-between gap-2 text-left" onClick={() => set(active ? { classifier: '', page: 1 } : { classifier: key, page: 1 })}>
             <span className={`truncate text-sm ${active ? 'font-semibold' : ''}`}>{label}</span>
             <span className="shrink-0 font-mono text-xs text-muted-foreground">{active ? `${search.minScore || '0'} – ${search.maxScore || '1'}` : bins ? compact(bins.reduce((a, b) => a + b, 0)) : ''}</span>
@@ -220,9 +220,9 @@ function SourcePanel({ chosen, set, sources, counts }: { chosen: string[]; set: 
       {sources.map(source => {
         const active = chosen.includes(source)
         const count = counts?.[source]
-        return <button type="button" key={source} aria-pressed={active} onClick={() => toggle(source)} className={`grid gap-1 rounded-lg px-2 py-1.5 text-left ${active ? 'bg-slate-soft' : 'hover:bg-[#FBF9F4]'}`}>
+        return <button type="button" key={source} aria-pressed={active} onClick={() => toggle(source)} className={`grid gap-1 rounded-lg px-2 py-1.5 text-left ${active ? 'bg-slate-soft' : 'hover:bg-hover'}`}>
           <span className="flex items-center justify-between gap-2 text-sm">
-            <span className="flex min-w-0 items-center gap-2"><span className={`grid size-3.5 shrink-0 place-items-center rounded-[4px] ${active ? 'bg-slate text-white' : 'shadow-[inset_0_0_0_1.5px_#B9C6D3]'}`}>{active && <svg viewBox="0 0 24 24" className="size-2.5" fill="none" stroke="currentColor" strokeWidth="4"><path d="M5 12l5 5L20 7" /></svg>}</span><span className={`truncate ${active ? `font-semibold ${tone.source.label}` : ''}`}>{source}</span></span>
+            <span className="flex min-w-0 items-center gap-2"><span className={`grid size-3.5 shrink-0 place-items-center rounded-[4px] ${active ? 'bg-slate text-slate-soft' : 'shadow-[inset_0_0_0_1.5px_var(--slate-line)]'}`}>{active && <svg viewBox="0 0 24 24" className="size-2.5" fill="none" stroke="currentColor" strokeWidth="4"><path d="M5 12l5 5L20 7" /></svg>}</span><span className={`truncate ${active ? `font-semibold ${tone.source.label}` : ''}`}>{source}</span></span>
             {count != null && <span className="font-mono text-xs text-muted-foreground">{number(count)}</span>}
           </span>
           {count != null && <Meter value={count} max={max} kind="source" strong={active} />}
@@ -241,7 +241,7 @@ function UsagePanel({ usage, set, counts }: { usage: string; set: Set; counts?: 
     {usageOptions.map(([value, label]) => {
       const count = !counts ? undefined : value === 'all' ? all : counts[value]
       const active = usage === value
-      return <button type="button" key={value} onClick={() => set({ usage: value, page: 1 })} className={`grid gap-1 rounded-lg px-2 py-1.5 text-left ${active ? 'bg-moss-soft' : 'hover:bg-[#FBF9F4]'}`}>
+      return <button type="button" key={value} onClick={() => set({ usage: value, page: 1 })} className={`grid gap-1 rounded-lg px-2 py-1.5 text-left ${active ? 'bg-moss-soft' : 'hover:bg-hover'}`}>
         <span className="flex justify-between text-sm"><span className={active ? `font-semibold ${tone.usage.label}` : ''}>{label}</span>{count != null && <span className="font-mono text-xs text-muted-foreground">{number(count)}</span>}</span>
         {count != null && <Meter value={count} max={Math.max(1, all)} kind="usage" strong={active} />}
       </button>
@@ -276,7 +276,7 @@ function ResultRow({ doc, questions }: { doc?: Document; questions: Question[] }
         <span className={`shrink-0 rounded px-1.5 py-px font-medium ${tone.source.on}`}>{doc.source}</span>
         <span className="truncate">{doc.resource}</span>
         <span className="shrink-0">· {characters(doc.chars)}</span>
-        {doc.excluded && <span className="shrink-0 rounded px-1.5 py-px font-medium text-destructive shadow-[inset_0_0_0_1px_#E2B1A8]">excluded</span>}
+        {doc.excluded && <span className="shrink-0 rounded px-1.5 py-px font-medium text-destructive shadow-[inset_0_0_0_1px_var(--destructive-line)]">excluded</span>}
       </span>
     </DocumentLink>
     <span className="hidden w-56 flex-wrap gap-1.5 pt-0.5 md:flex">
@@ -287,7 +287,7 @@ function ResultRow({ doc, questions }: { doc?: Document; questions: Question[] }
 }
 
 function Meter({ value, max, kind, strong }: { value: number; max: number; kind: Tone; strong: boolean }) {
-  return <span className="block h-1 rounded-full bg-[#EFE9DC]"><i className={`block h-full rounded-full ${strong ? tone[kind].bar : tone[kind].faint}`} style={{ width: `${Math.max(value ? 2 : 0, value / max * 100)}%` }} /></span>
+  return <span className="block h-1 rounded-full bg-track"><i className={`block h-full rounded-full ${strong ? tone[kind].bar : tone[kind].faint}`} style={{ width: `${Math.max(value ? 2 : 0, value / max * 100)}%` }} /></span>
 }
 
 /** How a classifier's scores spread over the matching documents, a bar per tenth, with the chosen band lit. */

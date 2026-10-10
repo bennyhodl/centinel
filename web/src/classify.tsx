@@ -189,8 +189,8 @@ export function Classify() {
         </Panel>
         <Panel position="top-right" className="!m-4 flex items-center gap-2">
           <button type="button" onClick={() => setDialog('test')} className="inline-flex h-9 max-w-80 items-center gap-2.5 rounded-full bg-foreground pr-3 pl-3 text-[13px] text-parchment shadow-[0_4px_14px_rgba(26,23,18,0.18)]">
-            <span className={`size-2 shrink-0 rounded-full ${test.doc ? 'bg-flame shadow-[0_0_0_3px_rgba(200,118,30,0.35)]' : 'bg-[#6B6458]'}`} />
-            <span className="text-[#B9AE98]">{test.running ? 'Asking Jev…' : test.doc ? 'Testing' : 'Test a document'}</span>
+            <span className={`size-2 shrink-0 rounded-full ${test.doc ? 'bg-flame shadow-[0_0_0_3px_rgba(200,118,30,0.35)]' : 'bg-muted-foreground'}`} />
+            <span className="text-parchment/70">{test.running ? 'Asking Jev…' : test.doc ? 'Testing' : 'Test a document'}</span>
             {test.doc && <span className="truncate font-semibold">{test.doc.title || tail(test.doc.resource)}</span>}
           </button>
           <Button variant="outline" className="bg-background" onClick={() => setDialog('run')}>{busy ? <span className="size-2 rounded-full bg-flame" /> : <Play />}Run</Button>
@@ -398,7 +398,7 @@ function TestPanel({ test, onPicked }: { test: Test; onPicked: () => void }) {
   return <div className="grid gap-3">
     <Input value={text} onChange={event => setText(event.target.value)} placeholder="Find a document by address or title" />
     <div className="grid">
-      {(found.data?.documents || []).map(doc => <button type="button" key={`${doc.source}:${doc.resource}`} onClick={() => { test.pick(doc); onPicked() }} className={`grid gap-0.5 border-b py-2 text-left hover:bg-[#FBF9F4] ${test.doc?.resource === doc.resource ? 'font-semibold' : ''}`}>
+      {(found.data?.documents || []).map(doc => <button type="button" key={`${doc.source}:${doc.resource}`} onClick={() => { test.pick(doc); onPicked() }} className={`grid gap-0.5 border-b py-2 text-left hover:bg-hover ${test.doc?.resource === doc.resource ? 'font-semibold' : ''}`}>
         <span className="truncate text-sm">{doc.title || tail(doc.resource)}</span><span className="truncate text-xs text-muted-foreground">{doc.source} · {doc.resource}</span>
       </button>)}
     </div>
@@ -409,7 +409,7 @@ function TestPanel({ test, onPicked }: { test: Test; onPicked: () => void }) {
 
 /** The canvas before the questions arrive: the same full-bleed frame, a source card masked. */
 export function ClassifySkeleton() {
-  return <div aria-busy className="relative -mx-5 -my-6 grid h-[calc(100svh-3rem)] place-items-center overflow-hidden bg-[#FBF8F1] bg-[radial-gradient(#D8CFBD_1.4px,transparent_1.4px)] [background-size:18px_18px] md:-mx-10 md:-my-8 md:h-[calc(100svh-1.25rem-2px)] md:rounded-2xl">
+  return <div aria-busy className="relative -mx-5 -my-6 grid h-[calc(100svh-3rem)] place-items-center overflow-hidden bg-canvas bg-[radial-gradient(var(--dot)_1.4px,transparent_1.4px)] [background-size:18px_18px] md:-mx-10 md:-my-8 md:h-[calc(100svh-1.25rem-2px)] md:rounded-2xl">
     <span className="absolute top-4 left-4 rounded-xl bg-background/95 px-4 py-2.5 font-serif text-[28px] leading-none shadow-[0_0_0_1px_var(--rule)]">Classify</span>
     <div className="grid w-80 gap-3 rounded-xl bg-background p-4 shadow-[0_0_0_1.5px_var(--rule)]">
       <Skeleton mask="SOURCE · NOUL · v1" className="text-[10px]" />
