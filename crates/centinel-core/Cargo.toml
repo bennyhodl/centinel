@@ -66,6 +66,12 @@ llama-cpp-2 = { version = "0.1.153", default-features = false, features = ["open
 # and OSS object stores — every one of them a network path out of a machine that §2.1
 # says nothing leaves. Local tables need none of them.
 lancedb = { version = "0.33.0", default-features = false }
+# `VectorTable::repair` drops an unreadable fragment from the table's manifest. That is a
+# raw Lance transaction, and lancedb exposes no delete-by-fragment-id. Pinned to the exact
+# version lancedb already requires, so this names a crate that is in the tree rather than
+# adding a second copy of it; `default-features = false` for the same reason as lancedb
+# above: the defaults are the object stores this machine never talks to.
+lance = { version = "=9.0.0", default-features = false }
 
 [features]
 default = []

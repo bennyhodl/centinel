@@ -489,6 +489,15 @@ the rows whose hash the index no longer has, then compacts the table and drops i
 superseded versions — so `embed` owns the table in both directions and a stored vector
 means one thing, a row whose hash is in the index.
 
+**A fragment that cannot be read is dropped, not recovered.** A data file is written once;
+storage that drops the write leaves a file of the right length with nothing in it, and
+every full scan then fails — `embed`'s pre-flight read of the hashes first. `centinel
+verify` reads every fragment back and names the ones that fail; `--repair` removes them
+from the manifest in one commit against the audited version, so a compaction in between
+is a conflict rather than a wrong deletion. The dropped hashes fall back onto the
+subtraction above and the next `embed` re-embeds them. `VectorTable` owns both halves;
+the op asks, and `embed` only points at it when its scan fails.
+
 **Batching is not optional.** A batch is one forward pass over many chunks: one context,
 one `decode`, every chunk as its own `seq_id`. Two costs collapse into it. A `llama.cpp`
 context and its KV cache are built per *call*, not per text — one chunk per call gave 6.1

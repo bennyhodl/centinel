@@ -104,6 +104,35 @@ NUL-bearing chunks would stay in the index beside the clean ones, and `embed` wo
 finding them. A rebuild clears the source's chunks first, and `embed` then prunes the
 vectors whose chunks are gone before it embeds the new ones.
 
+## Embedding fails with a Lance read error
+
+`embed` starts by reading every stored chunk hash back out of `vectors.lance/`, and that
+scan touches every fragment. If one data file cannot be read, the scan fails, and so does
+`embed` — before it has embedded anything, on one file among thousands of good ones. The
+error points you here:
+
+```bash
+centinel verify            # read every fragment back; name the ones that fail
+centinel verify --repair   # drop them from the table
+centinel embed             # re-embeds the dropped chunks with everything else outstanding
+```
+
+The repair touches only the table's manifest: the dropped fragments' chunks fall off the
+stored set and back onto `embed`'s work list, where they are re-embedded from their text
+in `centinel.db`. Nothing is recovered from the bad files because there is nothing in them
+to recover.
+
+**Check the storage before you re-embed.** The shape this was built for is a drive that
+silently dropped writes under load: 36 of 25,003 data files on one store were the right
+length and held nothing. `verify --repair` makes the table usable again; it does not make
+the disk honest, and embedding a day's worth of vectors onto the same disk only repeats
+the failure. Run `verify` once more after the embed if you have any doubt.
+
+`verify` is operator-only, like every command that changes the store. It commits against
+the exact version it audited, so if an `embed` compacted the table between the audit and
+the repair the repair is refused and you run it again — it will never drop a fragment it
+did not read.
+
 ## Things that are safe to delete
 
 Only `blobs/` and `log/` are truth. Everything else rebuilds.

@@ -43,6 +43,7 @@ mod status;
 pub(crate) mod target;
 mod transcribe;
 mod update;
+mod verify;
 
 pub use check::{CheckArgs, CheckReport, Checked, Enumerated, check};
 pub use models::{
@@ -86,6 +87,7 @@ pub use transcribe::{
 pub use update::{
     Applied, InstalledFrom, Provenance, ReleaseCheck, RepoCheck, UpdateArgs, UpdateReport, update,
 };
+pub use verify::{VerifyReport, VerifyTableArgs, verify};
 
 // ── shared plumbing ───────────────────────────────────────────────────────────
 

@@ -88,6 +88,30 @@ append, so what landed before the kill is there.
 
 `--dry-run` creates no table. A plan must leave nothing behind.
 
+## When a fragment cannot be read
+
+A Lance data file is written once and never rewritten in place. Storage that drops a
+write under load — the field case was a USB drive, 36 of 25,003 files — leaves a file of
+the right length with nothing in it. The manifest still lists the fragment, so every full
+scan fails, and the first full scan of a run is `embed`'s read of the stored hashes. One
+bad file blocks the stage.
+
+`centinel verify` asks the same question one fragment at a time, both columns, and names
+the fragments that fail: id, data files, the manifest's row count (an estimate — it can
+include rows since deleted) and Lance's error. `--repair` drops them from the manifest in
+one commit. Nothing is recovered, because the bytes never landed; nothing needs to be,
+because a vector is `chunk_hash → text → vector` and the dropped hashes simply fall back
+onto the work list above. The next `embed` re-embeds them.
+
+Two properties of the repair are deliberate. It commits against the version the audit
+read, so a compaction that rewrote those fragments in between makes Lance refuse the
+commit rather than let a stale id drop a fragment the audit never saw. And it does not
+compact or prune — `embed` does that afterwards in its own maintenance, as it always has.
+
+The Lance side of this lives in `VectorTable::audit` and `VectorTable::repair`, beside
+`append`, `retain` and `maintain`. The op is thin, and `embed` itself does no auditing:
+when its scan fails it says what to run and stops.
+
 ## The table
 
 ```

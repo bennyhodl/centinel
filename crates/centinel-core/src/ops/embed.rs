@@ -66,6 +66,7 @@
 
 use std::time::Instant;
 
+use anyhow::Context as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -338,7 +339,10 @@ pub async fn embed(
     let stored = match &table {
         Some(table) => {
             progress.say("checking stored vectors");
-            table.hashes().await?
+            table
+                .hashes()
+                .await
+                .with_context(|| verify_hint("reading the stored chunk hashes"))?
         }
         None => std::collections::HashSet::new(),
     };
@@ -408,7 +412,10 @@ pub async fn embed(
     if todo.is_empty() {
         cancel.check()?;
         progress.say("maintaining the vector table");
-        let done = table.maintain(args.ann_index).await?;
+        let done = table
+            .maintain(args.ann_index)
+            .await
+            .with_context(|| verify_hint("maintaining the vector table"))?;
         return Ok(EmbedReport {
             pruned,
             versions_removed: done.versions_removed,
@@ -486,7 +493,10 @@ pub async fn embed(
 
     cancel.check()?;
     progress.say("maintaining the vector table");
-    let done = table.maintain(args.ann_index).await?;
+    let done = table
+        .maintain(args.ann_index)
+        .await
+        .with_context(|| verify_hint("maintaining the vector table"))?;
     let elapsed = started.elapsed().as_secs_f64();
     Ok(EmbedReport {
         embedded,
@@ -499,6 +509,21 @@ pub async fn embed(
         skipped,
         ..base
     })
+}
+
+/// Context for a failed pass over the whole vector table, naming the op that can say
+/// which fragment failed.
+///
+/// `hashes` and `maintain` read every fragment, so they are where a data file that storage
+/// silently truncated first shows up — as a read error with no fragment named, because a
+/// scan only knows that it failed. Nothing here guesses at the cause: a read error is one
+/// possibility, and `centinel verify` is what tells. The underlying error stays beneath
+/// this line.
+fn verify_hint(doing: &str) -> String {
+    format!(
+        "{doing} failed; if this is a read error, run `centinel verify` to find the \
+         fragments Lance cannot read"
+    )
 }
 
 /// The flag, else the config file's standing preference, else what the machine affords.
