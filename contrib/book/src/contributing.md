@@ -14,7 +14,9 @@ optimises one of them away is a regression that no test catches.
 ## 1. Authentication for MCP and HTTP
 
 **Today:** there is none. `centinel serve` binds `127.0.0.1` and logs a warning rather than
-silently exposing the store when told to bind anything else. Ops carry a **reach** —
+silently exposing the store when told to bind anything else. `serve --tailscale` keeps that
+bind and hands the question to the tailnet's policy: Tailscale proxies to loopback, and the
+tailnet address is the one non-loopback origin a workspace write is accepted from. Ops carry a **reach** —
 `Public`, `Operator`, `Host` — and the remote surfaces enforce it by refusing to route
 anything that is not `Public`. A remote caller cannot collect, cannot add a source, cannot
 pull a model.

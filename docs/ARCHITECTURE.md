@@ -305,6 +305,7 @@ centinel crumbs --rescan                # only for a corpus collected before v0.
 
 # Serve it
 centinel serve          # HTTP + MCP over HTTP
+centinel serve start --tailscale   # the same, as a login service, on the tailnet
 centinel mcp            # MCP over stdio
 ```
 

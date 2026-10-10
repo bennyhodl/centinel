@@ -36,6 +36,12 @@
 //! access control as unspecified, and inventing a scheme here would foreclose that
 //! decision. Binding to a non-loopback address logs a warning rather than silently
 //! exposing the store.
+//!
+//! `serve --tailscale` keeps the loopback bind and lets Tailscale proxy to it, so the
+//! tailnet's own policy decides who reaches the server. The address it publishes is the
+//! one non-loopback origin [`same_origin`] accepts for a write: a page loaded from the
+//! tailnet is the workspace, served by this process, and Tailscale passes the browser's
+//! `Host` through unchanged.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -126,12 +132,45 @@ pub fn stamped_version(html: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// The tailnet origin `serve --tailscale` published, e.g. `https://host.tailnet.ts.net`.
+/// Set once, before the server starts.
+static PUBLISHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Records the origin this process is published at. A second call is ignored.
+pub fn publish_at(origin: String) {
+    let _ = PUBLISHED.set(origin);
+}
+
+/// Where an agent reaches this server when it is not the address a page was loaded from:
+/// `CENTINEL_PUBLIC_URL` when the operator set one, else the tailnet origin.
+fn public_url() -> Option<String> {
+    std::env::var("CENTINEL_PUBLIC_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .or_else(|| PUBLISHED.get().cloned())
+}
+
+/// Binds `bind`, warning when the address is reachable off-host.
+pub async fn listen(bind: &str) -> Result<tokio::net::TcpListener> {
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("binding {bind}"))?;
+    let addr = listener.local_addr()?;
+    if !addr.ip().is_loopback() {
+        tracing::warn!(
+            %addr,
+            "reachable off-host with no authentication — access control is unspecified (SPEC §8)"
+        );
+    }
+    Ok(listener)
+}
+
 /// Serves until the process is asked to stop.
 ///
 /// [`serve_until`] with a signal that never arrives — for a caller with nothing to wind
 /// down afterwards.
 pub async fn serve(ctx: Arc<Ctx>, bind: &str) -> Result<()> {
-    serve_until(ctx, bind, std::future::pending()).await
+    serve_until(ctx, listen(bind).await?, std::future::pending()).await
 }
 
 /// Serves until `shutdown` resolves, then stops accepting and returns.
@@ -142,25 +181,18 @@ pub async fn serve(ctx: Arc<Ctx>, bind: &str) -> Result<()> {
 /// its `interrupted` record. Without a graceful return the process is simply killed, the
 /// journal keeps no record of the run that was in flight, and the only evidence is a stale
 /// `run.lock` for the next startup to reclaim.
+///
+/// The listener arrives bound, from [`listen`], because `serve --tailscale` has to know
+/// the port before it can publish it, and publishing has to happen before the first
+/// request can arrive through it.
 pub async fn serve_until(
     ctx: Arc<Ctx>,
-    bind: &str,
+    listener: tokio::net::TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let store = ctx.store.root().display().to_string();
     let app = router(ctx);
-
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
-        .with_context(|| format!("binding {bind}"))?;
     let addr = listener.local_addr()?;
-
-    if !addr.ip().is_loopback() {
-        tracing::warn!(
-            %addr,
-            "reachable off-host with no authentication — access control is unspecified (SPEC §8)"
-        );
-    }
 
     // The first lines of the log, and what they are for: an operator can tell, before
     // sending a single request, which store this is, what it answers, and whether the
@@ -181,13 +213,21 @@ pub async fn serve_until(
     Ok(())
 }
 
-fn router(ctx: Arc<Ctx>) -> Router {
+/// The workspace page and its assets — everything the browser loads before it calls the
+/// API. Shared with `centinel web --server`, which serves this page and forwards the
+/// rest.
+pub fn page_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
-        .route("/health", get(|| async { "ok" }))
         .route("/web", get(web_ui))
         .route("/web/", get(web_ui))
         .route("/web/{*path}", get(web_ui))
         .route("/web/assets/{*path}", get(web_asset))
+}
+
+fn router(ctx: Arc<Ctx>) -> Router {
+    Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .merge(page_routes())
         .route("/workspace/documents", get(workspace_documents))
         .route("/workspace/system", get(workspace_system))
         .route("/workspace/document", get(workspace_document))
@@ -373,7 +413,7 @@ async fn workspace_system(State(ctx): State<Arc<Ctx>>) -> Response {
         "store_root": root,
         // Where an agent reaches MCP when this server sits behind another address. Unset,
         // the page offers the address it was loaded from.
-        "public_url": std::env::var("CENTINEL_PUBLIC_URL").ok().filter(|url| !url.trim().is_empty()),
+        "public_url": public_url(),
     }))
     .into_response()
 }
@@ -591,7 +631,13 @@ fn workspace_error(error: anyhow::Error) -> Response {
 /// Workspace writes can cause paid inference or change corpus usage. A browser must send
 /// the same authority in `Origin` and `Host`, which blocks a page on another origin from
 /// using the loopback server as its write target.
-fn same_origin(headers: &HeaderMap) -> bool {
+pub fn same_origin(headers: &HeaderMap) -> bool {
+    same_origin_with(headers, PUBLISHED.get().map(String::as_str))
+}
+
+/// [`same_origin`] against a given published origin, so the rule is testable without
+/// the process-wide one.
+fn same_origin_with(headers: &HeaderMap, published: Option<&str>) -> bool {
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok());
@@ -617,7 +663,11 @@ fn same_origin(headers: &HeaderMap) -> bool {
     {
         return true;
     }
-    false
+    // The tailnet address, exactly: an `https` origin Tailscale holds the certificate
+    // for, which no other site can present, arriving with the `Host` it forwarded.
+    published.is_some_and(|published| {
+        origin == Some(published) && host == published.strip_prefix("https://")
+    })
 }
 
 fn forbidden_origin() -> Response {
@@ -1105,5 +1155,41 @@ mod tests {
             !same_origin(&headers),
             "matching attacker headers are not loopback"
         );
+    }
+
+    /// Behind `serve --tailscale` the page is loaded from the tailnet address, and
+    /// Tailscale forwards the browser's `Host` and `Origin` as they were sent — measured
+    /// against `tailscale serve`. That pair is a write from the workspace; any other
+    /// non-loopback pair is still refused.
+    #[test]
+    fn workspace_writes_accept_the_published_tailnet_origin() {
+        let published = Some("https://box.tailnet.ts.net:8787");
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "box.tailnet.ts.net:8787".parse().unwrap());
+        headers.insert("origin", "https://box.tailnet.ts.net:8787".parse().unwrap());
+        assert!(same_origin_with(&headers, published));
+        assert!(
+            !same_origin_with(&headers, None),
+            "not accepted until this process published it"
+        );
+
+        headers.insert("origin", "https://attacker.example".parse().unwrap());
+        assert!(!same_origin_with(&headers, published));
+
+        headers.insert("host", "attacker.example".parse().unwrap());
+        headers.insert("origin", "https://box.tailnet.ts.net:8787".parse().unwrap());
+        assert!(
+            !same_origin_with(&headers, published),
+            "the origin alone is not enough; the Host must be the tailnet's too"
+        );
+
+        // On 443 neither header carries a port.
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "box.tailnet.ts.net".parse().unwrap());
+        headers.insert("origin", "https://box.tailnet.ts.net".parse().unwrap());
+        assert!(same_origin_with(
+            &headers,
+            Some("https://box.tailnet.ts.net")
+        ));
     }
 }

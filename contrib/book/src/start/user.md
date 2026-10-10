@@ -73,6 +73,12 @@ Or, against a machine already running `centinel serve`:
 claude mcp add --transport http centinel http://127.0.0.1:8787/mcp
 ```
 
+Or from another machine, against one running `centinel serve --tailscale`:
+
+```bash
+claude mcp add --transport http centinel https://box.tailnet.ts.net/mcp
+```
+
 Then `claude mcp list` to confirm it connected, and `/mcp` inside a session to see the
 tools.
 

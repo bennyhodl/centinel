@@ -19,6 +19,7 @@
 - [Sources](operate/sources.md)
 - [The run](operate/run.md)
 - [Schedules](operate/schedules.md)
+- [The server](operate/serve.md)
 - [When something is wrong](operate/troubleshooting.md)
 
 # How it works
