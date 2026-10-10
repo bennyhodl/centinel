@@ -1,12 +1,13 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useLocation } from '@tanstack/react-router'
 import { QueryClientProvider, useQuery, type QueryClient } from '@tanstack/react-query'
-import { Eye, FlaskConical, History, Plug, Search, ShieldCheck, Sparkles } from 'lucide-react'
+import { Eye, FlaskConical, History, Moon, Plug, Search, ShieldCheck, Sparkles, Sun } from 'lucide-react'
 import { queries } from '../queries'
 import { JobDrawer, WorkingNow, useJobEvents } from '../jobs'
 import { ActivityBar } from '../feedback'
 import { quotes } from '../quotes'
 import { number } from '../format'
+import { themeScript, useTheme } from '../theme'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import crest from '../assets/crest.jpg'
@@ -18,7 +19,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: 'utf-8' },
       { title: 'Centinel' },
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-      { name: 'color-scheme', content: 'light' },
+      { name: 'color-scheme', content: 'light dark' },
       { name: 'centinel-version', content: __CENTINEL_VERSION__ },
     ],
     links: [{ rel: 'stylesheet', href: styles }],
@@ -28,7 +29,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 })
 
 function RootDocument({ children }: { children: ReactNode }) {
-  return <html lang="en"><head><HeadContent /></head><body>{children}<Scripts /></body></html>
+  return <html lang="en" suppressHydrationWarning><head><script dangerouslySetInnerHTML={{ __html: themeScript }} /><HeadContent /></head><body>{children}<Scripts /></body></html>
 }
 
 function App() {
@@ -88,7 +89,7 @@ function Shell() {
           </NavItem>
         </NavGroup>
         <NavGroup label="Agent">
-          <NavItem active={at('/connect')} label="Connect" count={<span className="inline-flex items-center gap-1.5"><span className="size-1.5 rounded-full bg-[#4F7A4A]" />MCP</span>}>
+          <NavItem active={at('/connect')} label="Connect" count={<span className="inline-flex items-center gap-1.5"><span className="size-1.5 rounded-full bg-moss" />MCP</span>}>
             <Link to="/connect"><Plug /><span>Connect</span></Link>
           </NavItem>
           <NavItem active={at('/skills')} label="Skills" count="1">
@@ -99,6 +100,7 @@ function Shell() {
       <SidebarFooter className="gap-3 px-3 pb-3">
         <WorkingNow onOpen={setJob} />
         <Quote />
+        <ThemeToggle />
       </SidebarFooter>
     </Sidebar>
     <SidebarInset className="min-w-0 bg-background md:my-2.5 md:mr-2.5 md:rounded-2xl md:border md:border-sidebar-border md:shadow-[0_1px_2px_rgba(26,23,18,0.06),0_8px_24px_rgba(26,23,18,0.05)]">
@@ -126,8 +128,20 @@ function NavItem({ active, label, count, children }: { active: boolean; label: s
   </SidebarMenuItem>
 }
 
+function ThemeToggle() {
+  const [theme, toggle] = useTheme()
+  const label = theme === 'dark' ? 'Light mode' : 'Dark mode'
+  return <SidebarMenu>
+    <SidebarMenuItem>
+      <SidebarMenuButton onClick={toggle} tooltip={label} className="h-9 text-[14px] text-muted-foreground">
+        {theme === 'dark' ? <Sun /> : <Moon />}<span>{label}</span>
+      </SidebarMenuButton>
+    </SidebarMenuItem>
+  </SidebarMenu>
+}
+
 function LivePill({ children }: { children: ReactNode }) {
-  return <span className="inline-flex items-center gap-1.5 rounded-full bg-flame-soft px-2 py-0.5 font-sans text-[11px] font-semibold text-flame-ink"><span className="size-1.5 rounded-full bg-flame shadow-[0_0_0_3px_#F6D9B4]" />{children}</span>
+  return <span className="inline-flex items-center gap-1.5 rounded-full bg-flame-soft px-2 py-0.5 font-sans text-[11px] font-semibold text-flame-ink"><span className="size-1.5 rounded-full bg-flame shadow-[0_0_0_3px_var(--flame-halo)]" />{children}</span>
 }
 
 /**
@@ -140,7 +154,7 @@ function Quote() {
   useEffect(() => setQuote(quotes[Math.floor(Math.random() * quotes.length)]), [])
   if (!quote) return null
   return <figure className="grid gap-1.5 border-t px-1 pt-3 group-data-[collapsible=icon]:hidden">
-    <blockquote className="font-serif text-[14px] leading-[19px] italic text-[#3A352D]">“{quote.text}”</blockquote>
+    <blockquote className="font-serif text-[14px] leading-[19px] italic text-ink-soft">“{quote.text}”</blockquote>
     <figcaption className="text-[11px] text-muted-foreground">{quote.who}, {quote.where}</figcaption>
   </figure>
 }

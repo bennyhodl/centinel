@@ -30,7 +30,7 @@ function Skills() {
           <span className="grid size-11 shrink-0 place-items-center rounded-[10px] bg-foreground text-parchment"><Search className="size-5" /></span>
           <div className="grid gap-1.5">
             <div className="flex items-baseline gap-2.5"><span className="font-serif text-2xl leading-[26px]">{skill.name}</span><code className="font-mono text-xs text-muted-foreground">{skill.invoke}</code></div>
-            <p className="text-sm leading-[21px] text-[#3A352D]">{skill.about}</p>
+            <p className="text-sm leading-[21px] text-ink-soft">{skill.about}</p>
             <p className="text-xs text-muted-foreground">{skill.not}</p>
           </div>
         </div>)}

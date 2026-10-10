@@ -1,11 +1,13 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-/* Latin only: every font is inlined into the one HTML file the binary embeds. */
+/* Latin only: every font is inlined into the stylesheet the binary embeds. */
 @import "@fontsource/im-fell-english/latin-400.css";
 @import "@fontsource/im-fell-english/latin-400-italic.css";
 @import "@fontsource/im-fell-english-sc/latin-400.css";
 @import "@fontsource/jetbrains-mono/latin-400.css";
+
+@custom-variant dark (&:is(.dark *));
 
 
 :root {
@@ -15,7 +17,22 @@
     --flame: #C8761E;
     --flame-ink: #8A4A0E;
     --flame-soft: #FBEBD6;
+    --flame-wash: #FFFBF4;
+    --flame-line: #F0D6B0;
+    --flame-halo: #F6D9B4;
+    --flame-faint: #EBD3B4;
     --rule: #E2DACB;
+    /* Quiet surfaces: a row under the pointer, the canvas, a progress track, and the
+       stone grey of things that are there but not the point. */
+    --hover: #FBF9F4;
+    --canvas: #FBF8F1;
+    --dot: #D8CFBD;
+    --track: #EFE9DC;
+    --stone: #B9AE98;
+    --ink-soft: #3A352D;
+    /* Logs, source and commands sit on ink in either mode. */
+    --terminal: #1F1C17;
+    --terminal-ink: #F4EEE1;
     /* Motion: a press, an indicator, a progress fill. Every animation uses one. */
     --motion-micro: 180ms;
     --motion-indicator: 250ms;
@@ -24,8 +41,10 @@
        sources, the moss on the rampart for usage. */
     --slate: #2F4A62;
     --slate-soft: #E3EAF1;
+    --slate-line: #C9D6E2;
     --moss: #3E6539;
     --moss-soft: #E6EFE3;
+    --moss-line: #C8DBC3;
     --sidebar: #F4EEE1;
     --sidebar-foreground: #1A1712;
     --sidebar-primary: #1A1712;
@@ -50,6 +69,8 @@
     --accent: #F4EEE1;
     --accent-foreground: #1A1712;
     --destructive: #9B2C1F;
+    --destructive-line: #E2B1A8;
+    --destructive-soft: #F7E1DC;
     --border: #E2DACB;
     --input: #CFC6B5;
     --ring: #C8761E;
@@ -58,6 +79,73 @@
     --chart-3: #B9AE98;
     --chart-4: #9B2C1F;
     --chart-5: #6B6458;
+    color-scheme: light;
+}
+
+.dark {
+    /* Night on the rampart. Every neutral keeps the candle's warm hue (about 35°) at
+       low chroma, and a surface gets lighter the nearer it sits to the reader: ground,
+       then sidebar, then page. The three filter colours keep their hues and trade
+       weight for light, so each still reads as itself against the dark; their soft
+       fills become deep tints of the same hue. */
+    --ground: #110F0C;
+    --parchment: #1B1814;
+    --flame: #E39440;
+    --flame-ink: #F2B66B;
+    --flame-soft: #3A2716;
+    --flame-wash: #241B12;
+    --flame-line: #5A3D1E;
+    --flame-halo: #553718;
+    --flame-faint: #6E4C27;
+    --rule: #2F2922;
+    --hover: #26211B;
+    --canvas: #1A1713;
+    --dot: #3A332A;
+    --track: #2C261F;
+    --stone: #6F6655;
+    --ink-soft: #CFC5B3;
+    --terminal: #0D0B09;
+    --terminal-ink: #F4EEE1;
+    --slate: #94B4D0;
+    --slate-soft: #1C2733;
+    --slate-line: #34485C;
+    --moss: #95BD8F;
+    --moss-soft: #1C281B;
+    --moss-line: #344A31;
+    --sidebar: #1B1814;
+    --sidebar-foreground: #EDE5D6;
+    --sidebar-primary: #EDE5D6;
+    --sidebar-primary-foreground: #1B1814;
+    --sidebar-accent: #2A241E;
+    --sidebar-accent-foreground: #EDE5D6;
+    --sidebar-border: #2B251F;
+    --sidebar-ring: #E39440;
+    --background: #211D18;
+    --foreground: #EDE5D6;
+    --card: #211D18;
+    --card-foreground: #EDE5D6;
+    --popover: #26211C;
+    --popover-foreground: #EDE5D6;
+    --primary: #EDE5D6;
+    --primary-foreground: #1B1814;
+    --secondary: #2A241E;
+    --secondary-foreground: #EDE5D6;
+    --muted: #2A241E;
+    --muted-foreground: #A2978A;
+    --accent: #2A241E;
+    --accent-foreground: #EDE5D6;
+    --destructive: #E8806F;
+    --destructive-line: #6B3229;
+    --destructive-soft: #3B1F1A;
+    --border: #322B24;
+    --input: #4A4135;
+    --ring: #E39440;
+    --chart-1: #EDE5D6;
+    --chart-2: #E39440;
+    --chart-3: #6F6655;
+    --chart-4: #E8806F;
+    --chart-5: #A2978A;
+    color-scheme: dark;
 }
 
 
@@ -71,7 +159,19 @@
     --color-flame: var(--flame);
     --color-flame-ink: var(--flame-ink);
     --color-flame-soft: var(--flame-soft);
+    --color-flame-wash: var(--flame-wash);
+    --color-flame-line: var(--flame-line);
+    --color-flame-halo: var(--flame-halo);
+    --color-flame-faint: var(--flame-faint);
     --color-rule: var(--rule);
+    --color-hover: var(--hover);
+    --color-canvas: var(--canvas);
+    --color-dot: var(--dot);
+    --color-track: var(--track);
+    --color-stone: var(--stone);
+    --color-ink-soft: var(--ink-soft);
+    --color-terminal: var(--terminal);
+    --color-terminal-ink: var(--terminal-ink);
     --animate-activity-creep: activity-creep 8s cubic-bezier(0.1, 0.6, 0.2, 1) forwards;
     --animate-activity-glint: activity-glint 1.6s ease-in-out infinite;
     --animate-flicker: flicker 2.4s ease-in-out infinite;
@@ -80,6 +180,8 @@
     --color-slate-soft: var(--slate-soft);
     --color-moss: var(--moss);
     --color-moss-soft: var(--moss-soft);
+    --color-slate-line: var(--slate-line);
+    --color-moss-line: var(--moss-line);
     --color-sidebar: var(--sidebar);
     --color-sidebar-foreground: var(--sidebar-foreground);
     --color-sidebar-primary: var(--sidebar-primary);
@@ -97,6 +199,8 @@
     --color-input: var(--input);
     --color-border: var(--border);
     --color-destructive: var(--destructive);
+    --color-destructive-line: var(--destructive-line);
+    --color-destructive-soft: var(--destructive-soft);
     --color-accent-foreground: var(--accent-foreground);
     --color-accent: var(--accent);
     --color-muted-foreground: var(--muted-foreground);

@@ -4,6 +4,7 @@ import dagre from '@dagrejs/dagre'
 import '@xyflow/react/dist/style.css'
 import { Pencil, Plus, Trash2 } from 'lucide-react'
 import type { Question } from './api'
+import { useTheme } from './theme'
 import { answered, isChoice, outcomesOf, policyShort, probabilityOf, questionProblem } from './policy'
 
 /** A question as the page edits it: a stable key, and whether the next run asks it. */
@@ -66,7 +67,7 @@ function layout(chain: TreeQuestion[], data: Omit<CardData, 'question' | 'source
         edges.push({
           id: `${question.localKey}>${child.localKey}`, source: question.localKey, sourceHandle: branch.tag, target: child.localKey, type: 'smoothstep',
           pathOptions: { borderRadius: 14 },
-          style: on ? { stroke: 'var(--flame)', strokeWidth: 2.5 } : data.testing ? { stroke: '#CFC6B5', strokeWidth: 1.5, strokeDasharray: '5 5' } : { stroke: '#B9AE98', strokeWidth: 1.5 },
+          style: on ? { stroke: 'var(--flame)', strokeWidth: 2.5 } : data.testing ? { stroke: 'var(--input)', strokeWidth: 1.5, strokeDasharray: '5 5' } : { stroke: 'var(--stone)', strokeWidth: 1.5 },
         })
       }
     }
@@ -87,13 +88,14 @@ const nodeTypes = { question: QuestionCard }
 /** One chain on a canvas you can pan and zoom: the source on top, follow-ups falling below the answer they follow. */
 export function QuestionFlow({ chain, isDirty, answers, onEdit, onDelete, onFollow, onToggle, children }: Omit<CardData, 'question' | 'source' | 'dirty' | 'reached' | 'testing'> & { chain: TreeQuestion[]; isDirty: (question: TreeQuestion) => boolean; children?: ReactNode }) {
   const testing = Boolean(answers)
+  const [theme] = useTheme()
   const { nodes, edges } = useMemo(
     () => chain.length ? layout(chain, { isDirty, answers, testing, onEdit, onDelete, onFollow, onToggle }) : { nodes: [], edges: [] },
     [chain, isDirty, answers, testing, onEdit, onDelete, onFollow, onToggle],
   )
-  return <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.2, maxZoom: 1 }} minZoom={0.15} maxZoom={1.75}
+  return <ReactFlow colorMode={theme} nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.2, maxZoom: 1 }} minZoom={0.15} maxZoom={1.75}
     nodesDraggable={false} nodesConnectable={false} elementsSelectable={false} onNodeClick={(_, node) => onEdit(node.id)} proOptions={{ hideAttribution: true }}>
-    <Background variant={BackgroundVariant.Dots} gap={18} size={1.4} color="#D8CFBD" bgColor="#FBF8F1" />
+    <Background variant={BackgroundVariant.Dots} gap={18} size={1.4} color="var(--dot)" bgColor="var(--canvas)" />
     <Controls showInteractive={false} position="bottom-left" />
     <Refit signature={chain.map(question => question.localKey).join()} />
     {children}
@@ -115,13 +117,13 @@ function QuestionCard({ data }: NodeProps<CardNode>) {
   const lit = reached ? answered(question, answers) : undefined
   const dim = testing && !reached
   return <div className={`w-[320px] cursor-pointer rounded-xl bg-background ${testing && reached ? 'shadow-[0_0_0_1.5px_var(--flame),0_6px_18px_rgba(26,23,18,0.10)]' : 'shadow-[0_0_0_1.5px_var(--foreground),0_6px_18px_rgba(26,23,18,0.08)]'} ${dim || question.skip ? 'opacity-50' : ''}`}>
-    {!source && <Handle type="target" position={Position.Top} isConnectable={false} className="!size-2 !min-h-0 !min-w-0 !border-0 !bg-[#B9AE98]" />}
+    {!source && <Handle type="target" position={Position.Top} isConnectable={false} className="!size-2 !min-h-0 !min-w-0 !border-0 !bg-stone" />}
     <div className="flex items-center gap-2 px-4 pt-3">
       <input type="checkbox" checked={!question.skip} onClick={event => event.stopPropagation()} onChange={event => data.onToggle(question.localKey, event.target.checked)} aria-label={`Run ${question.id}`} className="nodrag accent-foreground" />
       <span className={`shrink-0 text-[10px] font-bold tracking-[0.1em] ${problem ? 'text-destructive' : dirty ? 'text-flame-ink' : 'text-muted-foreground'}`}>{source ? 'SOURCE · ' : ''}{isChoice(question) ? 'CHOICE' : 'NOUL'} · {problem ? 'fix' : dirty ? 'unsaved' : `v${question.version}`}</span>
       <span className="min-w-0 flex-1 truncate text-right font-mono text-[11px] text-muted-foreground">{question.id}</span>
       <button type="button" aria-label={`Edit ${question.id}`} onClick={event => { event.stopPropagation(); data.onEdit(question.localKey) }} className="nodrag grid size-6 place-items-center rounded-md text-muted-foreground hover:bg-parchment hover:text-foreground"><Pencil className="size-3.5" /></button>
-      <button type="button" aria-label={`Delete ${question.id}`} onClick={event => { event.stopPropagation(); data.onDelete(question.localKey) }} className="nodrag grid size-6 place-items-center rounded-md text-muted-foreground hover:bg-[#F7E1DC] hover:text-destructive"><Trash2 className="size-3.5" /></button>
+      <button type="button" aria-label={`Delete ${question.id}`} onClick={event => { event.stopPropagation(); data.onDelete(question.localKey) }} className="nodrag grid size-6 place-items-center rounded-md text-muted-foreground hover:bg-destructive-soft hover:text-destructive"><Trash2 className="size-3.5" /></button>
     </div>
     <p className={`px-4 pt-1.5 text-[15px] leading-[21px] font-semibold whitespace-pre-wrap ${question.instructions ? '' : 'text-muted-foreground'}`}>{question.instructions || 'Write the question'}</p>
     <p className="px-4 pt-1 text-xs text-muted-foreground">{policyShort(question)}</p>
@@ -129,11 +131,11 @@ function QuestionCard({ data }: NodeProps<CardNode>) {
       {outcomesOf(question).map(branch => {
         const on = lit === branch.label
         const p = answers && reached ? probabilityOf(question, branch, answers) : undefined
-        return <div key={branch.label} className={`group/chip relative flex h-[34px] min-w-0 items-center gap-1.5 rounded-lg px-2.5 text-[13px] ${on ? 'bg-flame-soft font-bold shadow-[0_0_0_1.5px_var(--flame)]' : 'bg-[#FBF8F1] shadow-[0_0_0_1px_var(--rule)]'}`}>
+        return <div key={branch.label} className={`group/chip relative flex h-[34px] min-w-0 items-center gap-1.5 rounded-lg px-2.5 text-[13px] ${on ? 'bg-flame-soft font-bold shadow-[0_0_0_1.5px_var(--flame)]' : 'bg-canvas shadow-[0_0_0_1px_var(--rule)]'}`}>
           <span className="min-w-0 flex-1 truncate" title={branch.label}>{branch.label}</span>
           {p != null ? <span className={`font-mono text-xs ${on ? 'text-flame-ink' : 'text-muted-foreground'}`}>{Math.round(p * 100)}%</span> : <span className={`text-[10px] ${branch.action === 'exclude' ? 'text-destructive' : 'text-muted-foreground'}`}>{actionWord[branch.action]}</span>}
           {branch.tag && <Handle type="source" id={branch.tag} position={Position.Bottom} isConnectable={false} className="!size-1.5 !min-h-0 !min-w-0 !border-0 !bg-transparent" />}
-          {branch.tag && <button type="button" aria-label={`Ask a follow-up on ${branch.label}`} onClick={event => { event.stopPropagation(); data.onFollow(branch.tag!) }} className="nodrag absolute -bottom-3 left-1/2 z-10 grid size-6 -translate-x-1/2 place-items-center rounded-full border border-[#CFC6B5] bg-background text-muted-foreground opacity-0 shadow-xs group-hover/chip:opacity-100 hover:text-foreground focus:opacity-100"><Plus className="size-3.5" /></button>}
+          {branch.tag && <button type="button" aria-label={`Ask a follow-up on ${branch.label}`} onClick={event => { event.stopPropagation(); data.onFollow(branch.tag!) }} className="nodrag absolute -bottom-3 left-1/2 z-10 grid size-6 -translate-x-1/2 place-items-center rounded-full border border-input bg-background text-muted-foreground opacity-0 shadow-xs group-hover/chip:opacity-100 hover:text-foreground focus:opacity-100"><Plus className="size-3.5" /></button>}
         </div>
       })}
     </div>

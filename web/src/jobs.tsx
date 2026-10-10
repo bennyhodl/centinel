@@ -47,7 +47,7 @@ export function WorkingNow({ onOpen }: { onOpen: (id: string) => void }) {
   const running = activeJobs(useJobs())
   if (!running.length) return null
   return <div className="grid gap-1 border-t pt-3 group-data-[collapsible=icon]:hidden">
-    <span className="mb-1 inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-flame-ink"><span className="size-1.5 rounded-full bg-flame shadow-[0_0_0_3px_#F6D9B4]" />Working now</span>
+    <span className="mb-1 inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-flame-ink"><span className="size-1.5 rounded-full bg-flame shadow-[0_0_0_3px_var(--flame-halo)]" />Working now</span>
     {running.map(job => <button key={job.id} type="button" onClick={() => onOpen(job.id)} className="grid gap-1 rounded-md px-1.5 py-1 text-left text-[13px] hover:bg-background">
       <span className="flex justify-between gap-2"><span className="truncate">{jobTitle(job)}</span><span className="shrink-0 font-mono text-xs text-muted-foreground">{count(job)}</span></span>
       <Bar job={job} thin />
@@ -60,7 +60,7 @@ const count = (job: JobState) => job.total ? `${number(job.done ?? 0)}/${number(
 
 function Bar({ job, thin }: { job: JobState; thin?: boolean }) {
   const width = job.total ? (job.done ?? 0) / job.total * 100 : 0
-  return <span className={`block rounded-full bg-[#EFE9DC] ${thin ? 'h-1' : 'h-1.5'}`}>
+  return <span className={`block rounded-full bg-track ${thin ? 'h-1' : 'h-1.5'}`}>
     <i className="block h-full rounded-full bg-foreground transition-[width] duration-(--motion-progress) ease-out" style={{ width: `${job.outcome ? 100 : width}%` }} />
   </span>
 }
@@ -89,7 +89,7 @@ export function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) 
     <SheetContent side="right" className="flex w-full flex-col gap-0 p-0 sm:max-w-[560px]">
       <div className="grid gap-3.5 border-b px-6 pt-6 pb-5">
         <span className={`inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] ${running ? 'text-flame-ink' : job.outcome === 'failed' ? 'text-destructive' : 'text-muted-foreground'}`}>
-          {running && <span className="size-2 rounded-full bg-flame shadow-[0_0_0_4px_#F6D9B4]" />}
+          {running && <span className="size-2 rounded-full bg-flame shadow-[0_0_0_4px_var(--flame-halo)]" />}
           {running ? 'Working' : job.outcome} · {job ? seconds((job.finished_at ?? Date.now()) - job.started_at) : ''}
         </span>
         <SheetTitle className="font-serif text-[30px] leading-8 font-normal">{job ? jobTitle(job) : 'Job'}</SheetTitle>
@@ -100,20 +100,20 @@ export function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) 
           {totals
             ? <>
               <Count value={number(totals.kept)} label="kept" />
-              <Count value={number(totals.tagged)} label="tagged" tone="text-[#3E6539]" />
+              <Count value={number(totals.tagged)} label="tagged" tone="text-moss" />
               <Count value={number(totals.review)} label="review" tone="text-flame-ink" />
               <Count value={number(totals.excluded)} label="exclude" />
               <Count value={number(totals.errors)} label="errors" tone="text-destructive" />
             </>
             : <>
-              <Count value={number(job?.ok ?? 0)} label="ok" tone="text-[#3E6539]" />
+              <Count value={number(job?.ok ?? 0)} label="ok" tone="text-moss" />
               <Count value={number(job?.failed ?? 0)} label="failed" tone="text-destructive" />
             </>}
         </div>
         {job?.current && <div className="grid gap-0.5 text-xs"><span className="text-muted-foreground">In hand</span><span className="truncate font-mono" title={job.current}>{job.current}</span></div>}
         {job?.error && <p className="text-[13px] text-destructive">{job.error}</p>}
       </div>
-      <div className="flex min-h-0 flex-1 flex-col bg-[#1F1C17] py-3 font-mono text-xs leading-[22px]">
+      <div className="flex min-h-0 flex-1 flex-col bg-terminal py-3 font-mono text-xs leading-[22px]">
         <div className="flex justify-between px-5 pb-2 font-sans text-[11px] text-[#B9AE98]"><span>Live log · {running ? 'following' : 'finished'}</span><span>{job?.step}</span></div>
         <div className="min-h-0 flex-1 overflow-y-auto">
           {lines.map(line => <LogLine key={line.seq} line={line} answer={line.type === 'item' ? answers.get(line.item.address) : undefined} questions={questions} />)}
@@ -122,7 +122,7 @@ export function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) 
       </div>
       <div className="flex items-center gap-3 border-t px-6 py-4">
         <span className="flex-1 text-[13px] text-muted-foreground">{run ? `${run.model} · ${number(run.questions.length)} questions` : job?.kind}</span>
-        {classify && <Link to="/runs" search={{ run: id, page: 1, outcome: '' }} onClick={onClose} className="inline-flex h-[34px] items-center rounded-lg px-3.5 text-[13px] font-medium shadow-[inset_0_0_0_1px_#CFC6B5]">Open run</Link>}
+        {classify && <Link to="/runs" search={{ run: id, page: 1, outcome: '' }} onClick={onClose} className="inline-flex h-[34px] items-center rounded-lg px-3.5 text-[13px] font-medium shadow-[inset_0_0_0_1px_var(--input)]">Open run</Link>}
       </div>
     </SheetContent>
   </Sheet>
@@ -136,7 +136,7 @@ function LogLine({ line, answer, questions }: { line: JobEvent; answer?: RunResu
   </div>
   switch (line.type) {
     case 'started': return row('started', 'text-[#B9AE98]', <span className="truncate">{line.label}</span>)
-    case 'step': return row('step', 'text-[#F4EEE1]', <span className="truncate text-[#F4EEE1]">{line.step}</span>)
+    case 'step': return row('step', 'text-terminal-ink', <span className="truncate text-terminal-ink">{line.step}</span>)
     case 'note': return row('note', 'text-[#6B6458]', <span className="truncate">{line.message}</span>)
     case 'finished': return row(line.outcome, line.outcome === 'failed' ? 'text-[#E57D6E]' : 'text-[#8FB58A]', <span className="truncate">{line.error}</span>)
     case 'item': {
@@ -144,8 +144,8 @@ function LogLine({ line, answer, questions }: { line: JobEvent; answer?: RunResu
       const said = answer ? answerSummary(questions, answer) : item.detail || (item.produced != null ? `${number(item.produced)} ch` : seconds(item.millis))
       return row(item.tag, verdictTone[item.verdict], <>
         {answer
-          ? <DocumentLink doc={answer} className="min-w-0 truncate text-[#F4EEE1] hover:underline">{tail(item.address)}</DocumentLink>
-          : <span className={`min-w-0 truncate ${succeeded(item.verdict) ? 'text-[#F4EEE1]' : ''}`} title={item.address}>{item.nested ? '↳ ' : ''}{tail(item.address)}</span>}
+          ? <DocumentLink doc={answer} className="min-w-0 truncate text-terminal-ink hover:underline">{tail(item.address)}</DocumentLink>
+          : <span className={`min-w-0 truncate ${succeeded(item.verdict) ? 'text-terminal-ink' : ''}`} title={item.address}>{item.nested ? '↳ ' : ''}{tail(item.address)}</span>}
         <span className="min-w-0 flex-1 truncate">{said}</span>
       </>)
     }

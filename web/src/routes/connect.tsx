@@ -42,7 +42,7 @@ function Connect() {
       <section className="grid">
         <SectionRule aside={`${tools.length} tools · read only`}>2 · What the agent gets</SectionRule>
         {ops.error && <ErrorBox error={ops.error} />}
-        {tools.map(op => <div key={op.name} className="flex gap-4 border-b py-2.5"><span className="w-28 shrink-0 font-mono text-[13px]">{op.name}</span><span className="text-sm text-[#3A352D]">{op.about}</span></div>)}
+        {tools.map(op => <div key={op.name} className="flex gap-4 border-b py-2.5"><span className="w-28 shrink-0 font-mono text-[13px]">{op.name}</span><span className="text-sm text-ink-soft">{op.about}</span></div>)}
       </section>
     </div>
   </>

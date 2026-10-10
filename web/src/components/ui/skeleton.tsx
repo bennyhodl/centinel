@@ -12,7 +12,7 @@ function Skeleton({ className, mask, ...props }: React.ComponentProps<"span"> & 
       data-slot="skeleton"
       aria-hidden
       className={cn(
-        "animate-pulse rounded-sm bg-[#EFE9DC] motion-reduce:animate-none",
+        "animate-pulse rounded-sm bg-track motion-reduce:animate-none",
         mask === undefined ? "block" : "box-decoration-clone select-none text-transparent [overflow-wrap:anywhere]",
         className,
       )}

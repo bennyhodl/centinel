@@ -99,10 +99,10 @@ function Source({ read }: { read: ReadReport }) {
   const source = useOriginalText(read)
   if (source.error) return <ErrorBox error={source.error} />
   const lines = (source.data || '').split('\n')
-  return <div className="overflow-hidden rounded-[10px] bg-[#1F1C17]">
+  return <div className="overflow-hidden rounded-[10px] bg-terminal">
     <div className="flex h-10 items-center px-3.5 font-mono text-xs text-[#B9AE98]">{tail(read.url)} · {number(lines.length)} lines</div>
     <div className="max-h-[72vh] overflow-auto py-3 font-mono text-[12.5px] leading-[21px]">
-      {source.isPending ? <div className="px-3.5 text-[#B9AE98]">Loading…</div> : lines.map((line, i) => <div key={i} className="flex px-3.5"><span className="w-12 shrink-0 select-none text-[#6B6458]">{i + 1}</span><span className="whitespace-pre text-[#F4EEE1]">{line}</span></div>)}
+      {source.isPending ? <div className="px-3.5 text-[#B9AE98]">Loading…</div> : lines.map((line, i) => <div key={i} className="flex px-3.5"><span className="w-12 shrink-0 select-none text-[#6B6458]">{i + 1}</span><span className="whitespace-pre text-terminal-ink">{line}</span></div>)}
     </div>
   </div>
 }
@@ -124,11 +124,11 @@ function CsvTable({ read }: { read: ReadReport }) {
     </div>
     <div className="max-h-[70vh] overflow-auto">
       <Table>
-        <TableHeader className="sticky top-0 bg-[#F7F3EA]"><TableRow>{(header || []).map((cell, i) => <TableHead key={i}>{cell}</TableHead>)}</TableRow></TableHeader>
+        <TableHeader className="sticky top-0 bg-canvas"><TableRow>{(header || []).map((cell, i) => <TableHead key={i}>{cell}</TableHead>)}</TableRow></TableHeader>
         <TableBody>{matching.slice(0, csvRowCap).map((row, i) => <TableRow key={i}>{row.map((cell, j) => <TableCell key={j} className="font-mono text-[13px]">{cell}</TableCell>)}</TableRow>)}</TableBody>
       </Table>
     </div>
-    {matching.length > csvRowCap && <div className="border-t bg-[#FBF9F4] px-3.5 py-3 text-[13px] text-muted-foreground">Showing the first {number(csvRowCap)} rows. Filter, or download the CSV for all of them.</div>}
+    {matching.length > csvRowCap && <div className="border-t bg-hover px-3.5 py-3 text-[13px] text-muted-foreground">Showing the first {number(csvRowCap)} rows. Filter, or download the CSV for all of them.</div>}
   </div>
 }
 

@@ -68,7 +68,7 @@ function HistoryRow({ summary, onOpen }: { summary: RunSummary; onOpen: (outcome
     ? `Committed · ${number(totals.excluded)} excluded`
     : failed ? `Stopped · ${plural(totals.errors, 'error')}`
       : [totals.kept && `${number(totals.kept)} keep`, totals.tagged && `${number(totals.tagged)} tagged`, totals.excluded && `${number(totals.excluded)} exclude`, totals.not_asked && `${number(totals.not_asked)} not asked`, totals.errors && `${number(totals.errors)} errors`].filter(Boolean).join(' · ') || 'Nothing decided'
-  return <div role="button" tabIndex={0} onClick={() => onOpen('')} onKeyDown={event => event.key === 'Enter' && onOpen('')} className="flex cursor-pointer items-center gap-6 border-b py-4 hover:bg-[#FBF9F4]">
+  return <div role="button" tabIndex={0} onClick={() => onOpen('')} onKeyDown={event => event.key === 'Enter' && onOpen('')} className="flex cursor-pointer items-center gap-6 border-b py-4 hover:bg-hover">
     <span className="grid w-36 shrink-0 gap-0.5"><b className="text-sm font-semibold">{summary.created_at.slice(0, 16).replace('T', ' ')}</b><span className="text-xs text-muted-foreground">{seconds(summary.duration_ms)}{summary.cost_usd != null ? ` · ${money(summary.cost_usd)}` : ''}</span></span>
     <span className="grid min-w-0 flex-1 gap-0.5"><span className="truncate text-sm">{run ? `${asked(run)} · ${plural(summary.document_count, 'document')}` : plural(summary.document_count, 'document')}</span><span className="truncate font-mono text-xs text-muted-foreground">{summary.id} · {summary.model}</span></span>
     <span className={`hidden w-56 shrink-0 text-[13px] md:block ${failed ? 'text-destructive' : summary.status === 'committed' ? 'text-muted-foreground' : ''}`}>{outcome}</span>
@@ -91,7 +91,7 @@ function NextStep({ run, onOpen }: { run: Run; onOpen: (outcome: ResultOutcome) 
   const toExclude = run.preview?.affected_documents || 0
   const review = run.view?.documents.review || 0
   if (run.status === 'completed' && toExclude) return <Button size="sm" disabled={commit.isPending} onClick={() => armed ? commit.mutate() : setArmed(true)} onBlur={() => setArmed(false)}>{commit.isPending ? <Spinner /> : null}{armed ? 'Click again to commit' : `Commit ${plural(toExclude, 'exclusion')}`}</Button>
-  if (review) return <button type="button" onClick={() => onOpen('review')} className="h-8 rounded-md bg-flame-soft px-3 text-[13px] font-semibold text-flame-ink shadow-[inset_0_0_0_1px_#F0D6B0]">Review {number(review)} →</button>
+  if (review) return <button type="button" onClick={() => onOpen('review')} className="h-8 rounded-md bg-flame-soft px-3 text-[13px] font-semibold text-flame-ink shadow-[inset_0_0_0_1px_var(--flame-line)]">Review {number(review)} →</button>
   if (run.status === 'failed' || run.status === 'interrupted') return <Button size="sm" variant="outline" disabled={repeat.isPending} onClick={() => repeat.mutate()}>{repeat.isPending ? <Spinner /> : <RotateCcw />}Run again</Button>
   return <Button size="sm" variant="outline" onClick={() => onOpen('')}>Open</Button>
 }
