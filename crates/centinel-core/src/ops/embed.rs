@@ -1251,6 +1251,69 @@ mod tests {
         );
     }
 
+    /// The field failure end to end: a data file the storage never wrote blocks the
+    /// pre-flight scan, the error names `centinel verify`, and after `verify --repair`
+    /// the dropped chunks are back on the work list rather than left as ghost rows.
+    #[tokio::test]
+    async fn a_repaired_table_puts_the_dropped_chunks_back_on_the_work_list() {
+        let (_dir, ctx) = indexed_store(3).await;
+        let hashes = Index::open(ctx.store.require_index().unwrap())
+            .unwrap()
+            .chunk_hashes()
+            .unwrap();
+
+        // Every chunk embedded, in two fragments; then one fragment's file goes bad.
+        let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
+            .await
+            .unwrap();
+        let row = |h: &String| (h.clone(), vec![0.0_f32; 2560]);
+        table.append(&[row(&hashes[0])]).await.unwrap();
+        table
+            .append(&hashes[1..].iter().map(row).collect::<Vec<_>>())
+            .await
+            .unwrap();
+        super::super::verify::tests::damage_a_data_file(&ctx);
+
+        let plan = || EmbedArgs {
+            model: default_model(),
+            variant: None,
+            batch: None,
+            limit: None,
+            dry_run: true,
+            ann_index: false,
+        };
+        let err = embed(&ctx, plan(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("centinel verify"),
+            "the pre-flight names the way out: {err:#}"
+        );
+
+        let repaired = crate::ops::verify(
+            &ctx,
+            crate::ops::VerifyTableArgs { repair: true },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap()
+        .repaired
+        .unwrap();
+        assert_eq!(repaired.fragments_dropped, 1);
+
+        let report = embed(&ctx, plan(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
+        assert_eq!(report.indexed, 3);
+        assert_eq!(report.already_embedded, 3 - repaired.estimated_rows);
+        assert_eq!(
+            report.remaining, repaired.estimated_rows,
+            "the dropped chunks are work again, not ghost rows"
+        );
+        assert_eq!(report.stale, 0);
+    }
+
     /// The subtraction the other way. A rebuilt index or a cleared source leaves rows no
     /// chunk claims: a dry run counts them, a run removes them before it embeds — and
     /// with every chunk already stored, the run needs no weights to show it.

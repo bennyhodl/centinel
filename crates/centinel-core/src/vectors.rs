@@ -115,6 +115,9 @@ const ANN_MIN_ROWS: usize = 4096;
 /// a fragment is never held whole: at 2,560 dimensions this is about ten megabytes.
 const AUDIT_BATCH_ROWS: usize = 1024;
 
+/// Fragments between progress lines in [`VectorTable::audit`].
+const AUDIT_PROGRESS_EVERY: usize = 500;
+
 /// What [`VectorTable::maintain`] did to the files behind the table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Maintenance {
@@ -506,9 +509,14 @@ impl VectorTable {
         let mut unreadable = Vec::new();
         for (i, fragment) in fragments.iter().enumerate() {
             cancel.check()?;
-            progress.step("reading fragments back", i as u64, total);
+            // Every step is a log line, and the field table had 25,003 fragments.
+            if i % AUDIT_PROGRESS_EVERY == 0 {
+                progress.step("reading fragments back", i as u64, total);
+            }
             if let Err(error) = read_back(fragment).await {
                 let meta = fragment.metadata();
+                // Said as it is found, since the progress lines above are sparse.
+                tracing::warn!(fragment = meta.id, %error, "vector fragment cannot be read");
                 unreadable.push(UnreadableFragment {
                     id: meta.id,
                     data_files: meta

@@ -175,11 +175,8 @@ fn render_repaired(p: &mut Painter<'_>, done: &VectorRepair) -> std::io::Result<
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
-    use crate::chunk::Chunk;
-    use crate::index::{Index, Placement};
-    use crate::ops::{EmbedArgs, embed};
     use crate::store::Store;
 
     const DIMS: usize = 4;
@@ -214,8 +211,8 @@ mod tests {
 
     /// Overwrites one data file with filler of the same length — the shape of the field
     /// failure: a file of the right size holding nothing Lance can read. Returns the path
-    /// the report should name, relative to `vectors.lance/`.
-    fn damage_a_data_file(ctx: &Ctx) -> String {
+    /// the report should name, relative to `vectors.lance/`. `embed`'s tests use it too.
+    pub(in crate::ops) fn damage_a_data_file(ctx: &Ctx) -> String {
         let data = ctx.store.vectors_path().join("data");
         let mut files: Vec<_> = std::fs::read_dir(&data)
             .unwrap()
@@ -298,80 +295,5 @@ mod tests {
         assert!(!bad.error.is_empty(), "Lance's own words are kept");
         assert!(report.repaired.is_none(), "read-only without --repair");
         assert_eq!(versions(&ctx), before, "a read-only run commits nothing");
-    }
-
-    /// The whole point of the repair, end to end: `embed` was blocked by the scan, and
-    /// afterwards it has the dropped chunk back on its work list rather than a ghost row.
-    #[tokio::test]
-    async fn repair_puts_the_dropped_chunks_back_on_embeds_work_list() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).await.unwrap();
-        let mut index = Index::open(store.index_path()).unwrap();
-        for i in 0..3 {
-            let chunk = Chunk::new(format!("passage number {i}"), i, String::new(), 0);
-            index
-                .insert(
-                    &chunk,
-                    &Placement {
-                        source: "test".into(),
-                        resource: format!("https://example.gov/{i}"),
-                        blob_sha: "0".repeat(64),
-                        derived_sha: "1".repeat(64),
-                        ordinal: i,
-                        heading: String::new(),
-                        char_start: chunk.char_start,
-                        char_end: chunk.char_end,
-                        observed_at: "2026-01-01T00:00:00Z".into(),
-                        tool: "test".into(),
-                        title: None,
-                    },
-                )
-                .unwrap();
-        }
-        let hashes = index.chunk_hashes().unwrap();
-        let ctx = Ctx::new(store);
-
-        // Every chunk embedded, in two fragments; then one fragment's file goes bad.
-        let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
-            .await
-            .unwrap();
-        let row = |h: &String| -> (String, Vec<f32>) { (h.clone(), vec![0.0; 2560]) };
-        table.append(&[row(&hashes[0])]).await.unwrap();
-        table
-            .append(&hashes[1..].iter().map(row).collect::<Vec<_>>())
-            .await
-            .unwrap();
-        damage_a_data_file(&ctx);
-
-        let plan = EmbedArgs {
-            model: Some("qwen3-embedding-4b".to_string()),
-            dry_run: true,
-            ..Default::default()
-        };
-        let err = embed(&ctx, plan.clone(), &Progress::none(), &Cancel::none())
-            .await
-            .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("centinel verify"),
-            "embed's pre-flight names the way out: {err:#}"
-        );
-
-        let report = verify(&ctx, args(true), &Progress::none(), &Cancel::none())
-            .await
-            .unwrap();
-        assert_eq!(report.unreadable.len(), 1);
-        let done = report.repaired.unwrap();
-        assert_eq!(done.fragments_dropped, 1);
-
-        let plan = embed(&ctx, plan, &Progress::none(), &Cancel::none())
-            .await
-            .unwrap();
-        assert_eq!(plan.indexed, 3);
-        assert_eq!(plan.already_embedded, 3 - done.estimated_rows);
-        assert_eq!(
-            plan.remaining, done.estimated_rows,
-            "the dropped chunks are work again, not ghost rows"
-        );
-        assert_eq!(plan.stale, 0, "nothing the index lacks was left behind");
     }
 }
