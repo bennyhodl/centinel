@@ -2,6 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "src/bundle.rs"]
+mod bundle;
+
 fn main() {
     let crate_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = crate_dir.join("../..");
@@ -56,25 +59,10 @@ fn main() {
         html.len()
     ));
 
-    let mut files = Vec::new();
-    visit(&dist, &mut files);
-    files.sort();
     let mut generated = String::from("pub static WEB_ASSETS: &[(&str, &str, &[u8])] = &[\n");
-    for file in files {
-        let relative = file
-            .strip_prefix(&dist)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        let route = if relative == "index.html" {
-            "/web".to_string()
-        } else {
-            format!("/{relative}")
-        };
+    for (route, mime, file) in bundle::files(&dist).unwrap() {
         generated.push_str(&format!(
-            "({route:?}, {:?}, include_bytes!({:?})),\n",
-            mime(&file),
-            file
+            "({route:?}, {mime:?}, include_bytes!({file:?})),\n"
         ));
     }
     generated.push_str("];\n");
@@ -127,17 +115,6 @@ fn stamped_version(html: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-fn visit(dir: &Path, files: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            visit(&path, files);
-        } else if path.is_file() {
-            files.push(path);
-        }
-    }
-}
-
 fn modified(path: &Path) -> Option<std::time::SystemTime> {
     fs::metadata(path).and_then(|m| m.modified()).ok()
 }
@@ -163,17 +140,5 @@ fn require_node(root: &Path) {
             "Centinel web requires Node.js 22.12+ to build; found `{}`",
             version.trim()
         );
-    }
-}
-
-fn mime(path: &Path) -> &'static str {
-    match path.extension().and_then(|x| x.to_str()) {
-        Some("html") => "text/html; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("svg") => "image/svg+xml",
-        Some("png") => "image/png",
-        Some("woff2") => "font/woff2",
-        _ => "application/octet-stream",
     }
 }

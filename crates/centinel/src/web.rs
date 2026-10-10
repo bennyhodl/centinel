@@ -101,7 +101,7 @@ pub fn check_bundle() -> Result<()> {
 /// Only a source build can do this. The checkout path is the one Cargo saw at compile
 /// time, so a release download — built on another machine — finds no `web/` there and
 /// is told so before anything else happens. The embedded page is never modified: a
-/// rebuilt bundle lives in `web-dist/` on disk and is served from memory for this
+/// rebuilt bundle lives in `web-dist/` on disk and is read into memory for this
 /// process only. The next `cargo build` embeds it for good.
 pub fn rebuild_bundle() -> Result<()> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -126,9 +126,20 @@ pub fn rebuild_bundle() -> Result<()> {
         bail!("`npm run build` failed in {}", root.display());
     }
     let dist = root.join("web-dist");
-    let page = std::fs::read(dist.join("index.html"))
-        .with_context(|| format!("reading {}", dist.join("index.html").display()))?;
-    let stamped = super::http::stamped_version(std::str::from_utf8(&page).unwrap_or(""));
+    let files = crate::bundle::files(&dist)
+        .with_context(|| format!("reading {}", dist.display()))?
+        .into_iter()
+        .map(|(route, mime, path)| {
+            std::fs::read(&path)
+                .map(|bytes| (route, mime, bytes))
+                .with_context(|| format!("reading {}", path.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let page = files
+        .iter()
+        .find(|file| file.0 == "/web")
+        .with_context(|| format!("{} has no index.html", dist.display()))?;
+    let stamped = super::http::stamped_version(std::str::from_utf8(&page.2).unwrap_or(""));
     match stamped.as_deref() {
         Some(stamped) if stamped == version => {}
         Some(stamped) => bail!(
@@ -137,8 +148,8 @@ pub fn rebuild_bundle() -> Result<()> {
         ),
         None => bail!("the rebuilt page carries no centinel-version stamp"),
     }
-    let bytes = page.len();
-    super::http::serve_page_from(page);
+    let bytes: usize = files.iter().map(|file| file.2.len()).sum();
+    super::http::serve_bundle_from(files);
     tracing::info!(version, bytes, from = %dist.display(), "web workspace rebuilt");
     Ok(())
 }

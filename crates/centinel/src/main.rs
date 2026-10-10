@@ -5,6 +5,7 @@
 //! [`centinel_core::op::all`]. Adding an op in the library makes it appear in all three
 //! without touching this file, which is the property ticket #9 was about.
 
+mod bundle;
 mod http;
 mod logging;
 mod mcp;

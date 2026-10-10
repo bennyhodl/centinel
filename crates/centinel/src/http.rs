@@ -81,25 +81,30 @@ pub fn build_id() -> &'static str {
     &ID
 }
 
-/// A page rebuilt by `centinel web --rebuild`, served in place of the embedded one for
-/// the life of this process. Set once, before the server starts.
-static REBUILT_PAGE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+/// A bundle rebuilt by `centinel web --rebuild`, served in place of the embedded one
+/// for the life of this process, as `(route, content type, bytes)`. Set once, before
+/// the server starts.
+static REBUILT: std::sync::OnceLock<Vec<(String, &'static str, Vec<u8>)>> =
+    std::sync::OnceLock::new();
 
-/// Serves `page` at `/web` instead of the embedded copy. A second call is ignored.
-pub fn serve_page_from(page: Vec<u8>) {
-    let _ = REBUILT_PAGE.set(page);
+/// Serves `files` instead of the embedded bundle. A second call is ignored.
+pub fn serve_bundle_from(files: Vec<(String, &'static str, Vec<u8>)>) {
+    let _ = REBUILT.set(files);
 }
 
-/// The workspace page this process serves: the rebuilt one when there is one, else the
-/// copy embedded at compile time.
-fn web_page() -> Option<&'static [u8]> {
-    if let Some(page) = REBUILT_PAGE.get() {
-        return Some(page.as_slice());
+/// The content type and bytes this process serves at `route`: from the rebuilt bundle
+/// when there is one, else from the copy embedded at compile time.
+fn asset(route: &str) -> Option<(&'static str, &'static [u8])> {
+    if let Some(files) = REBUILT.get() {
+        return files
+            .iter()
+            .find(|file| file.0 == route)
+            .map(|file| (file.1, file.2.as_slice()));
     }
     WEB_ASSETS
         .iter()
-        .find(|asset| asset.0 == "/web")
-        .map(|asset| asset.2)
+        .find(|asset| asset.0 == route)
+        .map(|asset| (asset.1, asset.2))
 }
 
 /// The version stamped into the served workspace page by the Start root route.
@@ -108,7 +113,7 @@ fn web_page() -> Option<&'static [u8]> {
 /// built from source this always equals `CARGO_PKG_VERSION`. A release download cannot
 /// rebuild the bundle, so [`crate::web::check_bundle`] only checks it, early.
 pub fn web_version() -> Option<String> {
-    stamped_version(std::str::from_utf8(web_page()?).ok()?)
+    stamped_version(std::str::from_utf8(asset("/web")?.1).ok()?)
 }
 
 /// The `centinel-version` meta tag in a page, as the Start root route writes it.
@@ -182,7 +187,7 @@ fn router(ctx: Arc<Ctx>) -> Router {
         .route("/web", get(web_ui))
         .route("/web/", get(web_ui))
         .route("/web/{*path}", get(web_ui))
-        .route("/assets/{*path}", get(web_asset))
+        .route("/web/assets/{*path}", get(web_asset))
         .route("/workspace/documents", get(workspace_documents))
         .route("/workspace/system", get(workspace_system))
         .route("/workspace/document", get(workspace_document))
@@ -243,32 +248,22 @@ async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) 
 
 /// The bundled classifier workspace.
 ///
-/// One file, embedded at build time: no asset directory to ship beside the binary and no
-/// build step on the user's machine. It talks to the ops API on this origin, so nothing
-/// here learns a route by name — the UI calls `/ops/read` and `/ops/search` the same way
-/// the CLI does.
-async fn web_ui() -> impl IntoResponse {
+/// Embedded at build time: no asset directory to ship beside the binary and no build
+/// step on the user's machine. Every path under `/web` that is not an asset gets the
+/// shell, and the router takes it from there. It talks to the ops API on this origin,
+/// so nothing here learns a route by name — the UI calls `/ops/read` and `/ops/search`
+/// the same way the CLI does.
+async fn web_ui() -> Response {
     asset_response("/web")
 }
 
 async fn web_asset(Path(path): Path<String>) -> Response {
-    asset_response(&format!("/assets/{path}"))
+    asset_response(&format!("/web/assets/{path}"))
 }
 
-fn asset_response(path: &str) -> Response {
-    if path == "/web"
-        && let Some(page) = REBUILT_PAGE.get()
-    {
-        return (
-            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            page.clone(),
-        )
-            .into_response();
-    }
-    match WEB_ASSETS.iter().find(|asset| asset.0 == path) {
-        Some((_, mime, bytes)) => {
-            ([(axum::http::header::CONTENT_TYPE, *mime)], *bytes).into_response()
-        }
+fn asset_response(route: &str) -> Response {
+    match asset(route) {
+        Some((mime, bytes)) => ([(axum::http::header::CONTENT_TYPE, mime)], bytes).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -979,10 +974,23 @@ mod tests {
         let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
             .await
             .unwrap();
-        assert!(
-            std::str::from_utf8(&bytes).unwrap().contains("Centinel"),
-            "the embedded document arrived"
-        );
+        let shell = std::str::from_utf8(&bytes).unwrap();
+        assert!(shell.contains("Centinel"), "the embedded document arrived");
+        let start = shell
+            .find("/web/assets/")
+            .expect("the shell loads its assets");
+        let end = start + shell[start..].find('"').unwrap();
+        let asset = app
+            .clone()
+            .oneshot(
+                Request::get(&shell[start..end])
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(asset.status(), StatusCode::OK, "{}", &shell[start..end]);
+        assert_ne!(asset.headers()["content-type"], "text/html; charset=utf-8");
         for path in ["/web/", "/web/classifiers", "/web/runs", "/web/review"] {
             assert_eq!(
                 app.clone()
