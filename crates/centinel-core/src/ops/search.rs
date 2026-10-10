@@ -515,7 +515,7 @@ async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<Vec<(String, f32)>, 
             // The query is the one piece of text this sends off the machine, and it is
             // sent because the operator embedded the corpus remotely — the same consent,
             // read back off the table.
-            crate::remote::RemoteEmbedder::new(spec)
+            crate::remote::RemoteEmbedder::new(spec, crate::spend::Ledger::new(&ctx.store))
                 .map_err(|e| format!("{e:#}"))?
                 .embed_query(&query)
                 .await
@@ -526,6 +526,7 @@ async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<Vec<(String, f32)>, 
             // gigabytes — a short CLI run pays this per query; `serve` and `mcp` pay it
             // once.
             let cache = ctx.query_embedder.clone();
+            let ledger = crate::spend::Ledger::new(&ctx.store);
             tokio::task::spawn_blocking(move || {
                 let mut cached = cache
                     .lock()
@@ -537,7 +538,7 @@ async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<Vec<(String, f32)>, 
                     // Release the old weights before loading a different model.
                     *cached = None;
                     let root = crate::models::models_dir()?;
-                    *cached = Some(crate::embed::Embedder::load(&root, &model, None)?);
+                    *cached = Some(crate::embed::Embedder::load(&root, &model, None, ledger)?);
                 }
                 cached
                     .as_ref()

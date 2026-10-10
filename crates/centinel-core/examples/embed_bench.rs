@@ -47,7 +47,11 @@ fn main() -> anyhow::Result<()> {
 
     let root = models::models_dir()?;
     let load = Instant::now();
-    let embedder = Embedder::load(&root, &model_id, None)?;
+    // A bench is not spend: its lines go to a scratch store that is gone when it ends.
+    let scratch = tempfile::tempdir()?;
+    let ledger =
+        centinel_core::spend::Ledger::new(&centinel_core::store::Store::at(scratch.path()));
+    let embedder = Embedder::load(&root, &model_id, None, ledger)?;
     let load = load.elapsed();
 
     println!(

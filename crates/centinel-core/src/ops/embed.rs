@@ -431,7 +431,8 @@ pub async fn embed(
                 spec.id,
                 args.variant.as_deref().unwrap_or(spec.default_variant)
             ));
-            let embedder = load_embedder(&args, spec.id).await?;
+            let embedder =
+                load_embedder(&args, spec.id, crate::spend::Ledger::new(&ctx.store)).await?;
             progress.say(embedder.device_summary());
             anyhow::ensure!(
                 embedder.dims() == dims,
@@ -474,7 +475,7 @@ pub async fn embed(
             // Said before the first byte moves, because it is the run's one departure
             // from §2.1: this stage, this model, chunk text to openrouter.ai.
             progress.say(format!("{} — chunk text is sent to openrouter.ai", spec.id));
-            let embedder = RemoteEmbedder::new(spec)?;
+            let embedder = RemoteEmbedder::new(spec, crate::spend::Ledger::new(&ctx.store))?;
             let batch_size = resolve_remote_batch(args.batch)?;
             progress.say(format!("{batch_size} chunks per request"));
             let (embedded, skipped) = run_remote(
@@ -894,11 +895,15 @@ fn embed_with_recovery(
 }
 
 /// Loads the model off the async runtime — it is seconds of blocking file and GPU work.
-async fn load_embedder(args: &EmbedArgs, model_id: &'static str) -> anyhow::Result<Embedder> {
+async fn load_embedder(
+    args: &EmbedArgs,
+    model_id: &'static str,
+    ledger: crate::spend::Ledger,
+) -> anyhow::Result<Embedder> {
     let variant = args.variant.clone();
     tokio::task::spawn_blocking(move || {
         let root = models::models_dir()?;
-        Embedder::load(&root, model_id, variant.as_deref())
+        Embedder::load(&root, model_id, variant.as_deref(), ledger)
     })
     .await?
 }

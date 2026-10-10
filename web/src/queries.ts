@@ -49,6 +49,17 @@ export const queries = {
     staleTime: Infinity,
   }),
 
+  /** The price list. It changes with a release, not while the page is open. */
+  prices: () => queryOptions({ queryKey: ['prices'], queryFn: api.prices, staleTime: Infinity }),
+
+  /** Spend since the start of a window. The window moves with the clock, so it refreshes. */
+  spend: (since: string) => queryOptions({
+    queryKey: ['spend', since],
+    queryFn: () => api.spend(since),
+    placeholderData: keepPreviousData,
+    refetchInterval: 60_000,
+  }),
+
   reviewQueue: (source: string, includeReviewed: boolean, pageSize: number) => queryOptions({
     queryKey: ['review-queue', source, includeReviewed, pageSize],
     queryFn: () => api.reviewQueue({ source, page_size: pageSize, include_reviewed: includeReviewed }),

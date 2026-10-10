@@ -46,6 +46,7 @@
 use serde::Deserialize;
 
 use crate::models::{self, ModelSpec};
+use crate::spend::{self, Spend};
 
 /// The environment variable holding the API key.
 ///
@@ -199,6 +200,7 @@ pub struct RemoteEmbedder {
     client: reqwest::Client,
     spec: &'static RemoteModelSpec,
     key: String,
+    ledger: spend::Ledger,
 }
 
 impl std::fmt::Debug for RemoteEmbedder {
@@ -211,23 +213,35 @@ impl std::fmt::Debug for RemoteEmbedder {
     }
 }
 
+/// The API key, or the error that names the variable to set — the way missing weights
+/// name `centinel models pull`.
+pub fn api_key(spec: &RemoteModelSpec) -> anyhow::Result<String> {
+    let key = std::env::var(ENV_API_KEY).unwrap_or_default();
+    let key = key.trim().to_string();
+    anyhow::ensure!(
+        !key.is_empty(),
+        "{} needs an OpenRouter API key — export {ENV_API_KEY}=sk-or-…",
+        spec.id
+    );
+    Ok(key)
+}
+
 impl RemoteEmbedder {
-    /// Builds a client, failing loudly when the key is absent — with the fix, the way
-    /// missing weights name `centinel models pull`.
-    pub fn new(spec: &'static RemoteModelSpec) -> anyhow::Result<Self> {
-        let key = std::env::var(ENV_API_KEY).unwrap_or_default();
-        let key = key.trim().to_string();
-        anyhow::ensure!(
-            !key.is_empty(),
-            "{} needs an OpenRouter API key — export {ENV_API_KEY}=sk-or-…",
-            spec.id
-        );
+    /// Builds a client, failing loudly when the key is absent. Every request it answers
+    /// is written to `ledger`.
+    pub fn new(spec: &'static RemoteModelSpec, ledger: spend::Ledger) -> anyhow::Result<Self> {
+        let key = api_key(spec)?;
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
             .user_agent(concat!("centinel/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| anyhow::anyhow!("building the HTTP client: {e}"))?;
-        Ok(Self { client, spec, key })
+        Ok(Self {
+            client,
+            spec,
+            key,
+            ledger,
+        })
     }
 
     pub fn model_id(&self) -> &'static str {
@@ -250,7 +264,7 @@ impl RemoteEmbedder {
         } else {
             query.to_string()
         };
-        Ok(self.call(&[text]).await?.remove(0))
+        Ok(self.call(&[text], spend::Stage::Query).await?.remove(0))
     }
 
     /// Embeds documents, bare, order preserved — the remote half of
@@ -264,11 +278,12 @@ impl RemoteEmbedder {
             return Ok(Vec::new());
         }
         let owned: Vec<String> = texts.iter().map(|t| t.as_ref().to_string()).collect();
-        self.call(&owned).await
+        self.call(&owned, spend::Stage::Embed).await
     }
 
-    /// One request, retried through transient failures, parsed and verified.
-    async fn call(&self, inputs: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+    /// One request, retried through transient failures, parsed, verified, and written to
+    /// the ledger. A request that failed is not written: OpenRouter bills what it answered.
+    async fn call(&self, inputs: &[String], stage: spend::Stage) -> anyhow::Result<Vec<Vec<f32>>> {
         let body = serde_json::json!({
             "model": self.spec.slug(),
             "input": inputs,
@@ -285,7 +300,14 @@ impl RemoteEmbedder {
                 .await;
             }
             match self.send(&body).await {
-                Ok(bytes) => return parse_response(&bytes, inputs.len(), self.dims()),
+                Ok(bytes) => {
+                    let (vectors, usage) = parse_response(&bytes, inputs.len(), self.dims())?;
+                    self.ledger.record(
+                        Spend::new(stage, self.spec.id, usage.prompt_tokens, 0)
+                            .reported(usage.cost),
+                    );
+                    return Ok(vectors);
+                }
                 // A refused key will be refused again in one second. Stop here so the
                 // caller's per-chunk retry does not turn one bad key into a day of it.
                 Err(e) if is_fatal(&e) => return Err(e),
@@ -332,11 +354,22 @@ impl RemoteEmbedder {
     }
 }
 
-/// The OpenAI response shape OpenRouter answers in. Unknown fields are ignored, so
-/// `usage` and whatever gets added beside it cost nothing here.
+/// The OpenAI response shape OpenRouter answers in. Unknown fields are ignored.
 #[derive(Deserialize)]
 struct EmbeddingResponse {
     data: Vec<EmbeddingRow>,
+    #[serde(default)]
+    usage: Usage,
+}
+
+/// What OpenRouter says a request used. `cost` is its own figure, in USD, when it sends
+/// one; without it the tokens are priced from [`crate::spend::PRICES`]. A response with no
+/// usage block at all still embeds, and is written as zero tokens rather than a guess.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+struct Usage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    cost: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -353,7 +386,11 @@ struct EmbeddingRow {
 /// order would hand chunk 3 another chunk's vector the day a provider reorders. The
 /// same crossed-wire failure [`crate::embed`]'s `seq_id` readback guards against,
 /// guarded the same way: by the identifier, never by arrival.
-fn parse_response(bytes: &[u8], expected: usize, dims: usize) -> anyhow::Result<Vec<Vec<f32>>> {
+fn parse_response(
+    bytes: &[u8],
+    expected: usize,
+    dims: usize,
+) -> anyhow::Result<(Vec<Vec<f32>>, Usage)> {
     let response: EmbeddingResponse = serde_json::from_slice(bytes).map_err(|e| {
         let head: String = String::from_utf8_lossy(bytes).chars().take(200).collect();
         anyhow::anyhow!("openrouter's response did not parse: {e} — starts `{head}`")
@@ -386,12 +423,14 @@ fn parse_response(bytes: &[u8], expected: usize, dims: usize) -> anyhow::Result<
         *slot = Some(crate::embed::normalize(&row.embedding));
     }
 
-    out.into_iter()
+    let vectors = out
+        .into_iter()
         .enumerate()
         .map(|(i, v)| {
             v.ok_or_else(|| anyhow::anyhow!("openrouter returned no vector for input {i}"))
         })
-        .collect()
+        .collect::<anyhow::Result<_>>()?;
+    Ok((vectors, response.usage))
 }
 
 #[cfg(test)]
@@ -454,7 +493,7 @@ mod tests {
         if std::env::var(ENV_API_KEY).is_ok() {
             return;
         }
-        let err = RemoteEmbedder::new(spec).unwrap_err().to_string();
+        let err = api_key(spec).unwrap_err().to_string();
         assert!(err.contains(ENV_API_KEY), "{err}");
     }
 
@@ -463,8 +502,30 @@ mod tests {
             .iter()
             .map(|(i, v)| serde_json::json!({"index": i, "embedding": v}))
             .collect();
-        serde_json::to_vec(&serde_json::json!({"data": data, "usage": {"total_tokens": 7}}))
-            .unwrap()
+        serde_json::to_vec(&serde_json::json!({
+            "data": data,
+            "usage": {"prompt_tokens": 7, "total_tokens": 7, "cost": 0.0000014}
+        }))
+        .unwrap()
+    }
+
+    /// The tokens and OpenRouter's own cost come back with the vectors, and a response
+    /// without a usage block still parses.
+    #[test]
+    fn usage_is_read_and_optional() {
+        let (_, usage) = parse_response(&body(&[(0, vec![1.0, 0.0])]), 1, 2).unwrap();
+        assert_eq!(
+            usage,
+            Usage {
+                prompt_tokens: 7,
+                cost: Some(0.0000014)
+            }
+        );
+        let bare = serde_json::to_vec(&serde_json::json!({
+            "data": [{"index": 0, "embedding": [1.0, 0.0]}]
+        }))
+        .unwrap();
+        assert_eq!(parse_response(&bare, 1, 2).unwrap().1, Usage::default());
     }
 
     /// Rows come back keyed by `index`, and the contract is input order — so a
@@ -472,7 +533,7 @@ mod tests {
     #[test]
     fn vectors_are_returned_in_input_order_whatever_the_row_order() {
         let bytes = body(&[(1, vec![0.0, 1.0]), (0, vec![1.0, 0.0])]);
-        let out = parse_response(&bytes, 2, 2).unwrap();
+        let (out, _) = parse_response(&bytes, 2, 2).unwrap();
         assert_eq!(out[0], vec![1.0, 0.0]);
         assert_eq!(out[1], vec![0.0, 1.0]);
     }
@@ -480,7 +541,7 @@ mod tests {
     #[test]
     fn vectors_are_normalized_here_not_trusted() {
         let bytes = body(&[(0, vec![3.0, 4.0])]);
-        let out = parse_response(&bytes, 1, 2).unwrap();
+        let (out, _) = parse_response(&bytes, 1, 2).unwrap();
         assert!((out[0][0] - 0.6).abs() < 1e-6);
         assert!((out[0][1] - 0.8).abs() < 1e-6);
     }

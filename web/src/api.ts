@@ -466,7 +466,47 @@ export const api = {
   /** Records a person's verdicts on one document, and acts on them at once. */
   review: (review: Review) => request<ReviewReport>('/workspace/review', { method: 'POST', body: JSON.stringify(review) }),
   evaluation: () => request<Evaluation>('/workspace/evaluation').then(value => withArray(value, 'questions', '/workspace/evaluation')),
+  /** Every model call since `since`, by hour, model and stage, with every price. */
+  spend: (since: string) => {
+    const path = `/workspace/spend?${new URLSearchParams({ since })}`
+    return request<SpendSummary>(path).then(value => withArray(value, 'buckets', path))
+  },
+  /** What each model is priced at. Local models carry the cloud model they are priced as. */
+  prices: () => request<{ prices: SpendPrice[] }>('/workspace/prices').then(value => withArray(value, 'prices', '/workspace/prices')),
 }
+
+/** Who ran a model: TypeSafe's Jev, OpenRouter, or weights on this machine. */
+export type SpendProvider = 'jev' | 'open_router' | 'local'
+/** What a call was for. */
+export type SpendStage = 'classify' | 'embed' | 'query'
+
+/** One model's calls for one stage in one UTC hour. */
+export type SpendBucket = {
+  hour: string
+  model: string
+  provider: SpendProvider
+  stage: SpendStage
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  /** Summed over the priced requests. */
+  cost_usd: number
+  /** Requests whose model has no price. */
+  unpriced: number
+}
+
+/** USD per million tokens. `model` ending in `*` covers a family. */
+export type SpendPrice = {
+  model: string
+  provider: SpendProvider
+  input: number
+  output: number
+  source: string
+  /** For a local model: the cloud model whose price it takes. */
+  priced_as?: string
+}
+
+export type SpendSummary = { since: string; read_at: string; buckets: SpendBucket[] }
 
 /**
  * The live job stream: a `snapshot` event with every job as it stands, then a `job` event

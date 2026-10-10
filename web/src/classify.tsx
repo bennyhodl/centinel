@@ -15,10 +15,10 @@ import { compact, money, number, plural, seconds, tail } from './format'
 import { LiveRun, useRunDetail } from './live'
 import { decisionLabels, decisionOf, estimateRun, isChoice, missingOther, outcomesOf, questionProblem, questionSnapshot, reachOf, tagsOf } from './policy'
 import { ResultsSection } from './results'
+import { priceOf } from './spend-logic'
 import { ErrorBox, Empty, PageHeader, Segmented, Spinner } from './ui'
 
 /** The TypeSafe published rate for Jev input, used when a run names no rate of its own. */
-const JEV_INPUT_RATE = 0.042
 /** Must match `MAX_RUN_DOCUMENTS` in the workspace module. */
 const MAX_RUN_DOCUMENTS = 50_000
 const usageOptions: Array<[string, string]> = [['all', 'All usage'], ['included', 'Included'], ['excluded', 'Excluded'], ['pending', 'Pending']]
@@ -58,7 +58,6 @@ export function Classify() {
   const [sample, setSample] = useState(25)
   const [model, setModel] = useState('jev-1.13.0')
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
-  const [inputRate, setInputRate] = useState('')
   const [filters, setFilters] = useState<CorpusFilters>({ search: '', address: '', source: '', usage: 'included', classifier: '', min_score: '0.5', max_score: '' })
   const [output, setOutput] = useState<'record' | 'preview'>('record')
   const [concurrency, setConcurrency] = useState(8)
@@ -95,7 +94,8 @@ export function Classify() {
   const total = available.data?.total || 0
   const count = scope === 'all' ? Math.min(total, MAX_RUN_DOCUMENTS) : Math.min(sample, total)
   const recording = output === 'record'
-  const rate = inputRate.trim() ? Number(inputRate) : model.startsWith('jev-') ? JEV_INPUT_RATE : null
+  const prices = useQuery(queries.prices())
+  const rate = priceOf(model, prices.data?.prices ?? [])?.input ?? null
   const reach = (question: Question) => reachOf(question, wire, available.data?.facets?.scores)
   const estimate = total ? estimateRun((available.data?.total_chars || 0) * count / total, count, checked.map(stripKey), rate ?? 0, undefined, reach) : null
   const run = useMutation({
@@ -117,7 +117,7 @@ export function Classify() {
           count,
         },
         questions: asked, model, evaluation_date: date, record: recording,
-        settings: { concurrency, ...(inputRate.trim() ? { input_cost_per_million: Number(inputRate) } : {}) },
+        settings: { concurrency },
       })
     },
     onSuccess: response => setActive({ id: response.id, preview: !recording }),
@@ -254,13 +254,12 @@ export function Classify() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <label className="grid min-w-0 gap-2 text-xs font-medium [&_[data-slot=select-trigger]]:w-full"><span>Evaluation date</span><Input type="date" value={date} onChange={event => setDate(event.target.value)} /></label>
-              <label className="grid min-w-0 gap-2 text-xs font-medium [&_[data-slot=select-trigger]]:w-full"><span>$ per 1M input</span><Input type="number" min="0" step="0.001" value={inputRate} placeholder={model.startsWith('jev-') ? String(JEV_INPUT_RATE) : 'unknown'} onChange={event => setInputRate(event.target.value)} /></label>
             </div>
           </details>
 
           <div className="grid grid-cols-[auto_1fr] items-baseline gap-x-2 rounded-md border bg-muted p-3 [&_b]:text-2xl [&_span]:text-xs [&_small]:col-span-full [&_small]:text-xs [&_small]:text-muted-foreground">
             <b>{number(count)}</b><span>{count === 1 ? 'document' : 'documents'} × {plural(checked.length, 'question')}</span>
-            {estimate && <small>About {compact(estimate.tokens)} input tokens{rate != null ? ` · ${money(estimate.cost)}` : ''}</small>}
+            {estimate && <small>About {compact(estimate.tokens)} input tokens{rate != null ? ` · ${money(estimate.cost)}` : ' · no price for this model'}</small>}
             <small>{number(total)} match the filters{total > MAX_RUN_DOCUMENTS ? `; one run holds ${number(MAX_RUN_DOCUMENTS)}` : ''}.</small>
           </div>
           {problems.length > 0 && <p className="rounded-md border bg-muted p-3 text-xs">Fix {problems[0][0]}: {problems[0][1]}</p>}
