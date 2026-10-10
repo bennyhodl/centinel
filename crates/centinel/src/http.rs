@@ -330,7 +330,11 @@ async fn workspace_original(
         .collect();
     let disposition = format!(
         "{}; filename=\"{name}\"",
-        if query.download { "attachment" } else { "inline" }
+        if query.download {
+            "attachment"
+        } else {
+            "inline"
+        }
     );
     let mut response = (
         [
@@ -537,12 +541,13 @@ async fn workspace_job_events(
         }
     };
 
-    let mut response = Sse::new(Box::pin(stream)
-        as std::pin::Pin<
-            Box<dyn Stream<Item = Result<Event, Infallible>> + Send>,
-        >)
-    .keep_alive(KeepAlive::default())
-    .into_response();
+    let mut response =
+        Sse::new(Box::pin(stream)
+            as std::pin::Pin<
+                Box<dyn Stream<Item = Result<Event, Infallible>> + Send>,
+            >)
+        .keep_alive(KeepAlive::default())
+        .into_response();
     // A proxy that buffers responses would hold every event until the stream ends.
     response.headers_mut().insert(
         "x-accel-buffering",

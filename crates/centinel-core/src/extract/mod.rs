@@ -851,10 +851,19 @@ mod tests {
     #[test]
     fn every_reader_is_found_again_by_the_tool_a_record_names() {
         for reader in Reader::ALL {
-            assert_eq!(Reader::named(&format!("{} 1.2.3", reader.name())), Some(reader));
+            assert_eq!(
+                Reader::named(&format!("{} 1.2.3", reader.name())),
+                Some(reader)
+            );
         }
-        assert_eq!(Reader::named("pdf-inspector 0.1.7").map(Reader::reads), Some("pdf"));
-        assert_eq!(Reader::named("dom_smoothie+htmd 0.18.0+0.5.5").map(Reader::reads), Some("web_page"));
+        assert_eq!(
+            Reader::named("pdf-inspector 0.1.7").map(Reader::reads),
+            Some("pdf")
+        );
+        assert_eq!(
+            Reader::named("dom_smoothie+htmd 0.18.0+0.5.5").map(Reader::reads),
+            Some("web_page")
+        );
         assert_eq!(Reader::named("whisper 1.0"), None);
     }
 

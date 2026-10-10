@@ -870,7 +870,13 @@ mod tests {
         let jobs = Jobs::default();
         let (_, mut rx) = jobs.subscribe();
         let job = jobs.start("collect", "test");
-        let result = collect(&store, &src, &CollectOpts::default(), &job.watch(Progress::none())).await;
+        let result = collect(
+            &store,
+            &src,
+            &CollectOpts::default(),
+            &job.watch(Progress::none()),
+        )
+        .await;
         job.finish(&result);
 
         let mut events = Vec::new();
@@ -880,12 +886,17 @@ mod tests {
         assert!(matches!(events.first(), Some(JobEvent::Started { .. })));
         assert!(matches!(
             events.last(),
-            Some(JobEvent::Finished { outcome: Outcome::Ok, .. })
+            Some(JobEvent::Finished {
+                outcome: Outcome::Ok,
+                ..
+            })
         ));
         let named: Vec<&str> = events
             .iter()
             .filter_map(|e| match e {
-                JobEvent::Progress { current: Some(c), .. } => Some(c.as_str()),
+                JobEvent::Progress {
+                    current: Some(c), ..
+                } => Some(c.as_str()),
                 _ => None,
             })
             .collect();
@@ -893,7 +904,10 @@ mod tests {
 
         let state = &jobs.snapshot()[0];
         assert_eq!((state.done, state.total), (Some(2), Some(2)));
-        assert_eq!(state.current, None, "nothing is in hand once the pass is done");
+        assert_eq!(
+            state.current, None,
+            "nothing is in hand once the pass is done"
+        );
     }
 
     #[tokio::test]

@@ -25,7 +25,7 @@ pub(super) type Verdicts = BTreeMap<String, Verdict>;
 /// with an `@version` suffix all belong to their first segment. Ids and option ids hold
 /// only letters, numbers, and underscores, so neither separator can be part of one.
 pub(super) fn question_of(key: &str) -> &str {
-    key.split(|c| c == ':' || c == '@').next().unwrap_or(key)
+    key.split([':', '@']).next().unwrap_or(key)
 }
 
 /// The tags a question's answers can land on, spelled the way `when` names them: a

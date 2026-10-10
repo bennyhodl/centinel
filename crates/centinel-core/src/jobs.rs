@@ -76,7 +76,9 @@ pub enum JobEvent {
         label: String,
     },
     /// The stage the job is now in: `tampa.gov · collect`, `embed`.
-    Step { step: String },
+    Step {
+        step: String,
+    },
     /// How far through its current stage the job is.
     Progress {
         message: String,
@@ -87,8 +89,12 @@ pub enum JobEvent {
         current: Option<String>,
     },
     /// One unit of work finished. A failure is an item whose verdict produced nothing.
-    Item { item: ItemOutcome },
-    Note { message: String },
+    Item {
+        item: ItemOutcome,
+    },
+    Note {
+        message: String,
+    },
     Finished {
         outcome: Outcome,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -487,7 +493,9 @@ mod tests {
         }
         assert_eq!(
             kinds(&seen),
-            ["started", "step", "progress", "item", "item", "note", "finished"]
+            [
+                "started", "step", "progress", "item", "item", "note", "finished"
+            ]
         );
         assert!(seen.windows(2).all(|w| w[0].seq < w[1].seq));
         match &seen[2].event {
@@ -517,7 +525,10 @@ mod tests {
         let state = &snapshot[0];
         assert_eq!(state.id, job.id());
         assert_eq!(state.step.as_deref(), Some("tampa.gov · collect"));
-        assert_eq!((state.done, state.total), (Some(TAIL as u64 + 49), Some(1005)));
+        assert_eq!(
+            (state.done, state.total),
+            (Some(TAIL as u64 + 49), Some(1005))
+        );
         assert_eq!(state.current.as_deref(), Some("https://tampa.gov/249"));
         assert_eq!(state.ok, TAIL as u64 + 50);
         assert!(state.outcome.is_none());

@@ -2932,7 +2932,8 @@ fn facets(conn: &Connection, q: &DocumentQuery) -> anyhow::Result<CorpusFacets> 
     })?;
     for row in rows {
         let (tool, count) = row?;
-        let kind = crate::extract::Reader::named(&tool).map_or("other", crate::extract::Reader::reads);
+        let kind =
+            crate::extract::Reader::named(&tool).map_or("other", crate::extract::Reader::reads);
         *facets.kinds.entry(kind.to_string()).or_default() += count;
     }
     Ok(facets)
@@ -5337,7 +5338,10 @@ mod tests {
         assert_eq!(page.facets.usage["included"], 3);
         assert_eq!(page.facets.usage["excluded"], 0);
         // `test 1` is no reader, so the three are counted as something else.
-        assert_eq!(page.facets.kinds, BTreeMap::from([("other".to_string(), 3)]));
+        assert_eq!(
+            page.facets.kinds,
+            BTreeMap::from([("other".to_string(), 3)])
+        );
     }
 
     #[tokio::test]
