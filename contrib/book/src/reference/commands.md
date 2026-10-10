@@ -56,9 +56,12 @@ Each is what `run` does for you, available on its own.
 | Command | What it does |
 |---|---|
 | `serve` | Run the HTTP server (ops as routes, plus MCP over HTTP). Default bind `127.0.0.1:8787`. |
+| `serve start` / `stop` / `restart` / `status` | Run `serve` as a service of your login. See [The server](../operate/serve.md). |
 | `mcp` | Run an MCP server over stdio. |
+| `web` | Open the corpus workspace in a browser; `--server URL` opens it against another machine. |
 
 `serve --no-schedule` serves the read API without firing any `[[schedule]]`.
+`serve --tailscale` also serves it on this machine's tailnet over HTTPS.
 
 ## Global flags
 

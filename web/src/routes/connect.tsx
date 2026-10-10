@@ -37,7 +37,7 @@ function Connect() {
           {clients.map(c => <button type="button" role="tab" aria-selected={client === c.id} key={c.id} onClick={() => setClient(c.id)} className={`h-[30px] rounded-md px-3 text-[13px] ${client === c.id ? 'bg-background font-semibold shadow-xs' : 'text-muted-foreground hover:text-foreground'}`}>{c.label}</button>)}
         </div>
         <CopyBlock text={chosen.body(url)} shell={chosen.shell} />
-        <p className="text-[13px] text-muted-foreground">{chosen.note} {system.data?.public_url ? 'The address comes from CENTINEL_PUBLIC_URL on the server.' : 'The address is this page’s host. Set CENTINEL_PUBLIC_URL on the server when agents reach it somewhere else.'}</p>
+        <p className="text-[13px] text-muted-foreground">{chosen.note} {system.data?.public_url ? 'The address is the one the server publishes: CENTINEL_PUBLIC_URL, or its tailnet address under serve --tailscale.' : 'The address is this page’s host. Run serve --tailscale, or set CENTINEL_PUBLIC_URL, when agents reach it somewhere else.'}</p>
       </section>
       <section className="grid">
         <SectionRule aside={`${tools.length} tools · read only`}>2 · What the agent gets</SectionRule>

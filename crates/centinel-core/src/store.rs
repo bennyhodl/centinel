@@ -13,6 +13,8 @@
 //!   current/<source>/…         DERIVED  URL-mirroring tree. Regenerable.
 //!   centinel.db                DERIVED  SQLite: metadata + FTS5   — the BM25 arm
 //!   vectors.lance/             DERIVED  LanceDB: chunk vectors    — the vector arm
+//!   serve.json                 RUNTIME  the `centinel serve` running on this store, if any
+//!   serve.log                  RUNTIME  what the installed service said
 //! ```
 //!
 //! The truth entries above are durable; everything else is rebuildable from them, which is
@@ -300,6 +302,20 @@ impl Store {
     /// both surfaces give the *same* answer to "is a run happening right now".
     pub fn lock_path(&self) -> PathBuf {
         self.root.join("run.lock")
+    }
+
+    /// `serve.json` — the `centinel serve` running on this store: its pid and the
+    /// addresses it answers on. Written once the server is reachable, removed when it
+    /// stops, so `centinel serve start` knows when to print them and `status` knows what
+    /// to print. Neither truth nor derived; it describes a process, not the corpus.
+    pub fn serve_record_path(&self) -> PathBuf {
+        self.root.join("serve.json")
+    }
+
+    /// `serve.log` — stdout and stderr of `centinel serve` when it runs as a service,
+    /// where no terminal is watching.
+    pub fn serve_log_path(&self) -> PathBuf {
+        self.root.join("serve.log")
     }
 
     /// `centinel.db` — the SQLite metadata and FTS5 index. Derived, and rebuildable.

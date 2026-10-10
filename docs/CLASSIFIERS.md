@@ -306,7 +306,11 @@ Reviewed documents are the regression set for every later run.
 centinel web                    # serves http://127.0.0.1:8787/web and opens the browser
 centinel web --bind 127.0.0.1:9000
 centinel web --rebuild          # rebuilds the Start SPA shell from this checkout, then opens
+centinel web --server https://box.tailnet.ts.net   # this page, another machine's corpus
 ```
+
+`--server` serves this binary's page on loopback and forwards the API to that server, so
+no local store is opened and the remote needs no CORS. Both must be the same release.
 
 `centinel web` reuses a server already on the port only when it is the same build of
 the same version on the same corpus root. A server left running from before a
