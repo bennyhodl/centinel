@@ -875,6 +875,7 @@ dependencies = [
  "htmd",
  "inventory",
  "jiff",
+ "lance",
  "lancedb",
  "libc",
  "llama-cpp-2",

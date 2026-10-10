@@ -346,10 +346,14 @@ unused: it can only fuse arms Lance owns.
 that set. RRF weights by rank alone, so the vector arm's rank 1 counts exactly the same
 whether it was drawn from 397,830 vectors or from 2,309. *Why it matters:* a partly
 embedded corpus therefore does **not** degrade gently — it promotes confident results
-from a tiny pool and looks identical to a complete one. So `search` reports
-`vectors_indexed` beside `total_chunks_indexed` and prints the share. It is the same
-error shape as `pages_needing_ocr`: a chunk's absence from an arm is a fact about what has
-been *processed*, never about whether it answers the question.
+from a tiny pool and looks identical to a complete one. It is the same error shape as
+`pages_needing_ocr`: a chunk's absence from an arm is a fact about what has been
+*processed*, never about whether it answers the question. The place to read how much has
+been processed is `centinel embed --dry-run`, which computes it as the set difference it
+is. `search` used to print a share from a plain chunk count on every query; at 21.7
+million chunks that count took 99 s cold and timed MCP searches out, and the number
+ignored `--source`, counted stale vectors, and read as zero whenever the vector arm
+failed. A query that audits the corpus to decorate its result was the design fault.
 
 **Method** — the name of the pipeline that produced this ordering, assembled from what
 actually ran: `bm25`, `bm25→rerank`, `bm25+vector→rrf`, `bm25+vector→rrf→rerank`. It is

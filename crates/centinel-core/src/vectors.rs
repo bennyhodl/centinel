@@ -47,6 +47,21 @@
 //!
 //! Width is guarded by the schema itself: the column is a `FixedSizeList` of exactly
 //! `dims` floats, so a wrong width cannot be written at all.
+//!
+//! ## When a fragment cannot be read
+//!
+//! A data file is written once and never rewritten in place. Storage that drops a write
+//! under load — the field case was a USB drive — leaves a file of the right length with
+//! nothing in it: the manifest lists the fragment, Lance opens the file and finds no
+//! footer, and every full scan fails. `embed`'s pre-flight read of the hashes is the first
+//! to go, which blocks the stage on one file among thousands of good ones.
+//!
+//! [`VectorTable::audit`] reads every fragment back and names the ones that cannot be
+//! read; [`VectorTable::repair`] drops them from the manifest in one commit. Nothing is
+//! recovered, because the bytes never landed, and nothing needs to be: a vector is
+//! `chunk_hash → text → vector`, computed afresh by `embed`, and a dropped fragment's
+//! hashes simply fall back onto its work list. This module owns the Lance side of that
+//! because it owns the table; the `verify` op is the thin thing that asks.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -54,6 +69,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::TryStreamExt;
+use lance::dataset::fragment::FileFragment;
+use lance::dataset::transaction::{Operation, Transaction};
+use lance::dataset::write::CommitBuilder;
 use lancedb::arrow::arrow_array::{
     Array, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, RecordBatchReader,
     StringArray, types::Float32Type,
@@ -63,6 +81,10 @@ use lancedb::index::{Index as LanceIndex, vector::IvfFlatIndexBuilder};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::OptimizeAction;
 use lancedb::{DistanceType, Table};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::op::{Cancel, Progress};
 
 /// The table inside the database, which is what names `vectors.lance` on disk.
 pub const TABLE: &str = "vectors";
@@ -87,6 +109,15 @@ const VERSION_RETENTION: Duration = Duration::from_secs(10 * 60);
 /// fast enough and loses nothing.
 const ANN_MIN_ROWS: usize = 4096;
 
+/// Rows per batch when [`VectorTable::audit`] reads a fragment back.
+///
+/// The read is for the error, not the data, so the batch only has to be small enough that
+/// a fragment is never held whole: at 2,560 dimensions this is about ten megabytes.
+const AUDIT_BATCH_ROWS: usize = 1024;
+
+/// Fragments between progress lines in [`VectorTable::audit`].
+const AUDIT_PROGRESS_EVERY: usize = 500;
+
 /// What [`VectorTable::maintain`] did to the files behind the table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Maintenance {
@@ -96,6 +127,57 @@ pub struct Maintenance {
     /// Superseded versions whose manifests and data files were deleted.
     pub versions_removed: u64,
     pub bytes_removed: u64,
+}
+
+/// One fragment the table cannot read back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UnreadableFragment {
+    /// Lance's id for the fragment — what [`VectorTable::repair`] drops.
+    pub id: u64,
+    /// Its data files, relative to `vectors.lance/`, for whoever wants to look at the
+    /// bytes themselves.
+    pub data_files: Vec<String>,
+    /// How many rows the manifest says the fragment held. An **estimate**: the file cannot
+    /// be asked, and the manifest's figure counts rows since deleted from the fragment
+    /// beside the ones still live. `None` on a table old enough to predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_rows: Option<usize>,
+    /// What Lance said when the read failed.
+    pub error: String,
+}
+
+/// What [`VectorTable::audit`] found.
+#[derive(Clone, Debug)]
+pub struct VectorAudit {
+    /// Fragments in the table at the version audited.
+    pub fragments: usize,
+    pub unreadable: Vec<UnreadableFragment>,
+    /// The version the fragments were read at. Private, because it exists for one reason:
+    /// [`VectorTable::repair`] commits against it, so that a commit which landed in
+    /// between — a compaction that rewrote these very fragments — is caught by Lance's
+    /// conflict detection rather than letting a stale id drop a fragment the audit never
+    /// looked at.
+    version: u64,
+}
+
+impl VectorAudit {
+    pub fn readable(&self) -> usize {
+        self.fragments - self.unreadable.len()
+    }
+
+    pub fn is_clean(&self) -> bool {
+        self.unreadable.is_empty()
+    }
+}
+
+/// What [`VectorTable::repair`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VectorRepair {
+    pub fragments_dropped: usize,
+    /// Rows that went with them, summed from each fragment's manifest figure — an estimate
+    /// for the reason [`UnreadableFragment::physical_rows`] gives. Every one of them is
+    /// work for the next `embed`.
+    pub estimated_rows: usize,
 }
 
 /// A LanceDB table of `(chunk_hash, vector)` for one model.
@@ -406,6 +488,119 @@ impl VectorTable {
         })
     }
 
+    /// Reads every fragment back, both columns, and names the ones that cannot be read.
+    ///
+    /// The same question every full scan asks, put one fragment at a time so the failure
+    /// is attributed rather than merely reproduced. Both columns, because a damaged file
+    /// can fail in one and not the other; batch by batch, so no fragment is held whole.
+    /// The answer carries the version it was read at, for [`Self::repair`].
+    pub async fn audit(&self, progress: &Progress, cancel: &Cancel) -> anyhow::Result<VectorAudit> {
+        // Through the table rather than by reopening the path, so the audit reads the
+        // version this handle sees — the one `repair` will then commit against.
+        let dataset = self
+            .table
+            .dataset()
+            .ok_or_else(not_a_local_table)?
+            .get()
+            .await?;
+        let fragments = dataset.get_fragments();
+        let total = fragments.len() as u64;
+
+        let mut unreadable = Vec::new();
+        for (i, fragment) in fragments.iter().enumerate() {
+            cancel.check()?;
+            // Every step is a log line, and the field table had 25,003 fragments.
+            if i % AUDIT_PROGRESS_EVERY == 0 {
+                progress.step("reading fragments back", i as u64, total);
+            }
+            if let Err(error) = read_back(fragment).await {
+                let meta = fragment.metadata();
+                // Said as it is found, since the progress lines above are sparse.
+                tracing::warn!(fragment = meta.id, %error, "vector fragment cannot be read");
+                unreadable.push(UnreadableFragment {
+                    id: meta.id,
+                    data_files: meta
+                        .files
+                        .iter()
+                        .map(|f| format!("data/{}", f.path))
+                        .collect(),
+                    physical_rows: meta.physical_rows,
+                    error: error.to_string(),
+                });
+            }
+        }
+        progress.step("reading fragments back", total, total);
+
+        let version = dataset.version().version;
+        tracing::debug!(
+            fragments = total,
+            unreadable = unreadable.len(),
+            version,
+            "vector table audited"
+        );
+        Ok(VectorAudit {
+            fragments: fragments.len(),
+            unreadable,
+            version,
+        })
+    }
+
+    /// Drops the fragments an [`audit`](Self::audit) could not read, in one commit.
+    ///
+    /// Touches the manifest and no data file: the fragment ids go, and with them the
+    /// hashes those fragments held, which puts them back on `embed`'s work list. Nothing
+    /// here compacts or prunes; `embed` does both afterwards in its own `maintain`.
+    ///
+    /// The commit's read version is the audit's. If anything rewrote those fragments in
+    /// between — a compaction from a concurrent `embed` — Lance's conflict detection
+    /// refuses the commit and the caller audits again, rather than a stale id deleting a
+    /// fragment the audit never saw. A clean audit commits nothing.
+    pub async fn repair(
+        &self,
+        audit: &VectorAudit,
+        cancel: &Cancel,
+    ) -> anyhow::Result<VectorRepair> {
+        if audit.is_clean() {
+            return Ok(VectorRepair::default());
+        }
+        cancel.check()?;
+
+        let ids: Vec<u64> = audit.unreadable.iter().map(|f| f.id).collect();
+        let transaction = Transaction::new(
+            audit.version,
+            Operation::Delete {
+                updated_fragments: Vec::new(),
+                deleted_fragment_ids: ids.clone(),
+                // Descriptive, not a filter: these rows were never evaluated against one,
+                // they were named by fragment because nothing could read them to be
+                // filtered. It is what the transaction log shows for this version.
+                predicate: format!("centinel verify --repair: unreadable fragments {ids:?}"),
+            },
+            None,
+        );
+
+        // The handle's type lives in a private module of lancedb, so it is used here and
+        // never named: `get` for the dataset to commit against, `update` for the result.
+        let handle = self.table.dataset().ok_or_else(not_a_local_table)?;
+        let repaired = CommitBuilder::new(handle.get().await?)
+            .execute(transaction)
+            .await?;
+        // lancedb refreshes its handle after its own writes; a commit it did not make has
+        // to be handed to it, or a `hashes()` on this same handle would go on reading the
+        // fragment that is gone.
+        handle.update(repaired);
+
+        tracing::debug!(fragments = ids.len(), "unreadable fragments dropped");
+        Ok(VectorRepair {
+            fragments_dropped: ids.len(),
+            estimated_rows: audit
+                .unreadable
+                .iter()
+                .filter_map(|f| f.physical_rows)
+                .sum(),
+        })
+    }
+
     /// The `limit` nearest chunks to `query`, best first.
     ///
     /// Returns cosine **similarity**, not Lance's distance — higher is better, matching
@@ -437,10 +632,9 @@ impl VectorTable {
             self.dims
         );
         // Deliberately not an emptiness check. `count_rows` reads the whole table's
-        // metadata, `search` already asks for that count on every query to report the
-        // vector arm's coverage, and asking twice made a second full count the price of
-        // re-checking a condition the caller had already rejected. An empty table simply
-        // returns no rows.
+        // metadata, `search` already asks whether the table is empty before it queries,
+        // and asking twice made a second full count the price of re-checking a condition
+        // the caller had already rejected. An empty table simply returns no rows.
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -524,6 +718,27 @@ fn validate(found: &Schema, model_id: &str, dims: usize) -> anyhow::Result<()> {
          not comparable; delete it and re-run `centinel embed`",
         found_id.unwrap_or("an unrecorded model"),
     );
+    Ok(())
+}
+
+/// Every table this module opens is local; lancedb's `None` exists for its remote tables.
+fn not_a_local_table() -> anyhow::Error {
+    anyhow::anyhow!("`{TABLE}` is not a local Lance table")
+}
+
+/// Reads one fragment back, both columns, batch by batch, and returns Lance's own account
+/// of why it could not.
+///
+/// Scoped to the fragment, so convicting one costs one fragment's I/O rather than a table
+/// scan per candidate. The batches are drained and dropped: the question is whether the
+/// bytes decode, not what they say.
+async fn read_back(fragment: &FileFragment) -> lance::Result<()> {
+    let mut scanner = fragment.scan();
+    scanner
+        .project(&[HASH_COLUMN, VECTOR_COLUMN])?
+        .batch_size(AUDIT_BATCH_ROWS);
+    let mut stream = scanner.try_into_stream().await?;
+    while stream.try_next().await?.is_some() {}
     Ok(())
 }
 
@@ -896,6 +1111,114 @@ mod tests {
         let t = table(dir.path()).await;
         t.append(&[]).await.unwrap();
         assert!(t.is_empty().await.unwrap());
+    }
+
+    /// Overwrites the first fragment's data file with filler of the same length — the
+    /// shape of the field failure: a file of the right size holding nothing Lance can
+    /// read. Returns the fragment's id, the file, and the bytes it held.
+    async fn damage_first_fragment(
+        dir: &Path,
+        t: &VectorTable,
+    ) -> (u64, std::path::PathBuf, Vec<u8>) {
+        let dataset = t.table.dataset().unwrap().get().await.unwrap();
+        let first = &dataset.get_fragments()[0];
+        let file = dir
+            .join("vectors.lance")
+            .join("data")
+            .join(&first.metadata().files[0].path);
+        let original = std::fs::read(&file).unwrap();
+        std::fs::write(&file, vec![0xAA; original.len()]).unwrap();
+        (first.metadata().id, file, original)
+    }
+
+    /// The repair is a commit this handle did not make through lancedb, so the handle has
+    /// to be told. Without that, the `hashes()` that follows on the same handle would go
+    /// on reading the fragment that is gone — and `embed`, which holds one handle for the
+    /// whole run, would fail its pre-flight on a table it had just repaired.
+    #[tokio::test]
+    async fn repair_is_seen_by_the_handle_that_made_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = table(dir.path()).await;
+        // Two appends, so two fragments: one to damage, one to prove untouched.
+        t.append(&[(hash(1), unit([1.0, 0.0, 0.0, 0.0]))])
+            .await
+            .unwrap();
+        t.append(&[(hash(2), unit([0.0, 1.0, 0.0, 0.0]))])
+            .await
+            .unwrap();
+        let (bad, _, _) = damage_first_fragment(dir.path(), &t).await;
+
+        // A fresh handle, as `verify` opens one: the damaged fragment was never read
+        // through it, so nothing is cached that the disk no longer holds.
+        let t = table(dir.path()).await;
+        assert!(t.hashes().await.is_err(), "the scan embed makes fails");
+
+        let audit = t.audit(&Progress::none(), &Cancel::none()).await.unwrap();
+        assert_eq!(audit.fragments, 2);
+        assert_eq!(audit.readable(), 1, "the untouched fragment still reads");
+        assert_eq!(audit.unreadable.len(), 1);
+        assert_eq!(audit.unreadable[0].id, bad);
+        assert_eq!(audit.unreadable[0].physical_rows, Some(1));
+
+        let done = t.repair(&audit, &Cancel::none()).await.unwrap();
+        assert_eq!(
+            done,
+            VectorRepair {
+                fragments_dropped: 1,
+                estimated_rows: 1,
+            }
+        );
+
+        // The same handle, not a reopened one.
+        assert_eq!(t.hashes().await.unwrap(), HashSet::from([hash(2)]));
+        // The dropped chunk comes back the way it would from `embed`, and maintenance
+        // folds the table as if nothing had happened.
+        t.append(&[(hash(1), unit([1.0, 0.0, 0.0, 0.0]))])
+            .await
+            .unwrap();
+        t.maintain(false).await.unwrap();
+        assert_eq!(t.hashes().await.unwrap(), HashSet::from([hash(1), hash(2)]));
+        assert_eq!(
+            t.nearest(&unit([1.0, 0.0, 0.0, 0.0]), 1).await.unwrap()[0].0,
+            hash(1)
+        );
+    }
+
+    /// An audit names fragment ids, and ids are only meaningful at the version they were
+    /// read. If a compaction rewrote the table in between, the same id could name a
+    /// fragment the audit never looked at — so the repair must fail, not delete.
+    #[tokio::test]
+    async fn a_stale_audit_cannot_drop_fragments_it_never_saw() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = table(dir.path()).await;
+        t.append(&[(hash(1), unit([1.0, 0.0, 0.0, 0.0]))])
+            .await
+            .unwrap();
+        t.append(&[(hash(2), unit([0.0, 1.0, 0.0, 0.0]))])
+            .await
+            .unwrap();
+        let (_, file, original) = damage_first_fragment(dir.path(), &t).await;
+
+        let t = table(dir.path()).await;
+        let stale = t.audit(&Progress::none(), &Cancel::none()).await.unwrap();
+        assert_eq!(stale.unreadable.len(), 1);
+
+        // The bytes come back — a restore from backup, say — and before anyone acts on
+        // the audit an `embed` compacts both fragments into one.
+        std::fs::write(&file, original).unwrap();
+        let done = table(dir.path()).await.maintain(false).await.unwrap();
+        assert_eq!(done.fragments_removed, 2, "{done:?}");
+
+        let err = t.repair(&stale, &Cancel::none()).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("Rewrite"),
+            "Lance names the commit that got there first: {err:#}"
+        );
+        assert_eq!(
+            table(dir.path()).await.hashes().await.unwrap(),
+            HashSet::from([hash(1), hash(2)]),
+            "nothing was dropped"
+        );
     }
 
     /// The table name is what names the directory, so this is the layout assertion that

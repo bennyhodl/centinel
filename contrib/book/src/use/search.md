@@ -52,7 +52,7 @@ too large to make it an option. [Search](../internals/search.md) has the mechani
 ## Read the header line
 
 ```
-stormwater drainage fee    2 results · bm25→rerank · 397,830 chunks indexed
+stormwater drainage fee    2 results · bm25→rerank
 ! keyword search only — no vectors at ~/.centinel/vectors.lance — run `centinel embed` first
 ```
 
@@ -72,24 +72,29 @@ counts exactly the same whether it was drawn from 397,830 vectors or from 2,309.
 embedded corpus therefore does not degrade gently — it promotes confident results from a
 tiny pool and looks identical to a complete one.
 
-So the report always carries `total_chunks_indexed` beside `vectors_indexed`, and the
-terminal prints the share whenever it is not 100%. `no_vectors` and `no_rerank` carry
-*why* a stage did not run. An absent stage is a different answer, not a slower one.
+So `no_vectors` and `no_rerank` carry *why* a stage did not run. An absent stage is a
+different answer, not a slower one.
 
 ## What a search cannot tell you
+
+How much of the corpus the vector arm could see. The report used to print a share from a
+chunk count, and at 21.7 million chunks that count took 99 seconds on every search; the
+share also ignored your filters and counted stale vectors. The honest figure is a set
+difference, and `centinel embed --dry-run` prints it: chunks indexed, already embedded,
+remaining, stale.
 
 A chunk's absence from an arm is a fact about what has been **processed**, never about
 whether it answers your question. The same holds one stage earlier: a PDF that failed
 extraction is not in the index at all, and no search will report its absence. `centinel
-list` and the run report are where coverage lives.
+list`, the run report and `centinel embed --dry-run` are where coverage lives.
 
 If you searched for something you are confident is in the corpus and got nothing, the
 order to check is:
 
 1. Was it collected? `centinel list` shows resource counts and liveness per source.
 2. Was text derived from it? The run report counts unreadable documents per stage.
-3. Was it indexed? `total_chunks_indexed` in the search report.
-4. Was it embedded? `vectors_indexed` in the same report.
+3. Was it indexed? `centinel embed --dry-run` prints the chunks indexed.
+4. Was it embedded? The same report prints how many of them have a vector.
 
 ## Cost
 

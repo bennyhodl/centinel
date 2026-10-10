@@ -23,15 +23,19 @@
 //! retriever used alone. The first stage only has to get the right passage into the top
 //! forty; it does not have to rank it.
 //!
-//! ## A rank is a position in a pool, and says nothing about the pool
+//! ## A search says what ran, not how big the corpus is
 //!
-//! RRF weights by rank alone, so the vector arm's rank 1 counts exactly as much whether
-//! it was drawn from four hundred thousand vectors or from two thousand. A partly
-//! embedded corpus therefore does **not** degrade gently — it promotes confident results
-//! from a small pool. So the report carries [`SearchReport::vectors_indexed`] beside the
-//! chunk count, and both are printed: a reader can see how much of the corpus the vector
-//! arm could actually see. An absent arm is named in [`SearchReport::no_vectors`] and an
-//! absent reranker in [`SearchReport::no_rerank`], rather than either being passed over.
+//! An absent arm is named in [`SearchReport::no_vectors`] and an absent reranker in
+//! [`SearchReport::no_rerank`], rather than either being passed over: a one-armed search
+//! is a different answer, not a slower one. What the report does **not** carry is how much
+//! of the corpus the vector arm could see. It used to — a chunk count beside the vector
+//! count, printed as a share — and the denominator was a `COUNT(*)` over every chunk,
+//! which measured 99 s cold at 21.7 million chunks and timed MCP searches out. The number
+//! was also wrong in the ways that matter: it ignored `--source` and `--tag`, counted
+//! stale vectors as coverage, and read as zero whenever the vector arm failed for any
+//! reason. A query that audits the corpus to decorate its result is the design fault;
+//! `centinel embed --dry-run` is where coverage is computed, as the set difference it
+//! actually is.
 //!
 //! Every result carries its provenance: source, address, the observation time, the tool
 //! that derived the text, and the character span within it (SPEC §6).
@@ -192,18 +196,6 @@ pub struct SearchReport {
     /// `bm25+vector→rrf→rerank`. Assembled from what ran, never hard-coded.
     pub method: String,
     pub results: Vec<SearchResult>,
-    pub total_chunks_indexed: usize,
-    /// Rows in the vector table.
-    ///
-    /// `embed` keeps the table equal to the indexed chunks it has embedded — it prunes
-    /// rows the index no longer has before it writes — so this is the count of chunks
-    /// with a vector, except between a rebuilt index and the next `embed`, when it can
-    /// exceed `total_chunks_indexed`. The rendering says so in either direction.
-    ///
-    /// Beside the chunk count because RRF cannot tell a small pool from a large one, so
-    /// the reader has to. See this module's header.
-    #[serde(default)]
-    pub vectors_indexed: usize,
     /// Why the vector arm did not run. `None` when it did.
     ///
     /// A one-armed search is a different answer, not a slower one, so it is said rather
@@ -245,14 +237,13 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
     // A missing model or an unbuilt table is a normal state, not a failure: the corpus
     // is keyword-searchable long before it is embedded. It degrades to one arm and says
     // so, rather than returning an error a reader cannot act on.
-    let (vector, vectors_indexed, no_vectors) = match vector_arm(ctx, &args).await {
-        Ok(arm) => (arm.hits, arm.stored, None),
-        Err(reason) => (Vec::new(), 0, Some(reason)),
+    let (vector, no_vectors) = match vector_arm(ctx, &args).await {
+        Ok(hits) => (hits, None),
+        Err(reason) => (Vec::new(), Some(reason)),
     };
     match &no_vectors {
         None => tracing::debug!(
             hits = vector.len(),
-            stored = vectors_indexed,
             ms = started.elapsed().as_millis() as u64,
             "vector arm"
         ),
@@ -266,10 +257,9 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
     //
     // It retrieves to `RERANK_DEPTH`, not to `args.limit`: the reranker's whole value is
     // reordering a set larger than the one returned (§6.3).
-    let (mut hits, total_chunks_indexed) = retrieve(&index_path, &args, vector)?;
+    let mut hits = retrieve(&index_path, &args, vector)?;
     tracing::debug!(
         candidates = hits.len(),
-        chunks_indexed = total_chunks_indexed,
         ms = started.elapsed().as_millis() as u64,
         "retrieved"
     );
@@ -352,8 +342,6 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
         query: args.query,
         method,
         results,
-        total_chunks_indexed,
-        vectors_indexed,
         no_vectors,
         no_rerank,
     })
@@ -376,7 +364,7 @@ fn method(vectors: bool, reranked: bool) -> String {
 }
 
 /// Everything that touches SQLite: the keyword arm, the vector arm's post-filter, the
-/// fusion, the tags, and the corpus size.
+/// fusion, and the tags.
 ///
 /// One function so that `Index` — which is not `Send` — is created and dropped without
 /// an `await` anywhere near it.
@@ -384,7 +372,7 @@ fn retrieve(
     index_path: &std::path::Path,
     args: &SearchArgs,
     mut vector: Vec<(String, f32)>,
-) -> anyhow::Result<(Vec<Hit>, usize)> {
+) -> anyhow::Result<Vec<Hit>> {
     let index = Index::open(index_path)?;
     // One filter for both arms — the keyword arm applies it in SQL, the vector arm
     // after retrieval — so the two never disagree about which documents are in play.
@@ -416,9 +404,7 @@ fn retrieve(
                 index.document_tags(&primary.source, &primary.resource, &primary.derived_sha)?;
         }
     }
-    // `chunk_count`, not `stats` — see its doc comment. `stats` sums a text column, which
-    // cost six seconds per query on the Tampa corpus for a number in the report footer.
-    Ok((hits, index.chunk_count()?))
+    Ok(hits)
 }
 
 /// Reorders `hits` in place with the cross-encoder, best first.
@@ -503,26 +489,19 @@ fn apply_scores(hits: &mut [Hit], scores: &[f32]) -> Result<(), String> {
     Ok(())
 }
 
-/// What the vector arm produced, and how much of the corpus it could see.
-struct VectorArm {
-    hits: Vec<(String, f32)>,
-    stored: usize,
-}
-
-/// The vector arm, or the reason there wasn't one.
+/// The vector arm's hits, or the reason there wasn't one.
 ///
 /// Returns `Err(String)` for an ordinary absence — no table yet, no weights installed —
 /// because to the caller those are the same fact: this query ran on one arm, and here is
 /// what to do about it. A real fault is logged and reported the same way, since a search
 /// that fails outright is worse than one that answers with BM25 and says it did.
-async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<VectorArm, String> {
+async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<Vec<(String, f32)>, String> {
     // The model is a property of the table, not of this caller — see
     // `VectorTable::open_existing`.
     let table = VectorTable::open_existing(&ctx.store.vectors_db())
         .await
         .map_err(|e| format!("{e:#}"))?;
-    let stored = table.len().await.map_err(|e| format!("{e:#}"))?;
-    if stored == 0 {
+    if table.is_empty().await.map_err(|e| format!("{e:#}"))? {
         return Err("the vector table is empty — run `centinel embed`".into());
     }
 
@@ -575,14 +554,12 @@ async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<VectorArm, String> {
     // retrieval, and exclusion applies to every query. The post-filter itself is the
     // caller's, because it needs SQLite and this function is the async half.
     let depth = ARM_DEPTH * FILTER_OVERFETCH;
-    let hits = if args.exact {
+    if args.exact {
         table.nearest_exact(&vector, depth).await
     } else {
         table.nearest(&vector, depth).await
     }
-    .map_err(|e| format!("{e:#}"))?;
-
-    Ok(VectorArm { hits, stored })
+    .map_err(|e| format!("{e:#}"))
 }
 
 /// Reciprocal Rank Fusion — `Σ 1 / (k + rank)`, over the union of both arms.
@@ -670,53 +647,12 @@ fn fuse(
 impl Render for SearchReport {
     fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
         let aside = format!(
-            "{} · {} · {} indexed",
+            "{} · {}",
             render::plural(self.results.len(), "result", "results"),
             self.method,
-            render::plural(self.total_chunks_indexed, "chunk", "chunks"),
         );
         p.title(&self.query, &aside)?;
 
-        // How much of the corpus the vector arm could see. Printed whenever the two
-        // counts disagree, because RRF gives a rank from a thin pool the weight of a rank
-        // from a whole one — so a reader who is not told will read ten confident results
-        // as ten results from the corpus.
-        if self.no_vectors.is_none() {
-            match self.vectors_indexed.cmp(&self.total_chunks_indexed) {
-                std::cmp::Ordering::Less => {
-                    let share = if self.total_chunks_indexed == 0 {
-                        0.0
-                    } else {
-                        100.0 * self.vectors_indexed as f64 / self.total_chunks_indexed as f64
-                    };
-                    // `<0.1%` rather than `0.0%`. A barely-started corpus is the case this
-                    // line exists for, and rounding its share to zero reads as "no vectors
-                    // at all" — which is a different fact, and one `no_vectors` carries.
-                    let share = match share {
-                        s if s > 0.0 && s < 0.1 => "<0.1".to_string(),
-                        s => format!("{s:.1}"),
-                    };
-                    let text = format!(
-                        "the vector arm saw {} of {} chunks ({share}%) — run `centinel embed` for the rest",
-                        render::count(self.vectors_indexed as u64),
-                        render::count(self.total_chunks_indexed as u64),
-                    );
-                    p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
-                }
-                // More vectors than chunks: a rebuilt index or a cleared source, and the
-                // rows it left behind have not been pruned yet. The count alone would
-                // read as a corpus more than fully embedded.
-                std::cmp::Ordering::Greater => {
-                    let text = format!(
-                        "the vector table holds {} vectors for {} chunks — run `centinel embed` to reconcile",
-                        render::count(self.vectors_indexed as u64),
-                        render::count(self.total_chunks_indexed as u64),
-                    );
-                    p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
-                }
-                std::cmp::Ordering::Equal => {}
-            }
-        }
         if let Some(reason) = &self.no_vectors {
             let text = format!("keyword search only — {reason}");
             p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
@@ -877,15 +813,13 @@ mod tests {
         }
     }
 
-    /// A fully-embedded corpus, so the coverage warning stays out of the way of the
-    /// rendering assertions that are about something else.
+    /// Both arms ran and nothing is missing, so the rendering assertions that are about
+    /// something else have no warning in their way.
     fn report(results: Vec<SearchResult>) -> SearchReport {
         SearchReport {
             query: "budget".into(),
             method: "bm25+vector→rrf".into(),
             results,
-            total_chunks_indexed: 12_400,
-            vectors_indexed: 12_400,
             no_vectors: None,
             no_rerank: None,
         }
@@ -1055,68 +989,6 @@ mod tests {
 
     // ── saying what actually ran ──────────────────────────────────────────────────
 
-    /// The defect this guards: RRF weights a rank from a 2,309-vector pool exactly as it
-    /// weights a rank from a 397,830-vector one, so a partly embedded corpus returns
-    /// confident results and looks identical to a complete one.
-    #[test]
-    fn a_partly_embedded_corpus_says_how_much_the_vector_arm_saw() {
-        let mut r = report(vec![result(Vec::new())]);
-        r.vectors_indexed = 2_309;
-        r.total_chunks_indexed = 397_830;
-
-        let out = render_to_string(&r);
-        assert!(out.contains("2,309"), "{out}");
-        assert!(out.contains("397,830"), "{out}");
-        assert!(
-            out.contains("0.6%"),
-            "the share, not just the counts: {out}"
-        );
-        assert!(out.contains("centinel embed"), "names the fix: {out}");
-    }
-
-    /// A barely-started corpus is the case this warning exists for, and `0.0%` reads as
-    /// "no vectors at all" — a different fact, and one `no_vectors` already carries.
-    /// Measured on the real store at 110 of 397,830.
-    #[test]
-    fn a_barely_started_corpus_does_not_round_its_share_to_zero() {
-        let mut r = report(vec![result(Vec::new())]);
-        r.vectors_indexed = 110;
-        r.total_chunks_indexed = 397_830;
-
-        let out = render_to_string(&r);
-        assert!(out.contains("<0.1%"), "{out}");
-        assert!(!out.contains("0.0%"), "{out}");
-        assert!(out.contains("110"), "the count is still exact: {out}");
-    }
-
-    /// The other direction. A rebuilt index or a cleared source leaves the table holding
-    /// more vectors than there are chunks until the next `embed` prunes them — measured
-    /// at 1,353,933 rows for 288,785 chunks — and a bare count would read as a corpus
-    /// more than fully embedded.
-    #[test]
-    fn a_table_with_more_vectors_than_chunks_says_so() {
-        let mut r = report(vec![result(Vec::new())]);
-        r.vectors_indexed = 1_353_933;
-        r.total_chunks_indexed = 288_785;
-
-        let out = render_to_string(&r);
-        assert!(out.contains("1,353,933"), "{out}");
-        assert!(out.contains("288,785"), "{out}");
-        assert!(out.contains("centinel embed"), "names the fix: {out}");
-        assert!(
-            !out.contains("the vector arm saw"),
-            "stale rows are not a thin pool: {out}"
-        );
-    }
-
-    /// A fully embedded corpus has nothing to warn about, and a warning printed every
-    /// time is a warning nobody reads.
-    #[test]
-    fn a_fully_embedded_corpus_prints_no_coverage_warning() {
-        let out = render_to_string(&report(vec![result(Vec::new())]));
-        assert!(!out.contains("the vector arm saw"), "{out}");
-    }
-
     /// One arm is a different answer, not a slower one.
     #[test]
     fn a_missing_vector_arm_is_named_rather_than_left_to_inference() {
@@ -1127,10 +999,6 @@ mod tests {
         let out = render_to_string(&r);
         assert!(out.contains("keyword search only"), "{out}");
         assert!(out.contains("centinel embed"), "{out}");
-        assert!(
-            !out.contains("the vector arm saw"),
-            "an absent arm is not a thin one: {out}"
-        );
     }
 
     /// The larger of the two quality steps, so its absence is the more important to say.
@@ -1337,7 +1205,6 @@ mod tests {
         .unwrap();
 
         assert!(report.no_vectors.is_none(), "{:?}", report.no_vectors);
-        assert_eq!(report.vectors_indexed, 3);
         assert!(report.method.contains("vector"), "{}", report.method);
         assert!(
             report.results[0].text.contains("UCMR 5"),
@@ -1396,7 +1263,6 @@ mod tests {
     fn no_results_says_so_plainly() {
         let out = render_to_string(&report(Vec::new()));
         assert!(out.contains("Nothing matched"), "{out}");
-        assert!(out.contains("12,400"), "the corpus size is context: {out}");
     }
 
     /// The span is an offset into a specific extraction, and the result has to say which.

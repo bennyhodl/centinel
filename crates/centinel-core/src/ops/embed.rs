@@ -66,6 +66,7 @@
 
 use std::time::Instant;
 
+use anyhow::Context as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -338,7 +339,10 @@ pub async fn embed(
     let stored = match &table {
         Some(table) => {
             progress.say("checking stored vectors");
-            table.hashes().await?
+            table
+                .hashes()
+                .await
+                .with_context(|| verify_hint("reading the stored chunk hashes"))?
         }
         None => std::collections::HashSet::new(),
     };
@@ -408,7 +412,10 @@ pub async fn embed(
     if todo.is_empty() {
         cancel.check()?;
         progress.say("maintaining the vector table");
-        let done = table.maintain(args.ann_index).await?;
+        let done = table
+            .maintain(args.ann_index)
+            .await
+            .with_context(|| verify_hint("maintaining the vector table"))?;
         return Ok(EmbedReport {
             pruned,
             versions_removed: done.versions_removed,
@@ -486,7 +493,10 @@ pub async fn embed(
 
     cancel.check()?;
     progress.say("maintaining the vector table");
-    let done = table.maintain(args.ann_index).await?;
+    let done = table
+        .maintain(args.ann_index)
+        .await
+        .with_context(|| verify_hint("maintaining the vector table"))?;
     let elapsed = started.elapsed().as_secs_f64();
     Ok(EmbedReport {
         embedded,
@@ -499,6 +509,21 @@ pub async fn embed(
         skipped,
         ..base
     })
+}
+
+/// Context for a failed pass over the whole vector table, naming the op that can say
+/// which fragment failed.
+///
+/// `hashes` and `maintain` read every fragment, so they are where a data file that storage
+/// silently truncated first shows up — as a read error with no fragment named, because a
+/// scan only knows that it failed. Nothing here guesses at the cause: a read error is one
+/// possibility, and `centinel verify` is what tells. The underlying error stays beneath
+/// this line.
+fn verify_hint(doing: &str) -> String {
+    format!(
+        "{doing} failed; if this is a read error, run `centinel verify` to find the \
+         fragments Lance cannot read"
+    )
 }
 
 /// The flag, else the config file's standing preference, else what the machine affords.
@@ -1031,6 +1056,32 @@ mod tests {
         Some("qwen3-embedding-4b".to_string())
     }
 
+    /// The one derived text every test document here is cut from, so an exclusion can
+    /// name a document the way the ledger does: source, address, derived blob.
+    const DERIVED: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+
+    /// Where `chunk` sits in the document at `resource`, in source `test`.
+    fn placement(chunk: &Chunk, resource: &str) -> Placement {
+        Placement {
+            source: "test".into(),
+            resource: resource.into(),
+            blob_sha: "0".repeat(64),
+            derived_sha: DERIVED.into(),
+            ordinal: chunk.ordinal,
+            heading: String::new(),
+            char_start: chunk.char_start,
+            char_end: chunk.char_end,
+            observed_at: "2026-01-01T00:00:00Z".into(),
+            tool: "test".into(),
+            title: None,
+        }
+    }
+
+    /// The text of the `i`th document in an [`indexed_store`], at `https://example.gov/{i}`.
+    fn passage(i: usize) -> Chunk {
+        Chunk::new(format!("passage number {i}"), i, String::new(), 0)
+    }
+
     /// A store with `n` chunks indexed, and nothing embedded.
     async fn indexed_store(n: usize) -> (tempfile::TempDir, Ctx) {
         let dir = tempfile::tempdir().unwrap();
@@ -1038,23 +1089,11 @@ mod tests {
         let mut index = Index::open(store.index_path()).unwrap();
 
         for i in 0..n {
-            let chunk = Chunk::new(format!("passage number {i}"), i, String::new(), 0);
+            let chunk = passage(i);
             index
                 .insert(
                     &chunk,
-                    &Placement {
-                        source: "test".into(),
-                        resource: format!("https://example.gov/{i}"),
-                        blob_sha: "0".repeat(64),
-                        derived_sha: "1".repeat(64),
-                        ordinal: i,
-                        heading: String::new(),
-                        char_start: chunk.char_start,
-                        char_end: chunk.char_end,
-                        observed_at: "2026-01-01T00:00:00Z".into(),
-                        tool: "test".into(),
-                        title: None,
-                    },
+                    &placement(&chunk, &format!("https://example.gov/{i}")),
                 )
                 .unwrap();
         }
@@ -1133,19 +1172,57 @@ mod tests {
 
     /// The resumability claim, without running a model: pre-seed the table and confirm
     /// the work list is the difference rather than the whole index.
+    ///
+    /// And the coverage claim with it. `embed --dry-run` is where "how much of the corpus
+    /// has a vector" is answered — `search` used to print a share from a plain chunk
+    /// count, which ignored every one of the shapes below — so its four figures are proven
+    /// here against each of them: a passage carried by two documents is one chunk; a
+    /// document the workspace excluded contributes no chunk, and a vector it already had
+    /// is stale; a vector for a chunk the index never had is stale too.
     #[tokio::test]
     async fn stored_chunks_are_subtracted_from_the_work_list() {
         let (_dir, ctx) = indexed_store(10).await;
-        let index = Index::open(ctx.store.require_index().unwrap()).unwrap();
-        let hashes = index.chunk_hashes().unwrap();
 
+        // The same passage under two addresses: one chunk, two placements.
+        let shared = Chunk::new("the same notice, carried twice".into(), 0, String::new(), 0);
+        {
+            let mut index = Index::open(ctx.store.require_index().unwrap()).unwrap();
+            for resource in [
+                "https://example.gov/shared-a",
+                "https://example.gov/shared-b",
+            ] {
+                index
+                    .insert(&shared, &placement(&shared, resource))
+                    .unwrap();
+            }
+        }
+
+        // Document 0 is excluded the way the workspace excludes one: a decision in the
+        // ledger, which the index replays when `embed` opens it.
+        let excluded = passage(0);
+        let decision = serde_json::json!({
+            "at": "2026-01-01T00:00:00Z",
+            "source": "test",
+            "resource": "https://example.gov/0",
+            "derived_sha": DERIVED,
+            "excluded": true,
+            "reason": "test",
+        });
+        let ledger = ctx.store.workspace_decisions_path();
+        std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+        std::fs::write(&ledger, format!("{decision}\n")).unwrap();
+
+        // Stored: four live chunks, the shared one, the excluded one, and a hash no chunk
+        // has ever had.
         let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
             .await
             .unwrap();
-        let seeded: Vec<(String, Vec<f32>)> = hashes[..4]
-            .iter()
-            .map(|h| (h.clone(), vec![0.0; 2560]))
+        let mut seeded: Vec<(String, Vec<f32>)> = (1..=4)
+            .map(|i| (passage(i).chunk_hash, vec![0.0; 2560]))
             .collect();
+        seeded.push((shared.chunk_hash.clone(), vec![0.0; 2560]));
+        seeded.push((excluded.chunk_hash.clone(), vec![0.0; 2560]));
+        seeded.push(("a".repeat(64), vec![0.0; 2560]));
         table.append(&seeded).await.unwrap();
 
         let report = embed(
@@ -1164,9 +1241,77 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(report.indexed, 10);
-        assert_eq!(report.already_embedded, 4);
-        assert_eq!(report.remaining, 6, "only unembedded chunks are work");
+        // Ten passages plus the shared one, minus the excluded one.
+        assert_eq!(report.indexed, 10, "one chunk per distinct live passage");
+        assert_eq!(report.already_embedded, 5, "the shared chunk counts once");
+        assert_eq!(report.remaining, 5, "only unembedded chunks are work");
+        assert_eq!(
+            report.stale, 2,
+            "the excluded document's vector and the orphan are both stale"
+        );
+    }
+
+    /// The field failure end to end: a data file the storage never wrote blocks the
+    /// pre-flight scan, the error names `centinel verify`, and after `verify --repair`
+    /// the dropped chunks are back on the work list rather than left as ghost rows.
+    #[tokio::test]
+    async fn a_repaired_table_puts_the_dropped_chunks_back_on_the_work_list() {
+        let (_dir, ctx) = indexed_store(3).await;
+        let hashes = Index::open(ctx.store.require_index().unwrap())
+            .unwrap()
+            .chunk_hashes()
+            .unwrap();
+
+        // Every chunk embedded, in two fragments; then one fragment's file goes bad.
+        let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
+            .await
+            .unwrap();
+        let row = |h: &String| (h.clone(), vec![0.0_f32; 2560]);
+        table.append(&[row(&hashes[0])]).await.unwrap();
+        table
+            .append(&hashes[1..].iter().map(row).collect::<Vec<_>>())
+            .await
+            .unwrap();
+        super::super::verify::tests::damage_a_data_file(&ctx);
+
+        let plan = || EmbedArgs {
+            model: default_model(),
+            variant: None,
+            batch: None,
+            limit: None,
+            dry_run: true,
+            ann_index: false,
+        };
+        let err = embed(&ctx, plan(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("centinel verify"),
+            "the pre-flight names the way out: {err:#}"
+        );
+
+        let repaired = crate::ops::verify(
+            &ctx,
+            crate::ops::VerifyTableArgs { repair: true },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap()
+        .repaired
+        .unwrap();
+        assert_eq!(repaired.fragments_dropped, 1);
+
+        let report = embed(&ctx, plan(), &Progress::none(), &Cancel::none())
+            .await
+            .unwrap();
+        assert_eq!(report.indexed, 3);
+        assert_eq!(report.already_embedded, 3 - repaired.estimated_rows);
+        assert_eq!(
+            report.remaining, repaired.estimated_rows,
+            "the dropped chunks are work again, not ghost rows"
+        );
+        assert_eq!(report.stale, 0);
     }
 
     /// The subtraction the other way. A rebuilt index or a cleared source leaves rows no
