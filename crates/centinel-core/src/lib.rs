@@ -10,6 +10,7 @@
 //!   acquire — discover and collect. One loop over any Source, whatever its kind.
 //!   store   — files are truth (§5). CAS blob pool + append-only JSONL log.
 //!   op      — the registry (#9).    One definition → CLI + MCP + HTTP.
+//!   jobs    — what is running now.  An op's progress, kept for whoever is watching.
 //!   ops     — the verbs.            Individual operations, registered by #[op].
 //!   render  — how a report reads.   The terminal's idiom for the same report.
 //! ```
@@ -43,6 +44,7 @@ pub mod extract;
 pub mod fetch;
 pub mod html;
 pub mod index;
+pub mod jobs;
 pub mod journal;
 pub mod materialize;
 pub mod models;

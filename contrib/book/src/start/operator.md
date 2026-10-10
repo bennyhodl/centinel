@@ -279,9 +279,11 @@ centinel schedule set agartha --cron "0 3 * * *"
 centinel serve
 ```
 
-`serve` fires the configured schedules and serves the read API. Or put `centinel run` in
-cron and skip the scheduler — the incremental behaviour is identical either way, because it
-comes from the store and not from the runner. See [Schedules](../operate/schedules.md).
+`serve` fires the configured schedules and serves the read API. `centinel serve start`
+runs it as a service that comes back at login, and `--tailscale` puts the workspace and MCP
+on your tailnet — see [The server](../operate/serve.md). Or put `centinel run` in cron and
+skip the scheduler — the incremental behaviour is identical either way, because it comes
+from the store and not from the runner. See [Schedules](../operate/schedules.md).
 
 ---
 

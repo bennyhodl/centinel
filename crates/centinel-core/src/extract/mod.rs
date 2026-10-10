@@ -228,6 +228,39 @@ impl Reader {
         }
     }
 
+    /// Every reader, for finding one by the name a record carries.
+    const ALL: [Reader; 9] = [
+        Self::Marked,
+        Self::Readability,
+        Self::WholePage,
+        Self::PdfInspector,
+        Self::Poppler,
+        Self::AnyDoc,
+        Self::Spreadsheet,
+        Self::Captions,
+        Self::Passthrough,
+    ];
+
+    /// The reader a record's `tool` names. The record carries the name and its version,
+    /// `pdf-inspector 0.1.7`. A tool that is not a reader, such as a transcription, is `None`.
+    pub fn named(tool: &str) -> Option<Self> {
+        let name = tool.split(' ').next().unwrap_or(tool);
+        Self::ALL.into_iter().find(|reader| reader.name() == name)
+    }
+
+    /// What this reader reads, in the words a count of documents uses: `pdf`, `web_page`.
+    /// Many to one, since a kind can have several readers and a count wants the kind.
+    pub fn reads(self) -> &'static str {
+        match self {
+            Self::Marked | Self::Readability | Self::WholePage => "web_page",
+            Self::PdfInspector | Self::Poppler => "pdf",
+            Self::AnyDoc => "document",
+            Self::Spreadsheet => "spreadsheet",
+            Self::Captions => "video",
+            Self::Passthrough => "text",
+        }
+    }
+
     /// Whether running this one means starting a child process.
     ///
     /// [`extract`] is synchronous and answers for the in-process pipeline alone; only
@@ -814,6 +847,25 @@ fn extract_spreadsheet(bytes: &[u8]) -> Extracted {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_reader_is_found_again_by_the_tool_a_record_names() {
+        for reader in Reader::ALL {
+            assert_eq!(
+                Reader::named(&format!("{} 1.2.3", reader.name())),
+                Some(reader)
+            );
+        }
+        assert_eq!(
+            Reader::named("pdf-inspector 0.1.7").map(Reader::reads),
+            Some("pdf")
+        );
+        assert_eq!(
+            Reader::named("dom_smoothie+htmd 0.18.0+0.5.5").map(Reader::reads),
+            Some("web_page")
+        );
+        assert_eq!(Reader::named("whisper 1.0"), None);
+    }
 
     /// A page shaped like Tampa's: heavy chrome wrapped around a small article.
     const DRUPAL_ISH: &str = r#"<!DOCTYPE html><html><head>

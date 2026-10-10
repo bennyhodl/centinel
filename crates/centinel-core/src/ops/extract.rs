@@ -245,10 +245,14 @@ pub async fn extract(
                 continue;
             }
 
-            // Every item, not every twenty-fifth: the bar sits directly above a tally that
-            // moves on each one, and the two drifting apart is what made the collect
-            // display look broken.
-            progress.step(format!("{} extracted", report.extracted), i as u64, total);
+            // Every item, not every twenty-fifth: this is the line that names the document
+            // about to be read and where it sits in the work list.
+            progress.step_on(
+                format!("{} extracted", report.extracted),
+                i as u64,
+                total,
+                &resource.natural_key,
+            );
             let started = std::time::Instant::now();
 
             // The head decides the kind, and the kind decides whether the rest is worth

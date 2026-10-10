@@ -5,12 +5,14 @@
 //! [`centinel_core::op::all`]. Adding an op in the library makes it appear in all three
 //! without touching this file, which is the property ticket #9 was about.
 
+mod bundle;
 mod http;
 mod logging;
 mod mcp;
-mod progress;
 mod promote;
 mod schedule;
+mod service;
+mod tailscale;
 mod web;
 mod wizard;
 
@@ -20,7 +22,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use centinel_core::config::{self, Config};
-use centinel_core::op::{self, Ctx, Group, Progress};
+use centinel_core::op::{self, Ctx, Group};
 use centinel_core::render::{DEFAULT_WIDTH, Painter};
 use centinel_core::store::Store;
 use clap::{Arg, ArgAction, Command};
@@ -32,7 +34,7 @@ use clap::{Arg, ArgAction, Command};
 const SERVER_COMMANDS: [(&str, &str); 2] = [
     (
         "serve",
-        "Run the HTTP server (ops as routes, plus MCP over HTTP)",
+        "Run the HTTP server (ops as routes, plus MCP over HTTP); `serve start` runs it as a service",
     ),
     ("mcp", "Run an MCP server over stdio"),
 ];
@@ -61,7 +63,16 @@ fn build_cli() -> Command {
                 .short('v')
                 .global(true)
                 .action(ArgAction::SetTrue)
-                .help("Log debug detail to stderr (`serve` and `mcp` log at info without it)"),
+                .conflicts_with("quiet")
+                .help("Log the internals too: calls made, sizes, timings, devices (RUST_LOG overrides)"),
+        )
+        .arg(
+            Arg::new("quiet")
+                .long("quiet")
+                .short('q')
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .help("Log only warnings and errors"),
         )
         .arg(
             Arg::new("json")
@@ -140,25 +151,24 @@ fn build_cli() -> Command {
         Command::new("serve")
             .about(SERVER_COMMANDS[0].1)
             .hide(true)
-            .arg(
-                Arg::new("bind")
-                    .long("bind")
-                    .default_value("127.0.0.1:8787")
-                    .value_name("ADDR"),
+            .args(serve_args())
+            // `serve --tailscale` runs here; `serve start --tailscale` runs it as a service.
+            .args_conflicts_with_subcommands(true)
+            .subcommand(
+                Command::new("start")
+                    .about(
+                        "Run `serve` as a service of your login, with these flags; replaces one \
+                         already installed, and prints where it answers",
+                    )
+                    .args(serve_args()),
             )
-            .arg(
-                // For a machine that serves a corpus somebody else collects.
-                Arg::new("no-schedule")
-                    .long("no-schedule")
-                    .action(ArgAction::SetTrue)
-                    .help("Serve the read API without firing any [[schedule]]"),
+            .subcommand(
+                Command::new("stop").about("Stop the service; it no longer starts at login"),
             )
-            .arg(
-                Arg::new("config")
-                    .long("config")
-                    .value_name("FILE")
-                    .help("Config file the schedules are read from"),
-            ),
+            .subcommand(
+                Command::new("restart").about("Restart the service with the flags it was started with"),
+            )
+            .subcommand(Command::new("status").about("Whether the service is running, and where")),
     )
     .subcommand(Command::new("mcp").about(SERVER_COMMANDS[1].1).hide(true))
     .subcommand(
@@ -171,15 +181,87 @@ fn build_cli() -> Command {
                     .value_name("ADDR"),
             )
             .arg(
+                Arg::new("server")
+                    .long("server")
+                    .value_name("URL")
+                    .help(
+                        "Open the workspace against the centinel serving at URL, e.g. \
+                         https://box.tailnet.ts.net, instead of this machine's store",
+                    ),
+            )
+            .arg(
                 Arg::new("rebuild")
                     .long("rebuild")
                     .action(ArgAction::SetTrue)
                     .help(
-                        "Rebuild the web page with Vite from this source checkout and serve \
+                        "Rebuild the web page with TanStack Start from this source checkout and serve \
                          it, instead of the page embedded at compile time. Source builds only",
                     ),
             ),
     )
+}
+
+/// What `serve` and `serve start` both take: `start` hands them to the service.
+fn serve_args() -> [Arg; 5] {
+    [
+        Arg::new("bind")
+            .long("bind")
+            .default_value("127.0.0.1:8787")
+            .value_name("ADDR"),
+        // For a machine that serves a corpus somebody else collects.
+        Arg::new("no-schedule")
+            .long("no-schedule")
+            .action(ArgAction::SetTrue)
+            .help("Serve the read API without firing any [[schedule]]"),
+        Arg::new("config")
+            .long("config")
+            .value_name("FILE")
+            .help("Config file the schedules are read from"),
+        Arg::new("tailscale")
+            .long("tailscale")
+            .action(ArgAction::SetTrue)
+            .help("Also serve /web and /mcp on this machine's tailnet over HTTPS (port 443, else 8787)"),
+        Arg::new("tailscale-port")
+            .long("tailscale-port")
+            .value_name("PORT")
+            .value_parser(clap::value_parser!(u16))
+            .requires("tailscale")
+            .help("Publish on this tailnet port only"),
+    ]
+}
+
+/// The flags `serve start` hands the service, as `serve` will parse them there.
+///
+/// The service runs in the store root, not where `start` was typed, so the config is
+/// pinned to the absolute path this invocation would have read — a `./centinel.toml`
+/// beside the person typing would otherwise be one the service never finds.
+fn serve_argv(m: &clap::ArgMatches) -> Result<Vec<String>> {
+    let bind = m.get_one::<String>("bind").expect("bind has a default");
+    let mut argv = vec!["--bind".to_string(), bind.clone()];
+    if m.get_flag("no-schedule") {
+        argv.push("--no-schedule".into());
+    }
+    let config = match m.get_one::<String>("config") {
+        Some(typed) => Some(config::expand_tilde(typed)),
+        None => Config::locate(),
+    };
+    if let Some(config) = config {
+        argv.push("--config".into());
+        argv.push(std::path::absolute(&config)?.display().to_string());
+    }
+    if m.get_flag("tailscale") {
+        argv.push("--tailscale".into());
+    }
+    if let Some(port) = m.get_one::<u16>("tailscale-port") {
+        argv.extend(["--tailscale-port".to_string(), port.to_string()]);
+    }
+    if m.get_flag("verbose") {
+        argv.push("-v".into());
+    }
+    if m.get_flag("quiet") {
+        argv.push("-q".into());
+    }
+    Ok(argv)
 }
 
 /// The command list, grouped by [`Group`].
@@ -241,17 +323,41 @@ async fn main() -> Result<()> {
 
     // Installed before the store opens, so that opening it is inside the log rather than
     // the first thing missing from it. Which levels reach stderr is [`logging`]'s
-    // decision — it is the one that knows a server has no other way to speak.
+    // decision.
     logging::install(
-        name,
         matches.get_flag("verbose"),
+        matches.get_flag("quiet"),
         matches.get_flag("no-color-env"),
     );
+
+    // Neither of these opens a store here: the service commands manage a process that
+    // opens its own, and `web --server` reads another machine's.
+    if name == "serve"
+        && let Some((action, args)) = sub.subcommand()
+    {
+        return match action {
+            "start" => service::start(&resolve_root(&matches)?, serve_argv(args)?).await,
+            "stop" => service::stop().await,
+            "restart" => service::restart().await,
+            "status" => service::status().await,
+            other => unreachable!("clap defines no `serve {other}`"),
+        };
+    }
+    if name == "web"
+        && let Some(server) = sub.get_one::<String>("server")
+    {
+        if sub.get_flag("rebuild") {
+            crate::web::rebuild_bundle()?;
+        }
+        let bind = sub.get_one::<String>("bind").expect("bind has a default");
+        return crate::web::open_remote(server, bind).await;
+    }
 
     let root = resolve_root(&matches)?;
     let store = Store::open(&root)
         .await
         .with_context(|| format!("opening store at {}", root.display()))?;
+    tracing::debug!(root = %root.display(), "store open");
     let ctx = Arc::new(Ctx::new(store));
 
     match name {
@@ -288,36 +394,70 @@ async fn main() -> Result<()> {
 /// **A broken schedule refuses to start the whole command.** A server that came up happily
 /// and collected nothing would say so nowhere, and the operator would find out weeks later
 /// from an empty search result. This is loud at the one moment it is cheap.
+///
+/// `--tailscale` publishes the bound port on the tailnet before the first request, and
+/// takes it down again once the socket closes. Either way, once the server is reachable
+/// it writes [`service::Running`] into the store, which is how `serve start` learns where
+/// it answers.
 async fn serve(ctx: Arc<Ctx>, bind: &str, matches: &clap::ArgMatches) -> Result<()> {
-    if matches.get_flag("no-schedule") {
+    // Validated and running before anything is bound or published: a schedule that does
+    // not parse refuses the command, and nothing that can still fail comes after the
+    // tailnet mapping except the publishing itself.
+    let armed = if matches.get_flag("no-schedule") {
         tracing::info!("scheduler disabled by --no-schedule");
-        return http::serve(ctx, bind).await;
-    }
-
-    let config = matches.get_one::<String>("config").map(String::as_str);
-    let scheduler = schedule::Scheduler::new(Arc::clone(&ctx), config)?;
-    let count = scheduler.schedules().len();
-
-    let (reload_tx, reload_rx) = schedule::ReloadSignal::channel();
-    let (canceller, thread) = schedule::spawn(scheduler, reload_rx)?;
-
-    if count == 0 {
-        eprintln!("  no schedules configured — centinel schedule set");
+        None
     } else {
-        eprintln!("  {count} schedule(s) armed — centinel schedules");
-    }
-    install_reload_handler(reload_tx);
+        let config = matches.get_one::<String>("config").map(String::as_str);
+        let scheduler = schedule::Scheduler::new(Arc::clone(&ctx), config)?;
+        let count = scheduler.schedules().len();
+        let (reload_tx, reload_rx) = schedule::ReloadSignal::channel();
+        let armed = schedule::spawn(scheduler, reload_rx)?;
+        match count {
+            0 => tracing::info!("no schedules configured — `centinel schedule set` adds one"),
+            n => tracing::info!(
+                schedules = n,
+                "scheduler armed — `centinel schedules` lists them"
+            ),
+        }
+        install_reload_handler(reload_tx);
+        Some(armed)
+    };
 
-    let served = http::serve_until(ctx, bind, terminate()).await;
+    let listener = http::listen(bind).await?;
+    let local = listener.local_addr()?;
+    let tailnet = if matches.get_flag("tailscale") {
+        let pinned = matches.get_one::<u16>("tailscale-port").copied();
+        let published = tailscale::publish(local, pinned).await?;
+        http::publish_at(published.origin.clone());
+        Some(published)
+    } else {
+        None
+    };
+    let running = service::Running::new(local, tailnet.as_ref().map(|t| t.origin.clone()));
+    if let Err(e) = running.write(&ctx.store) {
+        tracing::warn!(error = %e, "`centinel serve status` will not see this server");
+    }
+
+    let store = ctx.store.clone();
+    let served = http::serve_until(ctx, listener, terminate()).await;
+
+    // Off the tailnet first: it is quick, and a manager stopping this process kills it if
+    // the scheduler below takes longer than it allows.
+    if let Some(published) = &tailnet {
+        tailscale::unpublish(published).await;
+    }
+    service::Running::clear(&store);
 
     // The socket is closed, so the in-flight run is asked to stop at its next item
     // boundary and the scheduler is given time to write its `interrupted` record. Nothing
     // is lost by stopping there: every stage computes its work list as a subtraction, so
     // the next fire resumes from what the log says.
-    tracing::info!("stopping the scheduler");
-    canceller.cancel();
-    if let Err(e) = thread.join() {
-        tracing::warn!("the scheduler thread panicked: {e:?}");
+    if let Some((canceller, thread)) = armed {
+        tracing::info!("stopping the scheduler");
+        canceller.cancel();
+        if let Err(e) = thread.join() {
+            tracing::warn!("the scheduler thread panicked: {e:?}");
+        }
     }
     served
 }
@@ -493,25 +633,11 @@ async fn run_op(
         args = wizard::schedule_set(&ctx, args, assume_yes).await?;
     }
 
-    // Progress goes to stderr so stdout stays a clean JSON stream for piping. Which
-    // renderer draws it — bars or lines — is [`progress`]'s decision, not this one's.
-    let (progress, rx) = if def.long_running {
-        let (p, rx) = Progress::channel();
-        (p, Some(rx))
-    } else {
-        (Progress::none(), None)
-    };
-
-    let printer = rx.map(progress::spawn);
-
-    let result = logging::invoke("cli", def, Arc::clone(&ctx), args, Some(progress)).await;
-
-    if let Some(handle) = printer {
-        // The sink was dropped with `progress`, so the printer terminates on its own.
-        let _ = handle.await;
-    }
-
-    let value = result?;
+    // Progress is the log, on stderr, so stdout stays a clean JSON stream for piping. No
+    // sink is passed: [`logging::invoke`] hands the op one that writes each event as a
+    // line, and the line is written before the op moves on, so nothing is left to drain
+    // when the report arrives.
+    let value = logging::invoke("cli", def, Arc::clone(&ctx), args, None).await?;
 
     if output.json {
         println!("{}", serde_json::to_string_pretty(&value)?);
@@ -519,7 +645,7 @@ async fn run_op(
     }
 
     // Rendered through a lock and flushed once: a report is one screen of output and
-    // should not interleave with anything the progress renderer is still finishing.
+    // should not interleave with anything else writing to the terminal.
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     writeln!(handle)?;
@@ -572,6 +698,19 @@ mod tests {
         );
     }
 
+    /// The two verbosity flags are global, so they parse wherever a hand puts them, and
+    /// they contradict each other, so clap refuses both at once rather than one winning
+    /// silently.
+    #[test]
+    fn verbosity_flags_are_global_and_exclusive() {
+        let parsed = |argv: &[&str]| build_cli().try_get_matches_from(argv);
+        let m = parsed(&["centinel", "doctor", "-v"]).unwrap();
+        assert!(m.get_flag("verbose") && !m.get_flag("quiet"));
+        let m = parsed(&["centinel", "-q", "doctor"]).unwrap();
+        assert!(m.get_flag("quiet") && !m.get_flag("verbose"));
+        assert!(parsed(&["centinel", "doctor", "-v", "-q"]).is_err());
+    }
+
     /// `-y` answers a prompt this crate draws *after* the op it belongs to, so it has to
     /// parse on the subcommand rather than only ahead of it — `centinel investigate <url>
     /// -y` is where a hand puts it.
@@ -609,6 +748,54 @@ mod tests {
             Some("b.toml")
         );
         assert_eq!(at(&["centinel", "doctor"]), None);
+    }
+
+    /// `serve start` writes its flags into a unit that runs `serve` somewhere else, later.
+    /// What it writes has to parse back as the same server — and with the config pinned to
+    /// an absolute path, because the service runs in the store root.
+    #[test]
+    fn serve_start_hands_the_service_the_serve_it_was_given() {
+        let m = build_cli()
+            .try_get_matches_from([
+                "centinel",
+                "serve",
+                "start",
+                "--bind",
+                "127.0.0.1:9000",
+                "--no-schedule",
+                "--config",
+                "here.toml",
+                "--tailscale",
+                "--tailscale-port",
+                "8443",
+            ])
+            .unwrap();
+        let (_, serve) = m.subcommand().unwrap();
+        let (action, start) = serve.subcommand().unwrap();
+        assert_eq!(action, "start");
+
+        let argv = serve_argv(start).unwrap();
+        let m = build_cli()
+            .try_get_matches_from(
+                ["centinel".to_string(), "serve".to_string()]
+                    .into_iter()
+                    .chain(argv),
+            )
+            .unwrap();
+        let (_, serve) = m.subcommand().unwrap();
+        assert!(
+            serve.subcommand().is_none(),
+            "the service runs `serve` itself"
+        );
+        assert_eq!(serve.get_one::<String>("bind").unwrap(), "127.0.0.1:9000");
+        assert!(serve.get_flag("no-schedule"));
+        assert!(serve.get_flag("tailscale"));
+        assert_eq!(serve.get_one::<u16>("tailscale-port"), Some(&8443));
+        let config = Path::new(serve.get_one::<String>("config").unwrap());
+        assert!(
+            config.is_absolute() && config.ends_with("here.toml"),
+            "{config:?}"
+        );
     }
 
     #[test]

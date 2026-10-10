@@ -21,7 +21,11 @@ use crate::index::to_fts_query;
 use crate::op::{Cancel, Progress};
 use crate::store::Store;
 
+mod chain;
 mod defaults;
+#[cfg(test)]
+pub(crate) mod fake_jev;
+use chain::{Chain, Verdicts, question_of};
 pub use defaults::{Preset, default_questions, presets};
 
 static FILE_LOCK: Mutex<()> = Mutex::new(());
@@ -149,6 +153,19 @@ pub struct PreparedRun {
     api_key: String,
     endpoint: String,
     concurrency: usize,
+    /// The chain the run follows: its own questions, then the saved ones it does not ask,
+    /// so a follow-up can hang off an answer a document already holds.
+    tree: Vec<Question>,
+    /// What each document holds before the run asks anything.
+    priors: HashMap<DocumentId, Prior>,
+}
+
+/// One document's answers and a person's verdicts as the run starts, read once from the
+/// ledgers so a follow-up whose parent the run does not ask can still be reached.
+struct Prior {
+    /// Keyed bare, at the chain's versions.
+    answers: BTreeMap<String, f64>,
+    verdicts: Verdicts,
 }
 
 impl PreparedRun {
@@ -170,6 +187,24 @@ struct Scored {
     /// `Some` only when the model reported both counts for this document.
     usage: Option<(u64, u64)>,
     model: Option<String>,
+}
+
+/// What one document is asked: the run's questions and settings, the chain they follow,
+/// and what the document held before the run.
+struct Asking<'a> {
+    request: &'a RunRequest,
+    chain: &'a Chain<'a>,
+    prior: Option<&'a Prior>,
+}
+
+/// One document's token counts over every request it took, when each one reported both.
+/// `None` for a document that took no request.
+fn summed(usages: &[Option<(u64, u64)>]) -> Option<(u64, u64)> {
+    let all: Vec<(u64, u64)> = usages.iter().copied().collect::<Option<_>>()?;
+    (!all.is_empty()).then(|| {
+        all.iter()
+            .fold((0, 0), |(input, output), &(i, o)| (input + i, output + o))
+    })
 }
 
 /// Attempts per document before its failure is recorded. Jev answers a burst with
@@ -264,6 +299,13 @@ pub struct Question {
     /// The action of a `noul`. A `choice` takes its actions from its options.
     #[serde(default = "tag_action")]
     pub action: QuestionAction,
+    /// Ask this question only of documents whose answer to another question landed here:
+    /// `page_kind:record` for a choice's option, or `spending` for a yes-or-no question's
+    /// yes. `None` is a root, asked of every document. Policy, not meaning: changing it
+    /// makes no new version, and the answers that count are re-derived from the ledger.
+    /// See the `chain` module for what reaches a document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
 }
 
 /// `noul` asks yes or no and answers with one probability. `choice` picks one option out
@@ -458,6 +500,7 @@ pub struct DocumentQuery {
     pub search: String,
     #[serde(default)]
     pub address: String,
+    /// One source, or several separated by commas.
     #[serde(default)]
     pub source: String,
     #[serde(default)]
@@ -490,6 +533,22 @@ pub struct CorpusPage {
     pub page_size: usize,
     pub sources: Vec<String>,
     pub pending: usize,
+    pub facets: CorpusFacets,
+}
+
+/// What each filter would find. Every count leaves out its own filter and keeps the
+/// rest, so choosing a source shows what adding another one would add.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CorpusFacets {
+    /// Matching documents in each source.
+    pub sources: BTreeMap<String, usize>,
+    /// Matching documents by usage: `included`, `excluded`, and `pending`.
+    pub usage: BTreeMap<String, usize>,
+    /// For each classifier key, matching documents in each tenth of score, low to high.
+    pub scores: BTreeMap<String, [usize; 10]>,
+    /// Matching documents by what they were read as: `pdf`, `web_page`, `spreadsheet`,
+    /// … and `other` for text no reader produced, such as a transcription.
+    pub kinds: BTreeMap<String, usize>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -670,7 +729,7 @@ pub struct RunDetailQuery {
     pub page: usize,
     #[serde(default = "result_page_size")]
     pub page_size: usize,
-    /// `exclude`, `review`, `tag`, `keep`, `error`, or empty for every result.
+    /// `exclude`, `review`, `tag`, `keep`, `not_asked`, `error`, or empty for every result.
     #[serde(default)]
     pub outcome: String,
     /// `resource`, a question id, or an answer key. Empty keeps the stored order.
@@ -726,6 +785,10 @@ pub struct OutcomeTotals {
     pub review: usize,
     pub tagged: usize,
     pub kept: usize,
+    /// Documents no question of the run reached: every one was a follow-up whose parent
+    /// landed elsewhere. Nothing was sent for them, and nothing was decided.
+    #[serde(default)]
+    pub not_asked: usize,
     pub errors: usize,
     pub sampled: usize,
 }
@@ -735,6 +798,9 @@ pub struct QuestionTotals {
     pub excluded: usize,
     pub review: usize,
     pub tagged: usize,
+    /// Answered documents this question did not reach. Not a no: it was never asked.
+    #[serde(default)]
+    pub not_asked: usize,
     /// For a choice: how many documents each option won.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub top: BTreeMap<String, usize>,
@@ -1079,6 +1145,7 @@ impl<'a> Workspace<'a> {
     /// a browser cannot create a version for every key stroke.
     pub fn save_questions(&self, mut next: Vec<Question>) -> anyhow::Result<Vec<Question>> {
         validate_questions(&next)?;
+        Chain::new(&next).validate()?;
         let current: HashMap<String, Question> = self
             .saved_questions()?
             .into_iter()
@@ -1129,6 +1196,7 @@ impl<'a> Workspace<'a> {
             |r| r.get(0),
         )?;
         let (total, total_chars, page) = select_identities(&conn, &query)?;
+        let facets = facets(&conn, &query)?;
         let mut documents = Vec::with_capacity(page.len());
         for mut doc in page {
             doc.classifications = classifications_of(&conn, &doc)?;
@@ -1142,12 +1210,14 @@ impl<'a> Workspace<'a> {
             page_size: query.page_size,
             sources,
             pending: pending as usize,
+            facets,
         })
     }
 
     /// The documents a classify run has left to do: every included document, in `source`
     /// when one is named, that has no answer for at least one of `questions` at its
-    /// current version. With `rescore`, every included document whether answered or not.
+    /// current version — for a follow-up, only where the document's answers reach it. With
+    /// `rescore`, every included document whether answered or not.
     ///
     /// A subtraction, like every stage's work list: scoring a thousand documents and
     /// stopping leaves the next run the rest, and saving a question with new wording puts
@@ -1177,13 +1247,19 @@ impl<'a> Workspace<'a> {
             if questions.is_empty() {
                 return Ok(Vec::new());
             }
+            // A root is owed by every document; a follow-up only by the documents whose
+            // answers reach it, which the projection lists.
             let missing: Vec<String> = questions
                 .iter()
                 .map(|q| {
                     values.push(question_version(&q.id, q.version).into());
-                    "NOT EXISTS (SELECT 1 FROM workspace_classification wc WHERE wc.source=d.source \
-                     AND wc.resource=d.resource AND wc.derived_sha=d.derived_sha AND wc.question=?)"
-                        .to_string()
+                    match q.when {
+                        None => "NOT EXISTS (SELECT 1 FROM workspace_classification wc WHERE wc.source=d.source \
+                                 AND wc.resource=d.resource AND wc.derived_sha=d.derived_sha AND wc.question=?)",
+                        Some(_) => "EXISTS (SELECT 1 FROM workspace_open_follow_up o WHERE o.source=d.source \
+                                    AND o.resource=d.resource AND o.derived_sha=d.derived_sha AND o.question=?)",
+                    }
+                    .to_string()
                 })
                 .collect();
             where_parts.push(format!("({})", missing.join(" OR ")));
@@ -1207,6 +1283,40 @@ impl<'a> Workspace<'a> {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// For each of `questions`, the share of documents a run is expected to ask it of, for
+    /// pricing a run before it starts. A root is asked of every document. A follow-up is
+    /// asked of its parent's share times the share of documents scored on its tag that
+    /// score 0.5 or more there today — exact for a yes-or-no question's yes, and for a
+    /// choice a floor under "landed on this option", since an option can win below even
+    /// odds. A tag no document has an answer for yet counts as every document, so the
+    /// estimate errs high. The Classify page computes the same from its score facets.
+    pub fn reach(&self, questions: &[Question]) -> anyhow::Result<HashMap<String, f64>> {
+        let saved = self.questions()?;
+        let chain = Chain::new(&saved);
+        let conn = open_index(self.store.require_index()?)?;
+        prepare_projection(&conn)?;
+        sync_search_projection(&conn, self.store.root())?;
+        sync_score_projection(&conn, self.store, &saved)?;
+        let mut shares = HashMap::new();
+        for tag in saved.iter().filter_map(|q| q.when.as_deref()) {
+            let Some(parent) = chain.owner(tag) else {
+                continue;
+            };
+            let (scored, landed): (i64, i64) = conn.query_row(
+                "SELECT COUNT(*),COALESCE(SUM(score>=0.5),0) FROM workspace_classification WHERE question=?1",
+                [question_version(tag, parent.version)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if scored > 0 {
+                shares.insert(tag.to_owned(), landed as f64 / scored as f64);
+            }
+        }
+        Ok(questions
+            .iter()
+            .map(|q| (q.id.clone(), chain.reach(q, |tag| shares.get(tag).copied())))
+            .collect())
     }
 
     /// One indexed document by the handles `search` prints: a URL, a substring of one, or
@@ -1482,7 +1592,11 @@ impl<'a> Workspace<'a> {
         let path = self.store.workspace_reviews_path();
         let all = read_json_lines::<Review>(&path)?;
         let latest = latest_reviews(&path)?;
-        let scores = latest_scores(&self.store.workspace_runs_path())?;
+        let scores = latest_scores(
+            &self.store.workspace_runs_path(),
+            &path,
+            &Chain::new(&questions),
+        )?;
         let mut proposed = BTreeMap::new();
         for review in &all {
             for name in &review.proposed {
@@ -1530,7 +1644,7 @@ impl<'a> Workspace<'a> {
     }
 
     /// The run's evaluated questions under today's policy: a saved question with the same
-    /// id, version, and meaning lends its threshold, review floor, and actions.
+    /// id, version, and meaning lends its threshold, review floor, actions, and `when`.
     fn effective_questions(&self, run: &ClassifierRun) -> anyhow::Result<Vec<Question>> {
         let current = self.questions()?;
         let mut effective = run.questions.clone();
@@ -1543,6 +1657,7 @@ impl<'a> Workspace<'a> {
                 question.threshold = policy.threshold;
                 question.review = policy.review;
                 question.action = policy.action.clone();
+                question.when = policy.when.clone();
                 for (option, saved) in question.options.iter_mut().zip(&policy.options) {
                     option.action = saved.action.clone();
                 }
@@ -1697,6 +1812,45 @@ impl<'a> Workspace<'a> {
             )
         })?;
         let endpoint = typesafe_endpoint(&request.settings)?;
+
+        // The chain: the run's questions as sent — a preview may ask drafts — then the saved
+        // ones it does not ask, whose answers a follow-up may hang off. The answers each
+        // document holds are the ledger's, folded the way the projection folds them.
+        let saved = self.saved_questions()?;
+        let mut tree = request.questions.clone();
+        tree.extend(
+            saved
+                .iter()
+                .filter(|q| !request.questions.iter().any(|asked| asked.id == q.id))
+                .cloned(),
+        );
+        let reviews = latest_reviews(&self.store.workspace_reviews_path())?;
+        let mut scores = latest_scores(
+            &self.store.workspace_runs_path(),
+            &self.store.workspace_reviews_path(),
+            &Chain::new(&saved),
+        )?;
+        let priors: HashMap<DocumentId, Prior> = {
+            let chain = Chain::new(&tree);
+            request
+                .documents
+                .iter()
+                .map(|id| {
+                    let prior = Prior {
+                        answers: scores
+                            .remove(id)
+                            .map(|stored| chain.current(&stored))
+                            .unwrap_or_default(),
+                        verdicts: reviews
+                            .get(id)
+                            .map(|review| review.verdicts.clone())
+                            .unwrap_or_default(),
+                    };
+                    (id.clone(), prior)
+                })
+                .collect()
+        };
+
         let concurrency = request
             .settings
             .values
@@ -1776,6 +1930,8 @@ impl<'a> Workspace<'a> {
             api_key,
             endpoint,
             concurrency,
+            tree,
+            priors,
         })
     }
 
@@ -1838,7 +1994,10 @@ impl<'a> Workspace<'a> {
             api_key,
             endpoint,
             concurrency,
+            tree,
+            priors,
         } = prepared;
+        let chain = Chain::new(&tree);
         let _active = ActiveRun(run.id.clone());
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
@@ -1862,10 +2021,17 @@ impl<'a> Workspace<'a> {
                 let api_key = api_key.as_str();
                 let endpoint = endpoint.as_str();
                 let request = &request;
+                let chain = &chain;
+                let prior = priors.get(&input);
                 async move {
+                    let asking = Asking {
+                        request,
+                        chain,
+                        prior,
+                    };
                     (
                         index,
-                        self.score(&client, api_key, endpoint, request, &input, run_id, index)
+                        self.score(&client, api_key, endpoint, &asking, &input, run_id, index)
                             .await,
                     )
                 }
@@ -1891,6 +2057,7 @@ impl<'a> Workspace<'a> {
                 }
                 slots[index] = Some(scored.result.clone());
                 run.results.push(scored.result.clone());
+                progress.item(answered(&scored.result));
                 run.duration_ms = Some(start.elapsed().as_millis() as u64);
                 if request.record {
                     append_json(
@@ -1966,16 +2133,15 @@ impl<'a> Workspace<'a> {
         Ok(run)
     }
 
-    /// One document through Jev: the text from the blob pool, every question in one
-    /// request, the answers validated against the questions asked. While it is in
-    /// flight the run detail lists it, with its attempt and how much text went.
+    /// One document through Jev, the answers validated against the questions asked. While
+    /// it is in flight the run detail lists it, with its request and how much text went.
     #[allow(clippy::too_many_arguments)]
     async fn score(
         &self,
         client: &reqwest::Client,
         api_key: &str,
         endpoint: &str,
-        request: &RunRequest,
+        asking: &Asking<'_>,
         input: &DocumentId,
         run_id: &str,
         index: usize,
@@ -1983,23 +2149,33 @@ impl<'a> Workspace<'a> {
         let started = Instant::now();
         let _flight = Flight::start(run_id, index, input);
         let mut scored = self
-            .score_document(client, api_key, endpoint, request, input, run_id, index)
+            .score_document(client, api_key, endpoint, asking, input, run_id, index)
             .await;
         scored.result.duration_ms = Some(started.elapsed().as_millis() as u64);
         scored
     }
 
+    /// Down the chain one level at a time: the questions that reach the document in one
+    /// request, then the follow-ups its answers lead to in the next, until nothing is left
+    /// that applies. Each request carries the text from the blob pool, at the size the
+    /// first one needed. A document no question reaches is sent nothing; its result has
+    /// no answers and no error, which a run counts as not asked.
     #[allow(clippy::too_many_arguments)]
     async fn score_document(
         &self,
         client: &reqwest::Client,
         api_key: &str,
         endpoint: &str,
-        request: &RunRequest,
+        asking: &Asking<'_>,
         input: &DocumentId,
         run_id: &str,
         index: usize,
     ) -> Scored {
+        let Asking {
+            request,
+            chain,
+            prior,
+        } = *asking;
         let mut scored = Scored {
             result: failed_result(input, String::new()),
             usage: None,
@@ -2017,91 +2193,136 @@ impl<'a> Workspace<'a> {
             scored.result = failed_result(input, "not scorable: the derived text is empty".into());
             return scored;
         }
-        let questions: serde_json::Map<String, Value> = request
-            .questions
-            .iter()
-            .map(|q| (q.id.clone(), wire_question(q)))
-            .collect();
+        let verdicts = prior.map(|p| &p.verdicts);
+        // What the document holds, less what this run asks again: a follow-up waits for
+        // its parent's answer from this run, never a stale one.
+        let mut answers = prior.map(|p| p.answers.clone()).unwrap_or_default();
+        answers.retain(|key, _| !request.questions.iter().any(|q| q.id == question_of(key)));
+        let mut result = RunResult {
+            source: input.source.clone(),
+            resource: input.resource.clone(),
+            derived_sha: input.derived_sha.clone(),
+            ..RunResult::default()
+        };
+        let mut asked = std::collections::HashSet::new();
+        let mut usages = Vec::new();
         let mut budget = MAX_TEXT_BYTES;
-        let (mut text, mut sampled) = bounded_text(&full, budget);
         let mut attempts = 0u32;
-        let mut transient = 0u32;
-        let body = loop {
-            attempts += 1;
-            Flight::attempt(run_id, index, attempts, text.chars().count());
-            let payload = json!({
-                "state": { "text": text, "evaluation_date": request.evaluation_date },
-                "model": request.model,
-                "questions": questions,
-            });
-            let sent = client
-                .post(endpoint)
-                .bearer_auth(api_key)
-                .json(&payload)
-                .send()
-                .await;
-            let failure = match sent {
-                Ok(response) if response.status().is_success() => {
-                    match response.json::<TypeSafeResponse>().await {
-                        Ok(body) => break body,
-                        Err(error) => format!("Jev sent an answer that is not valid JSON: {error}"),
+        loop {
+            let level = chain.next(&request.questions, &answers, verdicts, &asked);
+            if level.is_empty() {
+                break;
+            }
+            asked.extend(level.iter().map(|q| q.id.clone()));
+            let questions: serde_json::Map<String, Value> = level
+                .iter()
+                .map(|q| (q.id.clone(), wire_question(q)))
+                .collect();
+            let (mut text, mut sampled) = bounded_text(&full, budget);
+            let mut transient = 0u32;
+            let body = loop {
+                attempts += 1;
+                Flight::attempt(run_id, index, attempts, text.chars().count());
+                tracing::debug!(
+                    run = run_id,
+                    document = %input.resource,
+                    questions = level.len(),
+                    attempt = attempts,
+                    chars = text.chars().count(),
+                    sampled = sampled.is_some(),
+                    model = %request.model,
+                    "scoring"
+                );
+                let payload = json!({
+                    "state": { "text": text, "evaluation_date": request.evaluation_date },
+                    "model": request.model,
+                    "questions": questions,
+                });
+                let sent = client
+                    .post(endpoint)
+                    .bearer_auth(api_key)
+                    .json(&payload)
+                    .send()
+                    .await;
+                let failure = match sent {
+                    Ok(response) if response.status().is_success() => {
+                        match response.json::<TypeSafeResponse>().await {
+                            Ok(body) => break body,
+                            Err(error) => {
+                                format!("Jev sent an answer that is not valid JSON: {error}")
+                            }
+                        }
                     }
-                }
-                Ok(response) => {
-                    let status = response.status();
-                    let detail = response.text().await.unwrap_or_default();
-                    // Jev refuses a state larger than its context with a 4xx. The text
-                    // is sent again at half the size, so the document gets an answer
-                    // about most of itself instead of no answer.
-                    if too_large(status, &detail, text.len()) && text.len() / 2 >= MIN_TEXT_BYTES {
-                        budget = text.len() / 2;
-                        (text, sampled) = bounded_text(&full, budget);
-                        continue;
+                    Ok(response) => {
+                        let status = response.status();
+                        let detail = response.text().await.unwrap_or_default();
+                        // Jev refuses a state larger than its context with a 4xx. The text
+                        // is sent again at half the size, so the document gets an answer
+                        // about most of itself instead of no answer.
+                        if too_large(status, &detail, text.len())
+                            && text.len() / 2 >= MIN_TEXT_BYTES
+                        {
+                            budget = text.len() / 2;
+                            (text, sampled) = bounded_text(&full, budget);
+                            continue;
+                        }
+                        let message = format!("Jev answered {status}: {}", snippet(&detail));
+                        if retryable_status(status) && transient + 1 < SCORE_ATTEMPTS {
+                            transient += 1;
+                            tokio::time::sleep(std::time::Duration::from_millis(500 << transient))
+                                .await;
+                            continue;
+                        }
+                        message
                     }
-                    let message = format!("Jev answered {status}: {}", snippet(&detail));
-                    if retryable_status(status) && transient + 1 < SCORE_ATTEMPTS {
-                        transient += 1;
-                        tokio::time::sleep(std::time::Duration::from_millis(500 << transient))
-                            .await;
-                        continue;
+                    Err(error) => {
+                        let message = format!("the request to Jev failed: {error}");
+                        if retryable(&error) && transient + 1 < SCORE_ATTEMPTS {
+                            transient += 1;
+                            tokio::time::sleep(std::time::Duration::from_millis(500 << transient))
+                                .await;
+                            continue;
+                        }
+                        message
                     }
-                    message
-                }
-                Err(error) => {
-                    let message = format!("the request to Jev failed: {error}");
-                    if retryable(&error) && transient + 1 < SCORE_ATTEMPTS {
-                        transient += 1;
-                        tokio::time::sleep(std::time::Duration::from_millis(500 << transient))
-                            .await;
-                        continue;
-                    }
-                    message
-                }
+                };
+                // A failure at any level fails the document: it stays pending whole, and
+                // the next run asks it from the top.
+                scored.usage = summed(&usages);
+                let mut failed =
+                    failed_result(input, format!("{failure} (after {attempts} request(s))"));
+                failed.attempts = Some(attempts);
+                scored.result = failed;
+                return scored;
             };
-            let mut result =
-                failed_result(input, format!("{failure} (after {attempts} request(s))"));
+            usages.push(
+                body.usage
+                    .as_ref()
+                    .and_then(|u| Some((u.input_tokens?, u.output_tokens?))),
+            );
+            scored.model = body.model.or(scored.model);
+            let (level_answers, choices) =
+                match validated_answers(level.iter().copied(), &body.answers) {
+                    Ok(valid) => valid,
+                    Err(error) => {
+                        scored.usage = summed(&usages);
+                        scored.result =
+                            failed_result(input, format!("invalid TypeSafe response: {error:#}"));
+                        return scored;
+                    }
+                };
+            answers.extend(
+                level_answers
+                    .iter()
+                    .map(|(key, score)| (key.clone(), *score)),
+            );
+            result.answers.extend(level_answers);
+            result.choices.extend(choices);
+            result.sampled = sampled;
             result.attempts = Some(attempts);
-            scored.result = result;
-            return scored;
-        };
-        scored.usage = body
-            .usage
-            .as_ref()
-            .and_then(|u| Some((u.input_tokens?, u.output_tokens?)));
-        scored.model = body.model;
-        scored.result = match validated_answers(&request.questions, &body.answers) {
-            Ok((answers, choices)) => RunResult {
-                source: input.source.clone(),
-                resource: input.resource.clone(),
-                derived_sha: input.derived_sha.clone(),
-                answers,
-                choices,
-                sampled,
-                attempts: Some(attempts),
-                ..RunResult::default()
-            },
-            Err(error) => failed_result(input, format!("invalid TypeSafe response: {error:#}")),
-        };
+        }
+        scored.usage = summed(&usages);
+        scored.result = result;
         scored
     }
 
@@ -2351,6 +2572,20 @@ pub(crate) fn view_results(
             totals.errors += 1;
             continue;
         }
+        // A question with no outcome was never asked of this document: its parent landed
+        // elsewhere. That is not a no, so it counts apart from every decision.
+        for question in questions {
+            if !result.outcomes.contains_key(&question.id) {
+                view.questions
+                    .entry(question.id.clone())
+                    .or_default()
+                    .not_asked += 1;
+            }
+        }
+        if result.answers.is_empty() {
+            totals.not_asked += 1;
+            continue;
+        }
         let excluded = result.outcomes.values().any(|o| o.excluded);
         let review = result.outcomes.values().any(|o| o.review);
         let tagged = result.outcomes.values().any(|o| !o.tags.is_empty());
@@ -2386,7 +2621,13 @@ pub(crate) fn view_results(
         "exclude" => r.error.is_none() && excluded(r),
         "review" => r.error.is_none() && !excluded(r) && r.outcomes.values().any(|o| o.review),
         "tag" => r.error.is_none() && r.outcomes.values().any(|o| !o.tags.is_empty()),
-        "keep" => r.error.is_none() && !excluded(r) && !r.outcomes.values().any(|o| o.review),
+        "keep" => {
+            r.error.is_none()
+                && !r.answers.is_empty()
+                && !excluded(r)
+                && !r.outcomes.values().any(|o| o.review)
+        }
+        "not_asked" => r.error.is_none() && r.answers.is_empty(),
         "error" => r.error.is_some(),
         _ => true,
     });
@@ -2397,9 +2638,11 @@ pub(crate) fn view_results(
             "desc" => false,
             _ => key == "resource" || key == "decision",
         };
-        // Excluded first, then review, tagged, kept, and failed last.
+        // Excluded first, then review, tagged, kept, not asked, and failed last.
         let rank = |r: &RunResult| -> u8 {
             if r.error.is_some() {
+                5
+            } else if r.answers.is_empty() {
                 4
             } else if r.outcomes.values().any(|o| o.excluded) {
                 0
@@ -2512,6 +2755,11 @@ fn prepare_projection(conn: &Connection) -> anyhow::Result<()> {
         CREATE TABLE IF NOT EXISTS workspace_required_question (
           question TEXT PRIMARY KEY
         );
+        CREATE TABLE IF NOT EXISTS workspace_open_follow_up (
+          source TEXT NOT NULL, resource TEXT NOT NULL, derived_sha TEXT NOT NULL,
+          question TEXT NOT NULL,
+          PRIMARY KEY(source,resource,derived_sha,question)
+        );
         CREATE TABLE IF NOT EXISTS workspace_current_key (
           key TEXT PRIMARY KEY
         );
@@ -2564,11 +2812,17 @@ fn prepare_projection(conn: &Connection) -> anyhow::Result<()> {
 }
 
 /// The matching documents' count, their summed characters, and the page asked for.
-fn select_identities(
-    conn: &Connection,
-    q: &DocumentQuery,
-) -> anyhow::Result<(usize, usize, Vec<Document>)> {
-    let joins = String::new();
+/// One part of the corpus filter. A facet counts with every part but its own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Filter {
+    Source,
+    Usage,
+    Classifier,
+}
+
+/// The corpus filter as a `FROM … WHERE` over documents `d` and their exclusions `x`,
+/// with one part left out when a facet is counting it.
+fn filter_from(q: &DocumentQuery, except: Option<Filter>) -> (String, Vec<rusqlite::types::Value>) {
     let mut where_parts = vec!["1=1".to_string()];
     let mut values: Vec<rusqlite::types::Value> = Vec::new();
     if !q.search.trim().is_empty() {
@@ -2588,26 +2842,108 @@ fn select_identities(
         values.push(like.clone().into());
         values.push(like.into());
     }
-    if !q.source.trim().is_empty() {
-        where_parts.push("d.source=?".into());
-        values.push(q.source.clone().into());
+    let sources: Vec<&str> = q
+        .source
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if except != Some(Filter::Source) && !sources.is_empty() {
+        where_parts.push(format!(
+            "d.source IN ({})",
+            vec!["?"; sources.len()].join(",")
+        ));
+        values.extend(sources.iter().map(|s| s.to_string().into()));
     }
-    if !q.classifier.trim().is_empty() {
+    if except != Some(Filter::Classifier) && !q.classifier.trim().is_empty() {
         where_parts.push("EXISTS (SELECT 1 FROM workspace_classification wc JOIN workspace_current_key ck ON ck.key=wc.question WHERE wc.source=d.source AND wc.resource=d.resource AND wc.derived_sha=d.derived_sha AND substr(ck.key,1,instr(ck.key,'@')-1)=? AND wc.score>=? AND wc.score<=?)".into());
         values.push(q.classifier.clone().into());
         values.push(q.min_score.unwrap_or(0.5).clamp(0.0, 1.0).into());
         values.push(q.max_score.unwrap_or(1.0).clamp(0.0, 1.0).into());
     }
-    match q.usage.as_str() {
-        "excluded" => where_parts.push("x.source IS NOT NULL".into()),
-        "included" => where_parts.push("x.source IS NULL".into()),
-        "pending" => where_parts.push(pending_sql("d")),
-        _ => {}
+    if except != Some(Filter::Usage) {
+        match q.usage.as_str() {
+            "excluded" => where_parts.push("x.source IS NOT NULL".into()),
+            "included" => where_parts.push("x.source IS NULL".into()),
+            "pending" => where_parts.push(pending_sql("d")),
+            _ => {}
+        }
     }
     let from = format!(
-        " FROM workspace_document d LEFT JOIN workspace_exclusion x ON x.source=d.source AND x.resource=d.resource AND x.derived_sha=d.derived_sha {joins} WHERE {}",
+        " FROM workspace_document d LEFT JOIN workspace_exclusion x ON x.source=d.source AND x.resource=d.resource AND x.derived_sha=d.derived_sha WHERE {}",
         where_parts.join(" AND ")
     );
+    (from, values)
+}
+
+/// The counts behind each filter: sources, usage, and every classifier's scores.
+fn facets(conn: &Connection, q: &DocumentQuery) -> anyhow::Result<CorpusFacets> {
+    let mut facets = CorpusFacets::default();
+
+    let (from, values) = filter_from(q, Some(Filter::Source));
+    let mut stmt = conn.prepare(&format!(
+        "SELECT d.source,COUNT(*) {from} GROUP BY d.source"
+    ))?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
+    })?;
+    facets.sources = rows.collect::<Result<_, _>>()?;
+
+    let (from, values) = filter_from(q, Some(Filter::Usage));
+    let (included, excluded, pending): (i64, i64, i64) = conn.query_row(
+        &format!(
+            "SELECT COALESCE(SUM(x.source IS NULL),0),COALESCE(SUM(x.source IS NOT NULL),0),COALESCE(SUM(CASE WHEN {} THEN 1 ELSE 0 END),0) {from}",
+            pending_sql("d")
+        ),
+        params_from_iter(values.iter()),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    facets.usage = BTreeMap::from([
+        ("included".to_string(), included as usize),
+        ("excluded".to_string(), excluded as usize),
+        ("pending".to_string(), pending as usize),
+    ]);
+
+    let (from, values) = filter_from(q, Some(Filter::Classifier));
+    let mut stmt = conn.prepare(&format!(
+        "SELECT substr(ck.key,1,instr(ck.key,'@')-1),MIN(CAST(wc.score*10 AS INTEGER),9),COUNT(*)
+         FROM workspace_classification wc JOIN workspace_current_key ck ON ck.key=wc.question
+         WHERE (wc.source,wc.resource,wc.derived_sha) IN (SELECT d.source,d.resource,d.derived_sha {from})
+         GROUP BY 1,2"
+    ))?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)? as usize,
+        ))
+    })?;
+    for row in rows {
+        let (key, tenth, count) = row?;
+        facets.scores.entry(key).or_insert([0; 10])[tenth.clamp(0, 9) as usize] = count;
+    }
+
+    // The reader that produced a document's text says what it was, so the count needs no
+    // look at the original bytes.
+    let (from, values) = filter_from(q, None);
+    let mut stmt = conn.prepare(&format!("SELECT d.tool,COUNT(*) {from} GROUP BY d.tool"))?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
+    })?;
+    for row in rows {
+        let (tool, count) = row?;
+        let kind =
+            crate::extract::Reader::named(&tool).map_or("other", crate::extract::Reader::reads);
+        *facets.kinds.entry(kind.to_string()).or_default() += count;
+    }
+    Ok(facets)
+}
+
+fn select_identities(
+    conn: &Connection,
+    q: &DocumentQuery,
+) -> anyhow::Result<(usize, usize, Vec<Document>)> {
+    let (from, values) = filter_from(q, None);
     let count_sql = format!("SELECT COUNT(*),COALESCE(SUM(d.chars),0) {from}");
     let (total, total_chars): (i64, i64) =
         conn.query_row(&count_sql, params_from_iter(values.iter()), |r| {
@@ -2733,6 +3069,32 @@ fn failed_result(input: &DocumentId, error: String) -> RunResult {
     }
 }
 
+/// One scored document as a stage's finished item, for whoever is watching the run. What
+/// the answers mean is policy, read from the run itself; this says only that it went.
+fn answered(result: &RunResult) -> crate::op::ItemOutcome {
+    use crate::op::Verdict;
+    crate::op::ItemOutcome {
+        address: result.resource.clone(),
+        tag: if result.error.is_some() {
+            "error"
+        } else {
+            "scored"
+        }
+        .into(),
+        verdict: if result.error.is_some() {
+            Verdict::Fail
+        } else {
+            Verdict::Ok
+        },
+        noun: "documents".into(),
+        bytes: 0,
+        produced: None,
+        millis: result.duration_ms.unwrap_or_default(),
+        detail: result.error.clone(),
+        nested: false,
+    }
+}
+
 /// One question as Jev's API takes it: the preamble, then the saved instructions; a
 /// choice's options as `criteria`, each described.
 fn wire_question(question: &Question) -> Value {
@@ -2792,8 +3154,8 @@ fn bounded_text(text: &str, budget: usize) -> (String, Option<SampledText>) {
 
 type Answers = (BTreeMap<String, f64>, BTreeMap<String, ChoiceAnswer>);
 
-fn validated_answers(
-    questions: &[Question],
+fn validated_answers<'q>(
+    questions: impl IntoIterator<Item = &'q Question>,
     answers: &BTreeMap<String, TypeSafeAnswer>,
 ) -> anyhow::Result<Answers> {
     let probability = |value: f64, what: &str| -> anyhow::Result<f64> {
@@ -3121,9 +3483,9 @@ fn sync_score_projection(
     let reviews = store.workspace_reviews_path();
     // The leading version changes when the projection's shape does, so an index
     // projected by an older build is projected again rather than read half-empty.
-    // `v3` added the tag projection; `v4` the reviews.
+    // `v3` added the tag projection; `v4` the reviews; `v5` the question chain.
     let fingerprint = format!(
-        "v4:{}:{}:{}",
+        "v5:{}:{}:{}",
         file_fingerprint(&runs)?,
         file_fingerprint(&questions)?,
         file_fingerprint(&reviews)?
@@ -3138,7 +3500,7 @@ fn sync_score_projection(
     if recorded.as_deref() == Some(&fingerprint) {
         return Ok(());
     }
-    let scores = latest_scores(&runs)?;
+    let scores = latest_scores(&runs, &reviews, &Chain::new(current))?;
     let reviews = latest_reviews(&reviews)?;
     project_scores(conn, &scores, current, &reviews)?;
     conn.execute(
@@ -3172,34 +3534,85 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> anyhow::Result
     Ok(names.iter().any(|name| name == column))
 }
 
-fn latest_scores(path: &Path) -> anyhow::Result<HashMap<DocumentId, BTreeMap<String, f64>>> {
-    let mut out = HashMap::new();
-    for run in read_runs(path)?.into_values() {
+/// Every document's answers as the ledgers leave them, keyed `key@version`.
+///
+/// The runs ledger and the reviews ledger are read as one history per document, in the
+/// order things happened: a run's results at the time the run started, a review at the
+/// time it was recorded, ledger order among equal times, and a record with no readable
+/// time as the oldest. After every step the chain is applied — see
+/// [`Chain::retain_reached`] — with the verdicts of the latest review so far. So any
+/// change of a parent's landed answer, by a run or by a person, drops the answers under
+/// it, and only answers recorded after the latest change count. Moving the parent back
+/// later revives nothing; the follow-up is owed and asked again.
+fn latest_scores(
+    runs: &Path,
+    reviews: &Path,
+    chain: &Chain,
+) -> anyhow::Result<HashMap<DocumentId, BTreeMap<String, f64>>> {
+    let recorded_at = |at: &str| at.parse::<Timestamp>().unwrap_or(Timestamp::MIN);
+    let mut history: HashMap<DocumentId, Vec<(Timestamp, Step)>> = HashMap::new();
+    for run in read_runs(runs)?.into_values() {
+        let at = recorded_at(&run.created_at);
         let versions: HashMap<_, _> = run
             .questions
             .iter()
             .map(|q| (q.id.as_str(), q.version))
             .collect();
         for result in run.results {
-            if result.error.is_none() {
-                let saved = out
-                    .entry(DocumentId {
-                        source: result.source,
-                        resource: result.resource,
-                        derived_sha: result.derived_sha,
-                    })
-                    .or_insert_with(BTreeMap::new);
-                for (key, score) in result.answers {
-                    // `question:option` carries the version of its question.
-                    let question = key.split_once(':').map_or(key.as_str(), |(q, _)| q);
-                    if let Some(version) = versions.get(question) {
-                        saved.insert(question_version(&key, *version), score);
-                    }
-                }
+            if result.error.is_some() {
+                continue;
             }
+            // `question:option` carries the version of its question.
+            let answers = result
+                .answers
+                .into_iter()
+                .filter_map(|(key, score)| {
+                    let version = versions.get(question_of(&key))?;
+                    Some((question_version(&key, *version), score))
+                })
+                .collect();
+            let id = DocumentId {
+                source: result.source,
+                resource: result.resource,
+                derived_sha: result.derived_sha,
+            };
+            history
+                .entry(id)
+                .or_default()
+                .push((at, Step::Answers(answers)));
+        }
+    }
+    for review in read_json_lines::<Review>(reviews)? {
+        history
+            .entry(review.id())
+            .or_default()
+            .push((recorded_at(&review.at), Step::Review(review.verdicts)));
+    }
+    let mut out = HashMap::new();
+    for (id, mut steps) in history {
+        // Stable, so steps at one time keep their ledger order.
+        steps.sort_by_key(|(at, _)| *at);
+        let mut stored = BTreeMap::new();
+        let mut verdicts: Option<Verdicts> = None;
+        for (_, step) in steps {
+            match step {
+                Step::Answers(answers) => stored.extend(answers),
+                Step::Review(latest) => verdicts = Some(latest),
+            }
+            chain.retain_reached(&mut stored, verdicts.as_ref());
+        }
+        if !stored.is_empty() {
+            out.insert(id, stored);
         }
     }
     Ok(out)
+}
+
+/// One thing that can move a document's answers: a run's answers, keyed `key@version`,
+/// or a person's review, whose verdicts stand until the next review replaces them.
+enum Step {
+    Answers(BTreeMap<String, f64>),
+    Review(Verdicts),
 }
 
 fn read_runs(path: &Path) -> anyhow::Result<BTreeMap<String, ClassifierRun>> {
@@ -3394,6 +3807,12 @@ fn project_exclusions(conn: &Connection, excluded: &[DocumentId]) -> anyhow::Res
 /// marked `human`, a `no` or a different option takes the model's tag away, and the model's
 /// tags stand for every question nobody reviewed. `workspace_review` records which
 /// documents a person has looked at, so the review queue can skip them.
+///
+/// `scores` hold only what the chain reaches, so a follow-up a document was never asked
+/// has no row here: it is not a no, it scores in no facet, and it holds nothing in a review
+/// band. What a document still owes is written beside: `workspace_required_question` lists
+/// the roots every document owes, `workspace_open_follow_up` the follow-ups each document's
+/// answers reach and it has not answered.
 fn project_scores(
     conn: &Connection,
     scores: &HashMap<DocumentId, BTreeMap<String, f64>>,
@@ -3403,6 +3822,7 @@ fn project_scores(
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM workspace_classification", [])?;
     tx.execute("DELETE FROM workspace_required_question", [])?;
+    tx.execute("DELETE FROM workspace_open_follow_up", [])?;
     tx.execute("DELETE FROM workspace_current_key", [])?;
     tx.execute("DELETE FROM workspace_tag", [])?;
     tx.execute("DELETE FROM workspace_review", [])?;
@@ -3414,6 +3834,10 @@ fn project_scores(
         let mut reviewed = tx.prepare(
             "INSERT OR REPLACE INTO workspace_review(source,resource,derived_sha,at,reviewer) VALUES (?1,?2,?3,?4,?5)",
         )?;
+        let mut open = tx.prepare(
+            "INSERT OR IGNORE INTO workspace_open_follow_up(source,resource,derived_sha,question) VALUES (?1,?2,?3,?4)",
+        )?;
+        let chain = Chain::new(questions);
         let empty = BTreeMap::new();
         let documents: std::collections::HashSet<&DocumentId> =
             scores.keys().chain(reviews.keys()).collect();
@@ -3436,6 +3860,14 @@ fn project_scores(
                     id.derived_sha,
                     review.at,
                     review.reviewer
+                ])?;
+            }
+            for question in chain.open(answers, review.map(|r| &r.verdicts)) {
+                open.execute(params![
+                    id.source,
+                    id.resource,
+                    id.derived_sha,
+                    question_version(&question.id, question.version)
                 ])?;
             }
             for question in questions {
@@ -3484,7 +3916,11 @@ fn project_scores(
             tx.prepare("INSERT OR IGNORE INTO workspace_current_key(key) VALUES (?1)")?;
         for question in questions {
             let key = question_version(&question.id, question.version);
-            required.execute([&key])?;
+            // Roots only: a follow-up is owed by the documents it reaches, which
+            // `workspace_open_follow_up` lists, and by no other.
+            if question.when.is_none() {
+                required.execute([&key])?;
+            }
             current.execute([&key])?;
             for option in &question.options {
                 current.execute([question_version(
@@ -3739,6 +4175,8 @@ fn latest_reviews(path: &Path) -> anyhow::Result<HashMap<DocumentId, Review>> {
     Ok(out)
 }
 
+/// A document is pending while it lacks an answer to a root, or owes a follow-up its
+/// answers reach. A follow-up that does not reach it is not owed.
 fn pending_sql(document_alias: &str) -> String {
     format!("((EXISTS (SELECT 1 FROM workspace_required_question) AND EXISTS (
       SELECT 1 FROM workspace_required_question rq WHERE NOT EXISTS (
@@ -3747,7 +4185,9 @@ fn pending_sql(document_alias: &str) -> String {
         AND wc.question=rq.question))) OR
       (NOT EXISTS (SELECT 1 FROM workspace_required_question) AND NOT EXISTS (
         SELECT 1 FROM workspace_classification wc WHERE wc.source={document_alias}.source
-        AND wc.resource={document_alias}.resource AND wc.derived_sha={document_alias}.derived_sha)))")
+        AND wc.resource={document_alias}.resource AND wc.derived_sha={document_alias}.derived_sha)) OR
+      EXISTS (SELECT 1 FROM workspace_open_follow_up o WHERE o.source={document_alias}.source
+        AND o.resource={document_alias}.resource AND o.derived_sha={document_alias}.derived_sha))")
 }
 
 fn string_column<P: rusqlite::Params>(
@@ -3777,6 +4217,7 @@ mod tests {
             threshold: 0.9,
             review: None,
             action: QuestionAction::Exclude,
+            when: None,
         }
     }
 
@@ -4436,6 +4877,7 @@ mod tests {
             threshold: 0.9,
             review: Some(0.5),
             action: QuestionAction::Tag,
+            when: None,
         }
     }
 
@@ -4841,6 +5283,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sources_combine_and_each_facet_counts_without_its_own_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let text = b"# Budget hearing\n\nResidents may speak about the proposed budget.";
+        let derived = store.put_blob(text).await.unwrap().to_string();
+        let mut index = Index::open(store.index_path()).unwrap();
+        for (source, resource) in [
+            ("city", "https://city.gov/a"),
+            ("city", "https://city.gov/b"),
+            ("county", "https://county.gov/c"),
+            ("port", "https://port.gov/d"),
+        ] {
+            for chunk in chunk_markdown(&String::from_utf8_lossy(text), &ChunkConfig::default()) {
+                index
+                    .insert(
+                        &chunk,
+                        &Placement {
+                            source: source.into(),
+                            resource: resource.into(),
+                            blob_sha: "aa".repeat(32),
+                            derived_sha: derived.clone(),
+                            ordinal: chunk.ordinal,
+                            heading: chunk.heading.clone(),
+                            char_start: chunk.char_start,
+                            char_end: chunk.char_end,
+                            observed_at: "2026-09-16T12:00:00Z".into(),
+                            tool: "test 1".into(),
+                            title: Some(resource.into()),
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+        drop(index);
+
+        let page = Workspace::new(&store)
+            .documents(DocumentQuery {
+                source: "city, county".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 3);
+        // The source facet ignores the source filter, so `port` still shows what adding it gives.
+        assert_eq!(
+            page.facets.sources,
+            BTreeMap::from([
+                ("city".to_string(), 2),
+                ("county".to_string(), 1),
+                ("port".to_string(), 1)
+            ])
+        );
+        // Every other facet keeps it.
+        assert_eq!(page.facets.usage["included"], 3);
+        assert_eq!(page.facets.usage["excluded"], 0);
+        // `test 1` is no reader, so the three are counted as something else.
+        assert_eq!(
+            page.facets.kinds,
+            BTreeMap::from([("other".to_string(), 3)])
+        );
+    }
+
+    #[tokio::test]
     async fn corpus_read_commit_and_restore_keep_shared_placements_separate() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
@@ -5052,5 +5556,401 @@ mod tests {
             .unwrap();
         assert_eq!(page.documents.len(), 1);
         assert_eq!(page.documents[0].derived_sha, "22".repeat(32));
+    }
+
+    const BUDGET: &str =
+        "# Budget hearing\n\nResidents may speak about the proposed budget on October 20.";
+    const MENU: &str = "# MENU\n\nHome · Quick Links · Contact Us · Site Map";
+
+    /// Documents in `city`, indexed and with their text in the pool, as `index` leaves them.
+    async fn indexed(store: &Store, docs: &[(&str, &str)]) -> Vec<DocumentId> {
+        let mut index = Index::open(store.index_path()).unwrap();
+        let mut ids = Vec::new();
+        for (resource, text) in docs {
+            let derived = store.put_blob(text.as_bytes()).await.unwrap().to_string();
+            for chunk in chunk_markdown(text, &ChunkConfig::default()) {
+                index
+                    .insert(
+                        &chunk,
+                        &Placement {
+                            source: "city".into(),
+                            resource: (*resource).into(),
+                            blob_sha: "aa".repeat(32),
+                            derived_sha: derived.clone(),
+                            ordinal: chunk.ordinal,
+                            heading: chunk.heading.clone(),
+                            char_start: chunk.char_start,
+                            char_end: chunk.char_end,
+                            observed_at: "2026-10-09T12:00:00Z".into(),
+                            tool: "test 1".into(),
+                            title: None,
+                        },
+                    )
+                    .unwrap();
+            }
+            ids.push(DocumentId {
+                source: "city".into(),
+                resource: (*resource).into(),
+                derived_sha: derived,
+            });
+        }
+        ids
+    }
+
+    /// The junk gate as the source, and `laws` asked only of what it calls a record.
+    fn gate_and_laws() -> Vec<Question> {
+        let defaults = default_questions();
+        let pick = |id: &str| defaults.iter().find(|q| q.id == id).unwrap().clone();
+        vec![
+            pick("page_kind"),
+            Question {
+                when: Some(option_key("page_kind", "record")),
+                ..pick("laws")
+            },
+        ]
+    }
+
+    fn chain_run(
+        questions: &[Question],
+        documents: &[DocumentId],
+        endpoint: &str,
+        record: bool,
+    ) -> RunRequest {
+        RunRequest {
+            questions: questions.to_vec(),
+            documents: documents.to_vec(),
+            selection: None,
+            repeat: None,
+            model: "jev-test".into(),
+            evaluation_date: "2026-10-09".into(),
+            settings: RunSettings {
+                values: BTreeMap::from([("endpoint".to_string(), json!(endpoint))]),
+            },
+            record,
+        }
+    }
+
+    fn answered(id: &DocumentId, answers: BTreeMap<String, f64>) -> RunResult {
+        RunResult {
+            source: id.source.clone(),
+            resource: id.resource.clone(),
+            derived_sha: id.derived_sha.clone(),
+            answers,
+            ..RunResult::default()
+        }
+    }
+
+    /// The chain end to end against a stand-in Jev: the record is asked its follow-up in a
+    /// second request, the menu never is, and every path — a saved run, the one-document
+    /// Test, a run of the follow-up alone — follows the same rule.
+    #[tokio::test]
+    async fn a_follow_up_is_asked_only_where_its_parent_lands_on_its_tag() {
+        let endpoint = crate::workspace::fake_jev::fake_jev().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        fs::write(dir.path().join(".env"), "TYPESAFE_API_KEY=test-key\n").unwrap();
+        let ids = indexed(
+            &store,
+            &[
+                ("https://example.gov/budget", BUDGET),
+                ("https://example.gov/menu", MENU),
+            ],
+        )
+        .await;
+        let ws = Workspace::new(&store);
+        let saved = ws.save_questions(gate_and_laws()).unwrap();
+
+        let run = ws
+            .run(chain_run(&saved, &ids, &endpoint, true))
+            .await
+            .unwrap();
+        let (budget, menu) = (&run.results[0], &run.results[1]);
+        assert_eq!(
+            budget.answers["laws"], 0.95,
+            "the record is asked its follow-up"
+        );
+        assert!(!menu.answers.contains_key("laws"), "the menu is not");
+        assert_eq!(
+            (budget.attempts, menu.attempts),
+            (Some(2), Some(1)),
+            "one request for each level a document reaches"
+        );
+        assert_eq!(run.input_tokens, Some(300), "three requests, not four");
+        let (view, _) = view_results(
+            &saved,
+            run.results.clone(),
+            &RunDetailQuery::default(),
+            false,
+        );
+        assert_eq!(view.questions["laws"].not_asked, 1);
+        assert_eq!(view.questions["laws"].tagged, 1);
+        assert_eq!(view.documents.not_asked, 0, "the menu was asked the gate");
+
+        // The Test on the canvas is a preview of one document, down the same chain.
+        let test = ws
+            .run(chain_run(&saved, &ids[1..], &endpoint, false))
+            .await
+            .unwrap();
+        assert_eq!(test.status, "preview");
+        assert!(test.results[0].answers.contains_key("page_kind:navigation"));
+        assert!(!test.results[0].answers.contains_key("laws"));
+
+        // The follow-up alone reaches the record through the gate's saved answer; the menu
+        // is sent nothing, and that is "not asked", not a no.
+        let alone = ws
+            .run(chain_run(&saved[1..], &ids, &endpoint, false))
+            .await
+            .unwrap();
+        assert_eq!(alone.results[0].answers["laws"], 0.95);
+        assert!(alone.results[1].answers.is_empty());
+        assert!(alone.results[1].error.is_none());
+        assert_eq!(alone.input_tokens, Some(100), "one request, for the record");
+        let (view, page) = view_results(
+            &saved[1..],
+            alone.results.clone(),
+            &RunDetailQuery {
+                outcome: "not_asked".into(),
+                ..RunDetailQuery::default()
+            },
+            false,
+        );
+        assert_eq!(view.documents.not_asked, 1);
+        assert_eq!(view.documents.kept, 1, "the record, tagged and kept");
+        assert_eq!(page[0].resource, "https://example.gov/menu");
+
+        // Priced before a run: half the documents hold the tag `laws` follows.
+        let reach = ws.reach(&saved).unwrap();
+        assert_eq!(reach["page_kind"], 1.0);
+        assert_eq!(reach["laws"], 0.5);
+    }
+
+    /// A parent's answer that moves takes its follow-ups' answers with it, whether a later
+    /// run moves it or a person does. Moving back, by either, does not revive them: the
+    /// follow-up is owed again and asked again.
+    #[tokio::test]
+    async fn a_parent_answer_that_moves_removes_its_follow_ups_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let ids = indexed(&store, &[("https://example.gov/budget", BUDGET)]).await;
+        let ws = Workspace::new(&store);
+        let saved = ws.save_questions(gate_and_laws()).unwrap();
+        let laws = &saved[1..];
+        let append = |id: &str, gate: &[(&str, f64)], follow_up: Option<f64>| {
+            let mut answers = choice_answers(gate);
+            if let Some(score) = follow_up {
+                answers.insert("laws".into(), score);
+            }
+            let mut run = stored_run(
+                id,
+                "completed",
+                saved[0].clone(),
+                answered(&ids[0], answers),
+            );
+            run.questions = saved.clone();
+            append_json(&store.workspace_runs_path(), &RunRecord::Complete { run }).unwrap();
+        };
+        let scores = || {
+            ws.documents(DocumentQuery::default()).unwrap().documents[0]
+                .classifications
+                .clone()
+        };
+        let review = |kind: &str| {
+            ws.review(Review {
+                at: String::new(),
+                source: ids[0].source.clone(),
+                resource: ids[0].resource.clone(),
+                derived_sha: ids[0].derived_sha.clone(),
+                verdicts: BTreeMap::from([(
+                    "page_kind".to_string(),
+                    Verdict {
+                        model: Some(json!("record")),
+                        human: json!(kind),
+                    },
+                )]),
+                proposed: Vec::new(),
+                note: String::new(),
+                reviewer: "ben".into(),
+            })
+            .unwrap()
+        };
+
+        append(
+            "run-1",
+            &[("record", 0.95), ("navigation", 0.05)],
+            Some(0.9),
+        );
+        assert_eq!(scores()["laws"], 0.9);
+        assert!(ws.pending_documents(laws, None, false).unwrap().is_empty());
+
+        // A later run calls it navigation: the answer `laws` was asked under is gone, and
+        // the menu owes no follow-up.
+        append("run-2", &[("record", 0.1), ("navigation", 0.9)], None);
+        assert!(!scores().contains_key("laws"));
+        assert!(ws.pending_documents(laws, None, false).unwrap().is_empty());
+        assert_eq!(ws.documents(DocumentQuery::default()).unwrap().pending, 0);
+
+        // Back to a record: the old answer stays gone, and the follow-up is owed again.
+        append("run-3", &[("record", 0.95), ("navigation", 0.05)], None);
+        assert!(!scores().contains_key("laws"));
+        assert_eq!(ws.pending_documents(laws, None, false).unwrap().len(), 1);
+        assert_eq!(ws.documents(DocumentQuery::default()).unwrap().pending, 1);
+
+        // Asked again; then a person says it is navigation after all.
+        append("run-4", &[], Some(0.85));
+        assert_eq!(scores()["laws"], 0.85);
+        review("navigation");
+        assert!(!scores().contains_key("laws"));
+        {
+            let index = Index::open(store.index_path()).unwrap();
+            assert!(
+                index
+                    .document_tags("city", &ids[0].resource, &ids[0].derived_sha)
+                    .unwrap()
+                    .is_empty(),
+                "the model's `laws` tag goes with its answer"
+            );
+        }
+
+        // The person changes their mind back to a record. The answer the verdict took away
+        // stays gone: the follow-up is owed again, not restored.
+        review("record");
+        assert!(!scores().contains_key("laws"));
+        assert_eq!(ws.pending_documents(laws, None, false).unwrap().len(), 1);
+
+        // Only an answer recorded after the latest change counts.
+        append("run-5", &[], Some(0.7));
+        assert_eq!(scores()["laws"], 0.7);
+        assert!(ws.pending_documents(laws, None, false).unwrap().is_empty());
+    }
+
+    /// Answers stored before runs followed the chain asked every question of every
+    /// document. A follow-up whose parent landed elsewhere is not a no: it counts in no
+    /// score facet, holds nothing in a review band, and leaves nothing pending.
+    #[tokio::test]
+    async fn a_follow_up_never_reached_is_not_a_no() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let ids = indexed(
+            &store,
+            &[
+                ("https://example.gov/budget", BUDGET),
+                ("https://example.gov/menu", MENU),
+            ],
+        )
+        .await;
+        let ws = Workspace::new(&store);
+        let saved = ws.save_questions(gate_and_laws()).unwrap();
+        let with_laws = |gate: &[(&str, f64)], laws: f64| {
+            let mut answers = choice_answers(gate);
+            answers.insert("laws".into(), laws);
+            answers
+        };
+        let mut run = stored_run(
+            "run-everything",
+            "completed",
+            saved[0].clone(),
+            answered(
+                &ids[0],
+                with_laws(&[("record", 0.95), ("navigation", 0.05)], 0.9),
+            ),
+        );
+        // The menu's `laws` sits in [0.5, 0.8): the band, were it counted.
+        run.results.push(answered(
+            &ids[1],
+            with_laws(&[("record", 0.05), ("navigation", 0.95)], 0.6),
+        ));
+        run.questions = saved.clone();
+        run.inputs = ids.clone();
+        run.document_count = 2;
+        append_json(&store.workspace_runs_path(), &RunRecord::Complete { run }).unwrap();
+
+        let page = ws
+            .documents(DocumentQuery {
+                page_size: 25,
+                ..DocumentQuery::default()
+            })
+            .unwrap();
+        assert_eq!(
+            page.facets.scores["laws"].iter().sum::<usize>(),
+            1,
+            "only the record holds a `laws` score"
+        );
+        assert_eq!(page.pending, 0, "the menu owes no follow-up");
+        let menu = page
+            .documents
+            .iter()
+            .find(|d| d.resource == "https://example.gov/menu")
+            .unwrap();
+        assert!(!menu.classifications.contains_key("laws"));
+
+        let queue = ws.review_queue(ReviewQuery::default()).unwrap();
+        assert_eq!(
+            queue.in_review_band, 0,
+            "the menu's `laws` is no answer to review"
+        );
+        assert!(queue.documents.iter().all(|c| !c.review_band));
+        let menu = queue
+            .documents
+            .iter()
+            .find(|c| c.document.resource == "https://example.gov/menu")
+            .unwrap();
+        assert!(!menu.outcomes.contains_key("laws"));
+    }
+
+    /// A `when` must name an answer of a question in the set, and no chain may lead back
+    /// to itself. Refused at save, with nothing written.
+    #[tokio::test]
+    async fn a_follow_up_must_hang_off_an_answer_in_the_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let ws = Workspace::new(&store);
+        let defaults = default_questions();
+        let pick = |id: &str, when: Option<&str>| Question {
+            when: when.map(String::from),
+            ..defaults.iter().find(|q| q.id == id).unwrap().clone()
+        };
+        let gate = pick("page_kind", None);
+
+        let unknown = ws
+            .save_questions(vec![gate.clone(), pick("laws", Some("page_kind:minutes"))])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            unknown.contains("`laws`") && unknown.contains("page_kind:minutes"),
+            "{unknown}"
+        );
+        let missing = ws
+            .save_questions(vec![pick("laws", Some("budget"))])
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("no question in the set"), "{missing}");
+
+        let cycle = ws
+            .save_questions(vec![
+                gate.clone(),
+                pick("laws", Some("budget")),
+                pick("budget", Some("laws")),
+            ])
+            .unwrap_err()
+            .to_string();
+        assert!(cycle.contains("leads back"), "{cycle}");
+        let own = ws
+            .save_questions(vec![gate.clone(), pick("laws", Some("laws"))])
+            .unwrap_err()
+            .to_string();
+        assert!(own.contains("leads back"), "{own}");
+        assert!(
+            !store.workspace_questions_path().exists(),
+            "nothing refused is saved"
+        );
+
+        let tree = ws
+            .save_questions(vec![
+                gate,
+                pick("laws", Some("page_kind:record")),
+                pick("budget", Some("laws")),
+            ])
+            .unwrap();
+        assert_eq!(tree[2].when.as_deref(), Some("laws"));
     }
 }

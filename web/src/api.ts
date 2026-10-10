@@ -35,6 +35,17 @@ export type CorpusPage = {
   page_size: number
   sources: string[]
   pending: number
+  /** What each filter would find, counted without its own filter. Absent from servers before facets. */
+  facets?: CorpusFacets
+}
+
+export type CorpusFacets = {
+  sources: Record<string, number>
+  usage: Record<string, number>
+  /** Per classifier key: matching documents in each tenth of score, low to high. */
+  scores: Record<string, number[]>
+  /** Matching documents by what they were read as: `pdf`, `web_page`, `spreadsheet`, … `other`. Absent from servers older than this field. */
+  kinds?: Record<string, number>
 }
 
 export type QuestionAction = 'exclude' | 'tag' | 'keep'
@@ -57,6 +68,8 @@ export type Question = {
   /** Scores from here up to the threshold are held for review. Absent is no review band. */
   review?: number | null
   action: QuestionAction
+  /** Ask only of documents carrying this tag: `question:option` or a noul's `question`. Absent is a root. */
+  when?: string
 }
 
 /** A group of shipped default questions, as the server offers them for adding. */
@@ -91,13 +104,16 @@ export type Outcome = {
 }
 
 export type RunResult = DocumentIdentity & {
-  /** A noul's probability under its id; a choice option's under `question:option`. */
+  /**
+   * A noul's probability under its id; a choice option's under `question:option`. A
+   * question with no key here was not asked: a follow-up whose parent landed elsewhere.
+   */
   answers: Record<string, number>
   choices?: Record<string, { choice: string; confidence?: number }>
   sampled?: { sent_chars: number; total_chars: number }
   /** Wall time for this document, retries and smaller resends included. */
   duration_ms?: number
-  /** Requests sent. More than one is a retry or a smaller resend. */
+  /** Requests sent: one for each level of the chain asked, plus any retry or smaller resend. */
   attempts?: number
   error?: string
   outcomes?: Record<string, Outcome>
@@ -118,6 +134,8 @@ export type OutcomeTotals = {
   review: number
   tagged: number
   kept: number
+  /** Documents no question of the run reached; nothing was sent for them. */
+  not_asked?: number
   errors: number
   sampled: number
 }
@@ -126,6 +144,8 @@ export type QuestionTotals = {
   excluded: number
   review: number
   tagged: number
+  /** Documents this question did not reach. Not a no: it was never asked. */
+  not_asked?: number
   top?: Record<string, number>
   tags?: Record<string, number>
 }
@@ -145,7 +165,7 @@ export type RunView = {
   recent?: RunResult[]
 }
 
-export type ResultOutcome = '' | 'exclude' | 'review' | 'tag' | 'keep' | 'error'
+export type ResultOutcome = '' | 'exclude' | 'review' | 'tag' | 'keep' | 'not_asked' | 'error'
 
 export type RunDetailQuery = {
   page: number
@@ -275,7 +295,72 @@ export type Evaluation = {
   proposed: Record<string, number>
 }
 
+/** One unit of work a stage finished: a page fetched, a document read or scored. */
+export type JobItem = {
+  address: string
+  /** An HTTP status for a fetch, a content kind for a read, `scored` or `error` for a run. */
+  tag: string
+  verdict: 'ok' | 'warn' | 'missing' | 'fail'
+  noun: string
+  bytes: number
+  /** Characters of text, where the stage produces some. */
+  produced?: number
+  millis: number
+  detail?: string
+  /** Found inside a page rather than declared by the source. */
+  nested?: boolean
+}
+
+export type JobOutcome = 'ok' | 'failed' | 'cancelled'
+
+/** What happened to a job, as the server stamped it. `seq` only grows, across every job. */
+export type JobEvent = { seq: number; at: number; job: string } & (
+  | { type: 'started'; kind: string; label: string }
+  | { type: 'step'; step: string }
+  | { type: 'progress'; message: string; done: number; total: number; current?: string }
+  | { type: 'item'; item: JobItem }
+  | { type: 'note'; message: string }
+  | { type: 'finished'; outcome: JobOutcome; error?: string }
+)
+
+/** A job as it stands: every event folded in, and the latest readable ones. */
+export type JobState = {
+  id: string
+  /** The op it runs, or `classify` for a workspace run (whose id is the run's). */
+  kind: string
+  label: string
+  started_at: number
+  finished_at?: number
+  /** The last event folded in. */
+  seq: number
+  /** The stage it is in: `tampa.gov · collect`, `embed`. */
+  step?: string
+  message?: string
+  done?: number
+  total?: number
+  /** The item in hand. */
+  current?: string
+  ok: number
+  failed: number
+  outcome?: JobOutcome
+  error?: string
+  /** Oldest first. Counter ticks are not kept here. */
+  log: JobEvent[]
+}
+
+/**
+ * Development only: hold every request for `VITE_DEV_DELAY_MS`, or for
+ * `localStorage['centinel.delayMs']`, to see skeletons and transitions at a slow
+ * server's pace. Production builds drop it.
+ */
+const devDelay = () => {
+  if (!import.meta.env.DEV) return 0
+  return Number(import.meta.env.VITE_DEV_DELAY_MS || globalThis.localStorage?.getItem('centinel.delayMs') || 0)
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const delay = devDelay()
+  if (delay) await new Promise(done => setTimeout(done, delay))
   let res: Response
   try {
     res = await fetch(path, { ...init, headers: { 'content-type': 'application/json', ...init?.headers } })
@@ -305,6 +390,8 @@ export function corpusParams(filters: CorpusFilters, page: number, pageSize: num
 }
 
 export type SystemInfo = {
+  /** `CENTINEL_PUBLIC_URL` on the server, when it sits behind another address. */
+  public_url?: string | null
   product: string
   api_version: number
   version: string
@@ -313,8 +400,16 @@ export type SystemInfo = {
   store_root: string
 }
 
+/** One op the registry offers a remote caller. `mcp` says whether agents see it as a tool. */
+export type RemoteOp = { name: string; about: string; mcp: boolean; long_running: boolean }
+
+/** Where the reader fetches a document's bytes as collected. */
+export const originalUrl = (blob: string, source: string, download = false) =>
+  `/workspace/original?${new URLSearchParams({ blob, source, ...(download ? { download: 'true' } : {}) })}`
+
 export const api = {
   system: () => request<SystemInfo>('/workspace/system'),
+  ops: () => request<{ ops: RemoteOp[] }>('/ops').then(value => withArray(value, 'ops', '/ops')),
   corpus: (params: URLSearchParams) => {
     const path = `/workspace/documents?${params}`
     return request<CorpusPage>(path).then(value => withArray(withArray(value, 'documents', path), 'sources', path))
@@ -372,3 +467,9 @@ export const api = {
   review: (review: Review) => request<ReviewReport>('/workspace/review', { method: 'POST', body: JSON.stringify(review) }),
   evaluation: () => request<Evaluation>('/workspace/evaluation').then(value => withArray(value, 'questions', '/workspace/evaluation')),
 }
+
+/**
+ * The live job stream: a `snapshot` event with every job as it stands, then a `job` event
+ * per change; `?job=` for one. `GET /workspace/jobs` answers the snapshot alone.
+ */
+export const jobEventsUrl = '/workspace/jobs/events'

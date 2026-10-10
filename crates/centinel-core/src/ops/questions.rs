@@ -187,6 +187,7 @@ mod tests {
             threshold: 0.7,
             review: None,
             action: QuestionAction::Tag,
+            when: None,
         }
     }
 

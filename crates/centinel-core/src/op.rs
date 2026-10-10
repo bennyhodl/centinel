@@ -41,6 +41,8 @@ pub struct Ctx {
     /// One model per role, shared across requests to bound GPU residency.
     pub(crate) query_reranker: Arc<std::sync::Mutex<Option<crate::rerank::Reranker>>>,
     pub(crate) query_embedder: Arc<std::sync::Mutex<Option<crate::embed::Embedder>>>,
+    /// What this process is working on, for whoever is watching. See [`crate::jobs`].
+    pub jobs: crate::jobs::Jobs,
 }
 
 impl Ctx {
@@ -49,6 +51,7 @@ impl Ctx {
             store,
             query_reranker: Arc::new(std::sync::Mutex::new(None)),
             query_embedder: Arc::new(std::sync::Mutex::new(None)),
+            jobs: crate::jobs::Jobs::default(),
         }
     }
 }
@@ -122,15 +125,15 @@ impl Verdict {
 ///
 /// **Stage-agnostic on purpose.** `collect` fetches an address and `extract` reads a blob,
 /// and at the level a person watches them they are the same event: one addressable thing,
-/// one verdict, some bytes, some time. One type means one renderer, and a third stage that
-/// wants a scrolling log writes no display code at all.
+/// one verdict, some bytes, some time. One type means one translation to a log line, and
+/// a third stage that wants its items seen writes no display code at all.
 ///
 /// Structured, and deliberately not a preformatted string. The op says what happened and
-/// each surface decides what it looks like — which is what lets one event become a
-/// scrolling line on a terminal, an SSE frame over HTTP, and a row of `--json` without
-/// the op learning who is listening. It is also what lets the renderer *derive* the
-/// tallies — ok, failed, bytes, rate, an honest estimate of what is left — none of which
-/// can be recovered from text that has already been formatted.
+/// each surface decides what it looks like — which is what lets one event become a log
+/// line on stderr, an SSE frame over HTTP, and a job event on the workspace page without
+/// the op learning who is listening. It is also what lets a consumer *derive* tallies —
+/// ok, failed, bytes — none of which can be recovered from text that has already been
+/// formatted.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ItemOutcome {
     /// What was worked on: a URL, or the address bytes were read from.
@@ -171,13 +174,14 @@ impl ItemOutcome {
 
 /// A progress report from a long-running op.
 ///
-/// This is the shape all three surfaces render: a progress bar on the CLI, an SSE frame
-/// over HTTP, a notification over MCP.
+/// This is the shape every surface consumes: a log line on the CLI and under a server
+/// ([`log_event`]), an SSE frame over HTTP, a job event on the workspace page
+/// ([`crate::jobs`]).
 ///
 /// `id` is what makes **concurrent or sequential multi-part work** legible: events
-/// sharing an id are the same unit of work, so a renderer can keep one bar per file and
-/// an aggregate bar beside it, rather than one bar whose meaning changes underneath the
-/// operator. An event with no `id` is a log line, not a bar.
+/// sharing an id are the same unit of work, so a consumer can tell one file's bytes from
+/// the aggregate beside it, rather than reading one counter whose meaning changes
+/// underneath the operator. An event with no `id` is a plain message.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProgressEvent {
     pub message: String,
@@ -185,15 +189,20 @@ pub struct ProgressEvent {
     pub done: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
-    /// Which unit of work this reports on. `None` means "a message, not a bar".
+    /// Which unit of work this reports on. `None` means "a message, not a track".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Unit::is_count")]
     pub unit: Unit,
-    /// Set when this event *is* one finished item. A renderer that does not know the
+    /// Set when this event *is* one finished item. A consumer that does not know the
     /// field sees the message and behaves exactly as it did before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<ItemOutcome>,
+    /// The item a counted step is now working on: the page being fetched, the document
+    /// being read. Said ahead of the outcome, so a watcher can name what a slow step is
+    /// waiting on; the outcome itself still arrives as an `item`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
 }
 
 /// The sink an op reports progress into.
@@ -207,23 +216,60 @@ pub struct ProgressEvent {
 #[derive(Clone, Debug, Default)]
 pub struct Progress {
     tx: Option<tokio::sync::mpsc::UnboundedSender<ProgressEvent>>,
+    /// The job this invocation is, when one is being kept. A second listener rather than
+    /// a second channel: the op still says each thing once.
+    job: Option<crate::jobs::JobSink>,
+    /// Whether each event is also a line in the log. See [`Progress::logged`].
+    log: bool,
 }
 
 impl Progress {
     /// A sink that discards events.
     pub fn none() -> Self {
-        Self { tx: None }
+        Self::default()
+    }
+
+    /// A sink that writes each event to the log, for a surface with nowhere else to put
+    /// it: the CLI, a scheduled run, an MCP call, a plain `POST /ops/{name}`.
+    ///
+    /// Written synchronously from [`Progress::send`] rather than drained by a task, so a
+    /// line lands in the order the op said it and inside whatever span the op is running
+    /// in — the `debug!` a fetch emits and the item that fetch became stay adjacent.
+    /// [`log_event`] is the one place an event is turned into a line.
+    pub fn logged() -> Self {
+        Self {
+            log: true,
+            ..Default::default()
+        }
     }
 
     /// A sink plus the receiver a surface drains.
     pub fn channel() -> (Self, tokio::sync::mpsc::UnboundedReceiver<ProgressEvent>) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        (Self { tx: Some(tx) }, rx)
+        (
+            Self {
+                tx: Some(tx),
+                ..Default::default()
+            },
+            rx,
+        )
+    }
+
+    /// This sink, also reporting into `job`. See [`crate::jobs::Job::watch`].
+    pub(crate) fn reporting_to(mut self, job: crate::jobs::JobSink) -> Self {
+        self.job = Some(job);
+        self
     }
 
     /// Reports progress. Never blocks, never fails — a dropped receiver is not an
     /// op's problem, and must not turn into an error in the op's own result.
     pub fn send(&self, event: ProgressEvent) {
+        if self.log {
+            log_event(&event);
+        }
+        if let Some(job) = &self.job {
+            job.record(&event);
+        }
         if let Some(tx) = &self.tx {
             let _ = tx.send(event);
         }
@@ -237,7 +283,7 @@ impl Progress {
         });
     }
 
-    /// Reports one finished item. Carries no `total`, so it is a line rather than a bar.
+    /// Reports one finished item. Carries no `total`, so it is an outcome rather than a count.
     pub fn item(&self, outcome: ItemOutcome) {
         self.send(ProgressEvent {
             // A surface that renders only `message` still shows something useful.
@@ -253,6 +299,23 @@ impl Progress {
             message: message.into(),
             done: Some(done),
             total: Some(total),
+            ..Default::default()
+        });
+    }
+
+    /// [`Progress::step`], naming the item the step is now working on.
+    pub fn step_on(
+        &self,
+        message: impl Into<String>,
+        done: u64,
+        total: u64,
+        current: impl Into<String>,
+    ) {
+        self.send(ProgressEvent {
+            message: message.into(),
+            done: Some(done),
+            total: Some(total),
+            current: Some(current.into()),
             ..Default::default()
         });
     }
@@ -277,6 +340,94 @@ impl Progress {
             unit,
             ..Default::default()
         });
+    }
+}
+
+/// What a [`ProgressEvent`] is as a log line, and at which level.
+///
+/// The one owner of that translation. [`crate::jobs`] folds the same stream into page
+/// state; this folds it into lines a person reads on stderr, and the policy is the same
+/// on every surface because the level is decided here rather than by whoever installed
+/// the subscriber.
+///
+/// **Info is what happened; debug is what is in flight.** A watcher at info wants one
+/// line per thing done — a page fetched, a document extracted, a batch embedded — and a
+/// summary when the stage ends. A watcher at debug wants the ticks between: the item
+/// a step is about to work on, each 512 KiB of a download, the aggregate counter.
+///
+/// | Event | Level | Why |
+/// |---|---|---|
+/// | a message (no `id`, no `total`) | info | a stage saying what it is doing |
+/// | a counted step, with or without `current` | info | one line per unit of work, with its position |
+/// | an item whose verdict is `Fail` | warn | a fact about this run — a timeout, a 500 |
+/// | an item whose verdict is `Missing` | info | a fact about the item — a 404 — worth a line, not an alarm |
+/// | a declared item that produced something | debug | the step above already announced it; this is its size and timing |
+/// | an enclosed item that produced something | info | nothing announced it, so its outcome is its only line |
+/// | an item with a caveat (`Warn`) | info | the caveat is the point |
+/// | [`TOTAL_TRACK`] | debug | the stage beside it is said as a message |
+/// | a named track counting items | info | one unit of work finished |
+/// | a named track counting bytes, unfinished | debug | one tick of a download |
+/// | a named track counting bytes, finished | info | the file landed |
+///
+/// Fields rather than prose for the numbers, so `done=12 total=1005` can be grepped and
+/// the message stays the thing being worked on.
+fn log_event(event: &ProgressEvent) {
+    use tracing::Level;
+
+    if let Some(item) = &event.item {
+        let level = match (item.verdict, item.nested) {
+            (Verdict::Fail, _) => Level::WARN,
+            (Verdict::Ok, false) => Level::DEBUG,
+            _ => Level::INFO,
+        };
+        let detail = item
+            .detail
+            .as_deref()
+            .map(|d| format!(" — {d}"))
+            .unwrap_or_default();
+        // `tracing` fixes an event's level when it compiles, so the level chosen here
+        // picks which of three otherwise identical lines runs.
+        macro_rules! line {
+            ($at:ident) => {
+                tracing::$at!(
+                    bytes = item.bytes,
+                    chars = item.produced,
+                    ms = item.millis,
+                    "{} {}{detail}",
+                    item.tag,
+                    item.address
+                )
+            };
+        }
+        if level == Level::WARN {
+            line!(warn)
+        } else if level == Level::DEBUG {
+            line!(debug)
+        } else {
+            line!(info)
+        }
+        return;
+    }
+
+    match (event.id.as_deref(), event.done, event.total) {
+        (None, Some(done), Some(total)) => match &event.current {
+            Some(current) => {
+                tracing::info!(done, total, "{current} ({})", event.message)
+            }
+            None => tracing::info!(done, total, "{}", event.message),
+        },
+        (None, _, _) => tracing::info!("{}", event.message),
+        (Some(TOTAL_TRACK), done, total) => {
+            tracing::debug!(done, total, stage = %event.message, "stage")
+        }
+        (Some(track), Some(done), Some(total)) => match (event.unit, done >= total) {
+            (Unit::Count, _) => tracing::info!(done, total, "{}", event.message),
+            (Unit::Bytes, true) => tracing::info!(track, bytes = total, "{}", event.message),
+            (Unit::Bytes, false) => {
+                tracing::debug!(track, done, total, "{}", event.message)
+            }
+        },
+        (Some(track), _, _) => tracing::info!(track, "{}", event.message),
     }
 }
 
@@ -660,6 +811,178 @@ mod tests {
         let (p, rx) = Progress::channel();
         drop(rx);
         p.say("into the void");
+    }
+
+    // ── the log translation ────────────────────────────────────────────────────
+
+    /// Every line written while `f` ran, with the subscriber held at `level`. Plain
+    /// text, no colour, no clock: the assertions are about what was said and at which
+    /// level, not when.
+    fn lines_at(level: tracing::Level, f: impl FnOnce()) -> Vec<String> {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Buf {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Buf {
+                self.clone()
+            }
+        }
+
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_max_level(level)
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.0.lock().unwrap().clone();
+        String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn fetched(address: &str, verdict: Verdict, nested: bool) -> ItemOutcome {
+        ItemOutcome {
+            address: address.into(),
+            tag: match verdict {
+                Verdict::Ok | Verdict::Warn => "200",
+                Verdict::Missing => "404",
+                Verdict::Fail => "—",
+            }
+            .into(),
+            verdict,
+            noun: "requests".into(),
+            bytes: 94_150,
+            produced: None,
+            millis: 900,
+            detail: (verdict == Verdict::Fail).then(|| "connection timed out".into()),
+            nested,
+        }
+    }
+
+    /// The step announced the page, so its success is a debug line carrying the size
+    /// and timing; a failure is a warning with its reason, and a 404 is a fact about the
+    /// item worth one plain line.
+    #[test]
+    fn a_declared_page_is_announced_once_and_its_failures_are_loud() {
+        let p = Progress::logged();
+        let info = lines_at(tracing::Level::INFO, || {
+            p.step_on("0 stored, 0 failed", 12, 1005, "https://tampa.gov/a");
+            p.item(fetched("https://tampa.gov/a", Verdict::Ok, false));
+            p.item(fetched("https://tampa.gov/b", Verdict::Missing, false));
+            p.item(fetched("https://tampa.gov/c", Verdict::Fail, false));
+        });
+        assert_eq!(info.len(), 3, "{info:#?}");
+        assert!(
+            info[0].contains("https://tampa.gov/a (0 stored, 0 failed)"),
+            "{}",
+            info[0]
+        );
+        assert!(
+            info[0].contains("done=12") && info[0].contains("total=1005"),
+            "{}",
+            info[0]
+        );
+        assert!(
+            info[1].starts_with(" INFO") && info[1].contains("404 https://tampa.gov/b"),
+            "{}",
+            info[1]
+        );
+        assert!(
+            info[2].starts_with(" WARN") && info[2].contains("connection timed out"),
+            "{}",
+            info[2]
+        );
+
+        let debug = lines_at(tracing::Level::DEBUG, || {
+            p.item(fetched("https://tampa.gov/a", Verdict::Ok, false));
+        });
+        assert_eq!(debug.len(), 1, "{debug:#?}");
+        assert!(
+            debug[0].starts_with("DEBUG")
+                && debug[0].contains("bytes=94150")
+                && debug[0].contains("ms=900"),
+            "{}",
+            debug[0]
+        );
+    }
+
+    /// A document found inside a page was never announced by a step, so its outcome is
+    /// the only line it gets — and it has to reach info or an enclosed PDF vanishes.
+    #[test]
+    fn an_enclosed_document_is_its_own_line() {
+        let p = Progress::logged();
+        let info = lines_at(tracing::Level::INFO, || {
+            p.item(fetched("https://tampa.gov/a.pdf", Verdict::Ok, true));
+        });
+        assert_eq!(info.len(), 1, "{info:#?}");
+        assert!(
+            info[0].contains("200 https://tampa.gov/a.pdf"),
+            "{}",
+            info[0]
+        );
+    }
+
+    /// A download ticks every 512 KiB and a run's aggregate ticks per stage; neither is
+    /// a line at info. The file landing and a counted item finishing are.
+    #[test]
+    fn ticks_stay_at_debug_and_completions_reach_info() {
+        let p = Progress::logged();
+        let info = lines_at(tracing::Level::INFO, || {
+            p.track(TOTAL_TRACK, "tampa · collect", 1, 9, Unit::Count);
+            p.track("m:weights", "weights.gguf", 512, 1024, Unit::Bytes);
+            p.track("m:weights", "weights.gguf", 1024, 1024, Unit::Bytes);
+            p.track("classify", "12 of 300 scored", 12, 300, Unit::Count);
+            p.say("1005 resources discovered");
+        });
+        assert_eq!(info.len(), 3, "{info:#?}");
+        assert!(
+            info[0].contains("weights.gguf") && info[0].contains("bytes=1024"),
+            "{}",
+            info[0]
+        );
+        assert!(
+            info[1].contains("12 of 300 scored") && info[1].contains("done=12"),
+            "{}",
+            info[1]
+        );
+        assert!(info[2].contains("1005 resources discovered"), "{}", info[2]);
+
+        let debug = lines_at(tracing::Level::DEBUG, || {
+            p.track(TOTAL_TRACK, "tampa · collect", 1, 9, Unit::Count);
+            p.track("m:weights", "weights.gguf", 512, 1024, Unit::Bytes);
+        });
+        assert_eq!(debug.len(), 2, "{debug:#?}");
+        assert!(debug[0].contains("stage=tampa · collect"), "{}", debug[0]);
+        assert!(debug[1].contains("done=512"), "{}", debug[1]);
+    }
+
+    /// `none()` and `channel()` write nothing: the log is a listener a surface asks for,
+    /// not a side effect of reporting.
+    #[test]
+    fn only_a_logged_sink_writes_lines() {
+        let (channel, _rx) = Progress::channel();
+        let lines = lines_at(tracing::Level::DEBUG, || {
+            Progress::none().say("quiet");
+            channel.say("also quiet");
+        });
+        assert!(lines.is_empty(), "{lines:#?}");
     }
 
     #[tokio::test]

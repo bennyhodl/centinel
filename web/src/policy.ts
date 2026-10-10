@@ -1,4 +1,4 @@
-import type { ChoiceOption, Question, RunResult } from './api'
+import type { ChoiceOption, Question, QuestionAction, RunResult } from './api'
 
 export const isChoice = (question: Question) => question.kind === 'choice'
 
@@ -35,16 +35,40 @@ export const hasScores = (scores: Record<string, number>) => Object.keys(scores)
 
 /**
  * A rough price before a run starts. English runs near four characters to a token.
- * Every request also carries the questions, so their text is counted once per document.
- * Text above the sampling limit is counted at the limit.
+ * Text above the sampling limit is counted at the limit. A run follows the chain, so a
+ * question counts for the share of documents `reach` expects it to be asked of, and each
+ * group of follow-ups sharing a `when` is a request of its own that carries the text
+ * again. Mirrors the CLI's estimate in `ops/classify.rs`.
  */
-export function estimateRun(chars: number, documents: number, questions: Question[], ratePerMillion: number, maxTextChars = 80_000) {
+export function estimateRun(chars: number, documents: number, questions: Question[], ratePerMillion: number, maxTextChars = 80_000, reach: (question: Question) => number = () => 1) {
   if (!documents) return { tokens: 0, cost: 0 }
   const averageChars = Math.min(chars / documents, maxTextChars)
   const questionChars = questions.reduce((sum, question) =>
-    sum + question.instructions.length + 70 + (question.options || []).reduce((total, option) => total + option.id.length + option.description.length, 0), 0)
-  const tokens = Math.round(documents * (averageChars + questionChars) / 4)
+    sum + reach(question) * (question.instructions.length + 70 + (question.options || []).reduce((total, option) => total + option.id.length + option.description.length, 0)), 0)
+  const followUps = new Map(questions.flatMap(question => question.when ? [[question.when, reach(question)] as const] : []))
+  const sends = 1 + [...followUps.values()].reduce((sum, share) => sum + share, 0)
+  const tokens = Math.round(documents * (averageChars * sends + questionChars) / 4)
   return { tokens, cost: tokens * ratePerMillion / 1_000_000 }
+}
+
+/**
+ * The share of documents a run is expected to ask `question` of, from the Search score
+ * facets: one for a source; for a follow-up, its parent's share times the share of
+ * documents scored on its tag that score 0.5 or more there. A tag nobody has scored yet
+ * counts as every document, so the estimate errs high. The server prices the CLI's runs
+ * the same way.
+ */
+export function reachOf(question: Question, questions: Question[], scores: Record<string, number[]> = {}): number {
+  let share = 1
+  let current: Question | undefined = question
+  for (let step = 0; current?.when && step <= questions.length; step++) {
+    const tag: string = current.when
+    const tenths = scores[tag] || []
+    const scored = tenths.reduce((sum, count) => sum + count, 0)
+    if (scored) share *= tenths.slice(5).reduce((sum, count) => sum + count, 0) / scored
+    current = questions.find(candidate => outcomesOf(candidate).some(branch => branch.tag === tag))
+  }
+  return share
 }
 
 /** The parts of a question the server versions or applies, for a dirty check. */
@@ -56,6 +80,7 @@ export const questionSnapshot = (questions: Question[]) => JSON.stringify(questi
   threshold: question.threshold,
   review: question.review ?? null,
   action: question.action,
+  when: question.when ?? null,
 })))
 
 /** What would stop the server accepting this question; empty when it would. */
@@ -82,11 +107,13 @@ export function questionProblem(question: Question): string {
 export const missingOther = (question: Question) =>
   isChoice(question) && !(question.options || []).some(option => option.id === 'other' || option.id === 'none')
 
-export type Decision = 'exclude' | 'review' | 'tag' | 'keep' | 'error'
+export type Decision = 'exclude' | 'review' | 'tag' | 'keep' | 'not_asked' | 'error'
 
 /** One word for what the current policy did with a document, strongest first. */
 export function decisionOf(result: RunResult): Decision {
   if (result.error) return 'error'
+  // Asked nothing: every question of the run was a follow-up its parent did not lead to.
+  if (!Object.keys(result.answers || {}).length && !Object.keys(result.outcomes || {}).length) return 'not_asked'
   const outcomes = Object.values(result.outcomes || {})
   if (outcomes.some(outcome => outcome.excluded)) return 'exclude'
   if (outcomes.some(outcome => outcome.review)) return 'review'
@@ -94,7 +121,7 @@ export function decisionOf(result: RunResult): Decision {
   return 'keep'
 }
 
-export const decisionLabels: Record<Decision, string> = { exclude: 'Exclude', review: 'Review', tag: 'Tagged', keep: 'Keep', error: 'Error' }
+export const decisionLabels: Record<Decision, string> = { exclude: 'Exclude', review: 'Review', tag: 'Tagged', keep: 'Keep', not_asked: 'Not asked', error: 'Error' }
 
 /** Every tag the policy gave a document, across questions. */
 export const tagsOf = (result: RunResult) => Object.values(result.outcomes || {}).flatMap(outcome => outcome.tags || [])
@@ -133,4 +160,27 @@ export function sortKeys(questions: Question[]): Array<[string, string]> {
     for (const option of question.options || []) keys.push([`${question.id}:${option.id}`, `${question.id} · ${option.id}`])
   }
   return keys
+}
+
+/** One answer a question can give, and the tag a follow-up hangs off. A noul's "no" tags nothing. */
+export type Branch = { label: string; tag?: string; action: QuestionAction }
+
+export function outcomesOf(question: Question): Branch[] {
+  return isChoice(question)
+    ? (question.options || []).map(option => ({ label: option.id, tag: `${question.id}:${option.id}`, action: option.action }))
+    : [{ label: 'yes', tag: question.id, action: question.action }, { label: 'no', action: 'keep' }]
+}
+
+/** Jev's probability for one answer, from a document's stored answers. */
+export function probabilityOf(question: Question, branch: Branch, answers: Record<string, number>) {
+  if (isChoice(question)) return answers[`${question.id}:${branch.label}`]
+  const yes = answers[question.id]
+  return yes == null ? undefined : branch.label === 'yes' ? yes : 1 - yes
+}
+
+/** The answer Jev gave: a choice's likeliest option, or a noul's side of one half. */
+export function answered(question: Question, answers?: Record<string, number>) {
+  if (!answers) return undefined
+  const scored = outcomesOf(question).map(branch => [branch.label, probabilityOf(question, branch, answers)] as const).filter(([, p]) => p != null)
+  return scored.sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))[0]?.[0]
 }

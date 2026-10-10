@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { Question } from './api'
-import { classificationBadges, decisionOf, estimateRun, optionScores, policyShort, sortKeys } from './policy'
+import { classificationBadges, decisionLabels, decisionOf, estimateRun, optionScores, policyShort, reachOf, sortKeys } from './policy'
 
 /**
  * The shapes the shipped defaults take, small enough to read here. The defaults
@@ -47,6 +47,24 @@ describe('run estimate', () => {
   it('caps a long document at the sampling limit', () => {
     expect(estimateRun(1_000_000, 1, [], 1, 80_000).tokens).toBe(20_000)
   })
+
+  it('prices a follow-up for the share of documents its parent leads to it', () => {
+    const lawsOnRecords: Question = { ...laws, when: 'page_kind:record' }
+    const chain = [junkGate, lawsOnRecords]
+    // A quarter of the scored documents put `record` at even odds or better.
+    const scores = { 'page_kind:record': [10, 10, 10, 0, 0, 2, 2, 3, 0, 3] }
+    expect(reachOf(junkGate, chain, scores)).toBe(1)
+    expect(reachOf(lawsOnRecords, chain, scores)).toBe(0.25)
+    expect(reachOf(lawsOnRecords, chain, {}), 'nothing scored yet: every document').toBe(1)
+
+    const reach = (question: Question) => reachOf(question, chain, scores)
+    const gateAlone = estimateRun(4_000_000, 1_000, [junkGate], 1).tokens
+    const unknown = estimateRun(4_000_000, 1_000, chain, 1).tokens
+    const quarter = estimateRun(4_000_000, 1_000, chain, 1, 80_000, reach).tokens
+    // Each follow-up request carries the text again: 1,000 tokens a document, here.
+    expect(unknown - gateAlone).toBeGreaterThan(1_000_000)
+    expect(quarter - gateAlone).toBeCloseTo((unknown - gateAlone) / 4, -2)
+  })
 })
 
 describe('decisions', () => {
@@ -57,6 +75,12 @@ describe('decisions', () => {
     expect(decisionOf({ ...base, outcomes: { a: { excluded: false, review: true, tags: ['laws'] } } })).toBe('review')
     expect(decisionOf({ ...base, outcomes: { a: { excluded: false, review: false, tags: ['laws'] } } })).toBe('tag')
     expect(decisionOf({ ...base, outcomes: { a: { excluded: false, review: false } } })).toBe('keep')
+  })
+
+  it('says not asked of a document no question reached, never keep', () => {
+    expect(decisionOf(base)).toBe('not_asked')
+    expect(decisionLabels.not_asked).toBe('Not asked')
+    expect(decisionOf({ ...base, answers: { laws: 0.1 }, outcomes: { laws: { excluded: false, review: false } } })).toBe('keep')
   })
 
   it('lists choice options most likely first', () => {

@@ -274,7 +274,13 @@ impl VectorTable {
             vec![Ok(batch)],
             self.schema.clone(),
         )) as Box<dyn RecordBatchReader + Send>;
+        let started = std::time::Instant::now();
         self.table.add(reader).execute().await?;
+        tracing::debug!(
+            rows = entries.len(),
+            ms = started.elapsed().as_millis() as u64,
+            "appended to the vector table"
+        );
         Ok(())
     }
 
@@ -383,6 +389,15 @@ impl VectorTable {
             .prune
             .map(|p| (p.old_versions, p.bytes_removed))
             .unwrap_or_default();
+        tracing::debug!(
+            rows,
+            indexed = indexed || (build_index && rows >= ANN_MIN_ROWS),
+            fragments_removed,
+            fragments_added,
+            versions_removed,
+            bytes_removed,
+            "vector table maintained"
+        );
         Ok(Maintenance {
             fragments_removed,
             fragments_added,

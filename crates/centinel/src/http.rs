@@ -9,6 +9,8 @@
 //! | `POST /ops/{name}` | invoke, JSON in / JSON out |
 //! | `POST /ops/{name}/stream` | invoke with SSE progress, then the result |
 //! | `POST /mcp` | MCP JSON-RPC over HTTP |
+//! | `GET /workspace/jobs` | what this process is working on, and what it just finished |
+//! | `GET /workspace/jobs/events` | the same, then every job event as it happens (SSE) |
 //!
 //! ## Long-running operations
 //!
@@ -21,12 +23,25 @@
 //! for the spine and wrong for a multi-hour crawl; a durable job store belongs with
 //! scheduling (ticket #7), which owns resumability.
 //!
+//! What a watcher wants from a multi-hour crawl is not its result but its progress, and
+//! that is `/workspace/jobs/events`: every long-running op this process runs — a scheduled
+//! `run`, a classifier run started from the page — is a job in [`centinel_core::jobs`],
+//! and the stream opens on a snapshot of all of them before it follows. SSE rather than a
+//! WebSocket because nothing travels the other way: it is plain HTTP through any proxy
+//! in front of this one, and `EventSource` reconnects on its own.
+//!
 //! ## Access control
 //!
 //! There is none, which is why the default bind is loopback. SPEC §8 lists server
 //! access control as unspecified, and inventing a scheme here would foreclose that
 //! decision. Binding to a non-loopback address logs a warning rather than silently
 //! exposing the store.
+//!
+//! `serve --tailscale` keeps the loopback bind and lets Tailscale proxy to it, so the
+//! tailnet's own policy decides who reaches the server. The address it publishes is the
+//! one non-loopback origin [`same_origin`] accepts for a write: a page loaded from the
+//! tailnet is the workspace, served by this process, and Tailscale passes the browser's
+//! `Host` through unchanged.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -38,7 +53,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use centinel_core::op::{self, Ctx, Progress};
+use centinel_core::jobs::JobState;
+use centinel_core::op::{self, Cancel, Ctx, Progress};
 use centinel_core::workspace::{
     DocumentQuery, ReadQuery, RestoreRequest, Review, ReviewQuery, RunDetailQuery, RunQuery,
     RunRequest, Workspace,
@@ -71,37 +87,42 @@ pub fn build_id() -> &'static str {
     &ID
 }
 
-/// A page rebuilt by `centinel web --rebuild`, served in place of the embedded one for
-/// the life of this process. Set once, before the server starts.
-static REBUILT_PAGE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+/// A bundle rebuilt by `centinel web --rebuild`, served in place of the embedded one
+/// for the life of this process, as `(route, content type, bytes)`. Set once, before
+/// the server starts.
+static REBUILT: std::sync::OnceLock<Vec<(String, &'static str, Vec<u8>)>> =
+    std::sync::OnceLock::new();
 
-/// Serves `page` at `/web` instead of the embedded copy. A second call is ignored.
-pub fn serve_page_from(page: Vec<u8>) {
-    let _ = REBUILT_PAGE.set(page);
+/// Serves `files` instead of the embedded bundle. A second call is ignored.
+pub fn serve_bundle_from(files: Vec<(String, &'static str, Vec<u8>)>) {
+    let _ = REBUILT.set(files);
 }
 
-/// The workspace page this process serves: the rebuilt one when there is one, else the
-/// copy embedded at compile time.
-fn web_page() -> Option<&'static [u8]> {
-    if let Some(page) = REBUILT_PAGE.get() {
-        return Some(page.as_slice());
+/// The content type and bytes this process serves at `route`: from the rebuilt bundle
+/// when there is one, else from the copy embedded at compile time.
+fn asset(route: &str) -> Option<(&'static str, &'static [u8])> {
+    if let Some(files) = REBUILT.get() {
+        return files
+            .iter()
+            .find(|file| file.0 == route)
+            .map(|file| (file.1, file.2.as_slice()));
     }
     WEB_ASSETS
         .iter()
-        .find(|asset| asset.0 == "/web")
-        .map(|asset| asset.2)
+        .find(|asset| asset.0 == route)
+        .map(|asset| (asset.1, asset.2))
 }
 
-/// The version stamped into the served workspace page by `vite.config.ts`.
+/// The version stamped into the served workspace page by the Start root route.
 ///
 /// The build script refuses a bundle whose stamp differs from the crate, so on a binary
 /// built from source this always equals `CARGO_PKG_VERSION`. A release download cannot
 /// rebuild the bundle, so [`crate::web::check_bundle`] only checks it, early.
 pub fn web_version() -> Option<String> {
-    stamped_version(std::str::from_utf8(web_page()?).ok()?)
+    stamped_version(std::str::from_utf8(asset("/web")?.1).ok()?)
 }
 
-/// The `centinel-version` meta tag in a page, as `vite.config.ts` writes it.
+/// The `centinel-version` meta tag in a page, as the Start root route writes it.
 pub fn stamped_version(html: &str) -> Option<String> {
     let start = html.find("name=\"centinel-version\"")?;
     let rest = &html[start..];
@@ -111,12 +132,45 @@ pub fn stamped_version(html: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// The tailnet origin `serve --tailscale` published, e.g. `https://host.tailnet.ts.net`.
+/// Set once, before the server starts.
+static PUBLISHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Records the origin this process is published at. A second call is ignored.
+pub fn publish_at(origin: String) {
+    let _ = PUBLISHED.set(origin);
+}
+
+/// Where an agent reaches this server when it is not the address a page was loaded from:
+/// `CENTINEL_PUBLIC_URL` when the operator set one, else the tailnet origin.
+fn public_url() -> Option<String> {
+    std::env::var("CENTINEL_PUBLIC_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .or_else(|| PUBLISHED.get().cloned())
+}
+
+/// Binds `bind`, warning when the address is reachable off-host.
+pub async fn listen(bind: &str) -> Result<tokio::net::TcpListener> {
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("binding {bind}"))?;
+    let addr = listener.local_addr()?;
+    if !addr.ip().is_loopback() {
+        tracing::warn!(
+            %addr,
+            "reachable off-host with no authentication — access control is unspecified (SPEC §8)"
+        );
+    }
+    Ok(listener)
+}
+
 /// Serves until the process is asked to stop.
 ///
 /// [`serve_until`] with a signal that never arrives — for a caller with nothing to wind
 /// down afterwards.
 pub async fn serve(ctx: Arc<Ctx>, bind: &str) -> Result<()> {
-    serve_until(ctx, bind, std::future::pending()).await
+    serve_until(ctx, listen(bind).await?, std::future::pending()).await
 }
 
 /// Serves until `shutdown` resolves, then stops accepting and returns.
@@ -127,37 +181,29 @@ pub async fn serve(ctx: Arc<Ctx>, bind: &str) -> Result<()> {
 /// its `interrupted` record. Without a graceful return the process is simply killed, the
 /// journal keeps no record of the run that was in flight, and the only evidence is a stale
 /// `run.lock` for the next startup to reclaim.
+///
+/// The listener arrives bound, from [`listen`], because `serve --tailscale` has to know
+/// the port before it can publish it, and publishing has to happen before the first
+/// request can arrive through it.
 pub async fn serve_until(
     ctx: Arc<Ctx>,
-    bind: &str,
+    listener: tokio::net::TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
+    let store = ctx.store.root().display().to_string();
     let app = router(ctx);
-
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
-        .with_context(|| format!("binding {bind}"))?;
     let addr = listener.local_addr()?;
 
-    if !addr.ip().is_loopback() {
-        tracing::warn!(
-            %addr,
-            "serving on a non-loopback address with no authentication — \
-             access control is unspecified (SPEC §8)"
-        );
-        eprintln!("warning: {addr} is reachable off-host and centinel has no authentication yet");
-    }
-
-    eprintln!("centinel serving on http://{addr}");
-    eprintln!("  GET  /ops                  list operations");
-    eprintln!("  POST /ops/{{name}}           invoke");
-    eprintln!("  POST /ops/{{name}}/stream    invoke with progress (SSE)");
-    eprintln!("  POST /mcp                  MCP over HTTP");
-
-    // The banner above is the greeting; this is the first line of the log. It exists so
-    // that an operator can tell, before sending a single request, whether the log they
-    // are watching is on at all.
-    tracing::info!(%addr, ops = op::remote_ops().len(), "http server listening");
+    // The first lines of the log, and what they are for: an operator can tell, before
+    // sending a single request, which store this is, what it answers, and whether the
+    // log they are watching is on at all.
+    tracing::info!(url = %format!("http://{addr}"), store = %store, "listening");
+    tracing::info!(
+        ops = op::remote_ops().len(),
+        tools = op::mcp_tools().len(),
+        web = web_version().as_deref().unwrap_or("absent"),
+        "serving /ops, /ops/{{name}}[/stream], /mcp and /web"
+    );
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -167,16 +213,25 @@ pub async fn serve_until(
     Ok(())
 }
 
-fn router(ctx: Arc<Ctx>) -> Router {
+/// The workspace page and its assets — everything the browser loads before it calls the
+/// API. Shared with `centinel web --server`, which serves this page and forwards the
+/// rest.
+pub fn page_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
-        .route("/health", get(|| async { "ok" }))
         .route("/web", get(web_ui))
         .route("/web/", get(web_ui))
         .route("/web/{*path}", get(web_ui))
-        .route("/assets/{*path}", get(web_asset))
+        .route("/web/assets/{*path}", get(web_asset))
+}
+
+fn router(ctx: Arc<Ctx>) -> Router {
+    Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .merge(page_routes())
         .route("/workspace/documents", get(workspace_documents))
         .route("/workspace/system", get(workspace_system))
         .route("/workspace/document", get(workspace_document))
+        .route("/workspace/original", get(workspace_original))
         .route(
             "/workspace/questions",
             get(workspace_questions).put(workspace_save_questions),
@@ -189,41 +244,66 @@ fn router(ctx: Arc<Ctx>) -> Router {
         .route("/workspace/review/queue", get(workspace_review_queue))
         .route("/workspace/review", post(workspace_review))
         .route("/workspace/evaluation", get(workspace_evaluation))
+        .route("/workspace/jobs", get(workspace_jobs))
+        .route("/workspace/jobs/events", get(workspace_job_events))
         .route("/ops", get(list_ops))
         .route("/ops/{name}", post(invoke))
         .route("/ops/{name}/stream", post(invoke_streaming))
         .route("/mcp", post(mcp_over_http))
+        .layer(axum::middleware::from_fn(log_request))
         .with_state(ctx)
+}
+
+/// One line per request, once it is answered: what was asked, what came back, how long.
+///
+/// Every route, including the ones that return a stream — for those the line is written
+/// when the headers go out, which is when the request was *answered* even if the body
+/// runs for an hour. The query string is kept because on this API it is the question:
+/// `/workspace/documents?source=tampa&tag=junk` is a search, and a line without it would
+/// say only that someone searched. What an op was asked and how it went is the
+/// invocation's own lines, under [`crate::logging::invoke`]; this is the transport's.
+async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().map(str::to_string);
+    let started = std::time::Instant::now();
+
+    let response = next.run(req).await;
+
+    let status = response.status().as_u16();
+    let ms = started.elapsed().as_millis() as u64;
+    let target = match &query {
+        Some(q) => format!("{path}?{q}"),
+        None => path,
+    };
+    // A 5xx is this process's fault and is worth seeing without raising the level; a
+    // 4xx is the caller's, and the route that refused it has already said why.
+    if status >= 500 {
+        tracing::error!(status, ms, "{method} {target}");
+    } else {
+        tracing::info!(status, ms, "{method} {target}");
+    }
+    response
 }
 
 /// The bundled classifier workspace.
 ///
-/// One file, embedded at build time: no asset directory to ship beside the binary and no
-/// build step on the user's machine. It talks to the ops API on this origin, so nothing
-/// here learns a route by name — the UI calls `/ops/read` and `/ops/search` the same way
-/// the CLI does.
-async fn web_ui() -> impl IntoResponse {
+/// Embedded at build time: no asset directory to ship beside the binary and no build
+/// step on the user's machine. Every path under `/web` that is not an asset gets the
+/// shell, and the router takes it from there. It talks to the ops API on this origin,
+/// so nothing here learns a route by name — the UI calls `/ops/read` and `/ops/search`
+/// the same way the CLI does.
+async fn web_ui() -> Response {
     asset_response("/web")
 }
 
 async fn web_asset(Path(path): Path<String>) -> Response {
-    asset_response(&format!("/assets/{path}"))
+    asset_response(&format!("/web/assets/{path}"))
 }
 
-fn asset_response(path: &str) -> Response {
-    if path == "/web"
-        && let Some(page) = REBUILT_PAGE.get()
-    {
-        return (
-            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            page.clone(),
-        )
-            .into_response();
-    }
-    match WEB_ASSETS.iter().find(|asset| asset.0 == path) {
-        Some((_, mime, bytes)) => {
-            ([(axum::http::header::CONTENT_TYPE, *mime)], *bytes).into_response()
-        }
+fn asset_response(route: &str) -> Response {
+    match asset(route) {
+        Some((mime, bytes)) => ([(axum::http::header::CONTENT_TYPE, mime)], bytes).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -242,6 +322,85 @@ async fn workspace_document(
     workspace_response(Workspace::new(&ctx.store).read(query).await)
 }
 
+#[derive(serde::Deserialize)]
+struct OriginalQuery {
+    /// A blob hash, full or short, as the reader holds it.
+    blob: String,
+    source: Option<String>,
+    /// Ask the browser to save the file rather than show it.
+    #[serde(default)]
+    download: bool,
+}
+
+/// A document's original bytes, for the reader to show and to save.
+///
+/// Collected HTML is another site's page served from this origin, beside the workspace's
+/// writes, so nothing served here may run: every response carries a sandbox policy and
+/// `nosniff`. A PDF is the one exception, because the browser's own viewer will not open
+/// a sandboxed document, and a PDF viewer runs no page script on this origin.
+async fn workspace_original(
+    State(ctx): State<Arc<Ctx>>,
+    Query(query): Query<OriginalQuery>,
+) -> Response {
+    use axum::http::header;
+    use centinel_core::content::ContentKind;
+
+    let doc = match centinel_core::ops::original(&ctx, &query.blob, query.source.as_deref()).await {
+        Ok(doc) => doc,
+        Err(error) => return workspace_error(error),
+    };
+    let content_type = doc
+        .media_type
+        .clone()
+        .or_else(|| {
+            ContentKind::declared_type_for_path(std::path::Path::new(&doc.filename))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let name: String = doc
+        .filename
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .filter(|c| *c != '"' && *c != '\\')
+        .collect();
+    let disposition = format!(
+        "{}; filename=\"{name}\"",
+        if query.download {
+            "attachment"
+        } else {
+            "inline"
+        }
+    );
+    let mut response = (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
+        doc.bytes,
+    )
+        .into_response();
+    if doc.kind != ContentKind::Pdf {
+        response.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            axum::http::HeaderValue::from_static("sandbox"),
+        );
+    }
+    response
+}
+
+/// The `snapshot` event: the jobs as they stand, or the one job asked for.
+fn job_snapshot(all: Vec<JobState>, wanted: Option<&str>) -> Event {
+    let jobs: Vec<JobState> = all
+        .into_iter()
+        .filter(|job| wanted.is_none_or(|id| id == job.id))
+        .collect();
+    Event::default()
+        .event("snapshot")
+        .json_data(json!({ "jobs": jobs }))
+        .expect("a job snapshot always serializes")
+}
+
 async fn workspace_system(State(ctx): State<Arc<Ctx>>) -> Response {
     let root =
         std::fs::canonicalize(ctx.store.root()).unwrap_or_else(|_| ctx.store.root().to_path_buf());
@@ -252,6 +411,9 @@ async fn workspace_system(State(ctx): State<Arc<Ctx>>) -> Response {
         "web_version": web_version(),
         "build_id": build_id(),
         "store_root": root,
+        // Where an agent reaches MCP when this server sits behind another address. Unset,
+        // the page offers the address it was loaded from.
+        "public_url": public_url(),
     }))
     .into_response()
 }
@@ -332,19 +494,28 @@ async fn workspace_run(
     if !same_origin(&headers) {
         return forbidden_origin();
     }
-    // Answer with the run as started, then score it on a task of its own. The browser
-    // polls the run detail for progress; a request held open for a thousand documents
-    // sat behind proxies, browser limits, and a person wondering whether anything was
-    // happening.
+    // Answer with the run as started, then score it on a task of its own, as a job under
+    // the run's id. The browser follows it on the job stream and reads the answers from
+    // the run detail; a request held open for a thousand documents sat behind proxies,
+    // browser limits, and a person wondering whether anything was happening.
     let prepared = match Workspace::new(&ctx.store).prepare(request) {
         Ok(prepared) => prepared,
         Err(error) => return workspace_error(error),
     };
     let started = prepared.run().clone();
+    let job = ctx.jobs.start_as(
+        started.id.clone(),
+        "classify",
+        format!("{} documents · {}", started.document_count, started.model),
+    );
     let worker = Arc::clone(&ctx);
     tokio::spawn(async move {
         let id = prepared.run().id.clone();
-        match Workspace::new(&worker.store).execute(prepared).await {
+        let progress = job.watch(Progress::none());
+        let result = Workspace::new(&worker.store)
+            .execute_with(prepared, &progress, &Cancel::none())
+            .await;
+        match &result {
             Ok(run) => tracing::info!(
                 run = %run.id,
                 documents = run.results.len(),
@@ -356,8 +527,68 @@ async fn workspace_run(
                 tracing::warn!(run = %id, error = %format!("{error:#}"), "classifier run failed")
             }
         }
+        job.finish(&result);
     });
     (StatusCode::ACCEPTED, Json(started)).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct JobsQuery {
+    /// One job's id. Absent is every job.
+    job: Option<String>,
+}
+
+/// Every active job, then the recently finished, each with its latest log lines.
+async fn workspace_jobs(State(ctx): State<Arc<Ctx>>) -> Response {
+    Json(json!({ "jobs": ctx.jobs.snapshot() })).into_response()
+}
+
+/// A `snapshot` event with the jobs as they stand, then one `job` event per thing that
+/// happens to them, for one job when `?job=` names it.
+///
+/// A subscriber that falls too far behind is sent a fresh snapshot rather than dropped:
+/// the events it missed are already folded into the state it is sent, and each carries a
+/// `seq` so the client skips any it then sees twice.
+async fn workspace_job_events(
+    State(ctx): State<Arc<Ctx>>,
+    Query(query): Query<JobsQuery>,
+) -> Response {
+    use tokio::sync::broadcast::error::RecvError;
+
+    let jobs = ctx.jobs.clone();
+    let (first, mut rx) = jobs.subscribe();
+    let wanted = query.job;
+    let stream = async_stream::stream! {
+        yield Ok(job_snapshot(first, wanted.as_deref()));
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if wanted.as_deref().is_none_or(|id| id == event.job) {
+                        yield Ok(Event::default()
+                            .event("job")
+                            .json_data(&event)
+                            .expect("a job event always serializes"));
+                    }
+                }
+                Err(RecvError::Lagged(_)) => yield Ok(job_snapshot(jobs.snapshot(), wanted.as_deref())),
+                Err(RecvError::Closed) => break,
+            }
+        }
+    };
+
+    let mut response =
+        Sse::new(Box::pin(stream)
+            as std::pin::Pin<
+                Box<dyn Stream<Item = Result<Event, Infallible>> + Send>,
+            >)
+        .keep_alive(KeepAlive::default())
+        .into_response();
+    // A proxy that buffers responses would hold every event until the stream ends.
+    response.headers_mut().insert(
+        "x-accel-buffering",
+        axum::http::HeaderValue::from_static("no"),
+    );
+    response
 }
 
 async fn workspace_commit(
@@ -400,7 +631,13 @@ fn workspace_error(error: anyhow::Error) -> Response {
 /// Workspace writes can cause paid inference or change corpus usage. A browser must send
 /// the same authority in `Origin` and `Host`, which blocks a page on another origin from
 /// using the loopback server as its write target.
-fn same_origin(headers: &HeaderMap) -> bool {
+pub fn same_origin(headers: &HeaderMap) -> bool {
+    same_origin_with(headers, PUBLISHED.get().map(String::as_str))
+}
+
+/// [`same_origin`] against a given published origin, so the rule is testable without
+/// the process-wide one.
+fn same_origin_with(headers: &HeaderMap, published: Option<&str>) -> bool {
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok());
@@ -426,7 +663,11 @@ fn same_origin(headers: &HeaderMap) -> bool {
     {
         return true;
     }
-    false
+    // The tailnet address, exactly: an `https` origin Tailscale holds the certificate
+    // for, which no other site can present, arriving with the `Host` it forwarded.
+    published.is_some_and(|published| {
+        origin == Some(published) && host == published.strip_prefix("https://")
+    })
 }
 
 fn forbidden_origin() -> Response {
@@ -783,10 +1024,23 @@ mod tests {
         let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
             .await
             .unwrap();
-        assert!(
-            std::str::from_utf8(&bytes).unwrap().contains("Centinel"),
-            "the embedded document arrived"
-        );
+        let shell = std::str::from_utf8(&bytes).unwrap();
+        assert!(shell.contains("Centinel"), "the embedded document arrived");
+        let start = shell
+            .find("/web/assets/")
+            .expect("the shell loads its assets");
+        let end = start + shell[start..].find('"').unwrap();
+        let asset = app
+            .clone()
+            .oneshot(
+                Request::get(&shell[start..end])
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(asset.status(), StatusCode::OK, "{}", &shell[start..end]);
+        assert_ne!(asset.headers()["content-type"], "text/html; charset=utf-8");
         for path in ["/web/", "/web/classifiers", "/web/runs", "/web/review"] {
             assert_eq!(
                 app.clone()
@@ -836,6 +1090,55 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
+    /// A page opened after a run started is told about it at once: the list names every
+    /// job, and the stream opens on the one asked for as it stands — its count and the
+    /// page in hand — before anything new happens.
+    #[tokio::test]
+    async fn the_job_stream_opens_on_the_job_asked_for_as_it_stands() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(Ctx::new(Store::open(dir.path()).await.unwrap()));
+        let app = router(Arc::clone(&ctx));
+        let wanted = ctx.jobs.start("run", "schedule");
+        let _other = ctx.jobs.start("embed", "schedule");
+        wanted.watch(Progress::none()).step_on(
+            "0 stored, 0 failed",
+            0,
+            1005,
+            "https://www.tampa.gov/a",
+        );
+
+        let listed = body_json(
+            app.clone()
+                .oneshot(Request::get("/workspace/jobs").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(listed["jobs"].as_array().unwrap().len(), 2);
+
+        let resp = app
+            .oneshot(
+                Request::get(format!("/workspace/jobs/events?job={}", wanted.id()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.headers()["content-type"], "text/event-stream");
+        let mut body = resp.into_body().into_data_stream();
+        let frame = futures::StreamExt::next(&mut body).await.unwrap().unwrap();
+        let text = std::str::from_utf8(&frame).unwrap();
+        assert!(text.contains("event: snapshot"), "{text}");
+        let data: Value =
+            serde_json::from_str(text.lines().find_map(|l| l.strip_prefix("data: ")).unwrap())
+                .unwrap();
+        let jobs = data["jobs"].as_array().unwrap();
+        assert_eq!(jobs.len(), 1, "only the job asked for");
+        assert_eq!(jobs[0]["id"], wanted.id());
+        assert_eq!(jobs[0]["current"], "https://www.tampa.gov/a");
+        assert_eq!(jobs[0]["total"], 1005);
+    }
+
     #[test]
     fn workspace_writes_require_same_loopback_origin() {
         let mut headers = HeaderMap::new();
@@ -852,5 +1155,41 @@ mod tests {
             !same_origin(&headers),
             "matching attacker headers are not loopback"
         );
+    }
+
+    /// Behind `serve --tailscale` the page is loaded from the tailnet address, and
+    /// Tailscale forwards the browser's `Host` and `Origin` as they were sent — measured
+    /// against `tailscale serve`. That pair is a write from the workspace; any other
+    /// non-loopback pair is still refused.
+    #[test]
+    fn workspace_writes_accept_the_published_tailnet_origin() {
+        let published = Some("https://box.tailnet.ts.net:8787");
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "box.tailnet.ts.net:8787".parse().unwrap());
+        headers.insert("origin", "https://box.tailnet.ts.net:8787".parse().unwrap());
+        assert!(same_origin_with(&headers, published));
+        assert!(
+            !same_origin_with(&headers, None),
+            "not accepted until this process published it"
+        );
+
+        headers.insert("origin", "https://attacker.example".parse().unwrap());
+        assert!(!same_origin_with(&headers, published));
+
+        headers.insert("host", "attacker.example".parse().unwrap());
+        headers.insert("origin", "https://box.tailnet.ts.net:8787".parse().unwrap());
+        assert!(
+            !same_origin_with(&headers, published),
+            "the origin alone is not enough; the Host must be the tailnet's too"
+        );
+
+        // On 443 neither header carries a port.
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "box.tailnet.ts.net".parse().unwrap());
+        headers.insert("origin", "https://box.tailnet.ts.net".parse().unwrap());
+        assert!(same_origin_with(
+            &headers,
+            Some("https://box.tailnet.ts.net")
+        ));
     }
 }

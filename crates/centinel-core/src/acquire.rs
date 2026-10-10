@@ -332,15 +332,14 @@ pub async fn collect(
         // the latest DiscoveryRun and picks up exactly here.
         opts.cancel.check()?;
 
-        // Every resource, not every twenty-fifth. The throttle was harmless when the bar
-        // was the only output; beside a request log that moves on every fetch it made the
-        // bar visibly disagree with the tally under it — 25/500 sitting still while the
-        // line beneath counted past a hundred requests. `indicatif` rate-limits its own
-        // redraws, so the cost of an event the renderer discards is a channel send.
-        progress.step(
+        // Every resource, not every twenty-fifth: this is the line that names the page
+        // about to be fetched and where it sits in the work list, and a counter that
+        // moved every twenty-fifth page read as a run that had stalled between them.
+        progress.step_on(
             format!("{} stored, {} failed", report.stored, report.failed),
             i as u64,
             total,
+            &resource.natural_key,
         );
 
         let at = Timestamp::now();
@@ -851,6 +850,63 @@ mod tests {
             src.acquired().len(),
             2,
             "the second pass must not touch the network"
+        );
+    }
+
+    /// Collection watched as a job: a watcher sees it start, sees each address named as it
+    /// is taken in hand, and sees it finish with the whole work list counted.
+    #[tokio::test]
+    async fn a_watched_collection_names_each_address_as_it_goes() {
+        use crate::jobs::{JobEvent, Jobs, Outcome};
+
+        let (_d, store) = store().await;
+        let src = Scripted::new("x", &["https://x.gov/a", "https://x.gov/b"])
+            .yields("https://x.gov/a", "alpha")
+            .yields("https://x.gov/b", "beta");
+        discover(&store, &src, &DiscoverOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+
+        let jobs = Jobs::default();
+        let (_, mut rx) = jobs.subscribe();
+        let job = jobs.start("collect", "test");
+        let result = collect(
+            &store,
+            &src,
+            &CollectOpts::default(),
+            &job.watch(Progress::none()),
+        )
+        .await;
+        job.finish(&result);
+
+        let mut events = Vec::new();
+        while let Ok(stamped) = rx.try_recv() {
+            events.push(stamped.event);
+        }
+        assert!(matches!(events.first(), Some(JobEvent::Started { .. })));
+        assert!(matches!(
+            events.last(),
+            Some(JobEvent::Finished {
+                outcome: Outcome::Ok,
+                ..
+            })
+        ));
+        let named: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                JobEvent::Progress {
+                    current: Some(c), ..
+                } => Some(c.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(named, ["https://x.gov/a", "https://x.gov/b"]);
+
+        let state = &jobs.snapshot()[0];
+        assert_eq!((state.done, state.total), (Some(2), Some(2)));
+        assert_eq!(
+            state.current, None,
+            "nothing is in hand once the pass is done"
         );
     }
 

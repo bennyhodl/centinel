@@ -103,8 +103,56 @@ forced into a wrong one. Write options by purpose, with the words a reader sees 
 page, and name the one or two options each is most likely confused with.
 
 The answers are stored as `question` for a noul and `question:option` for each option of a
-choice. The Corpus can filter on either. For a choice, the Corpus score under its own id
+choice. Search can filter on either. For a choice, the score Search filters under its own id
 is the summed probability of its exclude options under the current actions.
+
+### Follow-ups: the question chain
+
+A question can be asked only after another one. Its `when` names one answer of another
+question in the set as a tag: `page_kind:record` for an option of a choice, or `spending`
+for a yes-or-no question's yes. A no is no tag, so nothing follows it. A question with no
+`when` is a **root** and is asked of every document; a question with one is a
+**follow-up**, asked of a document only when the document's answer to its parent landed on
+that tag and the parent was itself asked. `when` is policy, like a threshold: changing it
+makes no new version.
+
+- **Landed** means the answer, not the policy. A choice lands on its likeliest option, the
+  first in order on a tie; a yes-or-no question lands on yes at 0.5 or above. A person's
+  verdict in Review beats the model's. Moving a threshold never changes which follow-ups
+  apply.
+- **A run walks the chain one level at a time.** For each document, the questions that
+  reach it go in one request; the follow-ups its answers lead to go in the next, and so on
+  until nothing is left that applies. A document is never sent a question its parent did
+  not lead to, so it costs nothing. Each level is a request of its own and carries the
+  text again. A follow-up whose parent the run does not ask hangs off the answer the
+  document already holds. A failure at any level fails the document whole; it stays
+  pending and the next run asks it from the top. Every path follows the same rule: a saved
+  run, a preview, the CLI and the pipeline stage, and the Test on the Classify canvas.
+- **Not asked is not no.** A follow-up that did not reach a document has no answer at all.
+  It does not count as a no, holds no score in Search's facets, sits in no review band, and
+  leaves nothing pending. A run counts it apart: per question as `not_asked`, and a
+  document that no question of the run reached as `not_asked` in the run's totals, with a
+  filter of its own.
+- **When a parent's answer moves, its follow-ups' answers go.** The scores are a fold over
+  `workspace/runs.jsonl` and `workspace/reviews.jsonl` together, per document, in the order
+  things happened: a run's results at the time the run started, a review at the time it
+  was recorded. After every step the fold drops the answers to every follow-up the chain no
+  longer reaches, recursively, with the latest verdicts so far standing for the parent. A
+  later run that moves the parent elsewhere, a person's verdict that does, an edit to
+  `when`, or a reworded parent that has no answer at its new version yet all remove the
+  follow-ups' answers from Search, the review queue and the evaluation. They are never
+  revived, whether a run or a person moves the parent back: the follow-up is owed again
+  and asked again, and only answers recorded after the latest change count. The ledgers
+  themselves are never edited.
+- **Saving checks the chain.** A `when` that names no answer of a question in the set, and
+  a chain that leads back to its own answers, are refused with the question's id.
+- **The estimate follows the chain too.** Before a run, a follow-up is priced for the share
+  of documents expected to reach it: its parent's share times the share of documents
+  scored on its tag that score 0.5 or more there today. That is exact for a yes, and a
+  floor under "landed on this option" for a choice, since an option can win below even
+  odds. A tag no document has an answer for yet counts as every document. Each group of
+  follow-ups sharing a `when` is priced as a request that sends the text again; two groups
+  that reach the same document at the same depth share one, so the estimate errs high.
 
 ### The junk gate
 
@@ -172,8 +220,9 @@ centinel questions                               # the saved set, versions, poli
 centinel questions --add-defaults                # append any shipped question the set lacks
 ```
 
-A document is **pending** when it is included and has no answer for some saved question
-at that question's current version. That is the work list, and it is a subtraction like
+A document is **pending** when it is included and has no answer for some saved root at
+that question's current version, or for a follow-up its answers reach. A follow-up its
+parent did not lead to is not owed. That is the work list, and it is a subtraction like
 every other stage's: a run that stops leaves the rest for the next one, rewording a
 question queues every document for that question alone, and a document the gate excluded
 is not sent again to be tagged.
@@ -256,8 +305,12 @@ Reviewed documents are the regression set for every later run.
 ```
 centinel web                    # serves http://127.0.0.1:8787/web and opens the browser
 centinel web --bind 127.0.0.1:9000
-centinel web --rebuild          # rebuilds the page with Vite from this checkout, then opens
+centinel web --rebuild          # rebuilds the Start SPA shell from this checkout, then opens
+centinel web --server https://box.tailnet.ts.net   # this page, another machine's corpus
 ```
+
+`--server` serves this binary's page on loopback and forwards the API to that server, so
+no local store is opened and the remote needs no CORS. Both must be the same release.
 
 `centinel web` reuses a server already on the port only when it is the same build of
 the same version on the same corpus root. A server left running from before a
@@ -267,37 +320,95 @@ by another process, so a rebuild running beside a live server slows a page inste
 failing it.
 
 `--rebuild` runs `npm run build` in the source checkout this binary was compiled in,
-streams the Vite output, checks the version stamp, and serves the rebuilt page for this
+streams the Start build output, checks the version stamp, and serves the rebuilt page for this
 process instead of the embedded one. It is the way to see a page change without a
 `cargo build`. It refuses to hand the browser to a server already on the port, because
 that server would show its own page. A release download has no checkout, so there the
 flag reports that and stops. The index is never touched; `centinel index --rebuild` is
 the command for that.
 
-A Vite React workspace is built into one HTML file and embedded in the binary. The
-installed program ships no asset directory and needs no Node runtime. A source build
-uses Node 20.19 or newer to make that embedded file; `cargo build` relays the Vite
+The React workspace uses TanStack Start in SPA mode with file-based routes under
+`web/src/routes/`, Tailwind v4, and stock neutral shadcn/ui components. Start generates
+a static shell at build time; `web/build-shell.mjs` copies it and its hashed CSS and
+JavaScript into `web-dist/`. There is no SSR server at runtime.
+
+`web-dist/` is embedded in the binary: the shell is served at `/web` and every path under
+it, the assets at `/web/assets/`. The installed program ships no asset directory and
+needs no Node runtime. A source build uses Node 22.12 or newer to make those files; `cargo build` relays the Start build
 output as `web:` warnings so the bundle step is visible.
 
 The page is stamped with the Centinel version it was built for. `build.rs` refuses a
 bundle whose stamp differs from the crate version, and `centinel web` checks the stamp
 before it probes a port, rebuilds an index, or opens a browser. A release download
 cannot rebuild the bundle, so there the check can only report a mismatch. The page shows
-its version in the rail and warns when the server it reached reports another one, which
+its version in the sidebar and warns when the server it reached reports another one, which
 is what a `centinel web` left running from an older build looks like.
 
 While a run scores, the page shows it live: progress by decision, the documents out to
 Jev with how long each has waited and which request it is on, and the latest answers as
 they land. When scoring stops, the same panel gives the counts by decision and the
-commit. The rail marks a running run from every page.
+commit. The sidebar marks a running run from every page.
 
-The workspace has three views:
+### Jobs, live
 
-- **Corpus** pages through the index without loading it into browser memory. Full-text,
-  address, Source, usage, and classifier filters can be combined. The reader resolves
-  the exact Source, Resource, and derived text identity, including shared text.
-- **Classifiers** edits atomic Jev questions and their policy thresholds. A trial sends
-  the Corpus filter and a count; the server resolves the top matches in one query and
+Every long-running op the server process runs is a job: a scheduled `run` under
+`centinel serve`, and a classifier run started from the page (its job id is the run's id).
+The sidebar's **Working now** lists each active job with what it is doing (`Collecting
+tampa.gov`, `Embedding`), its count through the current stage, and the item in hand;
+clicking one opens its log: every page fetched, document read or document scored, on
+the server's clock, failures in their own colour. Nothing polls for this. The page holds
+one stream open and folds its events into the cache.
+
+| Route | Answers |
+|---|---|
+| `GET /workspace/jobs` | `{ "jobs": [JobState] }`: active jobs in the order they started, then the last twenty finished, newest first |
+| `GET /workspace/jobs/events` | Server-Sent Events: one `snapshot` event (the same body), then a `job` event per change. `?job=<id>` narrows both to one job |
+
+A `job` event carries `seq` (grows by one per event across every job), `at`
+(milliseconds since the epoch, server clock), `job` (the id, which is the topic), and a
+`type`:
+
+| `type` | Fields | From |
+|---|---|---|
+| `started` | `kind` (the op, or `classify`), `label` | the job starting |
+| `step` | `step`, e.g. `tampa.gov · collect` | `run` entering a stage |
+| `progress` | `message`, `done`, `total`, `current` (the item in hand) | a stage's count |
+| `item` | `item`: `address`, `tag`, `verdict` (`ok`, `warn`, `missing`, `fail`), `bytes`, `millis`, `detail` | one finished page or document |
+| `note` | `message` | a log line |
+| `finished` | `outcome` (`ok`, `failed`, `cancelled`), `error` | the job ending |
+
+A `JobState` is those events folded: `step`, `done`, `total`, `current`, `ok` and
+`failed` item counts, `outcome`, and `log`, the last two hundred events other than
+`progress`. A client that falls behind the stream is sent a fresh `snapshot`; any event
+whose `seq` is not above its job's `seq` is already in it. Jobs live in the server's
+memory: a restart empties the list, and a `centinel run` typed in another terminal is
+another process and does not appear.
+
+The workspace has six views, in a sidebar grouped Archive, Classifiers, and Agent:
+
+- **Search** opens on one question box with the corpus at a glance, and lists nothing
+  until something is asked. It pages through the index without loading it into browser
+  memory. Full-text,
+  address, any number of Sources, usage, and a classifier score range can be combined.
+  Each filter shows what it would find: documents per Source, per usage, and each
+  classifier's scores by tenth, every count taken with the other filters but not its own. The reader
+  resolves the exact Source, Resource, and derived text identity, including shared text.
+  It shows the document as collected beside its extracted text: a PDF in the browser's
+  viewer, a CSV as a table, HTML as the page and as its source. `GET
+  /workspace/original` serves those bytes, and Download saves them. Collected HTML is
+  served with a sandbox policy, so a page never runs on the workspace's origin.
+- **Classify** draws one chain at a time on a canvas you can pan and zoom: a source
+  question on top, its answers along its foot, and each follow-up below the answer it
+  is asked after. Deleting a question moves its follow-ups up to the answer it followed. A question's
+  `when` names that answer as a tag (`page_kind:record`, or `spending` for a noul's yes);
+  it is policy, so changing it makes no new version. Runs follow the tree: a checked
+  follow-up is asked only of the documents whose answer leads to it (see
+  [Follow-ups](#follow-ups-the-question-chain)). Test sends one document through as a
+  preview, asks only the questions on its path, and lights the answers Jev gave. The
+  run card and the results show documents nothing reached as **not asked**, and a
+  question a document was not asked as not asked rather than a score. The page edits atomic
+  Jev questions and their policy thresholds. A trial sends
+  the Search filter and a count; the server resolves the top matches in one query and
   stores the exact identities with the run, so the browser never pages the corpus back
   and forth. The start request is answered at once with the run as started. Scoring
   continues on the server with a bounded number of documents in flight to Jev at a time
@@ -322,11 +433,16 @@ The workspace has three views:
   date, settings, tokens, duration, throughput, errors, and cost when a rate is known.
   The paged list returns small summaries. One run detail returns its exact evaluated
   questions, the current effective policy, a fresh commit preview, the counts of excluded,
-  review, kept, tagged, and failed documents, and one page of results. The server filters
+  review, kept, tagged, not asked, and failed documents, and one page of results. The server filters
   and sorts the results, so a run over the whole corpus never goes to the browser at once.
   A repeat names the run it repeats, and the server copies its inputs.
   An exact selection can be repeated for a comparable benchmark. A run with durable
   progress but no completion record is shown as interrupted after a server restart.
+- **Review** puts one document beside every answer Jev gave it, for a person's verdict.
+- **Connect** shows how to add Centinel's MCP server to an agent over HTTP, and lists
+  the tools the registry offers it. The address is `CENTINEL_PUBLIC_URL` when the server
+  sits behind another address, and the page's own host otherwise. **Skills** shows `npx skills add bennyhodl/centinel` and what
+  each skill in `contrib/skills/` does.
 
 Run and Commit are separate operations. A run stores scores and previews the documents,
 placements, characters, and unique chunks affected by its exclusion rules. Commit writes
@@ -340,8 +456,8 @@ projections. Deleting and rebuilding `centinel.db` replays durable usage decisio
 Corpus text leaves the machine only after the operator starts a run, and only for the
 selected documents. The server reads `TYPESAFE_API_KEY` from the process environment,
 then from `.env` in the working directory, then from `.env` in the corpus root; the key
-is never sent to the browser. It posts one complete document and all of the run's questions to
-`https://api.typesafe.ai/v1/systemone` per request.
+is never sent to the browser. It posts one complete document and the run's questions that
+reach it at one level of the chain to `https://api.typesafe.ai/v1/systemone` per request.
 
 ## The boundary that matters
 

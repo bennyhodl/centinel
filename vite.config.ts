@@ -1,6 +1,7 @@
 import { defineConfig, type ProxyOptions } from 'vite'
 import react from '@vitejs/plugin-react'
-import { viteSingleFile } from 'vite-plugin-singlefile'
+import { tanstackStart } from '@tanstack/react-start/plugin/vite'
+import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath, URL } from 'node:url'
 import { readFileSync } from 'node:fs'
 
@@ -18,11 +19,6 @@ function centinelVersion(): string {
 
 const version = centinelVersion()
 
-const versionMeta = () => ({
-  name: 'centinel-version-meta',
-  transformIndexHtml: (html: string) => html.replace('<head>', `<head>\n    <meta name="centinel-version" content="${version}" />`),
-})
-
 const apiProxy = (): ProxyOptions => ({
   target: 'http://127.0.0.1:8787',
   changeOrigin: true,
@@ -32,9 +28,8 @@ const apiProxy = (): ProxyOptions => ({
 })
 
 export default defineConfig({
-  plugins: [react(), viteSingleFile(), versionMeta()],
+  plugins: [tailwindcss(), tanstackStart({ srcDirectory: 'web/src', router: { basepath: '/web' }, spa: { enabled: true, prerender: { outputPath: '/index.html' } } }), react({ babel: { plugins: ['babel-plugin-react-compiler'] } })],
   define: { __CENTINEL_VERSION__: JSON.stringify(version) },
-  root: 'web',
   base: '/web/',
   resolve: {
     alias: { '@': fileURLToPath(new URL('./web/src', import.meta.url)) },
@@ -43,10 +38,12 @@ export default defineConfig({
     proxy: {
       '/workspace': apiProxy(),
       '/ops': apiProxy(),
+      '/mcp': apiProxy(),
     },
   },
+  environments: { client: { build: { cssCodeSplit: false, rollupOptions: { output: { inlineDynamicImports: true } } } } },
   build: {
-    outDir: '../web-dist',
+    outDir: '.start',
     emptyOutDir: true,
     assetsInlineLimit: 100_000_000
   },

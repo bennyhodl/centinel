@@ -499,7 +499,7 @@ async fn dir_size(dir: &std::path::Path) -> anyhow::Result<u64> {
     Ok(total)
 }
 
-/// Binary units, matching what the CLI's progress bars render.
+/// Binary units, the way a download's size is read on every surface.
 fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;

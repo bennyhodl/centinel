@@ -2,6 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "src/bundle.rs"]
+mod bundle;
+
 fn main() {
     let crate_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = crate_dir.join("../..");
@@ -48,7 +51,7 @@ fn main() {
         ),
         None => panic!(
             "web-dist/index.html carries no centinel-version meta tag; \
-             vite.config.ts must stamp it"
+             the Start root route must stamp it"
         ),
     }
     warn(&format!(
@@ -56,25 +59,10 @@ fn main() {
         html.len()
     ));
 
-    let mut files = Vec::new();
-    visit(&dist, &mut files);
-    files.sort();
     let mut generated = String::from("pub static WEB_ASSETS: &[(&str, &str, &[u8])] = &[\n");
-    for file in files {
-        let relative = file
-            .strip_prefix(&dist)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        let route = if relative == "index.html" {
-            "/web".to_string()
-        } else {
-            format!("/{relative}")
-        };
+    for (route, mime, file) in bundle::files(&dist).unwrap() {
         generated.push_str(&format!(
-            "({route:?}, {:?}, include_bytes!({:?})),\n",
-            mime(&file),
-            file
+            "({route:?}, {mime:?}, include_bytes!({file:?})),\n"
         ));
     }
     generated.push_str("];\n");
@@ -117,7 +105,7 @@ fn warn(line: &str) {
     println!("cargo:warning=web: {line}");
 }
 
-/// The version `vite.config.ts` stamped into the page head.
+/// The version the Start root route stamped into the page head.
 fn stamped_version(html: &str) -> Option<String> {
     let start = html.find("name=\"centinel-version\"")?;
     let rest = &html[start..];
@@ -125,17 +113,6 @@ fn stamped_version(html: &str) -> Option<String> {
     let rest = &rest[content..];
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
-}
-
-fn visit(dir: &Path, files: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            visit(&path, files);
-        } else if path.is_file() {
-            files.push(path);
-        }
-    }
 }
 
 fn modified(path: &Path) -> Option<std::time::SystemTime> {
@@ -148,7 +125,7 @@ fn require_node(root: &Path) {
         .current_dir(root)
         .output()
         .unwrap_or_else(|error| {
-            panic!("could not start `node`: {error}. Install Node.js 20.19 or newer")
+            panic!("could not start `node`: {error}. Install Node.js 22.12 or newer")
         });
     let version = String::from_utf8_lossy(&output.stdout);
     let parts: Vec<u64> = version
@@ -157,24 +134,11 @@ fn require_node(root: &Path) {
         .split('.')
         .filter_map(|p| p.parse().ok())
         .collect();
-    let supported = matches!(parts.as_slice(), [20, minor, ..] if *minor >= 19)
-        || matches!(parts.as_slice(), [major, minor, ..] if *major >= 22 && (*major > 22 || *minor >= 12));
+    let supported = matches!(parts.as_slice(), [major, minor, ..] if *major >= 22 && (*major > 22 || *minor >= 12));
     if !output.status.success() || !supported {
         panic!(
-            "Centinel web requires Node.js 20.19+ or 22.12+ to build; found `{}`",
+            "Centinel web requires Node.js 22.12+ to build; found `{}`",
             version.trim()
         );
-    }
-}
-
-fn mime(path: &Path) -> &'static str {
-    match path.extension().and_then(|x| x.to_str()) {
-        Some("html") => "text/html; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("svg") => "image/svg+xml",
-        Some("png") => "image/png",
-        Some("woff2") => "font/woff2",
-        _ => "application/octet-stream",
     }
 }

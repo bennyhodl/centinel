@@ -83,7 +83,7 @@ jobs:
       # the installed program serves static bytes and has no Node runtime dependency.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - name: build web workspace
         run: |
