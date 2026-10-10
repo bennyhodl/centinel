@@ -235,7 +235,7 @@ impl Reranker {
         budget: usize,
         document: &str,
     ) -> anyhow::Result<Vec<LlamaToken>> {
-        let mut body = self.tokenize(&neutralize(document))?;
+        let mut body = self.tokenize(&neutralize(&crate::embed::without_nul(document)))?;
         if body.len() > budget {
             tracing::debug!(
                 tokens = body.len(),
