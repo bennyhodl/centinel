@@ -131,7 +131,7 @@ function NavItem({ active, label, count, children }: { active: boolean; label: s
 function ThemeToggle() {
   const [theme, toggle] = useTheme()
   const label = theme === 'dark' ? 'Light mode' : 'Dark mode'
-  return <SidebarMenu>
+  return <SidebarMenu className="-mx-1">
     <SidebarMenuItem>
       <SidebarMenuButton onClick={toggle} tooltip={label} className="h-9 text-[14px] text-muted-foreground">
         {theme === 'dark' ? <Sun /> : <Moon />}<span>{label}</span>
