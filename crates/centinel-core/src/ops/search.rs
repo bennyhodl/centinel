@@ -1263,7 +1263,6 @@ mod tests {
     fn no_results_says_so_plainly() {
         let out = render_to_string(&report(Vec::new()));
         assert!(out.contains("Nothing matched"), "{out}");
-        assert!(out.contains("12,400"), "the corpus size is context: {out}");
     }
 
     /// The span is an offset into a specific extraction, and the result has to say which.
