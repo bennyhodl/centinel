@@ -44,7 +44,7 @@ function Shell() {
   const system = useQuery(queries.system())
   const corpus = useQuery(queries.corpus({}, 1, 1))
   const questions = useQuery(queries.questions())
-  const review = useQuery(queries.reviewQueue('', false, 1))
+  const review = useQuery(queries.reviewQueue(1))
   // The rail says when a run is going, from any page.
   const recent = useQuery({
     ...queries.runs(1, 10),

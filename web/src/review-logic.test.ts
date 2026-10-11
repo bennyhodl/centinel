@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { Question, ReviewCandidate } from './api'
-import { buildReview, gateOf, gateOption, modelAnswers } from './review-logic'
+import { buildReview, gateOf, gateOption, modelAnswers, swipe } from './review-logic'
 
 const gate: Question = {
   id: 'page_kind', kind: 'choice', version: 1, threshold: 0.9, review: 0.5, action: 'tag',
@@ -61,16 +61,39 @@ describe('swiping the gate', () => {
 })
 
 describe('the review line', () => {
-  it('carries every answer beside the model’s, trims the proposals, and names the document', () => {
+  it('carries every answer beside the model’s, and names the document', () => {
     const answers = { ...modelAnswers(questions, candidate), laws: false, page_kind: 'navigation' }
-    const review = buildReview(candidate, questions, answers, ' Ordinance Amendment , , fee schedule', '  menus around it ')
+    const review = buildReview(candidate, questions, answers)
     expect(review.source).toBe('city')
     expect(review.derived_sha).toBe(candidate.derived_sha)
     expect(review.verdicts.page_kind).toEqual({ model: 'record', human: 'navigation' })
     expect(review.verdicts.laws).toEqual({ model: 0.9, human: false })
     expect(review.verdicts.budget).toEqual({ model: 0.3, human: false })
     expect(review.verdicts.housing).toBeUndefined()
-    expect(review.proposed).toEqual(['Ordinance Amendment', 'fee schedule'])
-    expect(review.note).toBe('menus around it')
+  })
+})
+
+describe('junk without a gate', () => {
+  const shell: Question = { ...laws, id: 'navigation_shell', threshold: 0.9, action: 'exclude' }
+  const broken: Question = { ...shell, id: 'poor_extraction' }
+  const nouls = [shell, broken, laws]
+  const excluded: ReviewCandidate = {
+    ...candidate,
+    excluded: true,
+    classifications: { navigation_shell: 0.95, poor_extraction: 0.2, laws: 0.1 },
+    outcomes: { navigation_shell: { excluded: true, review: false }, poor_extraction: { excluded: false, review: false }, laws: { excluded: false, review: false } },
+  }
+  it('reads an exclude question’s yes from its score, so an untouched card keeps an excluded page out', () => {
+    const answers = modelAnswers(nouls, excluded)
+    expect(answers).toEqual({ navigation_shell: true, poor_extraction: false, laws: false })
+    expect(buildReview(excluded, nouls, answers).verdicts.navigation_shell).toEqual({ model: 0.95, human: true })
+  })
+  it('says yes to the exclude question the model leaned to most, and keep says no to all of them', () => {
+    const answers = { navigation_shell: false, poor_extraction: false, laws: true }
+    expect(swipe(nouls, excluded, answers, false)).toEqual({ navigation_shell: true, poor_extraction: false, laws: true })
+    expect(swipe(nouls, excluded, { ...answers, poor_extraction: true }, true)).toEqual({ navigation_shell: false, poor_extraction: false, laws: true })
+  })
+  it('has no junk call when nothing can exclude', () => {
+    expect(swipe([laws, budget], candidate, {}, false)).toBeUndefined()
   })
 })

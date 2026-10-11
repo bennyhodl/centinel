@@ -60,9 +60,9 @@ export const queries = {
     refetchInterval: 60_000,
   }),
 
-  reviewQueue: (source: string, includeReviewed: boolean, pageSize: number) => queryOptions({
-    queryKey: ['review-queue', source, includeReviewed, pageSize],
-    queryFn: () => api.reviewQueue({ source, page_size: pageSize, include_reviewed: includeReviewed }),
+  reviewQueue: (pageSize: number) => queryOptions({
+    queryKey: ['review-queue', pageSize],
+    queryFn: () => api.reviewQueue({ page_size: pageSize }),
     staleTime: Infinity,
   }),
 }

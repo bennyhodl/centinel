@@ -6,6 +6,7 @@
 @import "@fontsource/im-fell-english/latin-400-italic.css";
 @import "@fontsource/im-fell-english-sc/latin-400.css";
 @import "@fontsource/jetbrains-mono/latin-400.css";
+@import "@fontsource/newsreader/latin-400.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -153,6 +154,8 @@
     --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
     --font-serif: "IM Fell English", Georgia, serif;
     --font-display: "IM Fell English SC", "IM Fell English", Georgia, serif;
+    /* A document's own text, set to be read at length. */
+    --font-reading: "Newsreader", Georgia, serif;
     --font-mono: "JetBrains Mono", ui-monospace, monospace;
     --color-ground: var(--ground);
     --color-parchment: var(--parchment);

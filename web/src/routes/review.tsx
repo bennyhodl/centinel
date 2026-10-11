@@ -7,7 +7,7 @@ export const Route = createFileRoute('/review')({
     void queryClient.prefetchQuery(queries.evaluation())
     return Promise.all([
       queryClient.ensureQueryData(queries.questions()),
-      queryClient.ensureQueryData(queries.reviewQueue('', false, REVIEW_QUEUE)),
+      queryClient.ensureQueryData(queries.reviewQueue(REVIEW_QUEUE)),
     ])
   },
   pendingComponent: ReviewSkeleton,
