@@ -22,7 +22,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: 'color-scheme', content: 'light dark' },
       { name: 'centinel-version', content: __CENTINEL_VERSION__ },
     ],
-    links: [{ rel: 'stylesheet', href: styles }],
+    links: [{ rel: 'stylesheet', href: styles }, { rel: 'icon', type: 'image/jpeg', href: crest }],
   }),
   shellComponent: RootDocument,
   component: App,
@@ -44,7 +44,7 @@ function Shell() {
   const system = useQuery(queries.system())
   const corpus = useQuery(queries.corpus({}, 1, 1))
   const questions = useQuery(queries.questions())
-  const review = useQuery(queries.reviewQueue('', false, 1))
+  const review = useQuery(queries.reviewQueue(1))
   // The rail says when a run is going, from any page.
   const recent = useQuery({
     ...queries.runs(1, 10),

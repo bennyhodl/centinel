@@ -455,12 +455,8 @@ export const api = {
     body: JSON.stringify(identity),
   }),
   /** The review band first, then a random sample of decided documents. */
-  reviewQueue: (query: { source?: string; page_size?: number; include_reviewed?: boolean }) => {
-    const params = new URLSearchParams()
-    if (query.source) params.set('source', query.source)
-    if (query.page_size) params.set('page_size', String(query.page_size))
-    if (query.include_reviewed) params.set('include_reviewed', 'true')
-    const path = `/workspace/review/queue?${params}`
+  reviewQueue: (query: { page_size: number }) => {
+    const path = `/workspace/review/queue?${new URLSearchParams({ page_size: String(query.page_size) })}`
     return request<ReviewQueue>(path).then(value => withArray(value, 'documents', path))
   },
   /** Records a person's verdicts on one document, and acts on them at once. */
