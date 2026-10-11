@@ -22,7 +22,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: 'color-scheme', content: 'light dark' },
       { name: 'centinel-version', content: __CENTINEL_VERSION__ },
     ],
-    links: [{ rel: 'stylesheet', href: styles }],
+    links: [{ rel: 'stylesheet', href: styles }, { rel: 'icon', type: 'image/jpeg', href: crest }],
   }),
   shellComponent: RootDocument,
   component: App,
