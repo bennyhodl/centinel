@@ -26,6 +26,23 @@ embedder once and into the reranker freely.
 Q8_0 over Q4_K_M for the same reason: quantization here is amortised over hours of work
 rather than paid per query.
 
+### Remote, by choice
+
+The embedder is local unless you say otherwise. Set `embed_model` under `[defaults]` in the
+config to an `openrouter/…` id, such as `openrouter/qwen/qwen3-embedding-8b`, and the stage embeds through
+OpenRouter instead. That is a bigger model than most laptops run, at roughly a cent per
+million tokens, and it needs `OPENROUTER_API_KEY`.
+
+This is one of the two places text leaves the machine, and it is never silent. **Chunk text
+is sent to openrouter.ai**, the run says so before the first byte moves, and a search against
+that corpus embeds its query there too. Nothing else leaves: blobs, the log and the record
+stay put. The other place is a [classifier run](../use/classify.md).
+
+A remote id keys **its own vector table**. Even `openrouter/qwen/qwen3-embedding-4b`, which is
+the local default's weights, is a separate space, because quantization and serving differ.
+Switching between local and remote is a full re-embed, exactly like switching models. What the
+calls cost lands in [Spend](../use/spend.md), where a local model is priced as the cloud one.
+
 ## The recipe, and why it is written down
 
 Three things a generic embedding wrapper would get wrong, and **none of them errors**:

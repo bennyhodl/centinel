@@ -1,6 +1,7 @@
 # Your first corpus
 
-Ten minutes, one city, and a search that returns something.
+Ten minutes, one city, and a search that returns something. Collecting is the one part
+done from a terminal. Everything after it is in the [workspace](workspace.md).
 
 ## 1. Check the machine
 
@@ -64,24 +65,30 @@ truncated snapshot of a source's address set looks exactly like a source that sh
 that is a fact the archive must not record falsely. Fifty documents is enough to see
 whether the text coming out is the page's content or the page's navigation menu.
 
-Look at what came back:
+## 5. Look at it
 
 ```bash
-centinel status
-centinel list
-centinel search "budget"
+centinel web
 ```
 
-`status` counts what is stored, by source and content kind, and what it takes on disk — the
-fifty above should be fifty documents across `html` and `pdf`. A column you did not expect,
-or a size that is a hundred kilobytes when you asked for fifty PDFs, is worth a look before
-you collect ten thousand more of them.
-
-If the extracted text is a cookie banner and a menu, stop and read
+On **Search**, the opening line counts what is stored by kind, and the box below it takes
+words. Search for something you expect the city to have said, such as `budget`, and open a
+result. The reader shows the document as collected on one side and the extracted text on
+the other. If the text is a cookie banner and a menu, stop and read
 [Reading a document](../internals/extract.md). Collecting ten thousand copies of a
 navigation bar is the failure this project has spent the most time on.
 
-## 5. Commit to it
+The terminal tells the same story if you prefer it:
+
+```bash
+centinel status          # what is stored, by source and content kind, and its size
+centinel list            # each source, its resource counts and liveness
+```
+
+A column you did not expect, or a size that is a hundred kilobytes when you asked for fifty
+PDFs, is worth a look before you collect ten thousand more of them.
+
+## 6. Commit to it
 
 ```bash
 centinel run
@@ -92,23 +99,7 @@ Run it a second time on an unchanged corpus and it says `nothing new` in one lin
 
 `embed` is the one stage that takes real time — on a 400,000-chunk corpus, about a day,
 once. `centinel run --skip embed` stops before it, and `centinel embed` picks it up later.
-The corpus is keyword-searchable long before it is embedded.
-
-## 6. Ask it something
-
-```console
-$ centinel search "stormwater drainage fee"
-```
-
-Each result carries the passage, the address it came from, when it was observed, which
-tool derived the text, and a **handle** — the short hash of the original bytes.
-
-```bash
-centinel read 3f9a2c1          # the extracted text
-centinel open 3f9a2c1          # the original document, in an application
-```
-
-Both take the handle by prefix. See [Reading a result](../use/read.md).
+The corpus is keyword-searchable in the workspace long before it is embedded.
 
 ## 7. Keep it running
 
@@ -117,11 +108,18 @@ centinel schedule set agartha --cron "0 3 * * *"
 centinel serve
 ```
 
-`serve` runs the HTTP and MCP surfaces and fires the configured schedules. Or skip the
-scheduler entirely and put `centinel run` in cron — the incremental behaviour is the same
-either way, because it comes from the store rather than from the runner.
+`serve` fires the configured schedules and serves the workspace at `/web`, so a collection
+that starts on its own shows up under **Working now** in the sidebar, with a log you can
+follow. Or skip the scheduler and put `centinel run` in cron. The incremental behaviour is
+the same either way, because it comes from the store rather than from the runner.
+
+## 8. Sort the noise out
+
+A corpus holds a lot of navigation shells, calendars and staff directories. Once there is
+something to look at, **Classify** is where you decide what that is, and **Review** is
+where you check the answers. See [Classify](../use/classify.md).
 
 ---
 
-Next: [Searching](../use/search.md) — what to put in the query, and how to read what comes
-back.
+Next: [Operator](operator.md) takes the same steps one at a time with what each prints. To
+ask the corpus questions, go to [Searching](../use/search.md).

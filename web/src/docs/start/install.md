@@ -196,6 +196,11 @@ cargo install --path crates/centinel
 cargo install --path crates/centinel-whisper
 ```
 
+Building `centinel` from source also builds the workspace page that is embedded in it, so a
+source build needs **Node.js 22.12 or newer** on the machine. `cargo build` runs `npm ci`
+and the page build itself, and refuses to start without Node. A release download needs
+none of this, because the page is already inside the binary.
+
 Any GPU backend other than Metal is a `--features` flag on **each** of the two commands.
 Passing `--features cuda` to one and not the other leaves half the pipeline on the CPU.
 
@@ -227,4 +232,13 @@ centinel models pull    # weights for search and transcription
 Run `doctor` first and after every step. It names the fix beside each gap it finds. See
 [Models](../internals/models.md) for what `models pull` fetches and how much disk it wants.
 
-Next: [Operator](operator.md).
+Then open the workspace, which is how most of Centinel is used:
+
+```bash
+centinel web
+```
+
+It needs nothing beyond the binary. The page is embedded in it, with no asset directory and
+no Node runtime. Only a build from source needs Node 22.12 or newer, to make the page.
+
+Next: [The workspace](workspace.md), then [Your first corpus](first-corpus.md).

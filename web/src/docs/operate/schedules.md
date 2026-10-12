@@ -95,6 +95,10 @@ centinel history --run 8f3c         # one run, by id or unambiguous prefix — t
 
 `history` covers **manual runs too**, not only scheduled ones. It is a record of attempts.
 
+While a scheduled run is going, the workspace shows it under **Working now**, with its stage,
+its count and a live log, if the server that fires it is the one serving the page. `history`
+is what is left afterwards. See [The server](serve.md).
+
 One record per **attempt**, not per success. A crash leaves evidence: the record is
 written when the run starts, so a run that died is a row that never completed rather than
 a gap you have to infer.

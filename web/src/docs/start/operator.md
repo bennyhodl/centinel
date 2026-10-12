@@ -14,6 +14,10 @@ centinel list                                  # see what came back
 Nothing between those lines is hidden. Every stage prints what it did, and every stage can
 be run on its own.
 
+Collecting is the part of Centinel done at a terminal, on purpose: what gets collected should
+not depend on whoever happens to have a page open. Everything that comes after it, searching,
+reading, classifying and reviewing, is in the [workspace](workspace.md).
+
 This page is the walk-through. The *Operate it* part takes the same five steps one at a
 time and goes deeper into each.
 
@@ -297,6 +301,7 @@ from the store and not from the runner. See [Schedules](../operate/schedules.md)
   centinel.db     derived   SQLite metadata + FTS5   — the keyword arm
   chunks.lance/   derived   LanceDB chunk vectors    — the semantic arm
   workspace/      TRUTH     classifier questions, answers, reviews, overrides
+  spend/          TRUTH     every model call and what it cost
 ```
 
 Only `blobs/` and `log/` are evidence; `workspace/` is what you and the classifiers decided
@@ -307,5 +312,5 @@ See [The store](../internals/store.md) and [The record](../internals/record.md).
 
 ---
 
-Next: [User](user.md) — how somebody asks this corpus a question, from
-an agent, without touching any of the above.
+Next: [Searching](../use/search.md) — how somebody asks this corpus a question, from the
+workspace or from an agent, without touching any of the above.

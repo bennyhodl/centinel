@@ -28,12 +28,26 @@ Each is what `run` does for you, available on its own.
 | `embed` | Embed indexed chunks into the vector table. |
 | `ingest` | Fetch one or more URLs into the content-addressed store. |
 
+## Classifiers
+
+Everything here is also in the [workspace](../start/workspace.md), where it is the Classify,
+Runs and Review pages. `classify` is listed with the stages by `centinel --help`, but `run`
+never calls it: text leaves the machine only when a person starts a classifier run. See
+[Classify](../use/classify.md).
+
+| Command | What it does |
+|---|---|
+| `classify` | Score indexed documents with Jev: exclude junk, tag the rest. *(operator)* |
+| `questions` | List the saved classifier questions, or restore the shipped defaults among them. *(operator)* |
+| `evaluate` | Compare the classifier's answers with the review verdicts, per question. |
+
 ## Corpus
 
 | Command | What it does |
 |---|---|
 | `search` | Search the corpus for a passage. |
 | `read` | Read the extracted text of a collected document. |
+| `download` | Download a collected document's bytes, base64-encoded, for saving elsewhere. |
 | `open` | Open a collected document in an application. *(host)* |
 | `status` | Count what is stored, by source and content kind, and what it occupies on disk. |
 | `list` | List every source — configured or collected — with resource counts and liveness. |
@@ -59,10 +73,14 @@ Each is what `run` does for you, available on its own.
 | `serve` | Run the HTTP server (ops as routes, plus MCP over HTTP). Default bind `127.0.0.1:8787`. |
 | `serve start` / `stop` / `restart` / `status` | Run `serve` as a service of your login. See [The server](../operate/serve.md). |
 | `mcp` | Run an MCP server over stdio. |
-| `web` | Open the corpus workspace in a browser; `--server URL` opens it against another machine. |
+| `web` | Open the corpus workspace in a browser. Never starts the scheduler. See [The workspace](../start/workspace.md). |
 
 `serve --no-schedule` serves the read API without firing any `[[schedule]]`.
 `serve --tailscale` also serves it on this machine's tailnet over HTTPS.
+
+`web` takes `--bind ADDR` (default `127.0.0.1:8787`), and `--server URL` to open this
+binary's page against another machine's corpus. A source build also has `--rebuild`, which
+rebuilds the page from the checkout and serves that instead of the one embedded in the binary.
 
 ## Global flags
 
@@ -86,6 +104,9 @@ centinel embed --dry-run
 centinel embed --limit 100
 centinel embed --batch 64
 centinel search "budget" --source agartha -n 20 --snippet-chars 0
+centinel search "permits" --tag record_type:minutes --not-tag record_type:data_table
+centinel classify --dry-run
+centinel classify --source agartha --question page_kind
 centinel schedules --check
 centinel history --failed --since 2026-08-01T00:00:00Z
 centinel history --run 8f3c

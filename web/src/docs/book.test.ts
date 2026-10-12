@@ -3,12 +3,18 @@ import { assetUrl, pageAt, pages, parseSummary, parts, resolveLink, sourceOf } f
 
 describe('the book summary', () => {
   it('keeps the order and groups of SUMMARY.md', () => {
-    expect(parts.map(part => part.title)).toEqual([null, 'Usage', 'Operate it', 'How it works', 'Reference', null])
+    expect(parts.map(part => part.title)).toEqual([null, 'Start', 'Use it', 'Operate it', 'How it works', 'Reference', null])
     expect(pageAt('start/install')?.title).toBe('Install')
   })
 
   it('names the front page with the empty slug', () => {
     expect(parseSummary('# Summary\n\n[Centinel](README.md)\n')).toEqual([{ title: null, pages: [{ title: 'Centinel', path: 'README.md', slug: '' }] }])
+  })
+
+  it('lists every page in the folder, so none is written and never shown', () => {
+    const written = Object.keys(import.meta.glob('./**/*.md', { query: '?raw' })).map(path => path.slice('./'.length))
+    const unlisted = written.filter(path => path !== 'SUMMARY.md' && !pages.some(page => page.path === path))
+    expect(unlisted).toEqual([])
   })
 
   it('has source text for every page it lists, so no sidebar entry opens an empty page', () => {

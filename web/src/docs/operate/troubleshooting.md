@@ -39,6 +39,12 @@ its own coverage:
 3. **Indexed?** `centinel embed --dry-run` — `chunks indexed`.
 4. **Embedded?** The same report — `already embedded` and `remaining`, beside it.
 
+A fifth is easy to forget, and it is the only one a person can cause:
+
+5. **Excluded?** A classifier, or a person in Review, may have taken the document out of
+   search. In the workspace, set **Usage** to **Excluded** to see what is out, and open one
+   to **Restore usage**. Raising a question's threshold also brings documents back.
+
 Step 4 is the one people miss. RRF weights by rank alone, so a corpus with 2,309 vectors
 out of 397,830 chunks does not degrade gently — it promotes confident results from a tiny
 pool and looks identical to a complete one. The search report does not print that share
@@ -134,6 +140,41 @@ the failure. Run `verify` once more after the embed if you have any doubt.
 the exact version it audited, so if an `embed` compacted the table between the audit and
 the repair the repair is refused and you run it again — it will never drop a fragment it
 did not read.
+
+## The workspace will not open, or is out of step
+
+**"Server is v… This page is v…"** at the top of the page. The page and the server are from
+different releases, which is what a `centinel web` or `centinel serve` left running from an
+older build looks like. Stop it and start it again, then reload. `centinel web` refuses to
+reuse a server that is another build, another version or another corpus, and names which.
+
+**The address is already in use.** Something else holds `127.0.0.1:8787`. If it is a
+compatible Centinel on the same corpus, `centinel web` opens it. If it is not, it says so and
+opens nothing. `--bind` picks another address.
+
+**Search is slow.** A search over the whole archive can take most of a minute on a large
+corpus, and the page counts the seconds. Narrow it with **Sources** or **Address**. The
+passage search from a terminal or an agent is a different query, with its own timings, in
+[Searching](../use/search.md).
+
+## A classifier run stopped
+
+A run reads **Stopped** with Jev's own words when Jev answers `401`, `402` or `403`. Those are
+facts about the account and not the document, so nothing more is sent, and everything already
+answered stays.
+
+| Jev said | Fix |
+|---|---|
+| `401` | No key, or the wrong one. The server reads `TYPESAFE_API_KEY` from its environment, then from `.env` in its working directory, then from `.env` in the corpus root. A server started as a service takes the key from the shell that ran `serve start`, so run `start` again after changing it. |
+| `402` | The account is out of credit. |
+| `403` | The key does not have permission. |
+
+Then open the run in [Runs](../use/runs.md) and press **Continue**. It asks only the
+documents no run in its chain has answered. A run **Interrupted** by a server restart is
+carried on the same way.
+
+**Classify is disabled in the reader.** It asks the saved questions, so it waits until at
+least one is saved. Open **Classify** and press **Save tree**.
 
 ## Things that are safe to delete
 

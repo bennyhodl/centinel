@@ -156,6 +156,47 @@ prefix.
 **Original vs derived blob** — the bytes as served versus what an extraction or a
 transcription produced from them. Both addressable; only the first is an Observation.
 
+## The workspace
+
+**Workspace** — the web page `centinel web` and `centinel serve` serve at `/web`, and the
+`workspace/` directory of the store that holds what it records. The page reads the corpus
+and records decisions about it. It never collects and never writes the archive.
+
+**Usage** — whether a document is **included** in search, or **excluded**. A decision about
+the corpus, never about the archive: the bytes and the log are the same either way. Not to
+be confused with *spend*, which is what a model call costs.
+
+**Question** — one thing a model is asked about each document. A **yes-or-no** question
+(a *noul*) answers with one probability. A **choice** answers with one probability per option.
+
+**Meaning vs policy** — a question's wording, kind and options are its *meaning*; changing
+them makes a new version that is asked again. Its threshold, review floor and actions are its
+*policy*; changing them re-decides stored scores and sends nothing to the model.
+
+**Action** — what an answer does once it clears its threshold: **exclude** the document from
+search, **tag** it, or **keep** it, which only scores.
+
+**Tag** — an answer put on a document so search can filter on it, spelled as a yes-or-no
+question's id or `choice:option`. Marked as the model's or as a person's.
+
+**Review band** — scores from a question's review floor up to its threshold. Held for a
+person, neither kept nor excluded.
+
+**Follow-up** — a question asked only of documents another question's answer placed under a
+tag, through its `when`. A document it was not asked has no answer, which is not a no.
+
+**Override** — a person's word on a document, from a review or a restore. It stands through
+every later run and threshold change until a person says otherwise.
+
+**Run** — one classifier run: the questions it asked, the documents it covered, the model, and
+what it cost. A **preview** is a run that records nothing.
+
+**Job** — anything the server is doing that takes a while: a collection or a classifier run.
+Listed under *Working now*, in memory only.
+
+**Spend** — every model call, its tokens, and what it cost on the day it was made. Local
+models are priced as the cloud model with the same weights.
+
 ## The run report
 
 **Tally** — the numbers one stage produced, folded across however many calls it took.

@@ -26,7 +26,7 @@ at the machine. Loopback-only is a placeholder standing in for a decision nobody
 
 **Where to start:** the reach model in `crates/centinel-core/src/op.rs`, and the HTTP and
 MCP surfaces that read it. See [Ops](internals/ops.md) and the reach table in
-[User](start/user.md).
+[Agents and programs](use/agents.md).
 
 **The constraint:** a scheme here is deliberately unspecified because inventing one would
 foreclose the decision. Two things it must not do — collapse the reach distinction into
@@ -432,8 +432,19 @@ cargo test --workspace --locked
 npm run dev                # the web workspace and these docs, rebuilt on every save
 ```
 
-Those first three are CI, exactly as written. Warnings are errors. These pages are the
-Markdown in `web/src/docs/`, bundled into the web app and served at `/web/docs`.
+Those first three are CI, exactly as written. Warnings are errors.
+
+**The workspace** is a TanStack Start app in `web/`, in single-page mode: file routes under
+`web/src/routes/`, Tailwind v4 and shadcn components. `npm run dev` serves it with hot reload
+and forwards `/workspace`, `/ops` and `/mcp` to a `centinel serve` on port 8787, so start one
+first. `npm run typecheck` and `npm test` check it. `npm run build` makes the page that
+`cargo build` embeds in the binary, and `centinel web --rebuild` serves a fresh build from the
+checkout without a `cargo build`. A source build needs Node.js 22.12 or newer.
+
+**These pages** are the Markdown in `web/src/docs/`, bundled into the page and served at
+`/web/docs`. `SUMMARY.md` there is the sidebar, so a page nobody lists is a page nobody sees,
+and the tests fail on one. They also fail on a link or an image that points nowhere.
+Raw HTML is escaped, so write a tag name like `<sitemapindex>` in backticks.
 
 **Releases decide themselves.** A green push to master runs `Release`, which reads the
 conventional commits, bumps the workspace version, writes the changelog with `git cliff`,

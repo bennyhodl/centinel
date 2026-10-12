@@ -3,13 +3,21 @@
 [Centinel](README.md)
 [Install](start/install.md)
 
-# Usage
+# Start
 
-- [Operator](start/operator.md)
-- [User](start/user.md)
+- [The workspace](start/workspace.md)
 - [Your first corpus](start/first-corpus.md)
+- [Operator](start/operator.md)
+
+# Use it
+
 - [Searching](use/search.md)
-- [Reading a result](use/read.md)
+- [Reading a document](use/read.md)
+- [Classify](use/classify.md)
+- [Runs](use/runs.md)
+- [Review](use/review.md)
+- [Spend](use/spend.md)
+- [Agents and programs](use/agents.md)
 
 # Operate it
 

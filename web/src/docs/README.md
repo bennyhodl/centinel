@@ -39,9 +39,9 @@ It is built on three principles drawn directly from Bryan's playbook.
 
 ---
 
-Centinel is a library, a CLI, a server, and an MCP endpoint. The agents come later and sit **on top** — they are clients of the record, never its author. What is collected does not depend on what any model happened to think that day.
+Centinel is a library, a CLI, a server, an MCP endpoint, and a web workspace where most people will use it. The agents come later and sit **on top** — they are clients of the record, never its author. What is collected does not depend on what any model happened to think that day.
 
-Everything runs locally. No document, no transcript, no page ever leaves the machine for a third-party API.
+Collecting, reading, indexing, embedding and searching all run on your machine, and nothing leaves it by default. There are two things you can choose that send text to a third party, and each says so before it does. Starting a classifier run sends the documents it covers to the model that answers it. Pointing the embedder at an `openrouter/…` model sends chunk text and search queries to OpenRouter. Collected bytes, the log and the record never leave.
 
 Bryan lost the immediate fight. Pennsylvania ratified the Constitution in December 1787. But the pressure he and his fellow dissenters generated forced the **Bill of Rights** into existence — protections the powerful had not wanted to grant.
 

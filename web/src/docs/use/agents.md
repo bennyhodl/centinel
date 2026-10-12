@@ -1,14 +1,31 @@
-# User
+# Agents and programs
 
-You did not collect this corpus. Somebody handed you a directory, or pointed you at a
-machine that serves one. Your job is to ask it questions and be able to check the answers.
+The [workspace](../start/workspace.md) is how a person uses a corpus. This page is how an
+agent or a program does, and a person reaches for it too when the passage search is the tool
+they want. There are two surfaces, and they are the same operations:
 
-You will not need the CLI. There are two surfaces, and they are the same six operations:
-
-- **MCP** — for an agent. Wire it into your client once and the corpus becomes six tools.
+- **MCP** — for an agent. Wire it into your client once and the corpus becomes nine tools.
 - **HTTP** — for a program. JSON in, JSON out, at `POST /ops/{name}`.
 
-Both are served by a process the host runs. Neither can change the corpus.
+Both are served by a process the host runs, and neither can change the corpus. An agent is a
+client of the record and never its author. What gets collected does not depend on what a
+model thought that day.
+
+## The quick way
+
+The workspace's **Connect** page shows the exact command for **Claude Code**, **Claude
+Desktop** and **Cursor**, with this server's address filled in and a copy button, and lists
+the tools it will give the client. The address is the one the server publishes:
+`CENTINEL_PUBLIC_URL` when it sits behind another address, its tailnet address under
+`serve --tailscale`, and the page's own host otherwise.
+
+The **Skills** page shows `npx skills add bennyhodl/centinel`, which installs the skills in
+`contrib/skills/`. A skill teaches an agent a whole job. Today there is one, **Sherlock**:
+name a city, county or region, and it finds the NGOs, grant makers, quasi-public bodies and
+contract vendors tied to its government that no page in the corpus links to, and writes them
+as tips for you to promote. Skills call Centinel through MCP, so connect first.
+
+The rest of this page is what those commands set up, and how to call it.
 
 ---
 
@@ -17,9 +34,12 @@ Both are served by a process the host runs. Neither can change the corpus.
 ```
 search      Search the corpus for a passage.
 read        Read the extracted text of a collected document.
+download    Download a collected document's bytes, base64-encoded, for saving elsewhere.
 list        List sources in the store with resource counts and liveness.
+status      Count what is stored, by source and content kind, and what it occupies on disk.
 history     Show what scheduled and manual runs did, newest first.
 schedules   Show configured schedules, when each next fires, and how the last one went.
+evaluate    Compare the classifier's answers with the review verdicts, per question.
 doctor      Report host readiness: required binaries, store location, corpus size.
 ```
 
@@ -28,9 +48,14 @@ That is the entire remote surface, and the omissions are the design. Every op de
 
 | Reach | HTTP | MCP | Ops |
 |---|:--:|:--:|---|
-| `Public` | ● | ● | `search`, `read`, `list`, `doctor`, `schedules`, `history` |
-| `Operator` | ✕ | ✕ | `run` and every stage, `ingest`, `source`, `schedule` |
-| `Host` | ✕ | ✕ | `open`, `models` |
+| `Public` | ● | ● | `search`, `read`, `download`, `list`, `status`, `history`, `schedules`, `evaluate`, `doctor` |
+| `Operator` | ✕ | ✕ | `run` and every stage, `ingest`, `source`, `schedule`, `classify`, `questions`, `investigate`, `crumbs`, `verify` |
+| `Host` | ✕ | ✕ | `open`, `check`, `models`, `update` |
+
+The workspace is a separate matter. Its page talks to `/workspace` routes beside the ops,
+and those are where the browser reads the corpus and records classifier decisions. They are
+not tools, and an agent does not get them. See [The server](../operate/serve.md) for who can
+reach them.
 
 `Operator` ops change the corpus, and letting a remote caller add a source is letting it
 choose the corpus one step earlier. Agents are clients of the record, never its author —
@@ -295,7 +320,7 @@ Give the agent the handle discipline and it will use it:
 > say so in your answer.*
 
 What no prompt can do is collect. If the answer is "nothing in the corpus matches", the fix
-is an operator adding a source — see [Operator](operator.md).
+is an operator adding a source — see [Operator](../start/operator.md).
 
 ---
 
@@ -360,10 +385,14 @@ That is why the JSON above is the same JSON everywhere: a surface can never be s
 field another surface would not return.
 
 One caveat specific to MCP: tool calls **wait and return once**. Base MCP has no streaming
-channel for tool results, so a long op holds the call open. Nothing in the public six is
+channel for tool results, so a long op holds the call open. Nothing in the public nine is
 slow enough to matter, but if a host ever exposes one, use the HTTP streaming route.
+
+The workspace is a fourth consumer. It reads the corpus through routes of its own, and it
+shares the library with the other three. [The workspace](../start/workspace.md) says what it
+can do.
 
 ---
 
-Next: [Your first corpus](first-corpus.md) if you now want your own, or
-[Searching](../use/search.md) for what to put in the query.
+Next: [Your first corpus](../start/first-corpus.md) if you now want your own, or
+[Searching](search.md) for what to put in the query.
