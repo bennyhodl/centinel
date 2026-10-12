@@ -68,7 +68,7 @@ the log, by source and content kind, and says what it occupies.
 
 ## `binaries` — and what a missing one costs
 
-Centinel shells out rather than running a second language runtime. A missing binary carries
+Corpus processing shells out to standalone tools. Serving the web app and remote MCP also requires Node.js 22.13+ for the managed TanStack Start authentication server. A missing binary carries
 a **need**, and the three are not the same:
 
 | Need | Meaning |

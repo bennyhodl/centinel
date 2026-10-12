@@ -1,9 +1,9 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { Search } from 'lucide-react'
-import { PageHeader, SectionRule } from '../ui'
-import { CopyBlock } from '../copy'
+import { PageHeader, SectionRule } from '../../ui'
+import { CopyBlock } from '../../copy'
 
-export const Route = createFileRoute('/skills')({ component: Skills })
+export const Route = createFileRoute('/_workspace/skills')({ component: Skills })
 
 /** The skills `npx skills add bennyhodl/centinel` installs. One entry per directory in contrib/skills. */
 const skills = [

@@ -8,8 +8,8 @@
 //!
 //! It is the same argument that made `open` host-local, one step weaker. `models pull`
 //! writes to a machine-local cache outside the store and can be made to pull gigabytes;
-//! over an HTTP server that (SPEC §8) has no authentication, that is an unauthenticated
-//! disk-and-bandwidth exhaustion primitive. The *useful* remote question — "are the
+//! exposing it remotely would let a caller exhaust disk and bandwidth, even after
+//! authentication. The *useful* remote question — "are the
 //! weights present?" — belongs in `doctor` beside the binary probes, which is where
 //! SPEC §3.2 puts weights conceptually. Nothing here is needed by a model.
 //!

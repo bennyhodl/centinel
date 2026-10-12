@@ -36,6 +36,11 @@ fn main() {
         run(&root, "npm", &["ci"], &version);
     }
     run(&root, "npm", &["run", "build"], &version);
+    fs::copy(
+        root.join(".start/centinel-server.mjs"),
+        PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("centinel-server.mjs"),
+    )
+    .expect("copying Start server bundle");
     let index = dist.join("index.html");
     if !index.is_file() {
         panic!(
@@ -125,7 +130,7 @@ fn require_node(root: &Path) {
         .current_dir(root)
         .output()
         .unwrap_or_else(|error| {
-            panic!("could not start `node`: {error}. Install Node.js 22.12 or newer")
+            panic!("could not start `node`: {error}. Install Node.js 22.13 or newer")
         });
     let version = String::from_utf8_lossy(&output.stdout);
     let parts: Vec<u64> = version
@@ -134,10 +139,10 @@ fn require_node(root: &Path) {
         .split('.')
         .filter_map(|p| p.parse().ok())
         .collect();
-    let supported = matches!(parts.as_slice(), [major, minor, ..] if *major >= 22 && (*major > 22 || *minor >= 12));
+    let supported = matches!(parts.as_slice(), [major, minor, ..] if *major >= 22 && (*major > 22 || *minor >= 13));
     if !output.status.success() || !supported {
         panic!(
-            "Centinel web requires Node.js 22.12+ to build; found `{}`",
+            "Centinel web requires Node.js 22.13+ to build; found `{}`",
             version.trim()
         );
     }

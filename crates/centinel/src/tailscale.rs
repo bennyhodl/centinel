@@ -93,10 +93,7 @@ pub async fn publish(local: SocketAddr, pinned: Option<u16>) -> Result<Published
         mcp = %format!("{origin}/mcp"),
         "published on the tailnet"
     );
-    tracing::warn!(
-        "every tailnet device your Tailscale policy lets reach this machine can read the corpus \
-         and record classifier reviews — centinel has no authentication of its own (SPEC §8)"
-    );
+    tracing::info!("tailnet callers must sign in and receive administrator approval");
     Ok(Published {
         origin,
         port,

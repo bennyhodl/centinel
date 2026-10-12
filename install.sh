@@ -270,7 +270,7 @@ why_for() {
         c++)      echo "a C++ compiler" ;;
         libclang) echo "bindgen reads llama.cpp's and whisper.cpp's headers with it" ;;
         protoc)   echo "six lance crates run prost-build, and none of them vendor it" ;;
-        node)     echo "builds the browser workspace that is embedded in centinel" ;;
+        node)     echo "builds and runs the authenticated TanStack Start web server" ;;
     esac
 }
 
@@ -640,11 +640,11 @@ check_build_tools() {
     node_version=$(node --version | sed 's/^v//')
     node_major=$(printf '%s' "$node_version" | cut -d. -f1)
     node_supported=0
-    if [ "$node_major" -ge 22 ] && { [ "$node_major" -gt 22 ] || version_ge "$node_version" "22.12.0"; }; then
+    if [ "$node_major" -ge 22 ] && { [ "$node_major" -gt 22 ] || version_ge "$node_version" "22.13.0"; }; then
         node_supported=1
     fi
     [ "$node_supported" = 1 ] || die "Node $node_version cannot build the Centinel
-      browser workspace. Install Node 22.12+, then re-run this."
+      browser workspace. Install Node 22.13+, then re-run this."
 
     check_disk
 }
@@ -911,6 +911,7 @@ if [ "$RUN_DOCTOR" = 1 ]; then
     say ""
 fi
 
+say "  Web and remote MCP serving requires Node.js 22.13+ on this host."
 say "  ${G}Next${N}"
 say "    centinel models pull    ${D}weights for search and transcription${N}"
 say "    centinel doctor         ${D}what is still missing, and the fix for each gap${N}"

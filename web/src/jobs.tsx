@@ -16,9 +16,10 @@ import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui
  * jobs re-renders as they move, with nothing polling. `EventSource` reconnects on its
  * own, and each reconnect opens on a fresh snapshot.
  */
-export function useJobEvents() {
+export function useJobEvents(enabled = true) {
   const client = useQueryClient()
   useEffect(() => {
+    if (!enabled) return
     const stream = new EventSource(jobEventsUrl)
     const key = queries.jobs().queryKey
     stream.addEventListener('snapshot', message => {
@@ -40,7 +41,7 @@ export function useJobEvents() {
       if (activeJobs(client.getQueryData(key) ?? []).some(job => job.kind === 'classify')) client.invalidateQueries({ queryKey: ['corpus'] })
     }, CORPUS_REFRESH_MS)
     return () => { stream.close(); clearInterval(refresh) }
-  }, [client])
+  }, [client, enabled])
 }
 
 /** How often the corpus is re-read while a classifier scores. */

@@ -341,11 +341,11 @@ the command for that.
 The React workspace uses TanStack Start in SPA mode with file-based routes under
 `web/src/routes/`, Tailwind v4, and stock neutral shadcn/ui components. Start generates
 a static shell at build time; `web/build-shell.mjs` copies it and its hashed CSS and
-JavaScript into `web-dist/`. There is no SSR server at runtime.
+JavaScript into `web-dist/`. A bundled TanStack Start server handles authentication and forwards protected API requests to Rust at runtime.
 
 `web-dist/` is embedded in the binary: the shell is served at `/web` and every path under
 it, the assets at `/web/assets/`. The installed program ships no asset directory and
-needs no Node runtime. A source build uses Node 22.12 or newer to make those files; `cargo build` relays the Start build
+requires Node 22.13 or newer to serve the application. The Start server bundle is embedded too; `cargo build` relays the Start build
 output as `web:` warnings so the bundle step is visible.
 
 The page is stamped with the Centinel version it was built for. `build.rs` refuses a

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useSearch } from '@tanstack/react-router'
+import { getRouteApi } from '@tanstack/react-router'
 import { Check, ListPlus, Play, Plus, Trash2, X } from 'lucide-react'
 import { Panel, ReactFlowProvider } from '@xyflow/react'
 import { chainOf, QuestionFlow, sourcesOf, type TreeQuestion } from './tree'
@@ -66,7 +66,7 @@ export function Classify() {
   // The one button: every indexed document in the corpus or one source, excluded ones too,
   // through the checked questions. The server resolves the scope as the run goes, so there
   // is no count to cap and nothing is paged back to the browser.
-  const preset = useSearch({ from: '/classifiers' })
+  const preset = getRouteApi('/_workspace/_admin/classifiers').useSearch()
   const [classifySource, setClassifySource] = useState(preset.source || '')
 
   useEffect(() => {

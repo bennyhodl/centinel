@@ -23,7 +23,7 @@ const apiProxy = (): ProxyOptions => ({
   target: 'http://127.0.0.1:8787',
   changeOrigin: true,
   configure(proxy) {
-    proxy.on('proxyReq', request => request.setHeader('Origin', 'http://127.0.0.1:8787'))
+    proxy.on('proxyReq', request => request.setHeader('Origin', process.env.CENTINEL_PUBLIC_URL || 'http://127.0.0.1:8787'))
   },
 })
 
@@ -36,6 +36,8 @@ export default defineConfig({
   },
   server: {
     proxy: {
+      '/api': apiProxy(),
+      '/.well-known': apiProxy(),
       '/workspace': apiProxy(),
       '/ops': apiProxy(),
       '/mcp': apiProxy(),

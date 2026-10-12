@@ -35,16 +35,8 @@
 //!
 //! ## Access control
 //!
-//! There is none, which is why the default bind is loopback. SPEC §8 lists server
-//! access control as unspecified, and inventing a scheme here would foreclose that
-//! decision. Binding to a non-loopback address logs a warning rather than silently
-//! exposing the store.
-//!
-//! `serve --tailscale` keeps the loopback bind and lets Tailscale proxy to it, so the
-//! tailnet's own policy decides who reaches the server. The address it publishes is the
-//! one non-loopback origin [`same_origin`] accepts for a write: a page loaded from the
-//! tailnet is the workspace, served by this process, and Tailscale passes the browser's
-//! `Host` through unchanged.
+//! TanStack Start authenticates public requests. The Rust listener is private and
+//! accepts only its per-launch credential; permissions are enforced here and in MCP.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -146,34 +138,19 @@ pub fn publish_at(origin: String) {
 
 /// Where an agent reaches this server when it is not the address a page was loaded from:
 /// `CENTINEL_PUBLIC_URL` when the operator set one, else the tailnet origin.
-fn public_url() -> Option<String> {
+pub fn public_url() -> Option<String> {
     std::env::var("CENTINEL_PUBLIC_URL")
         .ok()
         .filter(|url| !url.trim().is_empty())
         .or_else(|| PUBLISHED.get().cloned())
 }
 
-/// Binds `bind`, warning when the address is reachable off-host.
+/// Reserves the public bind address for the supervised Start server.
 pub async fn listen(bind: &str) -> Result<tokio::net::TcpListener> {
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
-    let addr = listener.local_addr()?;
-    if !addr.ip().is_loopback() {
-        tracing::warn!(
-            %addr,
-            "reachable off-host with no authentication — access control is unspecified (SPEC §8)"
-        );
-    }
     Ok(listener)
-}
-
-/// Serves until the process is asked to stop.
-///
-/// [`serve_until`] with a signal that never arrives — for a caller with nothing to wind
-/// down afterwards.
-pub async fn serve(ctx: Arc<Ctx>, bind: &str) -> Result<()> {
-    serve_until(ctx, listen(bind).await?, std::future::pending()).await
 }
 
 /// Serves until `shutdown` resolves, then stops accepting and returns.
@@ -193,32 +170,11 @@ pub async fn serve_until(
     listener: tokio::net::TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    let store = ctx.store.root().display().to_string();
-    let app = router(ctx);
-    let addr = listener.local_addr()?;
-
-    // The first lines of the log, and what they are for: an operator can tell, before
-    // sending a single request, which store this is, what it answers, and whether the
-    // log they are watching is on at all.
-    tracing::info!(url = %format!("http://{addr}"), store = %store, "listening");
-    tracing::info!(
-        ops = op::remote_ops().len(),
-        tools = op::mcp_tools().len(),
-        web = web_version().as_deref().unwrap_or("absent"),
-        "serving /ops, /ops/{{name}}[/stream], /mcp and /web"
-    );
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
-
-    tracing::info!("http server stopped");
-    Ok(())
+    crate::gateway::serve(ctx, listener, shutdown).await
 }
 
 /// The workspace page and its assets — everything the browser loads before it calls the
-/// API. Shared with `centinel web --server`, which serves this page and forwards the
-/// rest.
+/// API. Start forwards asset requests here over the authenticated private connection.
 pub fn page_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
         .route("/web", get(web_ui))
@@ -227,7 +183,7 @@ pub fn page_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
         .route("/web/assets/{*path}", get(web_asset))
 }
 
-fn router(ctx: Arc<Ctx>) -> Router {
+pub(crate) fn router(ctx: Arc<Ctx>) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .merge(page_routes())
@@ -767,9 +723,10 @@ fn forbidden_origin() -> Response {
 
 /// The registry as JSON — the same information the CLI turns into help text and MCP
 /// turns into a tool list.
-async fn list_ops() -> Json<Value> {
+async fn list_ops(axum::Extension(role): axum::Extension<crate::access::Role>) -> Json<Value> {
     let ops: Vec<Value> = op::remote_ops()
         .into_iter()
+        .filter(|def| role.allows_op(def.name))
         .map(|def| {
             json!({
                 "name": def.name,
@@ -787,8 +744,12 @@ async fn list_ops() -> Json<Value> {
 async fn invoke(
     State(ctx): State<Arc<Ctx>>,
     Path(name): Path<String>,
+    axum::Extension(role): axum::Extension<crate::access::Role>,
     body: Option<Json<Value>>,
 ) -> Response {
+    if !role.allows_op(&name) {
+        return crate::access::forbidden();
+    }
     let Some(def) = remote_op(&name) else {
         return not_found(&name);
     };
@@ -808,8 +769,12 @@ async fn invoke(
 async fn invoke_streaming(
     State(ctx): State<Arc<Ctx>>,
     Path(name): Path<String>,
+    axum::Extension(role): axum::Extension<crate::access::Role>,
     body: Option<Json<Value>>,
 ) -> Response {
+    if !role.allows_op(&name) {
+        return crate::access::forbidden();
+    }
     let Some(def) = remote_op(&name) else {
         return not_found(&name);
     };
@@ -849,10 +814,14 @@ async fn invoke_streaming(
 }
 
 /// MCP over HTTP, delegating to the same handler stdio uses.
-async fn mcp_over_http(State(ctx): State<Arc<Ctx>>, Json(req): Json<Value>) -> Response {
+async fn mcp_over_http(
+    State(ctx): State<Arc<Ctx>>,
+    axum::Extension(role): axum::Extension<crate::access::Role>,
+    Json(req): Json<Value>,
+) -> Response {
     // The dispatch itself logs the method; this only records which transport it arrived on.
     tracing::debug!("mcp over http");
-    match crate::mcp::handle(&ctx, req).await {
+    match crate::mcp::handle_as(&ctx, req, role).await {
         Some(resp) => Json(resp).into_response(),
         // A notification: accepted, nothing to say.
         None => StatusCode::ACCEPTED.into_response(),
@@ -863,7 +832,7 @@ async fn mcp_over_http(State(ctx): State<Arc<Ctx>>, Json(req): Json<Value>) -> R
 ///
 /// Two kinds are refused here and they fail for different reasons. A `Host` op acts on
 /// the machine it runs on — launching a GUI, running a configured command — and remotely
-/// that is command execution against a server with no authentication. An `Operator` op
+/// those operations belong to the local operator, even after authentication. An `Operator` op
 /// *causes collection*, and this server may report on the record but never grow it: the
 /// authority to start a crawl comes from the operator's config file, not from a request.
 ///
@@ -907,7 +876,10 @@ mod tests {
     async fn app() -> (tempfile::TempDir, Router) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
-        (dir, router(Arc::new(Ctx::new(store))))
+        (
+            dir,
+            router(Arc::new(Ctx::new(store))).layer(axum::Extension(crate::access::Role::Admin)),
+        )
     }
 
     async fn body_json(resp: Response) -> Value {
@@ -934,7 +906,7 @@ mod tests {
 
     /// `Host` ops act on the machine they run on: `open` launches a configured command,
     /// `models` pulls gigabytes into a local cache. Over HTTP — which has no
-    /// authentication — those are remote command execution and remote disk exhaustion.
+    /// local operator authority — those are remote command execution and remote disk exhaustion.
     /// `Operator` ops *cause collection*, which over the same surface is an unbounded
     /// crawl against a city's web server, attributed to whoever runs this store.
     ///
@@ -1149,7 +1121,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         Ledger::new(&store).record(Spend::new(Stage::Classify, "jev-1.13.0", 1_000, 0));
-        let app = router(Arc::new(Ctx::new(store)));
+        let app =
+            router(Arc::new(Ctx::new(store))).layer(axum::Extension(crate::access::Role::Admin));
 
         let resp = app
             .clone()
@@ -1245,7 +1218,7 @@ mod tests {
     async fn the_job_stream_opens_on_the_job_asked_for_as_it_stands() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Arc::new(Ctx::new(Store::open(dir.path()).await.unwrap()));
-        let app = router(Arc::clone(&ctx));
+        let app = router(Arc::clone(&ctx)).layer(axum::Extension(crate::access::Role::Admin));
         let wanted = ctx.jobs.start("run", "schedule");
         let _other = ctx.jobs.start("embed", "schedule");
         wanted.watch(Progress::none()).step_on(

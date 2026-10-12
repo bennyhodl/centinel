@@ -2,7 +2,7 @@
 //!
 //! The service manager the OS already has does the supervising: a launchd agent on macOS,
 //! a systemd user unit on Linux. The unit runs this binary's own `serve`, so it is the
-//! same process `centinel serve` is in a terminal — no second daemon (SPEC §2.3) — and
+//! same supervisor `centinel serve` runs in a terminal, including its Start child, and
 //! everything that process does on the way out (the scheduler's `interrupted` record,
 //! taking its tailnet mapping down) happens on `stop` too, because both managers stop a
 //! service with `SIGTERM`.

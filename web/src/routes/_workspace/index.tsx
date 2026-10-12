@@ -1,21 +1,22 @@
 import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link, createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
+import { Link, createFileRoute, type SearchSchemaInput } from '@tanstack/react-router'
 import { ArrowUp, ChevronDown, ChevronLeft, ChevronRight, X } from 'lucide-react'
-import type { CorpusFacets, CorpusFilters, Document, Question } from '../api'
-import { classifierOptions } from '../classify'
-import { Candle, useElapsed, useShownInPlace } from '../feedback'
-import { characters, compact, number, tail } from '../format'
-import { classificationBadges, hasScores } from '../policy'
-import { queries } from '../queries'
-import { DocumentLink, documentTransition, Empty, ErrorBox, shortSha } from '../ui'
+import type { CorpusFacets, CorpusFilters, Document, Question } from '../../api'
+import { classifierOptions } from '../../classify'
+import { Candle, useElapsed, useShownInPlace } from '../../feedback'
+import { characters, compact, number, tail } from '../../format'
+import { classificationBadges, hasScores } from '../../policy'
+import { queries } from '../../queries'
+import { DocumentLink, documentTransition, Empty, ErrorBox, shortSha } from '../../ui'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Skeleton } from '@/components/ui/skeleton'
 
-export const Route = createFileRoute('/')({
-  validateSearch: (search: Record<string, unknown>) => ({
+export const Route = createFileRoute('/_workspace/')({
+  // Every param has a default, so a link may name none of them.
+  validateSearch: (search: Record<string, unknown> & SearchSchemaInput) => ({
     text: String(search.text || ''), address: String(search.address || ''),
     page: Math.max(1, Number(search.page || 1)), source: String(search.source || ''),
     usage: String(search.usage || 'all'), classifier: String(search.classifier || ''),
@@ -55,8 +56,8 @@ const tone = {
 type Tone = keyof typeof tone
 
 function SearchPage() {
-  const search = useSearch({ from: '/' })
-  const navigate = useNavigate({ from: '/' })
+  const search = Route.useSearch()
+  const navigate = Route.useNavigate()
   const set: Set = next => navigate({ search: previous => ({ ...previous, ...next }) })
   const open = asking(search)
   const query = useQuery(open ? queries.corpus(filtersOf(search), search.page) : everything)

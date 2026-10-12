@@ -206,7 +206,7 @@ Passing `--features cuda` to one and not the other leaves half the pipeline on t
 
 ## External tools
 
-Centinel shells out rather than running a second language runtime.
+Corpus processing shells out to standalone tools. Serving the web app and remote MCP also requires Node.js 22.13+ for the managed TanStack Start authentication server.
 
 | Binary | Needed for | Required |
 |---|---|---|

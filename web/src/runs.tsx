@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useNavigate, useSearch } from '@tanstack/react-router'
+import { getRouteApi } from '@tanstack/react-router'
 import { ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react'
 import { api, type ResultOutcome, type Run, type RunDetailQuery, type RunSummary } from './api'
 import { queries } from './queries'
@@ -12,11 +12,13 @@ import { again, asked, continuable, LiveRun, useRunDetail } from './live'
 import { ResultsSection } from './results'
 import { DocumentLink, Empty, ErrorBox, PageHeader, Spinner } from './ui'
 
+const route = getRouteApi('/_workspace/_admin/runs')
+
 export const startView = (outcome: string): RunDetailQuery => ({ page: 1, page_size: 100, outcome: outcome as ResultOutcome, sort: 'decision', direction: '' })
 
 export function Runs() {
-  const search = useSearch({ from: '/runs' })
-  const navigate = useNavigate({ from: '/runs' })
+  const search = route.useSearch()
+  const navigate = route.useNavigate()
   const query = useQuery(queries.runs(search.page))
   const [view, setView] = useState<RunDetailQuery>(() => startView(search.outcome))
   useEffect(() => setView(startView(search.outcome)), [search.run, search.outcome])
@@ -78,7 +80,7 @@ function HistoryRow({ summary, onOpen }: { summary: RunSummary; onOpen: (outcome
 /** The one thing to do with a run next: continue it, review what it was unsure of, or run it again. */
 function NextStep({ run, onOpen }: { run: Run; onOpen: (outcome: ResultOutcome) => void }) {
   const client = useQueryClient()
-  const navigate = useNavigate({ from: '/runs' })
+  const navigate = route.useNavigate()
   const repeat = useMutation({
     mutationFn: () => again(run),
     onSuccess: () => client.invalidateQueries({ queryKey: ['runs'] }),
@@ -96,7 +98,7 @@ function NextStep({ run, onOpen }: { run: Run; onOpen: (outcome: ResultOutcome) 
 
 function RunDetail({ run, view, setView, loading }: { run: Run; view: RunDetailQuery; setView: (view: RunDetailQuery) => void; loading: boolean }) {
   const client = useQueryClient()
-  const navigate = useNavigate({ from: '/runs' })
+  const navigate = route.useNavigate()
   const running = run.status === 'running'
   const repeat = useMutation({
     mutationFn: () => again(run),

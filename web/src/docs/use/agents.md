@@ -364,9 +364,11 @@ $ curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8787/ops/search -d 
 {"error":"invalid arguments for op `search`: missing field `query`"}
 ```
 
-**There is no access control**, which is why the default bind is loopback. Binding to a
-non-loopback address logs a warning rather than silently exposing the store. A scheme for
-this is deliberately unspecified — inventing one here would foreclose the decision.
+HTTP requires a Better Auth session, and remote MCP requires OAuth. Sign in with
+email/password or Nostr. The first account becomes admin; later accounts require approval.
+Users can search and read; admins also classify and manage access. The HTTP examples
+above assume an approved session cookie and a same-origin Origin header for POST requests.
+Without authentication they return 401. See [Serving](../operate/serve.md).
 
 `serve` also fires the host's configured schedules. `--no-schedule` serves the read API
 without them, which is what a machine serving a corpus somebody else collects wants.

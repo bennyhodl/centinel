@@ -7,6 +7,9 @@ import { api, corpusParams, type CorpusFilters, type DocumentIdentity, type JobS
  * one prefix per kind (`corpus`, `runs`, `run`, …) for invalidation to aim at.
  */
 export const queries = {
+  /** Who is signed in. Re-read every 15 s while someone is, so a revocation lands within that. */
+  account: () => queryOptions({ queryKey: ['account'], queryFn: api.account, retry: false, refetchInterval: query => query.state.data ? 15_000 : false }),
+  users: () => queryOptions({ queryKey: ['users'], queryFn: api.users, refetchInterval: 15_000 }),
   system: () => queryOptions({ queryKey: ['system'], queryFn: api.system, staleTime: 60_000 }),
   ops: () => queryOptions({ queryKey: ['ops'], queryFn: api.ops, staleTime: Infinity }),
   questions: () => queryOptions({ queryKey: ['questions'], queryFn: api.questions }),
