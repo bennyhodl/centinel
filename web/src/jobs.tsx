@@ -26,16 +26,24 @@ export function useJobEvents() {
     stream.addEventListener('job', message => {
       const event = JSON.parse(message.data) as JobEvent
       client.setQueryData(key, jobs => foldJob(jobs ?? [], event))
-      // A classifier run that ends has changed the ledger and possibly the corpus.
+      // A classifier run that ends has changed the corpus.
       if (event.type === 'finished' && client.getQueryData(key)?.find(job => job.id === event.job)?.kind === 'classify') {
         client.invalidateQueries({ queryKey: ['runs'] })
         client.invalidateQueries({ queryKey: ['run', event.job] })
         client.invalidateQueries({ queryKey: ['corpus'] })
       }
     })
-    return () => stream.close()
+    // Every answer a running classifier writes is live in the corpus at once, so a page
+    // showing the corpus is refreshed every few seconds while one scores.
+    const refresh = setInterval(() => {
+      if (activeJobs(client.getQueryData(key) ?? []).some(job => job.kind === 'classify')) client.invalidateQueries({ queryKey: ['corpus'] })
+    }, CORPUS_REFRESH_MS)
+    return () => { stream.close(); clearInterval(refresh) }
   }, [client])
 }
+
+/** How often the corpus is re-read while a classifier scores. */
+const CORPUS_REFRESH_MS = 5_000
 
 /** Every job the server knows of: running first, in the order they started, then finished. */
 export function useJobs() {

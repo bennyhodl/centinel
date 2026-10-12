@@ -80,6 +80,19 @@ export type Preset = {
   questions: Question[]
 }
 
+/** What a run covers when it is given no documents: the corpus, one source, or one document. */
+export type RunScope = {
+  source?: string
+  document?: DocumentIdentity
+}
+
+/** What a scoped run would send, priced the way the server prices every run. */
+export type RunPlan = {
+  documents: number
+  estimated_tokens: number
+  estimated_cost_usd?: number | null
+}
+
 /** The Corpus filter a run resolves on the server, plus how many top matches to take. */
 export type RunSelection = {
   search: string
@@ -185,6 +198,10 @@ export type Run = {
   effective_questions?: Question[]
   inputs: DocumentIdentity[]
   settings: Record<string, unknown>
+  /** The scope the run covered, when it was given one rather than documents. */
+  scope?: RunScope
+  /** The root of the chain this run continues. */
+  continue_from?: string
   document_count: number
   status: string
   input_tokens?: number | null
@@ -441,6 +458,8 @@ export const api = {
     selection?: RunSelection
     /** Scores the exact inputs of this stored run again; the server copies them. */
     repeat?: string
+    /** Every indexed document in scope, resolved on the server as the run goes. No cap. */
+    scope?: RunScope
     questions: Question[]
     model: string
     evaluation_date: string
@@ -448,6 +467,15 @@ export const api = {
     /** `false` returns the scores without writing a run record. */
     record?: boolean
   }) => request<Run>('/workspace/runs', { method: 'POST', body: JSON.stringify(body) }),
+  /** Carries a stopped run on: its scope, questions and settings, over what no run in its chain answered. */
+  continueRun: (id: string) => request<Run>('/workspace/runs', { method: 'POST', body: JSON.stringify({ continue_from: id }) }),
+  /** What a classify run over a scope would send, and its cost, from the server's one estimate. */
+  classifyPlan: (plan: { source?: string; document?: DocumentIdentity; questions: string[]; model: string }) => {
+    const params = new URLSearchParams({ questions: plan.questions.join(','), model: plan.model })
+    if (plan.document) Object.entries(plan.document).forEach(([key, value]) => params.set(key, value))
+    else if (plan.source) params.set('source', plan.source)
+    return request<RunPlan>(`/workspace/classify/plan?${params}`)
+  },
   restore: (identity: DocumentIdentity) => request<unknown>('/workspace/restore', {
     method: 'POST',
     body: JSON.stringify(identity),

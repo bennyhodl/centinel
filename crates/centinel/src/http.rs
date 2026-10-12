@@ -9,6 +9,7 @@
 //! | `POST /ops/{name}` | invoke, JSON in / JSON out |
 //! | `POST /ops/{name}/stream` | invoke with SSE progress, then the result |
 //! | `POST /mcp` | MCP JSON-RPC over HTTP |
+//! | `GET /workspace/classify/plan?source=&resource=&derived_sha=&questions=&model=` | what a classify run over that scope would send, and its cost |
 //! | `GET /workspace/jobs` | what this process is working on, and what it just finished |
 //! | `GET /workspace/jobs/events` | the same, then every job event as it happens (SSE) |
 //! | `GET /workspace/spend?since=` | every model call since then, by hour and model |
@@ -58,8 +59,8 @@ use axum::{Json, Router};
 use centinel_core::jobs::JobState;
 use centinel_core::op::{self, Cancel, Ctx, Progress};
 use centinel_core::workspace::{
-    DocumentQuery, ReadQuery, RestoreRequest, Review, ReviewQuery, RunDetailQuery, RunQuery,
-    RunRequest, Workspace,
+    DocumentId, DocumentQuery, ReadQuery, RestoreRequest, Review, ReviewQuery, RunDetailQuery,
+    RunQuery, RunRequest, RunScope, Workspace,
 };
 use futures::stream::Stream;
 use serde_json::{Value, json};
@@ -241,6 +242,7 @@ fn router(ctx: Arc<Ctx>) -> Router {
         .route("/workspace/presets", get(workspace_presets))
         .route("/workspace/runs", get(workspace_runs).post(workspace_run))
         .route("/workspace/runs/{id}", get(workspace_run_detail))
+        .route("/workspace/classify/plan", get(workspace_classify_plan))
         .route("/workspace/restore", post(workspace_restore))
         .route("/workspace/review/queue", get(workspace_review_queue))
         .route("/workspace/review", post(workspace_review))
@@ -562,6 +564,65 @@ async fn workspace_run(
         job.finish(&result);
     });
     (StatusCode::ACCEPTED, Json(started)).into_response()
+}
+
+/// What the Classify button is about to send: a scope — the corpus, `source`, or one
+/// document by `source`, `resource` and `derived_sha` — or a run to continue; the
+/// question ids, comma-separated, empty for every saved one; and the model to price at.
+#[derive(serde::Deserialize)]
+struct PlanQuery {
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    resource: Option<String>,
+    #[serde(default)]
+    derived_sha: Option<String>,
+    #[serde(default)]
+    continue_from: Option<String>,
+    #[serde(default)]
+    questions: String,
+    #[serde(default)]
+    model: String,
+}
+
+/// The same estimate the command and the run use, so the page never computes its own.
+async fn workspace_classify_plan(
+    State(ctx): State<Arc<Ctx>>,
+    Query(query): Query<PlanQuery>,
+) -> Response {
+    let workspace = Workspace::new(&ctx.store);
+    let plan = (|| {
+        let ids: Vec<String> = query
+            .questions
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let questions = centinel_core::workspace::chosen(&workspace.questions()?, &ids)?;
+        let document = match (&query.resource, &query.derived_sha) {
+            (Some(resource), Some(derived_sha)) => Some(DocumentId {
+                source: query.source.clone().unwrap_or_default(),
+                resource: resource.clone(),
+                derived_sha: derived_sha.clone(),
+            }),
+            _ => None,
+        };
+        let scope = RunScope {
+            source: match document {
+                Some(_) => None,
+                None => query.source.clone().filter(|s| !s.trim().is_empty()),
+            },
+            document,
+        };
+        workspace.plan(
+            Some(&scope),
+            query.continue_from.as_deref(),
+            &questions,
+            &query.model,
+        )
+    })();
+    workspace_response(plan)
 }
 
 #[derive(serde::Deserialize)]

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { createFileRoute } from '@tanstack/react-router'
-import { ArrowLeft, Download, ExternalLink, RotateCcw } from 'lucide-react'
+import { createFileRoute, useNavigate } from '@tanstack/react-router'
+import { ArrowLeft, Download, ExternalLink, Play, RotateCcw } from 'lucide-react'
 import { api, originalUrl, type ReadReport } from '../api'
 import { queries } from '../queries'
 import { parseCsv } from '../csv'
@@ -20,6 +20,9 @@ export const Route = createFileRoute('/document/$sha')({
   component: Reader,
 })
 
+/** The Jev model a run from this page asks, the same the Classify page starts with. */
+const DEFAULT_MODEL = 'jev-1.13.0'
+
 /** The kinds the reader can show as collected. Everything else is read as text and downloaded. */
 const originals: Record<string, string[]> = { pdf: ['Original'], csv: ['Table'], html: ['Page', 'Source'] }
 
@@ -29,7 +32,14 @@ function Reader() {
   const doc = { derived_sha: sha, source: search.source, resource: search.resource }
   const query = useQuery(queries.read(doc))
   const client = useQueryClient()
+  const navigate = useNavigate()
   const restore = useMutation({ mutationFn: () => api.restore(doc), onSuccess: () => client.invalidateQueries({ queryKey: ['corpus'] }) })
+  // Every saved question, over this one document, as the Classify page would send it.
+  const questions = useQuery(queries.questions())
+  const classify = useMutation({
+    mutationFn: () => api.run({ scope: { document: doc }, questions: questions.data?.questions ?? [], model: DEFAULT_MODEL, evaluation_date: new Date().toISOString().slice(0, 10), settings: {} }),
+    onSuccess: run => navigate({ to: '/runs', search: { run: run.id, page: 1, outcome: '' } }),
+  })
   const read = query.data
   const tabs = [...(read ? originals[read.kind] || [] : []), 'Text']
   const [tab, setTab] = useState<string>()
@@ -69,6 +79,8 @@ function Reader() {
             <Fact label="Text extracted by">{read.tool}</Fact>
             <Fact label="Collected">{read.observed_at}</Fact>
           </div>
+          <Button disabled={classify.isPending || !questions.data?.questions.length} onClick={() => classify.mutate()}><Play />Classify</Button>
+          {classify.error && <ErrorBox error={classify.error} />}
           <Button variant="outline" disabled={restore.isPending} onClick={() => restore.mutate()}><RotateCcw />Restore usage</Button>
           {restore.isSuccess && <p className="text-sm">Restored to corpus usage.</p>}
           {restore.error && <ErrorBox error={restore.error} />}

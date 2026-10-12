@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { money, number, plural, seconds, tail } from './format'
-import { asked, LiveRun, useRunDetail } from './live'
+import { again, asked, continuable, LiveRun, useRunDetail } from './live'
 import { ResultsSection } from './results'
 import { DocumentLink, Empty, ErrorBox, PageHeader, Spinner } from './ui'
 
@@ -75,13 +75,19 @@ function HistoryRow({ summary, onOpen }: { summary: RunSummary; onOpen: (outcome
   </div>
 }
 
-/** The one thing to do with a run next: review what it was unsure of, or run it again. */
+/** The one thing to do with a run next: continue it, review what it was unsure of, or run it again. */
 function NextStep({ run, onOpen }: { run: Run; onOpen: (outcome: ResultOutcome) => void }) {
   const client = useQueryClient()
+  const navigate = useNavigate({ from: '/runs' })
   const repeat = useMutation({
-    mutationFn: () => api.run({ repeat: run.id, questions: run.questions, model: run.model, evaluation_date: run.evaluation_date, settings: { concurrency: run.settings.concurrency ?? 8 } }),
+    mutationFn: () => again(run),
     onSuccess: () => client.invalidateQueries({ queryKey: ['runs'] }),
   })
+  const carryOn = useMutation({
+    mutationFn: () => api.continueRun(run.id),
+    onSuccess: continued => { client.invalidateQueries({ queryKey: ['runs'] }); navigate({ search: { run: continued.id, page: 1, outcome: '' } }) },
+  })
+  if (continuable(run)) return <Button size="sm" disabled={carryOn.isPending} onClick={() => carryOn.mutate()}>{carryOn.isPending ? <Spinner /> : null}Continue</Button>
   const review = run.view?.documents.review || 0
   if (review) return <button type="button" onClick={() => onOpen('review')} className="h-8 rounded-md bg-flame-soft px-3 text-[13px] font-semibold text-flame-ink shadow-[inset_0_0_0_1px_var(--flame-line)]">Review {number(review)} →</button>
   if (run.status === 'failed' || run.status === 'interrupted' || run.status === 'stopped') return <Button size="sm" variant="outline" disabled={repeat.isPending} onClick={() => repeat.mutate()}>{repeat.isPending ? <Spinner /> : <RotateCcw />}Run again</Button>
@@ -93,7 +99,7 @@ function RunDetail({ run, view, setView, loading }: { run: Run; view: RunDetailQ
   const navigate = useNavigate({ from: '/runs' })
   const running = run.status === 'running'
   const repeat = useMutation({
-    mutationFn: () => api.run({ repeat: run.id, questions: run.questions, model: run.model, evaluation_date: run.evaluation_date, settings: { concurrency: run.settings.concurrency ?? 8 } }),
+    mutationFn: () => again(run),
     onSuccess: response => { client.invalidateQueries({ queryKey: ['runs'] }); navigate({ search: { run: response.id, page: 1, outcome: '' } }) },
   })
   const questions = run.effective_questions?.length ? run.effective_questions : run.questions
@@ -105,7 +111,7 @@ function RunDetail({ run, view, setView, loading }: { run: Run; view: RunDetailQ
     <Tabs defaultValue="results"><TabsList><TabsTrigger value="results">Results</TabsTrigger><TabsTrigger value="questions">Questions</TabsTrigger><TabsTrigger value="inputs">Inputs · {number(inputTotal)}</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList>
       <TabsContent value="results"><ResultsSection run={run} questions={questions} view={view} setView={setView} loading={loading} /></TabsContent>
       <TabsContent value="questions"><div className="grid gap-3 [&>div]:rounded-md [&>div]:border [&>div]:p-3 [&_h4]:mb-2 [&_h4]:font-mono [&_h4]:text-sm [&_small]:text-muted-foreground [&_p]:text-sm [&_ul]:mt-2 [&_ul]:list-disc [&_ul]:pl-4 [&_li]:text-sm [&_em]:text-xs [&_em]:not-italic [&_em]:text-muted-foreground">{questions.map(question => <div key={question.id}><h4>{question.id} <small>v{question.version} · {question.kind === 'choice' ? 'choice' : 'yes / no'}</small></h4><p>{question.instructions}</p>{question.options?.length ? <ul>{question.options.map(option => <li key={option.id}><b>{option.id}</b> <em>{option.action}</em> {option.description}</li>)}</ul> : null}</div>)}</div></TabsContent>
-      <TabsContent value="inputs"><div className="grid [&_a]:grid [&_a]:grid-cols-[34px_minmax(0,1fr)] [&_a]:gap-2 [&_a]:border-t [&_a]:p-2 [&_small]:block [&_small]:truncate [&_small]:text-xs [&_small]:text-muted-foreground [&_b]:block [&_b]:truncate [&_b]:text-sm">{(run.inputs || []).map((doc, index) => <DocumentLink doc={doc} key={`${doc.source}:${doc.resource}:${doc.derived_sha}`}><span>{String(index + 1).padStart(2, '0')}</span><div><b>{tail(doc.resource)}</b><small>{doc.source} · {doc.derived_sha}</small></div></DocumentLink>)}</div>{inputTotal > run.inputs.length && <p className="m-2 text-xs text-muted-foreground">The first {number(run.inputs.length)} of {number(inputTotal)} inputs. The run keeps all of them, and “Run again” uses all of them.</p>}</TabsContent>
+      <TabsContent value="inputs">{run.scope && <p className="m-2 text-xs text-muted-foreground">A scoped run keeps no list: it covered {run.scope.document ? 'one document' : run.scope.source ? `every document in ${run.scope.source}` : 'the whole corpus'} as the index stood, {number(inputTotal)} at the start.</p>}<div className="grid [&_a]:grid [&_a]:grid-cols-[34px_minmax(0,1fr)] [&_a]:gap-2 [&_a]:border-t [&_a]:p-2 [&_small]:block [&_small]:truncate [&_small]:text-xs [&_small]:text-muted-foreground [&_b]:block [&_b]:truncate [&_b]:text-sm">{(run.inputs || []).map((doc, index) => <DocumentLink doc={doc} key={`${doc.source}:${doc.resource}:${doc.derived_sha}`}><span>{String(index + 1).padStart(2, '0')}</span><div><b>{tail(doc.resource)}</b><small>{doc.source} · {doc.derived_sha}</small></div></DocumentLink>)}</div>{inputTotal > run.inputs.length && <p className="m-2 text-xs text-muted-foreground">The first {number(run.inputs.length)} of {number(inputTotal)} inputs. The run keeps all of them, and “Run again” uses all of them.</p>}</TabsContent>
       <TabsContent value="settings"><dl className="grid grid-cols-[160px_minmax(0,1fr)] text-sm [&_dt]:border-t [&_dt]:p-2 [&_dt]:text-muted-foreground [&_dd]:border-t [&_dd]:p-2 [&_dd]:wrap-anywhere"><dt>Model</dt><dd>{run.model}</dd><dt>Input tokens</dt><dd>{number(run.input_tokens)}</dd><dt>Cost</dt><dd>{money(run.cost_usd)}</dd><dt>Duration</dt><dd>{seconds(run.duration_ms)}</dd><dt>Throughput</dt><dd>{run.throughput_docs_sec == null ? 'Unknown' : `${run.throughput_docs_sec.toFixed(2)} documents a second`}</dd>{Object.entries(run.settings || {}).map(([key, value]) => <React.Fragment key={key}><dt>{key.replaceAll('_', ' ')}</dt><dd className="font-mono">{typeof value === 'string' ? value || 'Any' : JSON.stringify(value)}</dd></React.Fragment>)}</dl></TabsContent>
     </Tabs>
   </section>

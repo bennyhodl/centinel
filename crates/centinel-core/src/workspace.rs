@@ -165,6 +165,7 @@ impl Drop for Flight {
 pub struct PreparedRun {
     run: ClassifierRun,
     request: RunRequest,
+    inputs: Inputs,
     api_key: String,
     endpoint: String,
     concurrency: usize,
@@ -173,8 +174,147 @@ pub struct PreparedRun {
     tree: Vec<Question>,
     /// The saved questions, which every recorded answer is decided under.
     saved: Vec<Question>,
-    /// What each document holds before the run asks anything.
-    priors: HashMap<DocumentId, Prior>,
+}
+
+/// Where a run's documents come from: named outright, or resolved from a scope a page at
+/// a time as the run goes, so a run over the corpus never holds the corpus.
+enum Inputs {
+    Explicit(Vec<DocumentId>),
+    Scoped {
+        scope: RunScope,
+        /// Runs whose documents with a result and no error are not sent again: a
+        /// continuation's root and every continuation of it.
+        done_in: Vec<String>,
+    },
+}
+
+/// Documents a run takes from its inputs at a time: one page's priors are read, one
+/// page's futures are built, and the page is scored before the next is resolved.
+const INPUT_PAGE: usize = 1_000;
+
+/// One page after another out of a run's inputs. A scope is read by keyset from the
+/// index, so a document indexed after the run started is still in a later page and a
+/// cleared one simply is not.
+struct InputPages<'a> {
+    inputs: &'a Inputs,
+    /// How far through an explicit list.
+    offset: usize,
+    /// The last document of the previous page of a scope, as `(source, resource)`.
+    after: Option<(String, String)>,
+    done: bool,
+}
+
+impl<'a> InputPages<'a> {
+    fn new(inputs: &'a Inputs) -> Self {
+        Self {
+            inputs,
+            offset: 0,
+            after: None,
+            done: false,
+        }
+    }
+
+    /// The next page, empty once there is none.
+    fn next(&mut self, store: &Store) -> anyhow::Result<Vec<DocumentId>> {
+        if self.done {
+            return Ok(Vec::new());
+        }
+        let page = match self.inputs {
+            Inputs::Explicit(documents) => {
+                let page: Vec<DocumentId> = documents
+                    .iter()
+                    .skip(self.offset)
+                    .take(INPUT_PAGE)
+                    .cloned()
+                    .collect();
+                self.offset += page.len();
+                page
+            }
+            Inputs::Scoped { scope, done_in } => {
+                let page = scope_page(store, scope, done_in, self.after.as_ref())?;
+                if let Some(last) = page.last() {
+                    self.after = Some((last.source.clone(), last.resource.clone()));
+                }
+                page
+            }
+        };
+        if page.len() < INPUT_PAGE {
+            self.done = true;
+        }
+        Ok(page)
+    }
+}
+
+/// The `WHERE` that picks a scope's documents out of `workspace_document d`, less the
+/// ones `done_in` already answered, and its parameters in order.
+fn scope_where(scope: &RunScope, done_in: &[String]) -> (String, Vec<rusqlite::types::Value>) {
+    let mut parts = vec!["1=1".to_string()];
+    let mut values: Vec<rusqlite::types::Value> = Vec::new();
+    if let Some(source) = &scope.source {
+        parts.push("d.source=?".into());
+        values.push(source.clone().into());
+    }
+    if let Some(document) = &scope.document {
+        parts.push("d.source=? AND d.resource=? AND d.derived_sha=?".into());
+        values.push(document.source.clone().into());
+        values.push(document.resource.clone().into());
+        values.push(document.derived_sha.clone().into());
+    }
+    if !done_in.is_empty() {
+        parts.push(format!(
+            "NOT EXISTS (SELECT 1 FROM ws.run_result r WHERE r.run_id IN ({}) AND r.source=d.source \
+             AND r.resource=d.resource AND r.derived_sha=d.derived_sha AND r.error IS NULL)",
+            vec!["?"; done_in.len()].join(",")
+        ));
+        values.extend(done_in.iter().map(|id| id.clone().into()));
+    }
+    (parts.join(" AND "), values)
+}
+
+/// One page of a scope's documents, in index order, after `after`.
+fn scope_page(
+    store: &Store,
+    scope: &RunScope,
+    done_in: &[String],
+    after: Option<&(String, String)>,
+) -> anyhow::Result<Vec<DocumentId>> {
+    let conn = open_index(store)?;
+    prepare_projection(&conn)?;
+    let (mut where_sql, mut values) = scope_where(scope, done_in);
+    if let Some((source, resource)) = after {
+        where_sql.push_str(" AND (d.source,d.resource) > (?,?)");
+        values.push(source.clone().into());
+        values.push(resource.clone().into());
+    }
+    values.push((INPUT_PAGE as i64).into());
+    let mut stmt = conn.prepare(&format!(
+        "SELECT d.source,d.resource,d.derived_sha FROM workspace_document d WHERE {where_sql}
+         ORDER BY d.source,d.resource LIMIT ?"
+    ))?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
+        Ok(DocumentId {
+            source: r.get(0)?,
+            resource: r.get(1)?,
+            derived_sha: r.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// How many documents a scope resolves to right now, and their characters as Jev would
+/// see them — each document counted at the sampling limit.
+fn scope_size(store: &Store, scope: &RunScope, done_in: &[String]) -> anyhow::Result<(usize, u64)> {
+    let conn = open_index(store)?;
+    prepare_projection(&conn)?;
+    let (where_sql, values) = scope_where(scope, done_in);
+    let (count, chars): (i64, i64) = conn.query_row(
+        &format!(
+            "SELECT COUNT(*),COALESCE(SUM(MIN(d.chars,{MAX_TEXT_BYTES})),0) FROM workspace_document d WHERE {where_sql}"
+        ),
+        params_from_iter(values.iter()),
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok((count as usize, chars as u64))
 }
 
 /// One document's answers and a person's verdicts as the run starts, read once from the
@@ -204,6 +344,19 @@ struct Scored {
     /// `Some` only when the model reported both counts for this document.
     usage: Option<(u64, u64)>,
     model: Option<String>,
+    /// Jev's own words when it refused the account rather than the document — a `401`,
+    /// `402` or `403` — which ends the run rather than the document.
+    stopped: Option<String>,
+}
+
+/// Whether Jev refused the account rather than the request: no key, no credit, no
+/// permission. Nothing about the next document changes that, so the run stops.
+fn account_refused(status: reqwest::StatusCode) -> bool {
+    use reqwest::StatusCode;
+    matches!(
+        status,
+        StatusCode::UNAUTHORIZED | StatusCode::PAYMENT_REQUIRED | StatusCode::FORBIDDEN
+    )
 }
 
 /// What one document is asked: the run's questions and settings, the chain they follow,
@@ -495,14 +648,6 @@ pub struct Document {
     pub exclusion_reason: Option<String>,
     pub classifications: BTreeMap<String, f64>,
 }
-/// A document a classify run would send, with the size the estimate is priced from.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingDocument {
-    pub id: DocumentId,
-    /// Characters of derived text, as the index measured it.
-    pub chars: usize,
-}
-
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct DocumentQuery {
     #[serde(default = "one")]
@@ -616,8 +761,12 @@ pub struct RunSelection {
     pub count: usize,
 }
 
+/// What a run covers. Exactly one of `documents`, `selection`, `repeat`, `scope` and
+/// `continue_from` is given.
 #[derive(Clone, Debug, Deserialize)]
 pub struct RunRequest {
+    /// The questions to ask. Empty with `continue_from`, which asks the root's.
+    #[serde(default)]
     pub questions: Vec<Question>,
     /// Explicit identities, as a repeated trial sends them. Empty when `selection` is
     /// given; the server fills it in before the run starts, so the stored run always
@@ -630,7 +779,19 @@ pub struct RunRequest {
     /// copies them, so a repeat of ten thousand documents sends no identities.
     #[serde(default)]
     pub repeat: Option<String>,
+    /// Every indexed document in scope — the corpus, one source, or one document —
+    /// excluded ones too, resolved a page at a time as the run goes. No cap.
+    #[serde(default)]
+    pub scope: Option<RunScope>,
+    /// A run to carry on: the same scope, questions and settings as the run that started
+    /// its chain, over the documents in scope now that no run in the chain has answered
+    /// without error.
+    #[serde(default)]
+    pub continue_from: Option<String>,
+    /// Empty with `continue_from`, which uses the root's.
+    #[serde(default)]
     pub model: String,
+    #[serde(default)]
     pub evaluation_date: String,
     #[serde(default)]
     pub settings: RunSettings,
@@ -643,6 +804,32 @@ pub struct RunRequest {
 
 fn default_true() -> bool {
     true
+}
+
+/// What a scoped run would cost before it starts.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RunPlan {
+    /// Documents the scope resolves to right now, less what a continuation has done.
+    pub documents: usize,
+    /// Input tokens, from the characters at the sampling limit plus the questions, at
+    /// about four characters a token; a follow-up for the share of documents expected
+    /// to reach it, with the text sent again.
+    pub estimated_tokens: u64,
+    /// At the model's published rate, when one is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_usd: Option<f64>,
+}
+
+/// A run to carry on, as its root recorded it.
+struct Continuation {
+    root: String,
+    scope: RunScope,
+    questions: Vec<Question>,
+    model: String,
+    evaluation_date: String,
+    settings: RunSettings,
+    /// The root and every continuation of it so far.
+    done_in: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1216,68 +1403,77 @@ impl<'a> Workspace<'a> {
         })
     }
 
-    /// The documents a classify run has left to do: every included document, in `source`
-    /// when one is named, that has no answer for at least one of `questions` at its
-    /// current version — for a follow-up, only where the document's answers reach it. With
-    /// `rescore`, every included document whether answered or not.
-    ///
-    /// Index order, so two runs over the same pending set take the same documents first.
-    pub fn pending_documents(
+    /// What a scoped run would send before it is started: the documents in scope now —
+    /// for a continuation, less what its chain has answered — and what they would cost.
+    /// One estimate, for the command, the page and the endpoint alike.
+    pub fn plan(
         &self,
+        scope: Option<&RunScope>,
+        continue_from: Option<&str>,
         questions: &[Question],
-        source: Option<&str>,
-        rescore: bool,
-    ) -> anyhow::Result<Vec<PendingDocument>> {
-        let conn = open_index(self.store)?;
-        prepare_projection(&conn)?;
-
-        let mut where_parts = vec!["x.source IS NULL".to_string()];
-        let mut values: Vec<rusqlite::types::Value> = Vec::new();
-        if let Some(source) = source {
-            where_parts.push("d.source=?".into());
-            values.push(source.to_owned().into());
-        }
-        if !rescore {
-            if questions.is_empty() {
-                return Ok(Vec::new());
+        model: &str,
+    ) -> anyhow::Result<RunPlan> {
+        let classifications = Classifications::open(self.store)?;
+        let (scope, questions, model, done_in) = match continue_from {
+            Some(id) => {
+                let run = self.continuation(&classifications, id)?;
+                (run.scope, run.questions, run.model, run.done_in)
             }
-            // A root is owed by every document; a follow-up only by the documents whose
-            // answers reach it, which the workspace lists. A score row exists only at a
-            // question's current version, so a reworded question is owed again.
-            let missing: Vec<String> = questions
-                .iter()
-                .map(|q| {
-                    values.push(q.id.clone().into());
-                    match q.when {
-                        None => "NOT EXISTS (SELECT 1 FROM ws.score s WHERE s.source=d.source \
-                                 AND s.resource=d.resource AND s.derived_sha=d.derived_sha AND s.question=?)",
-                        Some(_) => "EXISTS (SELECT 1 FROM ws.open_follow_up o WHERE o.source=d.source \
-                                    AND o.resource=d.resource AND o.derived_sha=d.derived_sha AND o.question=?)",
-                    }
-                    .to_string()
-                })
-                .collect();
-            where_parts.push(format!("({})", missing.join(" OR ")));
-        }
-        let sql = format!(
-            "SELECT d.source,d.resource,d.derived_sha,d.chars FROM workspace_document d
-             LEFT JOIN ws.excluded x ON x.source=d.source AND x.resource=d.resource
-               AND x.derived_sha=d.derived_sha
-             WHERE {} ORDER BY d.source,d.resource",
-            where_parts.join(" AND ")
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
-            Ok(PendingDocument {
-                id: DocumentId {
-                    source: r.get(0)?,
-                    resource: r.get(1)?,
-                    derived_sha: r.get(2)?,
-                },
-                chars: r.get::<_, i64>(3)? as usize,
-            })
+            None => (
+                scope
+                    .cloned()
+                    .context("a plan needs a scope or a run to continue")?,
+                questions.to_vec(),
+                model.to_string(),
+                Vec::new(),
+            ),
+        };
+        let (documents, chars) = scope_size(self.store, &scope, &done_in)?;
+        let reach = self.reach(&questions)?;
+        let (estimated_tokens, estimated_cost_usd) =
+            estimate(chars, documents, &questions, &reach, &model);
+        Ok(RunPlan {
+            documents,
+            estimated_tokens,
+            estimated_cost_usd,
+        })
+    }
+
+    /// The run `id` continues, as its root recorded it: the scope, the question snapshot,
+    /// the model and settings asked for, and every run in the chain so far.
+    fn continuation(
+        &self,
+        classifications: &Classifications,
+        id: &str,
+    ) -> anyhow::Result<Continuation> {
+        let root = classifications
+            .root_of(id)?
+            .with_context(|| format!("unknown classifier run `{id}`"))?;
+        let run = classifications
+            .run(&root, &active_runs())?
+            .with_context(|| format!("unknown classifier run `{root}`"))?;
+        let scope = run.scope.clone().with_context(|| {
+            format!(
+                "run `{root}` was given its documents outright, not a scope, so there is \
+                 nothing to continue; repeat it instead"
+            )
         })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        // The model as asked for, not as Jev reported it back.
+        let model = run
+            .settings
+            .values
+            .get("requested_model")
+            .and_then(Value::as_str)
+            .map_or_else(|| run.model.clone(), str::to_owned);
+        Ok(Continuation {
+            done_in: classifications.lineage(&root)?,
+            root,
+            scope,
+            questions: run.questions,
+            model,
+            evaluation_date: run.evaluation_date,
+            settings: run.settings,
+        })
     }
 
     /// For each of `questions`, the share of documents a run is expected to ask it of, for
@@ -1319,7 +1515,7 @@ impl<'a> Workspace<'a> {
         ctx: &crate::op::Ctx,
         target: &str,
         source: Option<&str>,
-    ) -> anyhow::Result<PendingDocument> {
+    ) -> anyhow::Result<DocumentId> {
         let found = crate::ops::target::resolve(ctx, target, source).await?;
         let derivation = found
             .replay
@@ -1336,24 +1532,17 @@ impl<'a> Workspace<'a> {
             derived_sha: derivation.to_sha.to_string(),
         };
         let conn = open_index(self.store)?;
-        let chars: Option<i64> = conn
-            .query_row(
-                "SELECT MAX(char_end) FROM placement WHERE source=?1 AND resource=?2 AND derived_sha=?3",
-                params![id.source, id.resource, id.derived_sha],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        let chars = chars.with_context(|| {
-            format!(
-                "{} is collected but not indexed — run `index` first",
-                id.resource
-            )
-        })?;
-        Ok(PendingDocument {
-            id,
-            chars: chars as usize,
-        })
+        let indexed: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM placement WHERE source=?1 AND resource=?2 AND derived_sha=?3)",
+            params![id.source, id.resource, id.derived_sha],
+            |r| r.get(0),
+        )?;
+        anyhow::ensure!(
+            indexed,
+            "{} is collected but not indexed — run `index` first",
+            id.resource
+        );
+        Ok(id)
     }
 
     /// Records what a person said about one document, and acts on it at once.
@@ -1704,21 +1893,39 @@ impl<'a> Workspace<'a> {
         self.execute(prepared).await
     }
 
-    /// Resolves the selection, validates, records the start, and returns without
+    /// Resolves what the run covers, validates, records the start, and returns without
     /// scoring anything. Every failure a person can fix — an unsaved question, a missing
-    /// key, an empty selection — happens here, so the start request reports it.
+    /// key, an empty scope — happens here, so the start request reports it.
     pub fn prepare(&self, mut request: RunRequest) -> anyhow::Result<PreparedRun> {
+        let sources = usize::from(!request.documents.is_empty())
+            + usize::from(request.selection.is_some())
+            + usize::from(request.repeat.is_some())
+            + usize::from(request.scope.is_some())
+            + usize::from(request.continue_from.is_some());
+        if sources > 1 {
+            bail!("give one of `documents`, `selection`, `repeat`, `scope`, or `continue_from`");
+        }
+        let classifications = Classifications::open(self.store)?;
+        let mut done_in = Vec::new();
+        let mut continue_from = None;
+        if let Some(id) = request.continue_from.take() {
+            let continuation = self.continuation(&classifications, &id)?;
+            request.questions = continuation.questions;
+            request.scope = Some(continuation.scope);
+            if request.model.trim().is_empty() {
+                request.model = continuation.model;
+            }
+            if request.evaluation_date.trim().is_empty() {
+                request.evaluation_date = continuation.evaluation_date;
+            }
+            request.settings = continuation.settings;
+            done_in = continuation.done_in;
+            continue_from = Some(continuation.root);
+        }
         if request.questions.is_empty() {
             bail!("choose at least one question for the run");
         }
         validate_questions(&request.questions)?;
-        let sources = usize::from(!request.documents.is_empty())
-            + usize::from(request.selection.is_some())
-            + usize::from(request.repeat.is_some());
-        if sources > 1 {
-            bail!("give one of `documents`, `selection`, or `repeat`");
-        }
-        let classifications = Classifications::open(self.store)?;
         if let Some(id) = request.repeat.take() {
             self.load_run(&id)?;
             request.documents = classifications.inputs(&id, None)?;
@@ -1736,9 +1943,40 @@ impl<'a> Workspace<'a> {
             values.insert("available_documents".into(), json!(total));
             values.entry("order".into()).or_insert(json!("index"));
         }
-        if request.documents.is_empty() {
-            bail!("select at least one document");
-        }
+        let (inputs, document_count) = match request.scope.take() {
+            Some(scope) => {
+                let (count, _) = scope_size(self.store, &scope, &done_in)?;
+                if count == 0 {
+                    match &continue_from {
+                        Some(root) => bail!(
+                            "every document in scope has an answer from `{root}` or a run that \
+                             continued it; start a new run to score them again"
+                        ),
+                        None => bail!("no indexed document is in scope"),
+                    }
+                }
+                (Inputs::Scoped { scope, done_in }, count)
+            }
+            None => {
+                if request.documents.is_empty() {
+                    bail!("select at least one document");
+                }
+                let mut unique = std::collections::HashSet::new();
+                if let Some(duplicate) = request
+                    .documents
+                    .iter()
+                    .find(|id| !unique.insert((*id).clone()))
+                {
+                    bail!(
+                        "document `{}` was selected more than once",
+                        duplicate.resource
+                    );
+                }
+                let documents = std::mem::take(&mut request.documents);
+                let count = documents.len();
+                (Inputs::Explicit(documents), count)
+            }
+        };
         if request.model.trim().is_empty() {
             bail!("model is required");
         }
@@ -1746,20 +1984,17 @@ impl<'a> Workspace<'a> {
             bail!("evaluation_date is required");
         }
         validate_date(&request.evaluation_date)?;
-        let mut unique = std::collections::HashSet::new();
-        if let Some(duplicate) = request
-            .documents
-            .iter()
-            .find(|id| !unique.insert((*id).clone()))
-        {
-            bail!(
-                "document `{}` was selected more than once",
-                duplicate.resource
-            );
-        }
         if request.record {
             let saved_questions = self.questions()?;
-            require_current_questions(&saved_questions, &request.questions)?;
+            if let Err(error) = require_current_questions(&saved_questions, &request.questions) {
+                match &continue_from {
+                    Some(root) => bail!(
+                        "the questions changed since `{root}` ran; start a new run instead of \
+                         continuing it"
+                    ),
+                    None => return Err(error),
+                }
+            }
         }
 
         let api_key = secret("TYPESAFE_API_KEY", self.store.root()).ok_or_else(|| {
@@ -1772,8 +2007,8 @@ impl<'a> Workspace<'a> {
         let endpoint = typesafe_endpoint(&request.settings)?;
 
         // The chain: the run's questions as sent — a preview may ask drafts — then the saved
-        // ones it does not ask, whose answers a follow-up may hang off. The answers each
-        // document holds are the workspace's, as the saved chain reaches them.
+        // ones it does not ask, whose answers a follow-up may hang off. What each document
+        // holds is read page by page as the run reaches it.
         let saved = self.saved_questions()?;
         let mut tree = request.questions.clone();
         tree.extend(
@@ -1782,22 +2017,6 @@ impl<'a> Workspace<'a> {
                 .filter(|q| !request.questions.iter().any(|asked| asked.id == q.id))
                 .cloned(),
         );
-        let priors = {
-            let saved_chain = Chain::new(&saved);
-            let chain = Chain::new(&tree);
-            let mut priors = HashMap::with_capacity(request.documents.len());
-            for id in &request.documents {
-                let (stored, verdicts) = classifications.reached(id, &saved_chain)?;
-                priors.insert(
-                    id.clone(),
-                    Prior {
-                        answers: chain.current(&stored),
-                        verdicts: verdicts.unwrap_or_default(),
-                    },
-                );
-            }
-            priors
-        };
 
         let concurrency = request
             .settings
@@ -1818,8 +2037,17 @@ impl<'a> Workspace<'a> {
             .settings
             .values
             .insert("max_text_bytes".into(), json!(MAX_TEXT_BYTES));
+        request
+            .settings
+            .values
+            .entry("requested_model".into())
+            .or_insert(json!(request.model));
 
-        let mut run = ClassifierRun {
+        let (explicit, scope): (&[DocumentId], Option<RunScope>) = match &inputs {
+            Inputs::Explicit(documents) => (documents.as_slice(), None),
+            Inputs::Scoped { scope, .. } => (&[], Some(scope.clone())),
+        };
+        let run = ClassifierRun {
             id: run_id(),
             created_at: Timestamp::now().to_string(),
             completed_at: None,
@@ -1827,16 +2055,11 @@ impl<'a> Workspace<'a> {
             evaluation_date: request.evaluation_date.clone(),
             questions: request.questions.clone(),
             effective_questions: Vec::new(),
-            inputs: request
-                .documents
-                .iter()
-                .take(DETAIL_INPUTS)
-                .cloned()
-                .collect(),
+            inputs: explicit.iter().take(DETAIL_INPUTS).cloned().collect(),
             settings: request.settings.clone(),
-            scope: None,
-            continue_from: None,
-            document_count: request.documents.len(),
+            scope,
+            continue_from,
+            document_count,
             status: "running".into(),
             error: None,
             input_tokens: Some(0),
@@ -1851,12 +2074,8 @@ impl<'a> Workspace<'a> {
             results: Vec::new(),
             view: None,
         };
-        run.settings
-            .values
-            .entry("requested_model".into())
-            .or_insert(json!(request.model));
         if request.record {
-            classifications.insert_run(&run, &request.documents)?;
+            classifications.insert_run(&run, explicit)?;
         }
         ACTIVE_RUNS
             .lock()
@@ -1866,12 +2085,12 @@ impl<'a> Workspace<'a> {
         Ok(PreparedRun {
             run,
             request,
+            inputs,
             api_key,
             endpoint,
             concurrency,
             tree,
             saved,
-            priors,
         })
     }
 
@@ -1933,15 +2152,18 @@ impl<'a> Workspace<'a> {
         let PreparedRun {
             mut run,
             request,
+            inputs,
             api_key,
             endpoint,
             concurrency,
             tree,
             saved,
-            priors,
         } = prepared;
         let chain = Chain::new(&tree);
+        let saved_chain = Chain::new(&saved);
         let policy = Policy::new(&saved);
+        // What each document holds before it is asked, read a page at a time.
+        let reader = Classifications::open(self.store)?;
         // A preview records nothing, so it opens nothing.
         let classifications = match request.record {
             true => Some(Classifications::open(self.store)?),
@@ -1953,97 +2175,126 @@ impl<'a> Workspace<'a> {
             .build()?;
         let ledger = Ledger::new(self.store);
         let start = Instant::now();
-
-        // Owned identities, and the futures built up front: a closure that takes
-        // `&DocumentId` is higher-ranked over that lifetime, and `tokio::spawn` cannot
-        // prove it for the future this all sits inside. Building the futures here, from
-        // values the closure owns, sidesteps that; they stay lazy until polled.
         let run_id = run.id.clone();
         let run_id = run_id.as_str();
-        let jobs: Vec<_> = request
-            .documents
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, input)| {
-                let client = client.clone();
-                let api_key = api_key.as_str();
-                let endpoint = endpoint.as_str();
-                let request = &request;
-                let chain = &chain;
-                let prior = priors.get(&input);
-                async move {
-                    let asking = Asking {
-                        request,
-                        chain,
-                        prior,
-                    };
-                    self.score(&client, api_key, endpoint, &asking, &input, run_id, index)
-                        .await
-                }
-            })
-            .collect();
-        let mut scored = futures::stream::iter(jobs).buffer_unordered(concurrency);
         // The live snapshot is a copy of the run's counters; a browser polls once a
         // second anyway.
         let mut published = Instant::now();
+        let mut pages = InputPages::new(&inputs);
+        // Jev's words when it refused the account, which end the run between results.
+        let mut stopped: Option<String> = None;
 
         let outcome: anyhow::Result<()> = async {
-            while let Some(scored) = scored.next().await {
-                if let Some((input, output)) = scored.usage {
-                    // Previews too: a preview is a paid call like any other.
-                    let model = scored.model.as_deref().unwrap_or(&request.model);
-                    ledger.record(Spend::new(Stage::Classify, model, input, output).run(&run.id));
-                    add_usage(&mut run.input_tokens, input);
-                    add_usage(&mut run.output_tokens, output);
-                    run.usage_documents += 1;
+            'pages: loop {
+                let page = pages.next(self.store)?;
+                if page.is_empty() {
+                    break;
                 }
-                if let Some(model) = scored.model {
-                    run.model = model;
-                }
-                if scored.result.error.is_some() {
-                    run.errors += 1;
-                }
-                run.scored += 1;
-                run.duration_ms = Some(start.elapsed().as_millis() as u64);
-                progress.item(answered(&scored.result));
-                // Written as it lands, and kept nowhere else: the run's memory is its
-                // counters, however many documents it covers.
-                match &classifications {
-                    Some(classifications) => {
-                        classifications.record_result(
-                            &run,
-                            &scored.result,
-                            scored.usage,
-                            &policy,
-                        )?;
-                        if run.scored % VECTOR_SYNC_EVERY == 0 {
-                            self.sync_vectors().await?;
+                let priors = priors_for(&reader, &saved_chain, &chain, &page)?;
+                // Owned identities, and the futures built up front: a closure that takes
+                // `&DocumentId` is higher-ranked over that lifetime, and `tokio::spawn`
+                // cannot prove it for the future this all sits inside. Building the
+                // futures here, from values the closure owns, sidesteps that; they stay
+                // lazy until polled, and a page of them is all that exists at once.
+                let jobs: Vec<_> = page
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, input)| {
+                        let client = client.clone();
+                        let api_key = api_key.as_str();
+                        let endpoint = endpoint.as_str();
+                        let request = &request;
+                        let chain = &chain;
+                        let prior = priors.get(&input);
+                        async move {
+                            let asking = Asking {
+                                request,
+                                chain,
+                                prior,
+                            };
+                            self.score(&client, api_key, endpoint, &asking, &input, run_id, index)
+                                .await
                         }
+                    })
+                    .collect();
+                let mut scored = futures::stream::iter(jobs).buffer_unordered(concurrency);
+                while let Some(mut scored) = scored.next().await {
+                    let stop = scored.stopped.take();
+                    if let Some((input, output)) = scored.usage {
+                        // Previews too: a preview is a paid call like any other.
+                        let model = scored.model.as_deref().unwrap_or(&request.model);
+                        ledger
+                            .record(Spend::new(Stage::Classify, model, input, output).run(&run.id));
+                        add_usage(&mut run.input_tokens, input);
+                        add_usage(&mut run.output_tokens, output);
+                        run.usage_documents += 1;
                     }
-                    None => run.results.push(scored.result),
+                    if let Some(model) = scored.model {
+                        run.model = model;
+                    }
+                    if scored.result.error.is_some() {
+                        run.errors += 1;
+                    }
+                    run.scored += 1;
+                    run.duration_ms = Some(start.elapsed().as_millis() as u64);
+                    progress.item(answered(&scored.result));
+                    // Written as it lands, and kept nowhere else: the run's memory is its
+                    // counters, however many documents it covers.
+                    match &classifications {
+                        Some(classifications) => {
+                            classifications.record_result(
+                                &run,
+                                &scored.result,
+                                scored.usage,
+                                &policy,
+                            )?;
+                            if run.scored % VECTOR_SYNC_EVERY == 0 {
+                                self.sync_vectors().await?;
+                            }
+                        }
+                        None => run.results.push(scored.result),
+                    }
+                    // Jev refused the account. What this document was answered is kept;
+                    // the documents still in flight are dropped unasked, and a
+                    // continuation picks up from here.
+                    if let Some(message) = stop {
+                        stopped = Some(message);
+                        break 'pages;
+                    }
+                    if published.elapsed() >= PUBLISH_EVERY {
+                        publish(&run);
+                        published = Instant::now();
+                    }
+                    progress.track(
+                        "classify",
+                        format!(
+                            "{} of {} scored · {} failed",
+                            run.scored, run.document_count, run.errors
+                        ),
+                        run.scored as u64,
+                        run.document_count as u64,
+                        crate::op::Unit::Count,
+                    );
+                    // Between results, never inside one: the answer just recorded is
+                    // whole, and the documents still in flight are simply dropped unasked.
+                    cancel.check()?;
                 }
-                if published.elapsed() >= PUBLISH_EVERY {
-                    publish(&run);
-                    published = Instant::now();
-                }
-                progress.track(
-                    "classify",
-                    format!(
-                        "{} of {} scored · {} failed",
-                        run.scored, run.document_count, run.errors
-                    ),
-                    run.scored as u64,
-                    run.document_count as u64,
-                    crate::op::Unit::Count,
-                );
-                // Between results, never inside one: the answer just recorded is whole,
-                // and the documents still in flight are simply dropped unasked.
-                cancel.check()?;
             }
             Ok(())
         }
         .await;
+        if let Some(message) = stopped {
+            run.status = "stopped".into();
+            run.error = Some(message.clone());
+            run.completed_at = Some(Timestamp::now().to_string());
+            run.duration_ms = Some(start.elapsed().as_millis() as u64);
+            if let Some(classifications) = &classifications {
+                classifications.finish_run(&run)?;
+                self.sync_vectors().await?;
+            }
+            publish(&run);
+            bail!("{message}");
+        }
         if let Err(error) = outcome {
             run.status = if crate::op::is_cancelled(&error) {
                 "interrupted"
@@ -2131,6 +2382,7 @@ impl<'a> Workspace<'a> {
             result: failed_result(input, String::new()),
             usage: None,
             model: None,
+            stopped: None,
         };
         let full = match self.document_text(input).await {
             Ok(text) => text,
@@ -2207,6 +2459,20 @@ impl<'a> Workspace<'a> {
                     Ok(response) => {
                         let status = response.status();
                         let detail = response.text().await.unwrap_or_default();
+                        // The account, not the document: no retry and no smaller text
+                        // changes a refused key or an empty balance. The answers this
+                        // document already gave stay with it, and the run stops here.
+                        if account_refused(status) {
+                            let message = format!("Jev answered {status}: {}", snippet(&detail));
+                            scored.usage = summed(&usages);
+                            let mut partial = result.clone();
+                            partial.error =
+                                Some(format!("{message} (after {attempts} request(s))"));
+                            partial.attempts = Some(attempts);
+                            scored.result = partial;
+                            scored.stopped = Some(message);
+                            return scored;
+                        }
                         // Jev refuses a state larger than its context with a 4xx. The text
                         // is sent again at half the size, so the document gets an answer
                         // about most of itself instead of no answer.
@@ -2576,6 +2842,88 @@ fn validate_date(value: &str) -> anyhow::Result<()> {
         .parse::<jiff::civil::Date>()
         .with_context(|| format!("evaluation_date `{value}` is not YYYY-MM-DD"))?;
     Ok(())
+}
+
+/// What each document of a page holds before the run asks anything: its answers as the
+/// saved chain reaches them, at the run's versions, and its latest verdicts.
+fn priors_for(
+    classifications: &Classifications,
+    saved: &Chain<'_>,
+    tree: &Chain<'_>,
+    page: &[DocumentId],
+) -> anyhow::Result<HashMap<DocumentId, Prior>> {
+    let mut priors = HashMap::with_capacity(page.len());
+    for id in page {
+        let (stored, verdicts) = classifications.reached(id, saved)?;
+        priors.insert(
+            id.clone(),
+            Prior {
+                answers: tree.current(&stored),
+                verdicts: verdicts.unwrap_or_default(),
+            },
+        );
+    }
+    Ok(priors)
+}
+
+/// Input tokens and cost before anything is sent: `chars` of text as Jev would see it —
+/// every document counted at the sampling limit — over `documents`, plus the questions,
+/// at about four characters a token. A run follows the chain, so a follow-up costs only
+/// for the documents it reaches — `reach` gives that share by question id, one when
+/// absent — and every group of follow-ups sharing a `when` is its own request, carrying
+/// the text again. Two groups that reach the same document at the same depth share a
+/// request, so this errs high.
+pub fn estimate(
+    chars: u64,
+    documents: usize,
+    questions: &[Question],
+    reach: &HashMap<String, f64>,
+    model: &str,
+) -> (u64, Option<f64>) {
+    let reach_of = |q: &Question| reach.get(&q.id).copied().unwrap_or(1.0);
+    let question_chars: f64 = questions
+        .iter()
+        .map(|q| {
+            let chars = q.instructions.len()
+                + 70
+                + q.options
+                    .iter()
+                    .map(|o| o.id.len() + o.description.len())
+                    .sum::<usize>();
+            reach_of(q) * chars as f64
+        })
+        .sum();
+    let follow_ups: HashMap<&str, f64> = questions
+        .iter()
+        .filter_map(|q| Some((q.when.as_deref()?, reach_of(q))))
+        .collect();
+    let sends = 1.0 + follow_ups.values().sum::<f64>();
+    let total = chars as f64 * sends + question_chars * documents as f64;
+    let tokens = (total / 4.0) as u64;
+    (tokens, crate::spend::cost(model, tokens, 0))
+}
+
+/// The saved questions a run asks: all of them, or the ids named. An id nobody saved is
+/// an error rather than a quiet omission — a typo would otherwise score a corpus with the
+/// wrong set and say nothing.
+pub fn chosen(saved: &[Question], ids: &[String]) -> anyhow::Result<Vec<Question>> {
+    if saved.is_empty() {
+        anyhow::bail!(
+            "no questions are saved — `centinel questions --add-defaults` restores the shipped \
+             set"
+        );
+    }
+    if ids.is_empty() {
+        return Ok(saved.to_vec());
+    }
+    if let Some(unknown) = ids.iter().find(|id| !saved.iter().any(|q| &q.id == *id)) {
+        anyhow::bail!("no saved question is called `{unknown}` — `centinel questions` lists them");
+    }
+    Ok(saved
+        .iter()
+        .filter(|q| ids.contains(&q.id))
+        .cloned()
+        .collect())
 }
 
 /// A snapshot of the runs this process is scoring, for telling a run left `running` by
@@ -3046,13 +3394,6 @@ fn dotenv_value(text: &str, name: &str) -> Option<String> {
         }
     }
     found
-}
-
-/// Whether a run could start on this machine: the key is in the environment or an `.env`
-/// the store would read. Asked by the pipeline before its classify stage, so a missing key
-/// is a skip with a reason rather than a failure at the end of a crawl.
-pub fn typesafe_key_present(root: &Path) -> bool {
-    secret("TYPESAFE_API_KEY", root).is_some()
 }
 
 /// Where a run posts. TypeSafe's API unless the run's settings or the environment name a
@@ -3529,10 +3870,11 @@ mod tests {
         assert!(ws.questions().unwrap().is_empty());
     }
 
-    /// The classify work list: documents missing an answer for a question at its current
-    /// version, never excluded ones, and everything with `rescore`.
+    /// A scope is every indexed document in it, excluded ones too, and the plan prices
+    /// exactly those: the corpus, one source, or one document. A scope nothing is in
+    /// cannot be started.
     #[tokio::test]
-    async fn pending_documents_are_the_unanswered_included_ones() {
+    async fn a_scope_covers_every_indexed_document_and_a_plan_prices_it() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let mut index = Index::open(store.index_path()).unwrap();
@@ -3573,62 +3915,102 @@ mod tests {
         drop(index);
         let ws = Workspace::new(&store);
         let noise = ws.save_questions(vec![q("noise", "Noise?", 0)]).unwrap();
+        let plan = |scope: RunScope| ws.plan(Some(&scope), None, &noise, "jev-test").unwrap();
 
-        let all = ws.pending_documents(&noise, None, false).unwrap();
-        assert_eq!(all.len(), 3);
-        assert!(all.iter().all(|p| p.chars > 0));
+        let all = plan(RunScope::default());
+        assert_eq!(all.documents, 3);
+        assert!(all.estimated_tokens > 0);
+        assert!(all.estimated_cost_usd.unwrap() > 0.0);
         assert_eq!(
-            ws.pending_documents(&noise, Some("county"), false)
-                .unwrap()
-                .len(),
+            plan(RunScope {
+                source: Some("county".into()),
+                document: None,
+            })
+            .documents,
             1
         );
-        assert!(
-            ws.pending_documents(&[], None, false).unwrap().is_empty(),
-            "no questions, nothing to answer"
+        assert_eq!(
+            plan(RunScope {
+                source: None,
+                document: Some(ids[1].clone()),
+            })
+            .documents,
+            1
         );
 
-        // `a` answered at the current version; `b` excluded by a person.
-        stored_run(
-            &store,
-            "run-a",
-            &noise,
-            vec![RunResult {
-                source: ids[0].source.clone(),
-                resource: ids[0].resource.clone(),
-                derived_sha: ids[0].derived_sha.clone(),
-                answers: BTreeMap::from([("noise".to_string(), 0.1)]),
-                ..RunResult::default()
-            }],
-        );
+        // A person excludes `b`: it is still in scope, because a classify run scores
+        // everything and the policy decides afterwards.
         Classifications::open(&store)
             .unwrap()
             .set_usage(&ids[1], true, "review", &Policy::new(&noise))
             .unwrap();
+        assert_eq!(plan(RunScope::default()).documents, 3);
 
-        let left = ws.pending_documents(&noise, None, false).unwrap();
-        assert_eq!(
-            left.iter()
-                .map(|p| p.id.resource.as_str())
-                .collect::<Vec<_>>(),
-            ["https://county.gov/c"],
-            "a is answered, b is excluded"
-        );
-        let everything = ws.pending_documents(&noise, None, true).unwrap();
-        assert_eq!(
-            everything.len(),
-            2,
-            "rescore sends the answered one again, never the excluded"
-        );
+        let nowhere = RunScope {
+            source: Some("nowhere".into()),
+            document: None,
+        };
+        assert_eq!(plan(nowhere.clone()).documents, 0);
+        let error = ws
+            .prepare(RunRequest {
+                questions: noise.clone(),
+                documents: Vec::new(),
+                selection: None,
+                repeat: None,
+                scope: Some(nowhere),
+                continue_from: None,
+                model: "jev-test".into(),
+                evaluation_date: "2026-10-11".into(),
+                settings: RunSettings::default(),
+                record: true,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no indexed document"), "{error}");
+    }
 
-        // New wording is a new version, and every included document is pending for it.
-        let reworded = ws
-            .save_questions(vec![q("noise", "Is it noise?", 0)])
-            .unwrap();
-        assert_eq!(reworded[0].version, 2);
-        assert_eq!(
-            ws.pending_documents(&reworded, None, false).unwrap().len(),
-            2
+    #[test]
+    fn the_estimate_counts_text_at_the_sampling_limit_plus_the_questions() {
+        let none = HashMap::new();
+        let (tokens, cost) = estimate(8_000, 2, &[], &none, "jev-test");
+        assert_eq!(tokens, 2_000);
+        assert!((cost.unwrap() - 2_000.0 * 0.042 / 1e6).abs() < 1e-12);
+        let with_questions = estimate(4_000, 1, &default_questions(), &none, "jev-test").0;
+        assert!(with_questions > 1_000);
+        assert_eq!(estimate(4_000, 1, &[], &none, "other-model").1, None);
+    }
+
+    /// A follow-up sends the text again, but only for the documents expected to reach it:
+    /// priced at its share, and at every document while no share is known.
+    #[test]
+    fn a_follow_up_is_priced_for_the_share_of_documents_it_reaches() {
+        let defaults = default_questions();
+        let pick = |id: &str| defaults.iter().find(|q| q.id == id).unwrap().clone();
+        let gate = pick("page_kind");
+        let laws = Question {
+            when: Some("page_kind:record".into()),
+            ..pick("laws")
+        };
+        let chain = [gate.clone(), laws];
+        let estimate_with = |questions: &[Question], reach: &[(&str, f64)]| {
+            let reach = reach
+                .iter()
+                .map(|(id, share)| (id.to_string(), *share))
+                .collect();
+            estimate(40_000, 1, questions, &reach, "jev-test").0
+        };
+
+        let gate_alone = estimate_with(std::slice::from_ref(&gate), &[]);
+        let unknown = estimate_with(&chain, &[]);
+        let quarter = estimate_with(&chain, &[("laws", 0.25)]);
+        assert!(
+            unknown >= gate_alone + 10_000,
+            "an unknown share sends the text twice: {unknown} against {gate_alone}"
+        );
+        assert!(gate_alone < quarter && quarter < unknown);
+        assert!(
+            quarter - gate_alone <= (unknown - gate_alone) / 4 + 2,
+            "a quarter of the documents cost a quarter of the follow-up"
         );
     }
 
@@ -3736,11 +4118,10 @@ mod tests {
                 .unwrap(),
             ["record_type:minutes"]
         );
-        assert!(
-            ws.pending_documents(&stricter, None, false)
-                .unwrap()
-                .is_empty(),
-            "a policy change asks Jev nothing"
+        assert_eq!(
+            ws.documents(DocumentQuery::default()).unwrap().pending,
+            0,
+            "a policy change leaves nothing owed"
         );
     }
 
@@ -4800,6 +5181,8 @@ mod tests {
             documents: documents.to_vec(),
             selection: None,
             repeat: None,
+            scope: None,
+            continue_from: None,
             model: "jev-test".into(),
             evaluation_date: "2026-10-09".into(),
             settings: RunSettings {
@@ -4807,6 +5190,190 @@ mod tests {
             },
             record,
         }
+    }
+
+    /// A recorded run over a scope, one document in flight at a time so a refusal lands
+    /// on a known request.
+    fn scoped_run(questions: &[Question], scope: RunScope, endpoint: &str) -> RunRequest {
+        RunRequest {
+            questions: questions.to_vec(),
+            documents: Vec::new(),
+            selection: None,
+            repeat: None,
+            scope: Some(scope),
+            continue_from: None,
+            model: "jev-test".into(),
+            evaluation_date: "2026-10-11".into(),
+            settings: RunSettings {
+                values: BTreeMap::from([
+                    ("endpoint".to_string(), json!(endpoint)),
+                    ("concurrency".to_string(), json!(1)),
+                ]),
+            },
+            record: true,
+        }
+    }
+
+    /// Nothing more is sent after Jev refuses the account: the run stops with Jev's
+    /// words, keeps every answer it had, and a continuation sends only the documents no
+    /// run in the chain answered — the one that was refused and the ones never reached —
+    /// over the scope as it stands now. A second continuation has nothing left.
+    #[tokio::test]
+    async fn an_account_refusal_stops_the_run_and_a_continuation_finishes_it() {
+        let endpoint = crate::workspace::fake_jev::fake_jev_refusing(402, 1).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        fs::write(dir.path().join(".env"), "TYPESAFE_API_KEY=test-key\n").unwrap();
+        indexed(
+            &store,
+            &[
+                ("https://example.gov/a-budget", BUDGET),
+                ("https://example.gov/b-menu", MENU),
+                ("https://example.gov/c-notice", BUDGET),
+            ],
+        )
+        .await;
+        let ws = Workspace::new(&store);
+        let gate = ws.save_questions(gate_and_laws()[..1].to_vec()).unwrap();
+        let scope = RunScope {
+            source: Some("city".into()),
+            document: None,
+        };
+
+        // The first document is answered, the second refused: stop.
+        let error = ws
+            .run(scoped_run(&gate, scope.clone(), &endpoint))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("402"), "{error}");
+        let runs = ws.runs(RunQuery::default()).unwrap().runs;
+        assert_eq!(runs.len(), 1);
+        let root = &runs[0];
+        assert_eq!(root.status, "stopped");
+        assert!(root.error.as_deref().unwrap().contains("402"), "{root:?}");
+        assert_eq!(root.document_count, 3);
+        let detail = ws.run_detail(&root.id, RunDetailQuery::default()).unwrap();
+        assert_eq!(
+            detail.scored, 2,
+            "one answered, one refused, one never sent"
+        );
+        assert_eq!(detail.view.as_ref().unwrap().documents.errors, 1);
+        assert_eq!(
+            Classifications::open(&store)
+                .unwrap()
+                .tags_of(&DocumentId {
+                    source: "city".into(),
+                    resource: "https://example.gov/a-budget".into(),
+                    derived_sha: detail.results[0].derived_sha.clone(),
+                })
+                .unwrap()
+                .len(),
+            0,
+            "the gate keeps records without a tag"
+        );
+
+        // The continuation plans and sends the two the chain has not answered.
+        let plan = ws.plan(None, Some(&root.id), &[], "").unwrap();
+        assert_eq!(plan.documents, 2);
+        let continued = ws
+            .run(RunRequest {
+                questions: Vec::new(),
+                documents: Vec::new(),
+                selection: None,
+                repeat: None,
+                scope: None,
+                continue_from: Some(root.id.clone()),
+                model: String::new(),
+                evaluation_date: String::new(),
+                settings: RunSettings::default(),
+                record: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(continued.status, "completed");
+        assert_eq!(continued.document_count, 2);
+        assert_eq!(continued.scored, 2);
+        assert_eq!(continued.continue_from.as_deref(), Some(root.id.as_str()));
+        assert_eq!(continued.questions, gate, "the root's question snapshot");
+        assert_eq!(
+            continued.settings.values["endpoint"],
+            json!(endpoint),
+            "and its settings"
+        );
+        assert_eq!(
+            ws.documents(DocumentQuery {
+                usage: "excluded".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .total,
+            1,
+            "the menu is junk, live"
+        );
+
+        // Everything in scope has an answer now.
+        let again = ws
+            .prepare(RunRequest {
+                questions: Vec::new(),
+                documents: Vec::new(),
+                selection: None,
+                repeat: None,
+                scope: None,
+                continue_from: Some(continued.id.clone()),
+                model: String::new(),
+                evaluation_date: String::new(),
+                settings: RunSettings::default(),
+                record: true,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(again.contains(&root.id), "{again}");
+    }
+
+    /// A scope is read a page at a time, so a run over more documents than one page
+    /// scores all of them without holding them.
+    #[tokio::test]
+    async fn a_scoped_run_pages_through_the_corpus() {
+        let endpoint = crate::workspace::fake_jev::fake_jev().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        fs::write(dir.path().join(".env"), "TYPESAFE_API_KEY=test-key\n").unwrap();
+        let count = INPUT_PAGE + 50;
+        let docs: Vec<(String, String)> = (0..count)
+            .map(|i| {
+                (
+                    format!("https://example.gov/minutes/{i:05}"),
+                    format!("# Minutes {i}\n\nThe board met and adopted item {i}."),
+                )
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str)> =
+            docs.iter().map(|(r, t)| (r.as_str(), t.as_str())).collect();
+        indexed(&store, &borrowed).await;
+        let ws = Workspace::new(&store);
+        let gate = ws.save_questions(gate_and_laws()[..1].to_vec()).unwrap();
+
+        let mut request = scoped_run(&gate, RunScope::default(), &endpoint);
+        request
+            .settings
+            .values
+            .insert("concurrency".into(), json!(MAX_CONCURRENCY));
+        let run = ws.run(request).await.unwrap();
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.document_count, count);
+        assert_eq!(run.scored, count);
+        assert_eq!(run.errors, 0);
+        assert_eq!(
+            run.inputs.len(),
+            0,
+            "a scoped run records its scope, not a list"
+        );
+        assert_eq!(
+            ws.documents(DocumentQuery::default()).unwrap().pending,
+            0,
+            "every document has its answer"
+        );
     }
 
     fn answered(id: &DocumentId, answers: BTreeMap<String, f64>) -> RunResult {
@@ -4926,7 +5493,6 @@ mod tests {
         let ids = indexed(&store, &[("https://example.gov/budget", BUDGET)]).await;
         let ws = Workspace::new(&store);
         let saved = ws.save_questions(gate_and_laws()).unwrap();
-        let laws = &saved[1..];
         let append = |id: &str, gate: &[(&str, f64)], follow_up: Option<f64>| {
             let mut answers = choice_answers(gate);
             if let Some(score) = follow_up {
@@ -4965,19 +5531,17 @@ mod tests {
             Some(0.9),
         );
         assert_eq!(scores()["laws"], 0.9);
-        assert!(ws.pending_documents(laws, None, false).unwrap().is_empty());
+        assert_eq!(ws.documents(DocumentQuery::default()).unwrap().pending, 0);
 
         // A later run calls it navigation: the answer `laws` was asked under is gone, and
         // the menu owes no follow-up.
         append("run-2", &[("record", 0.1), ("navigation", 0.9)], None);
         assert!(!scores().contains_key("laws"));
-        assert!(ws.pending_documents(laws, None, false).unwrap().is_empty());
         assert_eq!(ws.documents(DocumentQuery::default()).unwrap().pending, 0);
 
         // Back to a record: the old answer stays gone, and the follow-up is owed again.
         append("run-3", &[("record", 0.95), ("navigation", 0.05)], None);
         assert!(!scores().contains_key("laws"));
-        assert_eq!(ws.pending_documents(laws, None, false).unwrap().len(), 1);
         assert_eq!(ws.documents(DocumentQuery::default()).unwrap().pending, 1);
 
         // Asked again; then a person says it is navigation after all.
@@ -5000,12 +5564,12 @@ mod tests {
         // stays gone: the follow-up is owed again, not restored.
         review("record");
         assert!(!scores().contains_key("laws"));
-        assert_eq!(ws.pending_documents(laws, None, false).unwrap().len(), 1);
+        assert_eq!(ws.documents(DocumentQuery::default()).unwrap().pending, 1);
 
         // Only an answer recorded after the latest change counts.
         append("run-5", &[], Some(0.7));
         assert_eq!(scores()["laws"], 0.7);
-        assert!(ws.pending_documents(laws, None, false).unwrap().is_empty());
+        assert_eq!(ws.documents(DocumentQuery::default()).unwrap().pending, 0);
     }
 
     /// Answers stored before runs followed the chain asked every question of every
