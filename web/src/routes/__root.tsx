@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useLocation } from '@tanstack/react-router'
 import { QueryClientProvider, useQuery, type QueryClient } from '@tanstack/react-query'
-import { CircleDollarSign, Eye, FlaskConical, History, Moon, Plug, Search, ShieldCheck, Sparkles, Sun } from 'lucide-react'
+import { BookOpen, CircleDollarSign, Eye, FlaskConical, History, Moon, Plug, Search, ShieldCheck, Sparkles, Sun } from 'lucide-react'
 import { queries } from '../queries'
 import { JobDrawerProvider, WorkingNow, useJobEvents } from '../jobs'
 import { ActivityBar } from '../feedback'
@@ -102,6 +102,7 @@ function Shell() {
       <SidebarFooter className="gap-3 px-3 pb-3">
         <WorkingNow />
         <Quote />
+        <DocsLink active={pathname.startsWith('/web/docs')} />
         <ThemeToggle />
       </SidebarFooter>
     </Sidebar>
@@ -127,6 +128,16 @@ function NavItem({ active, label, count, children }: { active: boolean; label: s
     <SidebarMenuButton asChild isActive={active} tooltip={label} className="h-9 text-[14px] data-[active=true]:bg-background data-[active=true]:font-semibold data-[active=true]:shadow-[0_0_0_1px_var(--rule)]">{children}</SidebarMenuButton>
     {count !== undefined && <SidebarMenuBadge className="top-2 font-mono text-xs font-normal text-muted-foreground">{count}</SidebarMenuBadge>}
   </SidebarMenuItem>
+}
+
+function DocsLink({ active }: { active: boolean }) {
+  return <SidebarMenu className="-mx-1">
+    <SidebarMenuItem>
+      <SidebarMenuButton asChild isActive={active} tooltip="Documentation" className="h-9 text-[14px]">
+        <Link to="/docs/$" params={{ _splat: '' }}><BookOpen /><span>Documentation</span></Link>
+      </SidebarMenuButton>
+    </SidebarMenuItem>
+  </SidebarMenu>
 }
 
 function ThemeToggle() {

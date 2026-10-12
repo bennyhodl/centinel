@@ -295,3 +295,39 @@ html:active-view-transition-type(back)::view-transition-new(page) { animation-na
   ::view-transition-group(*) { animation: none; }
   .animate-activity-glint, .animate-flicker { animation: none; }
 }
+
+/* Documentation: the Markdown chapters, rendered by docs/Docs.tsx. The prose is a document's
+   own text, so it takes the reading face. Tailwind's preflight strips list markers and
+   heading sizes, so both are set here. */
+.docs { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(0, 860px) minmax(0, 1fr); gap: 56px; align-items: start; }
+.docs-nav { position: sticky; top: 32px; max-height: calc(100vh - 64px); overflow-y: auto; display: grid; gap: 22px; }
+.docs-nav h2 { margin: 0 0 6px; padding: 0 10px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted-foreground); }
+.docs-nav ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+.docs-nav a { display: block; padding: 6px 10px; border-radius: 6px; font-size: 14px; color: var(--muted-foreground); text-decoration: none; }
+.docs-nav a:hover { background: var(--hover); color: var(--foreground); }
+.docs-nav a.active { background: var(--muted); color: var(--foreground); font-weight: 600; }
+.docs-article { grid-column: 2; min-width: 0; font-family: var(--font-reading); font-size: 17px; line-height: 28px; }
+.docs-article h1 { margin: 0 0 24px; font: 400 40px/44px var(--font-serif); letter-spacing: -.01em; }
+.docs-article h2 { margin: 40px 0 12px; font: 400 26px/32px var(--font-serif); scroll-margin-top: 24px; }
+.docs-article h3 { margin: 28px 0 8px; font: 600 15px/22px var(--font-sans); scroll-margin-top: 24px; }
+.docs-article p, .docs-article ul, .docs-article ol, .docs-article blockquote, .docs-article pre, .docs-article table { margin: 0 0 16px; }
+.docs-article ul, .docs-article ol { padding-left: 22px; }
+.docs-article ul { list-style: disc; }
+.docs-article ol { list-style: decimal; }
+.docs-article li + li { margin-top: 4px; }
+.docs-article a { color: var(--flame-ink); text-underline-offset: 3px; }
+.docs-article code { padding: 1px 5px; border-radius: 4px; background: var(--muted); font: 13px var(--font-mono); }
+.docs-article pre { padding: 16px 18px; border-radius: 8px; background: var(--terminal); color: var(--terminal-ink); overflow-x: auto; font: 13px/1.6 var(--font-mono); }
+.docs-article pre code { padding: 0; background: none; color: inherit; font: inherit; }
+.docs-article blockquote { margin-left: 0; padding: 2px 16px; border-left: 3px solid var(--rule); color: var(--muted-foreground); }
+.docs-article table { width: 100%; border-collapse: collapse; font: 14px/20px var(--font-sans); }
+.docs-article th, .docs-article td { padding: 8px 12px 8px 0; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
+.docs-article th { font-size: 12px; font-weight: 600; color: var(--muted-foreground); }
+.docs-article hr { margin: 36px 0; border: 0; border-top: 1px solid var(--rule); }
+.docs-article img { width: 100%; height: auto; border-radius: 8px; }
+.docs-missing { margin: 0; color: var(--muted-foreground); }
+@media (max-width: 900px) {
+  .docs { grid-template-columns: minmax(0, 1fr); gap: 28px; }
+  .docs-article { grid-column: auto; }
+  .docs-nav { position: static; max-height: none; }
+}
