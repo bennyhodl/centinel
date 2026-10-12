@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { jobEventsUrl, type JobEvent, type JobItem, type JobState, type RunResult } from './api'
@@ -8,6 +8,7 @@ import { answerSummary } from './live'
 import { queries } from './queries'
 import { DocumentLink } from './ui'
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
+import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar'
 
 /**
  * Keeps the `jobs` cache current from the server's job stream. Mounted once, in the shell:
@@ -50,18 +51,58 @@ export function useJobs() {
   return useQuery(queries.jobs()).data ?? []
 }
 
-/** What is running right now, from any page: what each job is doing and how far along. */
-export function WorkingNow({ onOpen }: { onOpen: (id: string) => void }) {
+const OpenJob = createContext<(id: string) => void>(() => {})
+
+/** Opens one job in the drawer, from any page: a page that starts a job shows it this way. */
+export const useOpenJob = () => useContext(OpenJob)
+
+/** The one job drawer. Mounted once, in the shell, around everything that can open it. */
+export function JobDrawerProvider({ children }: { children: ReactNode }) {
+  const [id, setId] = useState('')
+  return <OpenJob.Provider value={setId}>
+    {children}
+    {id && <JobDrawer id={id} onClose={() => setId('')} />}
+  </OpenJob.Provider>
+}
+
+/**
+ * What is running right now, from any page: what each job is doing and how far along. In
+ * the collapsed rail, one mark that says something runs and opens the oldest of it.
+ */
+export function WorkingNow() {
+  const open = useOpenJob()
   const running = activeJobs(useJobs())
   if (!running.length) return null
-  return <div className="grid gap-1 border-t pt-3 group-data-[collapsible=icon]:hidden">
-    <span className="mb-1 inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-flame-ink"><span className="size-1.5 rounded-full bg-flame shadow-[0_0_0_3px_var(--flame-halo)]" />Working now</span>
-    {running.map(job => <button key={job.id} type="button" onClick={() => onOpen(job.id)} className="grid gap-1 rounded-md px-1.5 py-1 text-left text-[13px] hover:bg-background">
-      <span className="flex justify-between gap-2"><span className="truncate">{jobTitle(job)}</span><span className="shrink-0 font-mono text-xs text-muted-foreground">{count(job)}</span></span>
-      <Bar job={job} thin />
-      {job.current && <span className="truncate font-mono text-[11px] text-muted-foreground">{tail(job.current)}</span>}
-    </button>)}
-  </div>
+  const first = running[0]
+  return <>
+    <div className="grid gap-1 border-t pt-3 group-data-[collapsible=icon]:hidden">
+      <span className="mb-1 inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-flame-ink"><span className="size-1.5 rounded-full bg-flame shadow-[0_0_0_3px_var(--flame-halo)]" />Working now</span>
+      {running.map(job => <button key={job.id} type="button" onClick={() => open(job.id)} className="grid gap-1 rounded-md px-1.5 py-1 text-left text-[13px] hover:bg-background">
+        <span className="flex justify-between gap-2"><span className="truncate">{jobTitle(job)}</span><span className="shrink-0 font-mono text-xs text-muted-foreground">{count(job)}</span></span>
+        <Bar job={job} thin />
+        {job.current && <span className="truncate font-mono text-[11px] text-muted-foreground">{tail(job.current)}</span>}
+      </button>)}
+    </div>
+    <SidebarMenu className="-mx-1 hidden group-data-[collapsible=icon]:flex">
+      <SidebarMenuItem>
+        <SidebarMenuButton onClick={() => open(first.id)} tooltip={[jobTitle(first), count(first), running.length > 1 && `${running.length - 1} more`].filter(Boolean).join(' · ')} className="h-9">
+          <Ring job={first} /><span>Working now</span>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    </SidebarMenu>
+  </>
+}
+
+/** A job's progress as a ring around the live dot, for the collapsed rail. */
+function Ring({ job }: { job: JobState }) {
+  const done = job.total ? (job.done ?? 0) / job.total : 0
+  return <span className="relative grid size-4 shrink-0 place-items-center">
+    <svg viewBox="0 0 16 16" className="absolute inset-0 -rotate-90">
+      <circle cx="8" cy="8" r="7" fill="none" strokeWidth="2" className="stroke-track" />
+      <circle cx="8" cy="8" r="7" fill="none" strokeWidth="2" pathLength={1} strokeDasharray={`${done} 1`} className="stroke-flame transition-[stroke-dasharray] duration-(--motion-progress) ease-out" />
+    </svg>
+    <span className="size-1.5 animate-pulse rounded-full bg-flame" />
+  </span>
 }
 
 const count = (job: JobState) => job.total ? `${number(job.done ?? 0)}/${number(job.total)}` : ''
@@ -82,7 +123,7 @@ const clock = (ms: number) => new Date(ms).toTimeString().slice(0, 8)
  * failures in their own colour. A classifier run also reads its answers from the run, so
  * a scored line says what Jev decided.
  */
-export function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) {
+function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) {
   const job = useJobs().find(candidate => candidate.id === id)
   const classify = job?.kind === 'classify'
   const detail = useQuery({ ...queries.run(id, { page: 1, page_size: 1 }, 2000), enabled: classify })
@@ -91,7 +132,15 @@ export function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) 
   const questions = run ? (run.effective_questions?.length ? run.effective_questions : run.questions) : []
   const answers = new Map((run?.view?.recent || []).map(result => [result.resource, result]))
   const running = !job || !job.outcome
-  const lines = [...(job?.log || [])].reverse()
+  const lines = job?.log || []
+  // Oldest first, like a terminal: the newest line lands at the bottom, and the log follows
+  // it until the reader scrolls up, and again once they scroll back down.
+  const log = useRef<HTMLDivElement>(null)
+  const [following, setFollowing] = useState(true)
+  const latest = lines.at(-1)?.seq
+  useLayoutEffect(() => {
+    if (log.current && following) log.current.scrollTop = log.current.scrollHeight
+  }, [following, latest, detail.dataUpdatedAt])
 
   return <Sheet open onOpenChange={open => !open && onClose()}>
     <SheetContent side="right" className="flex w-full flex-col gap-0 p-0 sm:max-w-[560px]">
@@ -122,8 +171,8 @@ export function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) 
         {job?.error && <p className="text-[13px] text-destructive">{job.error}</p>}
       </div>
       <div className="flex min-h-0 flex-1 flex-col bg-terminal py-3 font-mono text-xs leading-[22px]">
-        <div className="flex justify-between px-5 pb-2 font-sans text-[11px] text-[#B9AE98]"><span>Live log · {running ? 'following' : 'finished'}</span><span>{job?.step}</span></div>
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="flex justify-between px-5 pb-2 font-sans text-[11px] text-[#B9AE98]"><span>Live log · {!running ? 'finished' : following ? 'following' : 'paused, scroll down to follow'}</span><span>{job?.step}</span></div>
+        <div ref={log} onScroll={event => { const { scrollHeight, scrollTop, clientHeight } = event.currentTarget; setFollowing(scrollHeight - scrollTop - clientHeight < 24) }} className="min-h-0 flex-1 overflow-y-auto">
           {lines.map(line => <LogLine key={line.seq} line={line} answer={line.type === 'item' ? answers.get(line.item.address) : undefined} questions={questions} />)}
           {!lines.length && <div className="px-5 text-[#B9AE98]">{job ? 'Waiting for the first event…' : 'This job is not running on this server.'}</div>}
         </div>
