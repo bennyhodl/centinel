@@ -37,6 +37,9 @@ Collection remains controlled by the local operator's configuration.
 per-launch credential. Install Node.js 22.13 or newer. No database service is needed.
 Back up the store's `auth/` directory, including `auth.sqlite` and `secret`, while stopped.
 Keep this directory private. Claim the first account before sharing the public link.
+A Nostr user's name and picture are read from `wss://relay.damus.io` and `wss://nos.lol`
+at sign-in; `CENTINEL_NOSTR_RELAYS` names other relays, comma-separated, and an empty
+value asks none.
 
 For a reverse proxy, set `CENTINEL_PUBLIC_URL=https://your-host.example` and forward that
 origin to the bound port. `--tailscale` supplies its HTTPS origin automatically. Remote

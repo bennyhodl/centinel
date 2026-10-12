@@ -3,7 +3,8 @@ import { requireMcpAuth } from '@better-auth/mcp'
 import { createIdentity } from './auth'
 import type { Account } from '../api'
 
-export async function createGateway(config: { root: string; origin: string; backend: string; secret: string }) {
+/** `relays` are asked for a Nostr user's name and picture at sign-in. None means never ask. */
+export async function createGateway(config: { root: string; origin: string; backend: string; secret: string; relays: string[] }) {
   const identity = await createIdentity(config.root, config.origin)
   const { auth, db, member, session } = identity
   const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { 'cache-control': 'no-store' } })
@@ -54,7 +55,7 @@ export async function createGateway(config: { root: string; origin: string; back
         const id = result.user?.id
         const key = id && db.prepare('SELECT publicKey FROM nostrPubkey WHERE userId = ? LIMIT 1').get(id) as { publicKey: string } | undefined
         if (key) {
-          const profile = await nostrProfile(key.publicKey)
+          const profile = await nostrProfile(key.publicKey, config.relays)
           db.prepare('UPDATE user SET name = COALESCE(?, name), image = COALESCE(?, image) WHERE id = ?').run(profile.name ?? null, profile.image ?? null, id)
         }
       }

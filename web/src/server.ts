@@ -11,6 +11,7 @@ export default {
       gateway ??= createGateway({
         root: process.env.CENTINEL_AUTH_ROOT!, origin: process.env.CENTINEL_PUBLIC_URL!,
         backend: process.env.CENTINEL_BACKEND, secret: process.env.CENTINEL_INTERNAL_SECRET!,
+        relays: (process.env.CENTINEL_NOSTR_RELAYS ?? 'wss://relay.damus.io,wss://nos.lol').split(',').map(url => url.trim()).filter(Boolean),
       })
       const response = await (await gateway).handle(request)
       if (response) return response

@@ -17,5 +17,6 @@ await build({
   entryPoints: ['web/serve.mjs'], outfile: '.start/centinel-server.mjs', bundle: true,
   platform: 'node', format: 'esm', target: 'node22',
   banner: { js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);" },
-  external: ['bun:sqlite', 'better-sqlite3', 'pg', 'mysql2', 'cloudflare:workers'],
+  // ws asks for its optional native speed-ups by name; absent, it falls back to JavaScript.
+  external: ['bun:sqlite', 'better-sqlite3', 'pg', 'mysql2', 'cloudflare:workers', 'bufferutil', 'utf-8-validate'],
 })

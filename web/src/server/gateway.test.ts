@@ -25,7 +25,7 @@ beforeAll(async () => {
   server = serve({ hostname: '127.0.0.1', port: 0, fetch: async request => await gateway.handle(request) ?? new Response('page') })
   await Promise.all([server, backend].map(s => new Promise<void>(resolve => s.listening ? resolve() : s.once('listening', resolve))))
   origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`
-  gateway = await createGateway({ root, origin, backend: `http://127.0.0.1:${(backend.address() as { port: number }).port}`, secret: 'private-test-credential' })
+  gateway = await createGateway({ root, origin, backend: `http://127.0.0.1:${(backend.address() as { port: number }).port}`, secret: 'private-test-credential', relays: [] })
 }, 30_000)
 afterAll(async () => {
   await Promise.all([server, backend].filter(Boolean).map(s => new Promise<void>(resolve => s.close(() => resolve()))))
