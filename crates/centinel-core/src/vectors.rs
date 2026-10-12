@@ -1257,7 +1257,12 @@ pub(crate) mod tests {
 
     fn doc(n: u8) -> DocumentId {
         DocumentId {
-            source: if n % 2 == 0 { "tampa" } else { "pinellas" }.into(),
+            source: if n.is_multiple_of(2) {
+                "tampa"
+            } else {
+                "pinellas"
+            }
+            .into(),
             resource: format!("https://x/{n}"),
             derived_sha: hex::encode([n; 32]),
         }

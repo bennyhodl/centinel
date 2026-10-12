@@ -1578,7 +1578,7 @@ mod tests {
         );
         assert_eq!(report.pruned, 1);
         let vectors = table
-            .vectors_of(&[shared.chunk_hash.clone()])
+            .vectors_of(std::slice::from_ref(&shared.chunk_hash))
             .await
             .unwrap();
         assert_eq!(vectors[&shared.chunk_hash], vec![0.5; 2560]);
