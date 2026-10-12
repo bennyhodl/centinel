@@ -216,7 +216,7 @@ mod tests {
             .json()
             .await
             .unwrap();
-        assert_eq!(account["role"], "admin");
+        assert_eq!(account["account"]["role"], "admin");
         let reader = signup("reader@example.com").await.unwrap();
         assert!(reader.status().is_success());
         let reader_cookie = cookies(&reader);
