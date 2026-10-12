@@ -1,12 +1,40 @@
-//! The vector store — `chunk_hash → vector`, in LanceDB.
+//! The vector store — one row per chunk placed in a document, in LanceDB.
 //!
 //! ```text
 //!   <root>/centinel.db        SQLite: metadata + FTS5   — the BM25 arm
-//!   <root>/vectors.lance/     LanceDB: vectors          — this
+//!   <root>/chunks.lance/      LanceDB: vectors          — this
 //! ```
 //!
 //! Vectors are written here by `embed` and read here by `search`. There is no second
 //! copy.
+//!
+//! ## What a row is
+//!
+//! A chunk **placed in a document**: the chunk's hash, the document's source, address and
+//! derived text, the document's tags and whether it is excluded, and the vector. The same
+//! passage on fifty pages is fifty rows carrying one vector, because what a search is
+//! narrowed to — a source, a tag, inclusion — is a fact about the document, and a filter
+//! that lives on the row is applied inside the vector query. The arm used to fetch five
+//! times its depth and throw candidates away in SQLite, and under a narrow filter it came
+//! back short; now it asks Lance for what qualifies.
+//!
+//! `embed` keeps the table to the index in both directions: [`VectorTable::append`] adds
+//! the placements the index has and the table lacks, [`VectorTable::remove`] drops the
+//! rows for placements the index no longer has. The tags and exclusion on a row are what
+//! the workspace said when the row was written; the workspace queues every document whose
+//! tags or exclusion change, and [`VectorTable::set_metadata`] rewrites those two columns
+//! in place — Lance patches the columns inside the existing fragments and never touches a
+//! vector. All of that happens under one file lock, `workspace/vectors.lock`, taken by
+//! whoever writes: `embed` for each append, a classifier run or a review for each sync.
+//!
+//! ## What a filter costs
+//!
+//! With an IVF index, a filter is applied **before** distance: Lance reads the probed
+//! partitions, masks the rows the filter rejects, and scores the rest. The masked rows
+//! cost no arithmetic, but their partitions are still read, so a query narrowed to one
+//! source of thirty reads about as many bytes as an unfiltered one and returns the right
+//! rows. Partitioning the table physically by source would change that, and is not done
+//! here. `examples/vector_bench.rs` measures the filtered case beside the plain one.
 //!
 //! ## Why there is no second copy
 //!
@@ -18,32 +46,21 @@
 //! vector back out. Extracting vectors from Lance is a table scan. Publishing the corpus
 //! is a directory copy. Backing it up is the same.
 //!
-//! What the cache cost was a second write path and a pipeline stage with its own skip
-//! predicate, on a corpus where a wrong skip predicate is the defect that has bitten this
-//! codebase most often. What it bought was one property — append-only bytes the query
-//! engine never rewrites — which is not worth ~4 GiB and a stage.
-//!
-//! ## What a stored vector means
-//!
-//! A row whose `chunk_hash` is in the index. That is the one definition, and `embed` —
-//! the only writer — keeps the table to it in both directions: [`VectorTable::append`]
-//! adds what the index has and the table lacks, [`VectorTable::retain`] drops what the
-//! table has and the index lacks. A rebuilt index or a cleared source therefore leaves
-//! the table stale only until the next `embed`, and `search` says so when the two counts
-//! disagree. Nothing else tracks orphans, and [`VectorTable::len`] is the count of
-//! vectors that count.
-//!
 //! Each append is a Lance commit — a fragment of that batch's rows and a manifest listing
 //! every fragment so far — and a query reads every fragment. Nothing in Lance removes
 //! either on its own; on one 1.3-million-vector corpus that was 20,000 fragments, 20,000
-//! manifests and 16 GiB of them. [`VectorTable::maintain`] is what consolidates them.
+//! manifests and 16 GiB of them. [`VectorTable::maintain`] is what consolidates them, and
+//! it is also what builds the scalar indexes the filters are served from.
 //!
 //! ## The guard
 //!
 //! A query vector and the vectors it searches must come from the same model (SPEC §6.2).
 //! Two models produce plausible, silently incomparable results, so the model id lives in
 //! the table's schema metadata and a mismatch is refused at [`VectorTable::open`] rather
-//! than discovered in bad rankings.
+//! than discovered in bad rankings. The layout is recorded beside it: a store that holds
+//! only the older `vectors` table — one row per chunk, no document, no filter columns — is
+//! told to run `centinel embed --limit 0`, which fills this table from that one with
+//! nothing sent to a model. [`LegacyVectors`] is how `embed` reads it.
 //!
 //! Width is guarded by the schema itself: the column is a `FixedSizeList` of exactly
 //! `dims` floats, so a wrong width cannot be written at all.
@@ -53,30 +70,33 @@
 //! A data file is written once and never rewritten in place. Storage that drops a write
 //! under load — the field case was a USB drive — leaves a file of the right length with
 //! nothing in it: the manifest lists the fragment, Lance opens the file and finds no
-//! footer, and every full scan fails. `embed`'s pre-flight read of the hashes is the first
+//! footer, and every full scan fails. `embed`'s pre-flight read of the keys is the first
 //! to go, which blocks the stage on one file among thousands of good ones.
 //!
 //! [`VectorTable::audit`] reads every fragment back and names the ones that cannot be
 //! read; [`VectorTable::repair`] drops them from the manifest in one commit. Nothing is
-//! recovered, because the bytes never landed, and nothing needs to be: a vector is
-//! `chunk_hash → text → vector`, computed afresh by `embed`, and a dropped fragment's
-//! hashes simply fall back onto its work list. This module owns the Lance side of that
-//! because it owns the table; the `verify` op is the thin thing that asks.
+//! recovered, because the bytes never landed, and nothing needs to be: a row is a chunk
+//! and a document the index still has, and a dropped fragment's rows simply fall back onto
+//! `embed`'s work list. This module owns the Lance side of that because it owns the
+//! table; the `verify` op is the thin thing that asks.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::TryStreamExt;
+use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
 use lance::dataset::fragment::FileFragment;
 use lance::dataset::transaction::{Operation, Transaction};
 use lance::dataset::write::CommitBuilder;
+use lancedb::arrow::arrow_array::builder::{ListBuilder, StringBuilder};
 use lancedb::arrow::arrow_array::{
-    Array, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, RecordBatchReader,
-    StringArray, types::Float32Type,
+    Array, BooleanArray, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator,
+    RecordBatchReader, StringArray, types::Float32Type,
 };
 use lancedb::arrow::arrow_schema::{DataType, Field, Schema, SchemaRef};
+use lancedb::index::scalar::{BTreeIndexBuilder, BitmapIndexBuilder, LabelListIndexBuilder};
 use lancedb::index::{Index as LanceIndex, vector::IvfFlatIndexBuilder};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::OptimizeAction;
@@ -84,18 +104,49 @@ use lancedb::{DistanceType, Table};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::index::Filter;
 use crate::op::{Cancel, Progress};
+use crate::workspace::{DocState, DocumentId};
 
-/// The table inside the database, which is what names `vectors.lance` on disk.
-pub const TABLE: &str = "vectors";
+/// The table inside the database, which is what names `chunks.lance` on disk.
+pub const TABLE: &str = "chunks";
 
+/// The table the layout before this one wrote: `(chunk_hash, vector)`, one row per chunk.
+/// Never written again; read by [`LegacyVectors`] so `embed` can fill [`TABLE`] from it.
+pub const LEGACY_TABLE: &str = "vectors";
+
+const KEY_COLUMN: &str = "key";
 const HASH_COLUMN: &str = "chunk_hash";
+const SOURCE_COLUMN: &str = "source";
+const RESOURCE_COLUMN: &str = "resource";
+const DERIVED_COLUMN: &str = "derived_sha";
+const TAGS_COLUMN: &str = "tags";
+const EXCLUDED_COLUMN: &str = "excluded";
 const VECTOR_COLUMN: &str = "vector";
+/// Every column, in schema order, for a read that has to touch them all.
+const ALL_COLUMNS: [&str; 8] = [
+    KEY_COLUMN,
+    HASH_COLUMN,
+    SOURCE_COLUMN,
+    RESOURCE_COLUMN,
+    DERIVED_COLUMN,
+    TAGS_COLUMN,
+    EXCLUDED_COLUMN,
+    VECTOR_COLUMN,
+];
 /// Where the model id is recorded. Namespaced, because the schema metadata is a shared
 /// map and Lance writes its own keys into it.
 const MODEL_KEY: &str = "centinel.model_id";
+/// Where the layout is recorded. `2` is this one; a table without the key is the one
+/// [`LegacyVectors`] reads.
+const LAYOUT_KEY: &str = "centinel.layout";
+const LAYOUT: &str = "2";
 /// Lance's name for the column a vector query scores into.
 const DISTANCE_COLUMN: &str = "_distance";
+
+/// Between the parts of a row's key. A control character no URL and no hash contains, so
+/// the key splits back into its parts without escaping.
+const KEY_SEPARATOR: char = '\u{1f}';
 
 /// How long a superseded table version stays on disk after [`VectorTable::maintain`].
 ///
@@ -109,6 +160,15 @@ const VERSION_RETENTION: Duration = Duration::from_secs(10 * 60);
 /// fast enough and loses nothing.
 const ANN_MIN_ROWS: usize = 4096;
 
+/// How many times [`VectorTable::nearest`] doubles its fetch when shared passages leave it
+/// short of distinct chunks. A chunk carried by hundreds of pages fills a page of rows on
+/// its own; four doublings reach sixteen times the ask before the arm settles for less.
+const NEAREST_ROUNDS: u32 = 4;
+
+/// Rows per `IN (…)` list when rows are deleted or vectors fetched by hash. Lance parses
+/// the predicate, and a list of a thousand quoted hashes is what it parses comfortably.
+const PREDICATE_ROWS: usize = 1_000;
+
 /// Rows per batch when [`VectorTable::audit`] reads a fragment back.
 ///
 /// The read is for the error, not the data, so the batch only has to be small enough that
@@ -117,6 +177,66 @@ const AUDIT_BATCH_ROWS: usize = 1024;
 
 /// Fragments between progress lines in [`VectorTable::audit`].
 const AUDIT_PROGRESS_EVERY: usize = 500;
+
+/// The key of the row for `chunk` placed in `document`.
+pub fn key_of(chunk_hash: &str, document: &DocumentId) -> String {
+    let mut key = String::with_capacity(
+        chunk_hash.len()
+            + document.source.len()
+            + document.resource.len()
+            + document.derived_sha.len()
+            + 3,
+    );
+    key.push_str(chunk_hash);
+    key.push(KEY_SEPARATOR);
+    key.push_str(&document.source);
+    key.push(KEY_SEPARATOR);
+    key.push_str(&document.resource);
+    key.push(KEY_SEPARATOR);
+    key.push_str(&document.derived_sha);
+    key
+}
+
+/// A key back into its chunk hash and document. `None` for a key this module did not
+/// write.
+pub fn parse_key(key: &str) -> Option<(&str, DocumentId)> {
+    let mut parts = key.split(KEY_SEPARATOR);
+    let chunk_hash = parts.next()?;
+    let source = parts.next()?;
+    let resource = parts.next()?;
+    let derived_sha = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((
+        chunk_hash,
+        DocumentId {
+            source: source.to_owned(),
+            resource: resource.to_owned(),
+            derived_sha: derived_sha.to_owned(),
+        },
+    ))
+}
+
+/// One row on its way in: a chunk placed in a document, what the workspace says about
+/// the document, and the vector.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Row {
+    pub chunk_hash: String,
+    pub document: DocumentId,
+    pub state: DocState,
+    pub vector: Vec<f32>,
+}
+
+/// One answer from [`VectorTable::nearest`]: the chunk, the document the filter admitted
+/// it through, and how near it was.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Nearest {
+    pub chunk_hash: String,
+    pub document: DocumentId,
+    /// Cosine similarity: higher is nearer, 1.0 is the query itself.
+    pub similarity: f32,
+}
 
 /// What [`VectorTable::maintain`] did to the files behind the table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -134,7 +254,7 @@ pub struct Maintenance {
 pub struct UnreadableFragment {
     /// Lance's id for the fragment — what [`VectorTable::repair`] drops.
     pub id: u64,
-    /// Its data files, relative to `vectors.lance/`, for whoever wants to look at the
+    /// Its data files, relative to `chunks.lance/`, for whoever wants to look at the
     /// bytes themselves.
     pub data_files: Vec<String>,
     /// How many rows the manifest says the fragment held. An **estimate**: the file cannot
@@ -180,7 +300,7 @@ pub struct VectorRepair {
     pub estimated_rows: usize,
 }
 
-/// A LanceDB table of `(chunk_hash, vector)` for one model.
+/// A LanceDB table of chunk placements and their vectors, for one model.
 ///
 /// Cheap to clone — a `Table` is a handle.
 #[derive(Clone)]
@@ -202,6 +322,17 @@ impl std::fmt::Debug for VectorTable {
     }
 }
 
+async fn connect(dir: &Path) -> anyhow::Result<lancedb::Connection> {
+    let dir = dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("{} is not valid UTF-8", dir.display()))?;
+    Ok(lancedb::connect(dir).execute().await?)
+}
+
+async fn has_table(db: &lancedb::Connection, name: &str) -> anyhow::Result<bool> {
+    Ok(db.table_names().execute().await?.iter().any(|n| n == name))
+}
+
 impl VectorTable {
     /// Opens or creates the table for a model, validating an existing one.
     ///
@@ -211,13 +342,10 @@ impl VectorTable {
     pub async fn open(dir: &Path, model_id: &str, dims: usize) -> anyhow::Result<Self> {
         anyhow::ensure!(dims > 0, "a model with zero dimensions cannot be stored");
 
-        let dir = dir
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("{} is not valid UTF-8", dir.display()))?;
-        let db = lancedb::connect(dir).execute().await?;
+        let db = connect(dir).await?;
         let schema = schema_for(model_id, dims);
 
-        let table = if db.table_names().execute().await?.iter().any(|n| n == TABLE) {
+        let table = if has_table(&db, TABLE).await? {
             let table = db.open_table(TABLE).execute().await?;
             validate(table.schema().await?.as_ref(), model_id, dims)?;
             table
@@ -242,26 +370,25 @@ impl VectorTable {
     /// have its query refused by [`Self::open`]'s guard and quietly fall back to one arm.
     /// Asking the table removes the question.
     pub async fn open_existing(dir: &Path) -> anyhow::Result<Self> {
-        let dir_str = dir
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("{} is not valid UTF-8", dir.display()))?;
-        let db = lancedb::connect(dir_str).execute().await?;
-        anyhow::ensure!(
-            db.table_names().execute().await?.iter().any(|n| n == TABLE),
-            "no vectors at {} — run `centinel embed` first",
-            dir.join(format!("{TABLE}.lance")).display()
-        );
+        let db = connect(dir).await?;
+        if !has_table(&db, TABLE).await? {
+            if has_table(&db, LEGACY_TABLE).await? {
+                anyhow::bail!(
+                    "the vectors at {} are in the older one-row-per-chunk layout — run \
+                     `centinel embed --limit 0` to upgrade the vector table; nothing is \
+                     sent to a model",
+                    dir.join(format!("{LEGACY_TABLE}.lance")).display()
+                );
+            }
+            anyhow::bail!(
+                "no vectors at {} — run `centinel embed` first",
+                dir.join(format!("{TABLE}.lance")).display()
+            );
+        }
 
         let table = db.open_table(TABLE).execute().await?;
         let schema = table.schema().await?;
-        let dims = match schema
-            .field_with_name(VECTOR_COLUMN)
-            .map_err(|_| anyhow::anyhow!("`{TABLE}` has no `{VECTOR_COLUMN}` column"))?
-            .data_type()
-        {
-            DataType::FixedSizeList(_, n) => *n as usize,
-            other => anyhow::bail!("`{VECTOR_COLUMN}` is {other}, not a fixed-size list of floats"),
-        };
+        let dims = vector_width(&schema)?;
         let model_id = schema
             .metadata()
             .get(MODEL_KEY)
@@ -289,7 +416,7 @@ impl VectorTable {
         &self.model_id
     }
 
-    /// How many vectors are stored.
+    /// How many rows are stored.
     pub async fn len(&self) -> anyhow::Result<usize> {
         Ok(self.table.count_rows(None).await?)
     }
@@ -298,58 +425,78 @@ impl VectorTable {
         Ok(self.len().await? == 0)
     }
 
-    /// Every stored chunk hash.
+    /// Every stored key, handed to `visit` one at a time and never held whole.
     ///
-    /// One column, so the scan reads hashes and never touches the vectors beside them.
-    /// That question is asked at the start of every `embed` run, and on a full corpus the
-    /// difference is tens of megabytes against four gigabytes.
-    pub async fn hashes(&self) -> anyhow::Result<HashSet<String>> {
+    /// One column, so the scan reads keys and never touches the vectors beside them. On
+    /// a full corpus the keys are a hundred megabytes and the vectors are gigabytes, and
+    /// `embed` asks this at the start of every run. Returns how many there were.
+    pub async fn keys(&self, mut visit: impl FnMut(&str)) -> anyhow::Result<usize> {
         // No `limit`, which on a plain scan means every row. Lance only applies its
         // default top-k to vector and full-text queries.
         let mut stream = self
             .table
             .query()
-            .select(Select::Columns(vec![HASH_COLUMN.to_string()]))
+            .select(Select::Columns(vec![KEY_COLUMN.to_string()]))
             .execute()
             .await?;
 
-        let mut out = HashSet::new();
+        let mut count = 0;
         while let Some(batch) = stream.try_next().await? {
-            for hash in hash_column(&batch)? {
-                out.insert(hash);
+            let keys = strings(&batch, KEY_COLUMN)?;
+            for i in 0..keys.len() {
+                visit(keys.value(i));
+                count += 1;
             }
         }
-        Ok(out)
+        Ok(count)
     }
 
-    /// Appends vectors in one durable commit.
+    /// Appends rows in one durable commit.
     ///
     /// Lance commits a version per call, so an interrupted run keeps every batch that
     /// landed before the kill and the work list is recomputed from what is there. That is
     /// what makes `embed` resumable without a checkpoint file.
-    pub async fn append(&self, entries: &[(String, Vec<f32>)]) -> anyhow::Result<()> {
-        if entries.is_empty() {
+    pub async fn append(&self, rows: &[Row]) -> anyhow::Result<()> {
+        if rows.is_empty() {
             return Ok(());
         }
-        for (hash, vector) in entries {
+        for row in rows {
             anyhow::ensure!(
-                vector.len() == self.dims,
-                "vector for {hash} has {} dimensions, expected {}",
-                vector.len(),
+                row.vector.len() == self.dims,
+                "vector for {} has {} dimensions, expected {}",
+                row.chunk_hash,
+                row.vector.len(),
                 self.dims
             );
         }
 
-        let hashes = StringArray::from_iter_values(entries.iter().map(|(h, _)| h.as_str()));
+        let keys =
+            StringArray::from_iter_values(rows.iter().map(|r| key_of(&r.chunk_hash, &r.document)));
+        let hashes = StringArray::from_iter_values(rows.iter().map(|r| r.chunk_hash.as_str()));
+        let sources =
+            StringArray::from_iter_values(rows.iter().map(|r| r.document.source.as_str()));
+        let resources =
+            StringArray::from_iter_values(rows.iter().map(|r| r.document.resource.as_str()));
+        let derived =
+            StringArray::from_iter_values(rows.iter().map(|r| r.document.derived_sha.as_str()));
+        let (tags, excluded) = metadata_columns(rows.iter().map(|r| &r.state));
         let vectors = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-            entries
-                .iter()
-                .map(|(_, v)| Some(v.iter().copied().map(Some).collect::<Vec<_>>())),
+            rows.iter()
+                .map(|r| Some(r.vector.iter().copied().map(Some).collect::<Vec<_>>())),
             self.dims as i32,
         );
         let batch = RecordBatch::try_new(
             self.schema.clone(),
-            vec![Arc::new(hashes), Arc::new(vectors)],
+            vec![
+                Arc::new(keys),
+                Arc::new(hashes),
+                Arc::new(sources),
+                Arc::new(resources),
+                Arc::new(derived),
+                Arc::new(tags),
+                Arc::new(excluded),
+                Arc::new(vectors),
+            ],
         )?;
 
         let reader = Box::new(RecordBatchIterator::new(
@@ -359,53 +506,103 @@ impl VectorTable {
         let started = std::time::Instant::now();
         self.table.add(reader).execute().await?;
         tracing::debug!(
-            rows = entries.len(),
+            rows = rows.len(),
             ms = started.elapsed().as_millis() as u64,
             "appended to the vector table"
         );
         Ok(())
     }
 
-    /// Deletes every row whose hash is not in `keep`, and says how many that was.
+    /// Deletes the rows with these keys.
     ///
     /// The other half of [`Self::append`]: that adds what the index has and the table
-    /// lacks, this removes what the table has and the index lacks. One commit, as a join
-    /// against `keep`, rather than a predicate spelling out a million hashes — on the
-    /// corpus that motivated this, the predicate form could not even be parsed.
-    ///
-    /// An empty `keep` removes nothing. Zero chunks is what an index looks like before
-    /// `centinel index` has run, not a statement that every vector is stale, and vectors
-    /// are the one derived artifact that costs hours or money to replace.
-    pub async fn retain(&self, keep: &HashSet<String>) -> anyhow::Result<usize> {
-        if keep.is_empty() {
-            return Ok(0);
+    /// lacks, this removes what the table has and the index lacks. By key list rather than
+    /// by a merge against everything to keep, because what the index lacks is usually a
+    /// cleared source — thousands of rows against a million kept — and the million is the
+    /// expensive side to send.
+    pub async fn remove(&self, keys: &[String]) -> anyhow::Result<()> {
+        for chunk in keys.chunks(PREDICATE_ROWS) {
+            self.table
+                .delete(&format!("{KEY_COLUMN} IN ({})", quoted_list(chunk)))
+                .await?;
         }
+        Ok(())
+    }
 
-        // Only the key column: the merge neither inserts nor updates, so there is no
-        // vector to supply, and sending one would mean sending a width.
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            HASH_COLUMN,
-            DataType::Utf8,
-            false,
-        )]));
-        let hashes = StringArray::from_iter_values(keep.iter().map(String::as_str));
-        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(hashes)])?;
+    /// Rewrites the tags and exclusion of the rows with these keys, and nothing else.
+    ///
+    /// A merge on the key with a source that carries only the two metadata columns. Lance
+    /// treats a partial-schema source as a column rewrite: the two columns are patched
+    /// inside the fragments that hold the rows, and the vector column is never read or
+    /// written. Keys the table does not hold are ignored — a document's chunks may not be
+    /// embedded yet, and when they are, they arrive with the state of that moment.
+    pub async fn set_metadata(&self, rows: &[(String, DocState)]) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(KEY_COLUMN, DataType::Utf8, false),
+            tags_field(),
+            Field::new(EXCLUDED_COLUMN, DataType::Boolean, false),
+        ]));
+        let keys = StringArray::from_iter_values(rows.iter().map(|(key, _)| key.as_str()));
+        let (tags, excluded) = metadata_columns(rows.iter().map(|(_, state)| state));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(keys), Arc::new(tags), Arc::new(excluded)],
+        )?;
         let reader = Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema))
             as Box<dyn RecordBatchReader + Send>;
 
-        let mut merge = self.table.merge_insert(&[HASH_COLUMN]);
-        merge.when_not_matched_by_source_delete(None);
+        let mut merge = self.table.merge_insert(&[KEY_COLUMN]);
+        merge.when_matched_update_all(None);
         let result = merge.execute(reader).await?;
-        Ok(result.num_deleted_rows as usize)
+        tracing::debug!(
+            rows = rows.len(),
+            updated = result.num_updated_rows,
+            "vector metadata rewritten"
+        );
+        Ok(())
     }
 
-    /// Consolidates what [`Self::append`] and [`Self::retain`] leave behind.
+    /// The vector stored for each of `hashes` that has a row, whichever document's.
+    ///
+    /// For `embed`: a chunk already embedded under one document is not embedded again for
+    /// another, its vector is copied. Served by the scalar index on the hash once
+    /// [`Self::maintain`] has built one; a full scan before then.
+    pub async fn vectors_of(&self, hashes: &[String]) -> anyhow::Result<HashMap<String, Vec<f32>>> {
+        let mut out = HashMap::new();
+        for chunk in hashes.chunks(PREDICATE_ROWS) {
+            let mut stream = self
+                .table
+                .query()
+                .only_if(format!("{HASH_COLUMN} IN ({})", quoted_list(chunk)))
+                .select(Select::Columns(vec![
+                    HASH_COLUMN.to_string(),
+                    VECTOR_COLUMN.to_string(),
+                ]))
+                .execute()
+                .await?;
+            while let Some(batch) = stream.try_next().await? {
+                for (hash, vector) in hash_vectors(&batch)? {
+                    out.entry(hash).or_insert(vector);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Consolidates what [`Self::append`] and [`Self::remove`] leave behind, and builds
+    /// the indexes the filters are served from.
     ///
     /// Compaction rewrites the per-append fragments into few and writes deleted rows out
-    /// for good; then every version older than `VERSION_RETENTION` (ten minutes) is
-    /// dropped with its files. Creating an ANN index stays opt-in through `build_index` — small corpora
-    /// keep exact search, and IVF_FLAT keeps full-precision vectors, so only partition
-    /// selection is approximate. An index that exists is brought up to date either way.
+    /// for good; the scalar indexes — the key the merges join on, the hash `embed` copies
+    /// by, and the source, tags and exclusion a search filters on — are created when
+    /// missing and brought up to date when present; then every version older than
+    /// `VERSION_RETENTION` (ten minutes) is dropped with its files. Creating an ANN index
+    /// stays opt-in through `build_index` — small corpora keep exact search, and IVF_FLAT
+    /// keeps full-precision vectors, so only partition selection is approximate. An index
+    /// that exists is brought up to date either way.
     pub async fn maintain(&self, build_index: bool) -> anyhow::Result<Maintenance> {
         self.maintain_keeping(build_index, VERSION_RETENTION).await
     }
@@ -425,17 +622,43 @@ impl VectorTable {
             .await?;
 
         let rows = self.len().await?;
-        let indexed = self
+        let existing: HashSet<String> = self
             .table
             .list_indices()
             .await?
-            .iter()
-            .any(|index| index.columns == [VECTOR_COLUMN]);
-        if indexed {
-            self.table
-                .optimize(OptimizeAction::Index(Default::default()))
-                .await?;
-        } else if build_index && rows >= ANN_MIN_ROWS {
+            .into_iter()
+            .flat_map(|index| index.columns)
+            .collect();
+        // A scalar index over nothing has nothing to say; the first append is soon.
+        if rows > 0 {
+            let scalar: [(&str, fn() -> LanceIndex); 5] = [
+                (KEY_COLUMN, || {
+                    LanceIndex::BTree(BTreeIndexBuilder::default())
+                }),
+                (HASH_COLUMN, || {
+                    LanceIndex::BTree(BTreeIndexBuilder::default())
+                }),
+                (SOURCE_COLUMN, || {
+                    LanceIndex::Bitmap(BitmapIndexBuilder::default())
+                }),
+                (TAGS_COLUMN, || {
+                    LanceIndex::LabelList(LabelListIndexBuilder::default())
+                }),
+                (EXCLUDED_COLUMN, || {
+                    LanceIndex::Bitmap(BitmapIndexBuilder::default())
+                }),
+            ];
+            for (column, index) in scalar {
+                if !existing.contains(column) {
+                    self.table
+                        .create_index(&[column], index())
+                        .execute()
+                        .await?;
+                }
+            }
+        }
+        let indexed = existing.contains(VECTOR_COLUMN);
+        if !indexed && build_index && rows >= ANN_MIN_ROWS {
             self.table
                 .create_index(
                     &[VECTOR_COLUMN],
@@ -448,8 +671,13 @@ impl VectorTable {
                 .execute()
                 .await?;
         }
+        if rows > 0 {
+            self.table
+                .optimize(OptimizeAction::Index(Default::default()))
+                .await?;
+        }
 
-        // Last, so the versions the compaction and the index just superseded are among
+        // Last, so the versions the compaction and the indexes just superseded are among
         // what goes.
         // Lance measures the retention in chrono's `Duration`, which it re-exports; the
         // conversion fails only for a span longer than chrono can count, which ten
@@ -488,12 +716,12 @@ impl VectorTable {
         })
     }
 
-    /// Reads every fragment back, both columns, and names the ones that cannot be read.
+    /// Reads every fragment back, every column, and names the ones that cannot be read.
     ///
     /// The same question every full scan asks, put one fragment at a time so the failure
-    /// is attributed rather than merely reproduced. Both columns, because a damaged file
-    /// can fail in one and not the other; batch by batch, so no fragment is held whole.
-    /// The answer carries the version it was read at, for [`Self::repair`].
+    /// is attributed rather than merely reproduced. Every column, because a damaged file
+    /// can fail in one and not another; batch by batch, so no fragment is held whole. The
+    /// answer carries the version it was read at, for [`Self::repair`].
     pub async fn audit(&self, progress: &Progress, cancel: &Cancel) -> anyhow::Result<VectorAudit> {
         // Through the table rather than by reopening the path, so the audit reads the
         // version this handle sees — the one `repair` will then commit against.
@@ -548,7 +776,7 @@ impl VectorTable {
     /// Drops the fragments an [`audit`](Self::audit) could not read, in one commit.
     ///
     /// Touches the manifest and no data file: the fragment ids go, and with them the
-    /// hashes those fragments held, which puts them back on `embed`'s work list. Nothing
+    /// rows those fragments held, which puts them back on `embed`'s work list. Nothing
     /// here compacts or prunes; `embed` does both afterwards in its own `maintain`.
     ///
     /// The commit's read version is the audit's. If anything rewrote those fragments in
@@ -586,7 +814,7 @@ impl VectorTable {
             .execute(transaction)
             .await?;
         // lancedb refreshes its handle after its own writes; a commit it did not make has
-        // to be handed to it, or a `hashes()` on this same handle would go on reading the
+        // to be handed to it, or a `keys()` on this same handle would go on reading the
         // fragment that is gone.
         handle.update(repaired);
 
@@ -601,13 +829,20 @@ impl VectorTable {
         })
     }
 
-    /// The `limit` nearest chunks to `query`, best first.
+    /// The `limit` nearest **distinct chunks** to `query` among the rows the filter
+    /// admits, best first, each with the document it was admitted through.
     ///
     /// Returns cosine **similarity**, not Lance's distance — higher is better, matching
     /// the BM25 arm, so a caller fusing the two never has to remember which way one of
-    /// them points.
-    pub async fn nearest(&self, query: &[f32], limit: usize) -> anyhow::Result<Vec<(String, f32)>> {
-        self.nearest_with_index(query, limit, true).await
+    /// them points. The filter is applied inside the query, before distance; see the
+    /// module notes for what that costs.
+    pub async fn nearest(
+        &self,
+        query: &[f32],
+        limit: usize,
+        filter: &Filter<'_>,
+    ) -> anyhow::Result<Vec<Nearest>> {
+        self.nearest_with_index(query, limit, filter, true).await
     }
 
     /// Exhaustive cosine search, including when an ANN index exists.
@@ -615,16 +850,22 @@ impl VectorTable {
         &self,
         query: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<(String, f32)>> {
-        self.nearest_with_index(query, limit, false).await
+        filter: &Filter<'_>,
+    ) -> anyhow::Result<Vec<Nearest>> {
+        self.nearest_with_index(query, limit, filter, false).await
     }
 
+    /// Rows come back one per placement, so a passage shared by many documents fills many
+    /// of the top `k`. The answer is deduplicated by chunk, keeping the first — the
+    /// nearest — row of each; when that leaves fewer than `limit` and the fetch came back
+    /// full, the fetch doubles, up to [`NEAREST_ROUNDS`] times.
     async fn nearest_with_index(
         &self,
         query: &[f32],
         limit: usize,
+        filter: &Filter<'_>,
         use_index: bool,
-    ) -> anyhow::Result<Vec<(String, f32)>> {
+    ) -> anyhow::Result<Vec<Nearest>> {
         anyhow::ensure!(
             query.len() == self.dims,
             "query vector has {} dimensions, this table holds {}",
@@ -638,7 +879,35 @@ impl VectorTable {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let predicate = filter_sql(filter);
+        let mut fetch = limit;
+        let mut round = 0;
+        loop {
+            let rows = self
+                .nearest_rows(query, fetch, &predicate, use_index)
+                .await?;
+            let full = rows.len() >= fetch;
+            let mut seen = HashSet::new();
+            let mut unique: Vec<Nearest> = rows
+                .into_iter()
+                .filter(|row| seen.insert(row.chunk_hash.clone()))
+                .collect();
+            round += 1;
+            if unique.len() >= limit || !full || round >= NEAREST_ROUNDS {
+                unique.truncate(limit);
+                return Ok(unique);
+            }
+            fetch *= 2;
+        }
+    }
 
+    async fn nearest_rows(
+        &self,
+        query: &[f32],
+        limit: usize,
+        predicate: &str,
+        use_index: bool,
+    ) -> anyhow::Result<Vec<Nearest>> {
         let search = self
             .table
             .query()
@@ -650,7 +919,15 @@ impl VectorTable {
             // The backend's 20-partition default lost too many candidates in the
             // synthetic recall benchmark. Search more partitions before reranking.
             .nprobes(64)
-            .select(Select::Columns(vec![HASH_COLUMN.to_string()]))
+            // Before distance, which is lancedb's default for a filter on a vector query;
+            // said here because the arm's correctness under a narrow filter depends on it.
+            .only_if(predicate)
+            .select(Select::Columns(vec![
+                HASH_COLUMN.to_string(),
+                SOURCE_COLUMN.to_string(),
+                RESOURCE_COLUMN.to_string(),
+                DERIVED_COLUMN.to_string(),
+            ]))
             .limit(limit);
         let search = if use_index {
             search
@@ -661,25 +938,99 @@ impl VectorTable {
 
         let mut out = Vec::with_capacity(limit);
         while let Some(batch) = stream.try_next().await? {
-            let hashes = hash_column(&batch)?;
+            let hashes = strings(&batch, HASH_COLUMN)?;
+            let sources = strings(&batch, SOURCE_COLUMN)?;
+            let resources = strings(&batch, RESOURCE_COLUMN)?;
+            let derived = strings(&batch, DERIVED_COLUMN)?;
             let distances = batch
                 .column_by_name(DISTANCE_COLUMN)
                 .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
                 .ok_or_else(|| anyhow::anyhow!("no `{DISTANCE_COLUMN}` in a vector result"))?;
-            for (i, hash) in hashes.into_iter().enumerate() {
-                out.push((hash, 1.0 - distances.value(i)));
+            for i in 0..batch.num_rows() {
+                out.push(Nearest {
+                    chunk_hash: hashes.value(i).to_string(),
+                    document: DocumentId {
+                        source: sources.value(i).to_string(),
+                        resource: resources.value(i).to_string(),
+                        derived_sha: derived.value(i).to_string(),
+                    },
+                    similarity: 1.0 - distances.value(i),
+                });
             }
         }
         Ok(out)
     }
 }
 
-/// The schema, and the one place the model id is written into it.
+/// The table the layout before this one wrote, opened read-only for one model.
+///
+/// `embed` fills [`TABLE`] from it: every chunk here that the index still places somewhere
+/// gets its rows without a model being asked. The operator deletes the directory by hand
+/// once satisfied; nothing here ever writes to it.
+pub struct LegacyVectors {
+    table: Table,
+    dims: usize,
+}
+
+impl LegacyVectors {
+    /// The legacy table, when there is one written by `model_id`. `None` when there is
+    /// none, or when it holds another model's vectors, which are no use to this one.
+    pub async fn open(dir: &Path, model_id: &str) -> anyhow::Result<Option<Self>> {
+        let db = connect(dir).await?;
+        if !has_table(&db, LEGACY_TABLE).await? {
+            return Ok(None);
+        }
+        let table = db.open_table(LEGACY_TABLE).execute().await?;
+        let schema = table.schema().await?;
+        let found = schema.metadata().get(MODEL_KEY).map(String::as_str);
+        if found != Some(model_id) {
+            tracing::debug!(
+                found = found.unwrap_or("an unrecorded model"),
+                wanted = model_id,
+                "the legacy vector table was written by another model; not copied"
+            );
+            return Ok(None);
+        }
+        let dims = vector_width(&schema)?;
+        Ok(Some(Self { table, dims }))
+    }
+
+    pub fn dims(&self) -> usize {
+        self.dims
+    }
+
+    /// Every stored `(chunk_hash, vector)`, a batch at a time, never held whole.
+    pub async fn rows(
+        &self,
+    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<Vec<(String, Vec<f32>)>>>> {
+        let stream = self
+            .table
+            .query()
+            .select(Select::Columns(vec![
+                HASH_COLUMN.to_string(),
+                VECTOR_COLUMN.to_string(),
+            ]))
+            .execute()
+            .await?;
+        Ok(stream.map(|batch| hash_vectors(&batch?)).boxed())
+    }
+}
+
+/// The schema, and the one place the model id and layout are written into it.
 fn schema_for(model_id: &str, dims: usize) -> SchemaRef {
-    let metadata = HashMap::from([(MODEL_KEY.to_string(), model_id.to_string())]);
+    let metadata = HashMap::from([
+        (MODEL_KEY.to_string(), model_id.to_string()),
+        (LAYOUT_KEY.to_string(), LAYOUT.to_string()),
+    ]);
     Arc::new(Schema::new_with_metadata(
         vec![
+            Field::new(KEY_COLUMN, DataType::Utf8, false),
             Field::new(HASH_COLUMN, DataType::Utf8, false),
+            Field::new(SOURCE_COLUMN, DataType::Utf8, false),
+            Field::new(RESOURCE_COLUMN, DataType::Utf8, false),
+            Field::new(DERIVED_COLUMN, DataType::Utf8, false),
+            tags_field(),
+            Field::new(EXCLUDED_COLUMN, DataType::Boolean, false),
             Field::new(
                 VECTOR_COLUMN,
                 DataType::FixedSizeList(
@@ -693,18 +1044,52 @@ fn schema_for(model_id: &str, dims: usize) -> SchemaRef {
     ))
 }
 
-/// Refuses a table that was written by another model, or at another width.
-///
-/// Both are silent failures otherwise: vectors from two models are in different spaces
-/// and still return a ranked list.
-fn validate(found: &Schema, model_id: &str, dims: usize) -> anyhow::Result<()> {
-    let field = found
+/// The tags column: a list of strings, never null, empty for a document with no tags.
+/// The item field is spelled the way the arrow list builder spells it, so a built array
+/// matches the schema exactly.
+fn tags_field() -> Field {
+    Field::new(
+        TAGS_COLUMN,
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+        false,
+    )
+}
+
+/// The tags and exclusion columns for a run of states, in order.
+fn metadata_columns<'a>(
+    states: impl Iterator<Item = &'a DocState> + Clone,
+) -> (lancedb::arrow::arrow_array::ListArray, BooleanArray) {
+    let mut tags = ListBuilder::new(StringBuilder::new());
+    for state in states.clone() {
+        for tag in &state.tags {
+            tags.values().append_value(tag);
+        }
+        tags.append(true);
+    }
+    let excluded = BooleanArray::from(states.map(|state| state.excluded).collect::<Vec<_>>());
+    (tags.finish(), excluded)
+}
+
+/// The width of the vector column, or why there is no such thing.
+fn vector_width(schema: &Schema) -> anyhow::Result<usize> {
+    match schema
         .field_with_name(VECTOR_COLUMN)
-        .map_err(|_| anyhow::anyhow!("`{TABLE}` has no `{VECTOR_COLUMN}` column"))?;
-    let width = match field.data_type() {
-        DataType::FixedSizeList(_, n) => *n as usize,
+        .map_err(|_| anyhow::anyhow!("the vector table has no `{VECTOR_COLUMN}` column"))?
+        .data_type()
+    {
+        DataType::FixedSizeList(_, n) => Ok(*n as usize),
         other => anyhow::bail!("`{VECTOR_COLUMN}` is {other}, not a fixed-size list of floats"),
-    };
+    }
+}
+
+/// Refuses a table that was written by another model, at another width, or in another
+/// layout.
+///
+/// All three are silent failures otherwise: vectors from two models are in different
+/// spaces and still return a ranked list, and a table without the filter columns answers
+/// no filtered query.
+fn validate(found: &Schema, model_id: &str, dims: usize) -> anyhow::Result<()> {
+    let width = vector_width(found)?;
     anyhow::ensure!(
         width == dims,
         "`{TABLE}` holds {width}-dimensional vectors, not {dims} — \
@@ -718,7 +1103,49 @@ fn validate(found: &Schema, model_id: &str, dims: usize) -> anyhow::Result<()> {
          not comparable; delete it and re-run `centinel embed`",
         found_id.unwrap_or("an unrecorded model"),
     );
+    let layout = found.metadata().get(LAYOUT_KEY).map(String::as_str);
+    anyhow::ensure!(
+        layout == Some(LAYOUT),
+        "`{TABLE}` is in layout {}, not {LAYOUT} — delete it and re-run `centinel embed`",
+        layout.unwrap_or("none"),
+    );
     Ok(())
+}
+
+/// The filter as the SQL Lance applies before distance. Exclusion first, always; the
+/// label-list index serves `array_has_all` and `array_has_any`, the bitmap index the
+/// equality on `source`.
+fn filter_sql(filter: &Filter<'_>) -> String {
+    let mut parts = vec![format!("{EXCLUDED_COLUMN} = false")];
+    if let Some(source) = filter.source {
+        parts.push(format!("{SOURCE_COLUMN} = {}", quoted(source)));
+    }
+    if !filter.tags.is_empty() {
+        parts.push(format!(
+            "array_has_all({TAGS_COLUMN}, [{}])",
+            quoted_list(filter.tags)
+        ));
+    }
+    if !filter.not_tags.is_empty() {
+        parts.push(format!(
+            "NOT array_has_any({TAGS_COLUMN}, [{}])",
+            quoted_list(filter.not_tags)
+        ));
+    }
+    parts.join(" AND ")
+}
+
+/// A string as a SQL literal: single quotes doubled, as the SQL standard escapes them.
+fn quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn quoted_list(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| quoted(value))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Every table this module opens is local; lancedb's `None` exists for its remote tables.
@@ -726,7 +1153,7 @@ fn not_a_local_table() -> anyhow::Error {
     anyhow::anyhow!("`{TABLE}` is not a local Lance table")
 }
 
-/// Reads one fragment back, both columns, batch by batch, and returns Lance's own account
+/// Reads one fragment back, every column, batch by batch, and returns Lance's own account
 /// of why it could not.
 ///
 /// Scoped to the fragment, so convicting one costs one fragment's I/O rather than a table
@@ -734,26 +1161,42 @@ fn not_a_local_table() -> anyhow::Error {
 /// bytes decode, not what they say.
 async fn read_back(fragment: &FileFragment) -> lance::Result<()> {
     let mut scanner = fragment.scan();
-    scanner
-        .project(&[HASH_COLUMN, VECTOR_COLUMN])?
-        .batch_size(AUDIT_BATCH_ROWS);
+    scanner.project(&ALL_COLUMNS)?.batch_size(AUDIT_BATCH_ROWS);
     let mut stream = scanner.try_into_stream().await?;
     while stream.try_next().await?.is_some() {}
     Ok(())
 }
 
-fn hash_column(batch: &RecordBatch) -> anyhow::Result<Vec<String>> {
-    let column = batch
-        .column_by_name(HASH_COLUMN)
+fn strings<'a>(batch: &'a RecordBatch, name: &str) -> anyhow::Result<&'a StringArray> {
+    batch
+        .column_by_name(name)
         .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-        .ok_or_else(|| anyhow::anyhow!("no `{HASH_COLUMN}` in a result batch"))?;
-    Ok((0..column.len())
-        .map(|i| column.value(i).to_string())
-        .collect())
+        .ok_or_else(|| anyhow::anyhow!("no `{name}` in a result batch"))
+}
+
+/// A batch's `(chunk_hash, vector)` pairs.
+fn hash_vectors(batch: &RecordBatch) -> anyhow::Result<Vec<(String, Vec<f32>)>> {
+    let hashes = strings(batch, HASH_COLUMN)?;
+    let vectors = batch
+        .column_by_name(VECTOR_COLUMN)
+        .and_then(|c| c.as_any().downcast_ref::<FixedSizeListArray>())
+        .ok_or_else(|| anyhow::anyhow!("no `{VECTOR_COLUMN}` in a result batch"))?;
+    (0..batch.num_rows())
+        .map(|i| {
+            let values = vectors.value(i);
+            let floats = values
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("`{VECTOR_COLUMN}` holds something other than floats")
+                })?;
+            Ok((hashes.value(i).to_string(), floats.values().to_vec()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const DIMS: usize = 4;
@@ -762,19 +1205,67 @@ mod tests {
         hex::encode([byte; 32])
     }
 
+    fn doc(n: u8) -> DocumentId {
+        DocumentId {
+            source: if n % 2 == 0 { "tampa" } else { "pinellas" }.into(),
+            resource: format!("https://x/{n}"),
+            derived_sha: hex::encode([n; 32]),
+        }
+    }
+
     /// L2-normalized, so `nearest` returns a similarity in [-1, 1].
     fn unit(v: [f32; DIMS]) -> Vec<f32> {
         let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         v.iter().map(|x| x / norm).collect()
     }
 
+    fn row(chunk: u8, document: u8, vector: Vec<f32>) -> Row {
+        Row {
+            chunk_hash: hash(chunk),
+            document: doc(document),
+            state: DocState::default(),
+            vector,
+        }
+    }
+
+    fn tagged(chunk: u8, document: u8, vector: Vec<f32>, tags: &[&str], excluded: bool) -> Row {
+        Row {
+            state: DocState {
+                tags: tags.iter().map(|t| t.to_string()).collect(),
+                excluded,
+            },
+            ..row(chunk, document, vector)
+        }
+    }
+
     async fn table(dir: &Path) -> VectorTable {
         VectorTable::open(dir, "test-model", DIMS).await.unwrap()
     }
 
+    async fn all_keys(t: &VectorTable) -> HashSet<String> {
+        let mut keys = HashSet::new();
+        t.keys(|key| {
+            keys.insert(key.to_string());
+        })
+        .await
+        .unwrap();
+        keys
+    }
+
+    fn only(hits: &[Nearest]) -> Vec<String> {
+        hits.iter().map(|h| h.chunk_hash.clone()).collect()
+    }
+
+    fn in_source(source: &str) -> Filter<'_> {
+        Filter {
+            source: Some(source),
+            ..Default::default()
+        }
+    }
+
     /// `.manifest` files under the table — one per version Lance still holds.
     fn manifests(dir: &Path) -> usize {
-        std::fs::read_dir(dir.join("vectors.lance").join("_versions"))
+        std::fs::read_dir(dir.join("chunks.lance").join("_versions"))
             .unwrap()
             .filter(|e| {
                 e.as_ref()
@@ -786,106 +1277,161 @@ mod tests {
             .count()
     }
 
+    #[test]
+    fn a_key_round_trips_through_its_parts() {
+        let key = key_of(&hash(7), &doc(3));
+        let (chunk, document) = parse_key(&key).unwrap();
+        assert_eq!(chunk, hash(7));
+        assert_eq!(document, doc(3));
+        assert!(parse_key("not a key").is_none());
+    }
+
     #[tokio::test]
     async fn maintenance_indexes_large_tables_and_preserves_appended_rows() {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
-        let entries: Vec<_> = (0..4096u32)
+        let rows: Vec<Row> = (0..4096u32)
             .map(|i| {
                 // Deterministic, distinct directions without an additional RNG dependency.
                 let x = (i.wrapping_mul(1664525).wrapping_add(1013904223)) as f32;
                 let y = (i.wrapping_mul(22695477).wrapping_add(1)) as f32;
-                (format!("{i:064x}"), unit([x, y, i as f32 * 1000000.0, 1.0]))
+                Row {
+                    chunk_hash: format!("{i:064x}"),
+                    document: doc((i % 7) as u8),
+                    state: DocState::default(),
+                    vector: unit([x, y, i as f32 * 1000000.0, 1.0]),
+                }
             })
             .collect();
-        t.append(&entries[..2048]).await.unwrap();
-        t.append(&entries[2048..]).await.unwrap();
+        t.append(&rows[..2048]).await.unwrap();
+        t.append(&rows[2048..]).await.unwrap();
         t.maintain(false).await.unwrap();
-        assert!(
-            t.table.list_indices().await.unwrap().is_empty(),
-            "ANN must be opt-in"
-        );
+        async fn indexed(t: &VectorTable) -> HashSet<String> {
+            t.table
+                .list_indices()
+                .await
+                .unwrap()
+                .into_iter()
+                .flat_map(|i| i.columns)
+                .collect()
+        }
+        let scalar = indexed(&t).await;
+        assert!(!scalar.contains(VECTOR_COLUMN), "ANN must be opt-in");
+        for column in [
+            KEY_COLUMN,
+            HASH_COLUMN,
+            SOURCE_COLUMN,
+            TAGS_COLUMN,
+            EXCLUDED_COLUMN,
+        ] {
+            assert!(scalar.contains(column), "no scalar index on {column}");
+        }
         t.maintain(true).await.unwrap();
-        assert_eq!(t.table.list_indices().await.unwrap().len(), 1);
+        assert!(indexed(&t).await.contains(VECTOR_COLUMN));
         let query = unit([-1.0, 0.0, 0.0, 0.0]);
         let added = "f".repeat(64);
-        t.append(&[(added.clone(), query.clone())]).await.unwrap();
+        t.append(&[Row {
+            chunk_hash: added.clone(),
+            document: doc(1),
+            state: DocState::default(),
+            vector: query.clone(),
+        }])
+        .await
+        .unwrap();
         // Lance must scan the unindexed tail as well as searching the ANN index.
-        assert_eq!(t.nearest(&query, 1).await.unwrap()[0].0, added);
+        assert_eq!(
+            t.nearest(&query, 1, &Filter::default()).await.unwrap()[0].chunk_hash,
+            added
+        );
         t.maintain(true).await.unwrap();
         let reopened = table(dir.path()).await;
         assert_eq!(reopened.len().await.unwrap(), 4097);
-        assert_eq!(reopened.hashes().await.unwrap().len(), 4097);
-        let hits = reopened.nearest(&query, 1).await.unwrap();
-        assert_eq!(hits[0].0, added);
-        assert!((hits[0].1 - 1.0).abs() < 1e-5);
-        let exact = reopened.nearest_exact(&query, 4097).await.unwrap();
+        assert_eq!(all_keys(&reopened).await.len(), 4097);
+        let hits = reopened
+            .nearest(&query, 1, &Filter::default())
+            .await
+            .unwrap();
+        assert_eq!(hits[0].chunk_hash, added);
+        assert!((hits[0].similarity - 1.0).abs() < 1e-5);
+        let exact = reopened
+            .nearest_exact(&query, 4097, &Filter::default())
+            .await
+            .unwrap();
         assert_eq!(
             exact.len(),
             4097,
             "exact search bypasses partition selection"
         );
-        assert_eq!(exact[0].0, added);
+        assert_eq!(exact[0].chunk_hash, added);
+        // The filter is served through the index too: one source of two, nearest first.
+        let pinellas = reopened
+            .nearest(&query, 5, &in_source("pinellas"))
+            .await
+            .unwrap();
+        assert_eq!(pinellas[0].chunk_hash, added);
+        assert!(pinellas.iter().all(|h| h.document.source == "pinellas"));
     }
 
     #[tokio::test]
     async fn maintenance_leaves_small_tables_on_exact_search() {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
-        t.append(&[(hash(1), unit([1.0, 0.0, 0.0, 0.0]))])
+        t.append(&[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))])
             .await
             .unwrap();
         t.maintain(true).await.unwrap();
-        assert!(t.table.list_indices().await.unwrap().is_empty());
+        assert!(
+            !t.table
+                .list_indices()
+                .await
+                .unwrap()
+                .iter()
+                .any(|i| i.columns == [VECTOR_COLUMN])
+        );
         assert_eq!(
-            t.nearest(&[1.0, 0.0, 0.0, 0.0], 1).await.unwrap()[0].0,
+            t.nearest(&[1.0, 0.0, 0.0, 0.0], 1, &Filter::default())
+                .await
+                .unwrap()[0]
+                .chunk_hash,
             hash(1)
         );
     }
 
     /// The reconciling half of `embed`: a rebuilt index or a cleared source leaves rows
-    /// no chunk claims, and they must go without touching the rows one does.
+    /// no placement claims, and they must go without touching the rows one does.
     #[tokio::test]
-    async fn retain_keeps_exactly_the_hashes_it_is_given() {
+    async fn remove_deletes_exactly_the_keys_it_is_given() {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         t.append(&[
-            (hash(1), unit([1.0, 0.0, 0.0, 0.0])),
-            (hash(2), unit([0.0, 1.0, 0.0, 0.0])),
-            (hash(3), unit([0.0, 0.0, 1.0, 0.0])),
+            row(1, 0, unit([1.0, 0.0, 0.0, 0.0])),
+            row(2, 0, unit([0.0, 1.0, 0.0, 0.0])),
+            row(3, 1, unit([0.0, 0.0, 1.0, 0.0])),
         ])
         .await
         .unwrap();
 
-        let keep = HashSet::from([hash(1), hash(3), hash(9)]);
+        // A key the table never had is not an error and not a row.
+        t.remove(&[key_of(&hash(2), &doc(0)), key_of(&hash(9), &doc(0))])
+            .await
+            .unwrap();
         assert_eq!(
-            t.retain(&keep).await.unwrap(),
-            1,
-            "only the unclaimed row goes"
+            all_keys(&t).await,
+            HashSet::from([key_of(&hash(1), &doc(0)), key_of(&hash(3), &doc(1))])
         );
-        assert_eq!(t.hashes().await.unwrap(), HashSet::from([hash(1), hash(3)]));
-        // A hash in `keep` that the table never had is not an error and not a row.
         assert_eq!(t.len().await.unwrap(), 2);
         // Nearer to the deleted row than to either survivor, and nearer to `3` than to
         // `1` so the answer is not a tie between the survivors.
         assert_eq!(
-            t.nearest(&unit([0.0, 0.8, 0.6, 0.0]), 1).await.unwrap()[0].0,
+            t.nearest(&unit([0.0, 0.8, 0.6, 0.0]), 1, &Filter::default())
+                .await
+                .unwrap()[0]
+                .chunk_hash,
             hash(3),
             "the deleted row no longer answers queries"
         );
-    }
-
-    /// An index with no chunks is an index that has not been built, and that must not
-    /// read as "delete every vector" — the one derived artifact that costs money.
-    #[tokio::test]
-    async fn retain_of_nothing_removes_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let t = table(dir.path()).await;
-        t.append(&[(hash(1), unit([1.0, 0.0, 0.0, 0.0]))])
-            .await
-            .unwrap();
-        assert_eq!(t.retain(&HashSet::new()).await.unwrap(), 0);
-        assert_eq!(t.len().await.unwrap(), 1);
+        t.remove(&[]).await.unwrap();
+        assert_eq!(t.len().await.unwrap(), 2);
     }
 
     /// Every append is a version with its own manifest, and Lance never drops one on its
@@ -896,13 +1442,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         for i in 1..=5u8 {
-            t.append(&[(hash(i), unit([i as f32, 1.0, 0.0, 0.0]))])
+            t.append(&[row(i, 0, unit([i as f32, 1.0, 0.0, 0.0]))])
                 .await
                 .unwrap();
         }
-        t.retain(&HashSet::from([hash(1), hash(2), hash(3), hash(4)]))
-            .await
-            .unwrap();
+        t.remove(&[key_of(&hash(5), &doc(0))]).await.unwrap();
         let before = manifests(dir.path());
         assert!(
             before >= 6,
@@ -919,16 +1463,18 @@ mod tests {
         assert_eq!(manifests(dir.path()), 1, "only the current version remains");
         let reopened = table(dir.path()).await;
         assert_eq!(
-            reopened.hashes().await.unwrap(),
-            HashSet::from([hash(1), hash(2), hash(3), hash(4)]),
+            all_keys(&reopened).await,
+            (1..=4u8)
+                .map(|i| key_of(&hash(i), &doc(0)))
+                .collect::<HashSet<_>>(),
             "the deleted row stays deleted and the rest stay"
         );
         assert_eq!(
             reopened
-                .nearest(&unit([4.0, 1.0, 0.0, 0.0]), 1)
+                .nearest(&unit([4.0, 1.0, 0.0, 0.0]), 1, &Filter::default())
                 .await
                 .unwrap()[0]
-                .0,
+                .chunk_hash,
             hash(4)
         );
     }
@@ -949,18 +1495,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vectors_round_trip() {
+    async fn rows_round_trip_with_their_documents_and_state() {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         t.append(&[
-            (hash(1), unit([1.0, 0.0, 0.0, 0.0])),
-            (hash(2), unit([0.0, 1.0, 0.0, 0.0])),
+            tagged(1, 0, unit([1.0, 0.0, 0.0, 0.0]), &["budget"], false),
+            tagged(1, 1, unit([1.0, 0.0, 0.0, 0.0]), &[], true),
         ])
         .await
         .unwrap();
 
         assert_eq!(t.len().await.unwrap(), 2);
-        assert_eq!(t.hashes().await.unwrap(), HashSet::from([hash(1), hash(2)]));
+        assert_eq!(
+            all_keys(&t).await,
+            HashSet::from([key_of(&hash(1), &doc(0)), key_of(&hash(1), &doc(1))])
+        );
+        let vectors = t.vectors_of(&[hash(1), hash(2)]).await.unwrap();
+        assert_eq!(
+            vectors.len(),
+            1,
+            "one vector, however many documents carry it"
+        );
+        assert_eq!(vectors[&hash(1)], unit([1.0, 0.0, 0.0, 0.0]));
     }
 
     #[tokio::test]
@@ -968,12 +1524,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         table(dir.path())
             .await
-            .append(&[(hash(1), unit([1.0, 1.0, 1.0, 1.0]))])
+            .append(&[row(1, 0, unit([1.0, 1.0, 1.0, 1.0]))])
             .await
             .unwrap();
         table(dir.path())
             .await
-            .append(&[(hash(2), unit([1.0, 0.0, 1.0, 0.0]))])
+            .append(&[row(2, 0, unit([1.0, 0.0, 1.0, 0.0]))])
             .await
             .unwrap();
         assert_eq!(table(dir.path()).await.len().await.unwrap(), 2);
@@ -985,25 +1541,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         t.append(&[
-            (hash(1), unit([1.0, 0.0, 0.0, 0.0])),
-            (hash(2), unit([0.9, 0.1, 0.0, 0.0])),
-            (hash(3), unit([0.0, 0.0, 0.0, 1.0])),
+            row(1, 0, unit([1.0, 0.0, 0.0, 0.0])),
+            row(2, 0, unit([0.9, 0.1, 0.0, 0.0])),
+            row(3, 0, unit([0.0, 0.0, 0.0, 1.0])),
         ])
         .await
         .unwrap();
 
-        let hits = t.nearest(&unit([1.0, 0.0, 0.0, 0.0]), 3).await.unwrap();
+        let hits = t
+            .nearest(&unit([1.0, 0.0, 0.0, 0.0]), 3, &Filter::default())
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 3);
-        assert_eq!(hits[0].0, hash(1), "the identical vector ranks first");
-        assert_eq!(hits[1].0, hash(2));
-        assert_eq!(hits[2].0, hash(3), "the orthogonal one ranks last");
+        assert_eq!(
+            hits[0].chunk_hash,
+            hash(1),
+            "the identical vector ranks first"
+        );
+        assert_eq!(hits[1].chunk_hash, hash(2));
+        assert_eq!(hits[2].chunk_hash, hash(3), "the orthogonal one ranks last");
         assert!(
-            hits[0].1 > hits[1].1 && hits[1].1 > hits[2].1,
+            hits[0].similarity > hits[1].similarity && hits[1].similarity > hits[2].similarity,
             "scores descend: {hits:?}"
         );
         assert!(
-            (hits[0].1 - 1.0).abs() < 1e-5,
+            (hits[0].similarity - 1.0).abs() < 1e-5,
             "a self-match is 1.0: {hits:?}"
+        );
+        assert_eq!(
+            hits[0].document,
+            doc(0),
+            "the row names the document it cites"
         );
     }
 
@@ -1012,12 +1580,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         for i in 1..=5u8 {
-            t.append(&[(hash(i), unit([i as f32, 1.0, 0.0, 0.0]))])
+            t.append(&[row(i, 0, unit([i as f32, 1.0, 0.0, 0.0]))])
                 .await
                 .unwrap();
         }
         assert_eq!(
-            t.nearest(&unit([1.0, 1.0, 0.0, 0.0]), 2)
+            t.nearest(&unit([1.0, 1.0, 0.0, 0.0]), 2, &Filter::default())
                 .await
                 .unwrap()
                 .len(),
@@ -1030,11 +1598,175 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         assert!(
-            t.nearest(&unit([1.0, 0.0, 0.0, 0.0]), 10)
+            t.nearest(&unit([1.0, 0.0, 0.0, 0.0]), 10, &Filter::default())
                 .await
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// The filter is answered inside the query: a source whose rows are all farther away
+    /// than another source's still gets its own nearest rows, in full, where the old
+    /// post-filter came back with nothing.
+    #[tokio::test]
+    async fn a_source_filter_returns_that_sources_nearest_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = table(dir.path()).await;
+        // Even chunks sit in tampa (docs 0, 2), near the query; odd ones in pinellas, far.
+        let rows: Vec<Row> = (0..40u8)
+            .map(|i| {
+                let near = i % 2 == 0;
+                let v = if near {
+                    [1.0, 0.01 * i as f32, 0.0, 0.0]
+                } else {
+                    [0.0, 0.0, 1.0, 0.01 * i as f32]
+                };
+                row(i, if near { 0 } else { 1 }, unit(v))
+            })
+            .collect();
+        t.append(&rows).await.unwrap();
+
+        let query = unit([1.0, 0.0, 0.0, 0.0]);
+        let pinellas = t.nearest(&query, 10, &in_source("pinellas")).await.unwrap();
+        assert_eq!(pinellas.len(), 10, "a full page from the far source");
+        assert!(pinellas.iter().all(|h| h.document.source == "pinellas"));
+        let tampa = t.nearest(&query, 10, &in_source("tampa")).await.unwrap();
+        assert!(tampa.iter().all(|h| h.document.source == "tampa"));
+        assert_eq!(tampa[0].chunk_hash, hash(0));
+        assert!(
+            t.nearest(&query, 10, &in_source("nowhere"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Tags narrow the rows the way the keyword arm's `--tag` does: every tag must be on
+    /// the document, `--not-tag` removes, and an excluded document never answers however
+    /// near its vector is. Rewriting a document's metadata changes the answers and leaves
+    /// its vectors byte for byte as they were.
+    #[tokio::test]
+    async fn tags_and_exclusion_filter_inside_the_query_and_metadata_rewrites_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = table(dir.path()).await;
+        let v = |i: u8| unit([1.0, 0.1 * i as f32, 0.0, 0.0]);
+        t.append(&[
+            tagged(1, 0, v(1), &["budget", "record_type:minutes"], false),
+            tagged(2, 1, v(2), &["budget"], false),
+            tagged(3, 2, v(3), &["record_type:agenda"], false),
+            tagged(4, 3, v(0), &["budget"], true),
+        ])
+        .await
+        .unwrap();
+        let query = unit([1.0, 0.0, 0.0, 0.0]);
+        let budget = vec!["budget".to_string()];
+        let minutes = vec!["record_type:minutes".to_string()];
+        let both = vec!["budget".to_string(), "record_type:minutes".to_string()];
+
+        let all = t.nearest(&query, 10, &Filter::default()).await.unwrap();
+        assert_eq!(
+            only(&all),
+            [hash(1), hash(2), hash(3)],
+            "the excluded row never answers"
+        );
+        let with_budget = Filter {
+            tags: &budget,
+            ..Default::default()
+        };
+        assert_eq!(
+            only(&t.nearest(&query, 10, &with_budget).await.unwrap()),
+            [hash(1), hash(2)]
+        );
+        let anded = Filter {
+            tags: &both,
+            ..Default::default()
+        };
+        assert_eq!(
+            only(&t.nearest(&query, 10, &anded).await.unwrap()),
+            [hash(1)]
+        );
+        let without = Filter {
+            not_tags: &minutes,
+            ..Default::default()
+        };
+        assert_eq!(
+            only(&t.nearest(&query, 10, &without).await.unwrap()),
+            [hash(2), hash(3)]
+        );
+        let elsewhere = Filter {
+            source: Some("pinellas"),
+            tags: &budget,
+            not_tags: &[],
+        };
+        assert_eq!(
+            only(&t.nearest(&query, 10, &elsewhere).await.unwrap()),
+            [hash(2)]
+        );
+
+        // The excluded document is restored and tagged; the budget on document 1 is
+        // taken away. Only those two rows change, and no vector does.
+        let before = t
+            .vectors_of(&[hash(1), hash(2), hash(3), hash(4)])
+            .await
+            .unwrap();
+        t.set_metadata(&[
+            (
+                key_of(&hash(4), &doc(3)),
+                DocState {
+                    tags: vec!["budget".into(), "record_type:minutes".into()],
+                    excluded: false,
+                },
+            ),
+            (key_of(&hash(2), &doc(1)), DocState::default()),
+            (key_of(&hash(9), &doc(9)), DocState::default()),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(
+            only(&t.nearest(&query, 10, &anded).await.unwrap()),
+            [hash(4), hash(1)]
+        );
+        assert_eq!(
+            only(&t.nearest(&query, 10, &with_budget).await.unwrap()),
+            [hash(4), hash(1)]
+        );
+        assert_eq!(
+            t.len().await.unwrap(),
+            4,
+            "a key the table lacks inserts nothing"
+        );
+        let after = t
+            .vectors_of(&[hash(1), hash(2), hash(3), hash(4)])
+            .await
+            .unwrap();
+        assert_eq!(before, after, "no vector moved");
+    }
+
+    /// A passage carried by many documents is many rows with one vector. The arm wants
+    /// distinct chunks, so the answer is deduplicated and the fetch widened until it has
+    /// them.
+    #[tokio::test]
+    async fn nearest_returns_distinct_chunks_when_one_is_shared_by_many_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = table(dir.path()).await;
+        let mut rows: Vec<Row> = (0..10u8)
+            .map(|d| row(1, d, unit([1.0, 0.0, 0.0, 0.0])))
+            .collect();
+        rows.push(row(2, 0, unit([0.9, 0.1, 0.0, 0.0])));
+        rows.push(row(3, 0, unit([0.8, 0.2, 0.0, 0.0])));
+        t.append(&rows).await.unwrap();
+
+        let hits = t
+            .nearest(&unit([1.0, 0.0, 0.0, 0.0]), 3, &Filter::default())
+            .await
+            .unwrap();
+        assert_eq!(only(&hits), [hash(1), hash(2), hash(3)]);
+        let fewer = t
+            .nearest(&unit([1.0, 0.0, 0.0, 0.0]), 2, &in_source("tampa"))
+            .await
+            .unwrap();
+        assert_eq!(only(&fewer), [hash(1), hash(2)]);
+        assert_eq!(fewer[0].document.source, "tampa");
     }
 
     /// `search` opens the table without being told which model wrote it, so that a
@@ -1044,7 +1776,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         table(dir.path())
             .await
-            .append(&[(hash(1), unit([1.0, 0.0, 0.0, 0.0]))])
+            .append(&[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))])
             .await
             .unwrap();
 
@@ -1064,7 +1796,95 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("centinel embed"), "{err}");
-        assert!(err.contains("vectors.lance"), "and where it looked: {err}");
+        assert!(err.contains("chunks.lance"), "and where it looked: {err}");
+    }
+
+    /// A store from before this layout holds a `vectors` table and no `chunks`. A reader
+    /// is told the one command that upgrades it, and the legacy table opens for `embed`
+    /// to copy from — for the model that wrote it, and no other.
+    #[tokio::test]
+    async fn a_legacy_table_names_the_upgrade_and_opens_for_copying() {
+        let dir = tempfile::tempdir().unwrap();
+        legacy_table(
+            dir.path(),
+            "test-model",
+            &[(hash(1), unit([1.0, 0.0, 0.0, 0.0]))],
+        )
+        .await;
+
+        let err = VectorTable::open_existing(dir.path())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("embed --limit 0"), "{err}");
+        assert!(err.contains("vectors.lance"), "{err}");
+
+        let legacy = LegacyVectors::open(dir.path(), "test-model")
+            .await
+            .unwrap()
+            .expect("the model matches");
+        assert_eq!(legacy.dims(), DIMS);
+        let mut rows = Vec::new();
+        let mut stream = legacy.rows().await.unwrap();
+        while let Some(batch) = stream.try_next().await.unwrap() {
+            rows.extend(batch);
+        }
+        assert_eq!(rows, [(hash(1), unit([1.0, 0.0, 0.0, 0.0]))]);
+        assert!(
+            LegacyVectors::open(dir.path(), "other-model")
+                .await
+                .unwrap()
+                .is_none(),
+            "another model's vectors are no use"
+        );
+        assert!(
+            LegacyVectors::open(tempfile::tempdir().unwrap().path(), "test-model")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Writes the table the layout before this one wrote: `(chunk_hash, vector)` under
+    /// the legacy name, with the model id and no layout key.
+    pub(crate) async fn legacy_table(dir: &Path, model_id: &str, entries: &[(String, Vec<f32>)]) {
+        let dims = entries.first().map_or(DIMS, |(_, v)| v.len());
+        let metadata = HashMap::from([(MODEL_KEY.to_string(), model_id.to_string())]);
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new(HASH_COLUMN, DataType::Utf8, false),
+                Field::new(
+                    VECTOR_COLUMN,
+                    DataType::FixedSizeList(
+                        Arc::new(Field::new("item", DataType::Float32, true)),
+                        dims as i32,
+                    ),
+                    true,
+                ),
+            ],
+            metadata,
+        ));
+        let db = connect(dir).await.unwrap();
+        let table = db
+            .create_empty_table(LEGACY_TABLE, schema.clone())
+            .execute()
+            .await
+            .unwrap();
+        if entries.is_empty() {
+            return;
+        }
+        let hashes = StringArray::from_iter_values(entries.iter().map(|(h, _)| h.as_str()));
+        let vectors = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+            entries
+                .iter()
+                .map(|(_, v)| Some(v.iter().copied().map(Some).collect::<Vec<_>>())),
+            dims as i32,
+        );
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(hashes), Arc::new(vectors)])
+            .unwrap();
+        let reader = Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema))
+            as Box<dyn RecordBatchReader + Send>;
+        table.add(reader).execute().await.unwrap();
     }
 
     /// Vectors from two models share no space. Reading one as the other returns a ranked
@@ -1097,7 +1917,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         let err = t
-            .append(&[(hash(1), vec![1.0; DIMS + 3])])
+            .append(&[row(1, 0, vec![1.0; DIMS + 3])])
             .await
             .unwrap_err()
             .to_string();
@@ -1123,7 +1943,7 @@ mod tests {
         let dataset = t.table.dataset().unwrap().get().await.unwrap();
         let first = &dataset.get_fragments()[0];
         let file = dir
-            .join("vectors.lance")
+            .join("chunks.lance")
             .join("data")
             .join(&first.metadata().files[0].path);
         let original = std::fs::read(&file).unwrap();
@@ -1132,7 +1952,7 @@ mod tests {
     }
 
     /// The repair is a commit this handle did not make through lancedb, so the handle has
-    /// to be told. Without that, the `hashes()` that follows on the same handle would go
+    /// to be told. Without that, the `keys()` that follows on the same handle would go
     /// on reading the fragment that is gone — and `embed`, which holds one handle for the
     /// whole run, would fail its pre-flight on a table it had just repaired.
     #[tokio::test]
@@ -1140,10 +1960,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         // Two appends, so two fragments: one to damage, one to prove untouched.
-        t.append(&[(hash(1), unit([1.0, 0.0, 0.0, 0.0]))])
+        t.append(&[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))])
             .await
             .unwrap();
-        t.append(&[(hash(2), unit([0.0, 1.0, 0.0, 0.0]))])
+        t.append(&[row(2, 0, unit([0.0, 1.0, 0.0, 0.0]))])
             .await
             .unwrap();
         let (bad, _, _) = damage_first_fragment(dir.path(), &t).await;
@@ -1151,7 +1971,7 @@ mod tests {
         // A fresh handle, as `verify` opens one: the damaged fragment was never read
         // through it, so nothing is cached that the disk no longer holds.
         let t = table(dir.path()).await;
-        assert!(t.hashes().await.is_err(), "the scan embed makes fails");
+        assert!(t.keys(|_| {}).await.is_err(), "the scan embed makes fails");
 
         let audit = t.audit(&Progress::none(), &Cancel::none()).await.unwrap();
         assert_eq!(audit.fragments, 2);
@@ -1170,16 +1990,22 @@ mod tests {
         );
 
         // The same handle, not a reopened one.
-        assert_eq!(t.hashes().await.unwrap(), HashSet::from([hash(2)]));
-        // The dropped chunk comes back the way it would from `embed`, and maintenance
+        assert_eq!(
+            all_keys(&t).await,
+            HashSet::from([key_of(&hash(2), &doc(0))])
+        );
+        // The dropped row comes back the way it would from `embed`, and maintenance
         // folds the table as if nothing had happened.
-        t.append(&[(hash(1), unit([1.0, 0.0, 0.0, 0.0]))])
+        t.append(&[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))])
             .await
             .unwrap();
         t.maintain(false).await.unwrap();
-        assert_eq!(t.hashes().await.unwrap(), HashSet::from([hash(1), hash(2)]));
+        assert_eq!(all_keys(&t).await.len(), 2);
         assert_eq!(
-            t.nearest(&unit([1.0, 0.0, 0.0, 0.0]), 1).await.unwrap()[0].0,
+            t.nearest(&unit([1.0, 0.0, 0.0, 0.0]), 1, &Filter::default())
+                .await
+                .unwrap()[0]
+                .chunk_hash,
             hash(1)
         );
     }
@@ -1191,10 +2017,10 @@ mod tests {
     async fn a_stale_audit_cannot_drop_fragments_it_never_saw() {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
-        t.append(&[(hash(1), unit([1.0, 0.0, 0.0, 0.0]))])
+        t.append(&[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))])
             .await
             .unwrap();
-        t.append(&[(hash(2), unit([0.0, 1.0, 0.0, 0.0]))])
+        t.append(&[row(2, 0, unit([0.0, 1.0, 0.0, 0.0]))])
             .await
             .unwrap();
         let (_, file, original) = damage_first_fragment(dir.path(), &t).await;
@@ -1215,8 +2041,8 @@ mod tests {
             "Lance names the commit that got there first: {err:#}"
         );
         assert_eq!(
-            table(dir.path()).await.hashes().await.unwrap(),
-            HashSet::from([hash(1), hash(2)]),
+            all_keys(&table(dir.path()).await).await.len(),
+            2,
             "nothing was dropped"
         );
     }
@@ -1227,6 +2053,6 @@ mod tests {
     async fn the_table_is_a_directory_named_for_itself() {
         let dir = tempfile::tempdir().unwrap();
         table(dir.path()).await;
-        assert!(dir.path().join("vectors.lance").is_dir());
+        assert!(dir.path().join("chunks.lance").is_dir());
     }
 }

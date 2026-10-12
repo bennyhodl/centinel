@@ -445,7 +445,12 @@ async fn workspace_review(
     if !same_origin(&headers) {
         return forbidden_origin();
     }
-    workspace_response(Workspace::new(&ctx.store).review(review))
+    let workspace = Workspace::new(&ctx.store);
+    let report = workspace.review(review);
+    workspace_response(match report {
+        Ok(report) => workspace.sync_vectors().await.map(|_| report),
+        Err(error) => Err(error),
+    })
 }
 
 async fn workspace_evaluation(State(ctx): State<Arc<Ctx>>) -> Response {
@@ -491,8 +496,12 @@ async fn workspace_save_questions(
             Ok(questions) => questions,
             Err(error) => return workspace_error(error.into()),
         };
-    match Workspace::new(&ctx.store).save_questions(questions) {
-        Ok(questions) => Json(json!({ "questions": questions })).into_response(),
+    let workspace = Workspace::new(&ctx.store);
+    match workspace.save_questions(questions) {
+        Ok(questions) => match workspace.sync_vectors().await {
+            Ok(_) => Json(json!({ "questions": questions })).into_response(),
+            Err(error) => workspace_error(error),
+        },
         Err(error) => workspace_error(error),
     }
 }
@@ -622,7 +631,12 @@ async fn workspace_restore(
     if !same_origin(&headers) {
         return forbidden_origin();
     }
-    workspace_response(Workspace::new(&ctx.store).restore(request))
+    let workspace = Workspace::new(&ctx.store);
+    let report = workspace.restore(request);
+    workspace_response(match report {
+        Ok(report) => workspace.sync_vectors().await.map(|_| report),
+        Err(error) => Err(error),
+    })
 }
 
 fn workspace_response<T: serde::Serialize>(result: anyhow::Result<T>) -> Response {

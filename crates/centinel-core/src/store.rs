@@ -8,12 +8,12 @@
 //!   decisions.jsonl            TRUTH    what the operator decided
 //!   workspace/questions.jsonl  TRUTH    saved classifier question sets
 //!   workspace/workspace.db     TRUTH    classifier runs, answers, reviews, usage overrides
-//!   workspace/vectors.lock     RUNTIME  the one writer of vectors.lance at a time
+//!   workspace/vectors.lock     RUNTIME  the one writer of chunks.lance at a time
 //!   spend/YYYY-MM.jsonl        TRUTH    every model call, its tokens and its cost
 //!   crumbs/<source>.jsonl      DERIVED  the off-host links each page dropped
 //!   current/<source>/…         DERIVED  URL-mirroring tree. Regenerable.
 //!   centinel.db                DERIVED  SQLite: metadata + FTS5   — the BM25 arm
-//!   vectors.lance/             DERIVED  LanceDB: chunk vectors    — the vector arm
+//!   chunks.lance/              DERIVED  LanceDB: chunk vectors    — the vector arm
 //!   serve.json                 RUNTIME  the `centinel serve` running on this store, if any
 //!   serve.log                  RUNTIME  what the installed service said
 //! ```
@@ -141,7 +141,7 @@ impl Store {
     /// Opens (and creates, if absent) a store at `root`.
     pub async fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
-        // `vectors.lance/` is absent: Lance creates its own table directory, and an empty
+        // `chunks.lance/` is absent: Lance creates its own table directory, and an empty
         // one left here would be a database with a table that cannot be opened.
         for sub in ["blobs", "log", "current"] {
             let p = root.join(sub);
@@ -194,7 +194,7 @@ impl Store {
         self.root.clone()
     }
 
-    /// `vectors.lance/` — the chunk vectors. Derived, and safe to delete.
+    /// `chunks.lance/` — the chunk vectors. Derived, and safe to delete.
     ///
     /// Built from [`crate::vectors::TABLE`] rather than spelled out, because Lance
     /// derives the directory from the table name and the two must not be able to drift.
@@ -285,7 +285,7 @@ impl Store {
         self.workspace_dir().join("workspace.db")
     }
 
-    /// `workspace/vectors.lock` — held by whoever writes `vectors.lance` at the moment:
+    /// `workspace/vectors.lock` — held by whoever writes `chunks.lance` at the moment:
     /// `embed` appending rows, a classifier run or a review syncing tags onto them.
     pub fn vectors_lock_path(&self) -> PathBuf {
         self.workspace_dir().join("vectors.lock")
@@ -1205,7 +1205,7 @@ mod tests {
                 .ends_with("crumbs/tampa.jsonl")
         );
         assert!(s.index_path().ends_with("centinel.db"));
-        assert!(s.vectors_path().ends_with("vectors.lance"));
+        assert!(s.vectors_path().ends_with("chunks.lance"));
         assert!(
             s.blob_path_of(&BlobSha::from_bytes(b"x"))
                 .starts_with(s.blobs_dir())
@@ -1213,7 +1213,7 @@ mod tests {
     }
 
     /// The two arms sit beside each other under the root, and neither is created up
-    /// front: `centinel.db` is `index`'s to make, and `vectors.lance/` is Lance's.
+    /// front: `centinel.db` is `index`'s to make, and `chunks.lance/` is Lance's.
     #[tokio::test]
     async fn the_two_search_arms_are_siblings_and_neither_is_pre_created() {
         let dir = tempfile::tempdir().unwrap();

@@ -45,9 +45,10 @@ use std::collections::HashMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::index::{Hit, Index};
+use crate::index::{Filter, Hit, Index, Placement};
 use crate::prelude::*;
-use crate::vectors::VectorTable;
+use crate::vectors::{Nearest, VectorTable};
+use crate::workspace::DocumentId;
 
 /// How deep each arm reaches before fusion (SPEC §6).
 const ARM_DEPTH: usize = 100;
@@ -58,15 +59,6 @@ const ARM_DEPTH: usize = 100;
 /// rank 2 is small, so agreement between the arms matters more than either arm's
 /// confidence — which is the whole reason to fuse rather than to pick.
 const RRF_K: f64 = 60.0;
-
-/// How much deeper the vector arm reaches when `--source` is set.
-///
-/// Lance carries no source or tag column, and knows nothing of exclusions, so every filter
-/// is applied after retrieval and a plain top-100 could come back nearly empty on a corpus
-/// one source dominates. This over-fetches instead, always: exclusion is a filter nobody
-/// can turn off. It can still under-fill, which is a known limit of the post-filter rather
-/// than a bug in it.
-const FILTER_OVERFETCH: usize = 5;
 
 /// How many fused candidates reach the reranker (SPEC §6: "top 30–40").
 ///
@@ -237,7 +229,12 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
     // A missing model or an unbuilt table is a normal state, not a failure: the corpus
     // is keyword-searchable long before it is embedded. It degrades to one arm and says
     // so, rather than returning an error a reader cannot act on.
-    let (vector, no_vectors) = match vector_arm(ctx, &args).await {
+    let filter = Filter {
+        source: args.source.as_deref(),
+        tags: &args.tags,
+        not_tags: &args.not_tags,
+    };
+    let (vector, no_vectors) = match vector_arm(ctx, &args, &filter).await {
         Ok(hits) => (hits, None),
         Err(reason) => (Vec::new(), Some(reason)),
     };
@@ -257,7 +254,7 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
     //
     // It retrieves to `RERANK_DEPTH`, not to `args.limit`: the reranker's whole value is
     // reordering a set larger than the one returned (§6.3).
-    let mut hits = retrieve(&index_path, &args, vector)?;
+    let mut hits = retrieve(&index_path, &args, &filter, vector)?;
     tracing::debug!(
         candidates = hits.len(),
         ms = started.elapsed().as_millis() as u64,
@@ -363,38 +360,26 @@ fn method(vectors: bool, reranked: bool) -> String {
     parts
 }
 
-/// Everything that touches SQLite: the keyword arm, the vector arm's post-filter, the
-/// fusion, and the tags.
+/// Everything that touches SQLite: the keyword arm, the fusion, and the tags.
 ///
 /// One function so that `Index` — which is not `Send` — is created and dropped without
-/// an `await` anywhere near it.
+/// an `await` anywhere near it. One filter for both arms — the keyword arm applies it in
+/// SQL here, the vector arm applied it inside Lance — so the two never disagree about
+/// which documents are in play.
 fn retrieve(
     index_path: &std::path::Path,
     args: &SearchArgs,
-    mut vector: Vec<(String, f32)>,
+    filter: &Filter<'_>,
+    vector: Vec<Nearest>,
 ) -> anyhow::Result<Vec<Hit>> {
     let index = Index::open(index_path)?;
-    // One filter for both arms — the keyword arm applies it in SQL, the vector arm
-    // after retrieval — so the two never disagree about which documents are in play.
-    let filter = crate::index::Filter {
-        source: args.source.as_deref(),
-        tags: &args.tags,
-        not_tags: &args.not_tags,
-    };
 
     // Both arms reach `ARM_DEPTH`, not `args.limit`: fusion decides the top n, and an
     // arm that only ever returned ten could not lift a result the other missed.
-    let keyword = index.search(&args.query, ARM_DEPTH, &filter)?;
-
-    // The vector arm's post-filter. One query for the whole candidate set, not one per
-    // candidate.
-    let hashes: Vec<String> = vector.iter().map(|(h, _)| h.clone()).collect();
-    let kept = index.eligible(&hashes, &filter)?;
-    vector.retain(|(h, _)| kept.contains(h));
-    vector.truncate(ARM_DEPTH);
+    let keyword = index.search(&args.query, ARM_DEPTH, filter)?;
 
     let depth = RERANK_DEPTH.max(args.limit);
-    let mut hits = fuse(&index, keyword, &vector, depth, &filter)?;
+    let mut hits = fuse(&index, keyword, &vector, depth, filter)?;
     // The tags ride with the hit, read off the document its first placement cites — the
     // one the result will name — so a reader sees why a filtered hit qualified and what
     // else it is.
@@ -491,11 +476,16 @@ fn apply_scores(hits: &mut [Hit], scores: &[f32]) -> Result<(), String> {
 
 /// The vector arm's hits, or the reason there wasn't one.
 ///
-/// Returns `Err(String)` for an ordinary absence — no table yet, no weights installed —
-/// because to the caller those are the same fact: this query ran on one arm, and here is
-/// what to do about it. A real fault is logged and reported the same way, since a search
-/// that fails outright is worse than one that answers with BM25 and says it did.
-async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<Vec<(String, f32)>, String> {
+/// Returns `Err(String)` for an ordinary absence — no table yet, a table in the older
+/// layout, no weights installed — because to the caller those are the same fact: this
+/// query ran on one arm, and here is what to do about it. A real fault is logged and
+/// reported the same way, since a search that fails outright is worse than one that
+/// answers with BM25 and says it did.
+async fn vector_arm(
+    ctx: &Ctx,
+    args: &SearchArgs,
+    filter: &Filter<'_>,
+) -> Result<Vec<Nearest>, String> {
     // The model is a property of the table, not of this caller — see
     // `VectorTable::open_existing`.
     let table = VectorTable::open_existing(&ctx.store.vectors_db())
@@ -551,16 +541,26 @@ async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<Vec<(String, f32)>, 
         }
     };
 
-    // Always over-fetched: exclusions, `--source` and `--tag` are all applied after
-    // retrieval, and exclusion applies to every query. The post-filter itself is the
-    // caller's, because it needs SQLite and this function is the async half.
-    let depth = ARM_DEPTH * FILTER_OVERFETCH;
+    // The filter rides inside the query, so the arm asks for exactly its depth in
+    // distinct chunks and gets them, however narrow the filter.
     if args.exact {
-        table.nearest_exact(&vector, depth).await
+        table.nearest_exact(&vector, ARM_DEPTH, filter).await
     } else {
-        table.nearest(&vector, depth).await
+        table.nearest(&vector, ARM_DEPTH, filter).await
     }
     .map_err(|e| format!("{e:#}"))
+}
+
+/// Puts the document a hit was admitted through first among its placements, so the
+/// result cites the document the filter chose rather than whichever sorted first.
+fn cite_first(placements: &mut [Placement], document: &DocumentId) {
+    if let Some(at) = placements.iter().position(|p| {
+        p.source == document.source
+            && p.resource == document.resource
+            && p.derived_sha == document.derived_sha
+    }) {
+        placements[..=at].rotate_right(1);
+    }
 }
 
 /// Reciprocal Rank Fusion — `Σ 1 / (k + rank)`, over the union of both arms.
@@ -572,20 +572,25 @@ async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<Vec<(String, f32)>, 
 /// Keyword hits arrive already carrying their text and placements, so only the
 /// vector-only survivors are looked up — which is why the lookup is here, after the
 /// cut, rather than when the vector arm returned — under the same filter, so a shared
-/// chunk never cites a document the filter left out.
+/// chunk never cites a document the filter left out. A chunk the vector arm found cites
+/// the document it was admitted through first.
 fn fuse(
     index: &Index,
     keyword: Vec<Hit>,
-    vector: &[(String, f32)],
+    vector: &[Nearest],
     limit: usize,
-    filter: &crate::index::Filter<'_>,
+    filter: &Filter<'_>,
 ) -> anyhow::Result<Vec<Hit>> {
     let mut scores: HashMap<&str, f64> = HashMap::new();
     for (rank, hit) in keyword.iter().enumerate() {
         *scores.entry(hit.chunk_hash.as_str()).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
     }
-    for (rank, (hash, _)) in vector.iter().enumerate() {
-        *scores.entry(hash.as_str()).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+    let mut admitted: HashMap<&str, &DocumentId> = HashMap::new();
+    for (rank, near) in vector.iter().enumerate() {
+        *scores.entry(near.chunk_hash.as_str()).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+        admitted
+            .entry(near.chunk_hash.as_str())
+            .or_insert(&near.document);
     }
 
     let mut ranked: Vec<(&str, f64)> = scores.into_iter().collect();
@@ -599,11 +604,11 @@ fn fuse(
 
     let mut out = Vec::with_capacity(ranked.len());
     for (hash, score) in ranked {
-        match carried.get(hash) {
-            Some(hit) => out.push(Hit {
+        let mut hit = match carried.get(hash) {
+            Some(hit) => Hit {
                 score,
                 ..(*hit).clone()
-            }),
+            },
             None => {
                 // The two stores drift legitimately: a rebuilt index, or `clear_source`,
                 // leaves vectors for chunks SQLite no longer has until the next `embed`
@@ -616,15 +621,19 @@ fn fuse(
                     tracing::debug!(chunk = %hash, "a vector has no chunk in the index");
                     continue;
                 }
-                out.push(Hit {
+                Hit {
                     chunk_hash: hash.to_string(),
                     text: index.chunk_texts(&[hash.to_string()])?.remove(0),
                     score,
                     placements,
                     tags: Vec::new(),
-                });
+                }
             }
+        };
+        if let Some(document) = admitted.get(hash) {
+            cite_first(&mut hit.placements, document);
         }
+        out.push(hit);
     }
     Ok(out)
 }
@@ -893,6 +902,19 @@ mod tests {
         }
     }
 
+    /// A vector-arm hit, admitted through a document the fusion tests never cite.
+    fn near(hash: &str, similarity: f32) -> Nearest {
+        Nearest {
+            chunk_hash: sha(hash),
+            document: DocumentId {
+                source: "test".into(),
+                resource: format!("https://example.gov/{hash}"),
+                derived_sha: "1".repeat(64),
+            },
+            similarity,
+        }
+    }
+
     /// An index holding exactly the chunks a test names, so `fuse` can look up the ones
     /// only the vector arm found.
     fn indexed(texts: &[(&str, &str)]) -> Index {
@@ -931,7 +953,7 @@ mod tests {
         // `both` is second in each arm; `kw` and `vec` are first in one and absent from
         // the other.
         let keyword = vec![hit("kw", 9.0), hit("both", 8.0)];
-        let vector = vec![(sha("vec"), 0.99), (sha("both"), 0.98)];
+        let vector = vec![near("vec", 0.99), near("both", 0.98)];
 
         let fused = fuse(&index, keyword, &vector, 3, &Default::default()).unwrap();
         assert_eq!(fused[0].chunk_hash, sha("both"), "{fused:?}");
@@ -948,7 +970,15 @@ mod tests {
         let fused = fuse(
             &index,
             Vec::new(),
-            &[(hash.clone(), 0.9)],
+            &[Nearest {
+                chunk_hash: hash.clone(),
+                document: DocumentId {
+                    source: "test".into(),
+                    resource: "https://example.gov/a".into(),
+                    derived_sha: "1".repeat(64),
+                },
+                similarity: 0.9,
+            }],
             5,
             &Default::default(),
         )
@@ -979,7 +1009,7 @@ mod tests {
         let first = fuse(
             &index,
             vec![hit("b", 1.0), hit("a", 1.0), hit("c", 1.0)],
-            &[(sha("a"), 0.5), (sha("c"), 0.5), (sha("b"), 0.5)],
+            &[near("a", 0.5), near("c", 0.5), near("b", 0.5)],
             3,
             &Default::default(),
         )
@@ -988,7 +1018,7 @@ mod tests {
             let again = fuse(
                 &index,
                 vec![hit("b", 1.0), hit("a", 1.0), hit("c", 1.0)],
-                &[(sha("a"), 0.5), (sha("c"), 0.5), (sha("b"), 0.5)],
+                &[near("a", 0.5), near("c", 0.5), near("b", 0.5)],
                 3,
                 &Default::default(),
             )

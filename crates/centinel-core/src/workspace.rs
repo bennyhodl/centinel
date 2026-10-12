@@ -30,10 +30,18 @@ pub(crate) mod classifications;
 mod defaults;
 #[cfg(test)]
 pub(crate) mod fake_jev;
+mod vector_sync;
 use chain::{Chain, Verdicts, question_of};
 pub use classifications::DocState;
 use classifications::{Classifications, Policy};
 pub use defaults::{Preset, default_questions, presets};
+pub(crate) use vector_sync::VectorLock;
+pub use vector_sync::{VectorSync, sync_vectors};
+
+/// Results between drains of the vector metadata queue while a run scores. A drain is a
+/// Lance commit per ten thousand rows; every couple of thousand documents keeps search
+/// current without a commit per answer.
+const VECTOR_SYNC_EVERY: usize = 2_000;
 
 static FILE_LOCK: Mutex<()> = Mutex::new(());
 static ACTIVE_RUNS: LazyLock<Mutex<std::collections::HashSet<String>>> =
@@ -1897,6 +1905,12 @@ impl<'a> Workspace<'a> {
         Ok((documents, total))
     }
 
+    /// Carries the workspace's tags and exclusions onto the vector rows of every document
+    /// whose state changed since the last time. See [`sync_vectors`].
+    pub async fn sync_vectors(&self) -> anyhow::Result<VectorSync> {
+        sync_vectors(self.store).await
+    }
+
     /// Scores a prepared run: `concurrency` documents in flight to Jev at once, each
     /// result written the moment it lands, the live snapshot updated with it.
     pub async fn execute(&self, prepared: PreparedRun) -> anyhow::Result<ClassifierRun> {
@@ -1996,12 +2010,17 @@ impl<'a> Workspace<'a> {
                 // Written as it lands, and kept nowhere else: the run's memory is its
                 // counters, however many documents it covers.
                 match &classifications {
-                    Some(classifications) => classifications.record_result(
-                        &run,
-                        &scored.result,
-                        scored.usage,
-                        &policy,
-                    )?,
+                    Some(classifications) => {
+                        classifications.record_result(
+                            &run,
+                            &scored.result,
+                            scored.usage,
+                            &policy,
+                        )?;
+                        if run.scored % VECTOR_SYNC_EVERY == 0 {
+                            self.sync_vectors().await?;
+                        }
+                    }
                     None => run.results.push(scored.result),
                 }
                 if published.elapsed() >= PUBLISH_EVERY {
@@ -2059,6 +2078,7 @@ impl<'a> Workspace<'a> {
         run.cost_estimated = run.cost_usd.is_some();
         if let Some(classifications) = &classifications {
             classifications.finish_run(&run)?;
+            self.sync_vectors().await?;
         }
         publish(&run);
         Ok(run)

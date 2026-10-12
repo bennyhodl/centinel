@@ -21,6 +21,24 @@
 //! re-crawled site is ~95% identical, identical text has an identical `chunk_hash`, and
 //! only genuinely new chunks reach the model (SPEC §6.1).
 //!
+//! ## One row per placement, and most rows are copies
+//!
+//! The table holds a row for every chunk **placed in a document**, carrying the
+//! document's source, tags and exclusion so a search can filter inside the vector query
+//! (see [`crate::vectors`]). The work list is therefore placements, not chunks, and a
+//! placement's vector comes from the cheapest place that has it: another document's row
+//! for the same chunk, the `vectors` table a store from before this layout still holds,
+//! and only then the model. A recrawl that changes a page gives it a new derived text and
+//! so new placements, nearly all of them for passages the table already has under the
+//! old text; those are copied, and the model sees only what is actually new. Upgrading a
+//! store is the same loop with nothing new: `centinel embed --limit 0` fills the table
+//! from `vectors` with nothing sent to a model, resumably, by the same set difference.
+//!
+//! Each row is written with what the workspace says about its document at that moment,
+//! read under the lock every writer of the table takes, and the workspace's own queue of
+//! changed documents is drained before the first row and after the last — so a row is
+//! never older than a change the workspace already made without a pending revision
+//! saying so.
 //! ## The subtraction runs the other way too
 //!
 //! Before anything is embedded, rows whose hash the index no longer has are deleted
@@ -64,9 +82,12 @@
 //! HTTP requests in flight instead of a standing `llama.cpp` context ([`run_remote`]),
 //! and a batch that is a request body rather than a KV-cache reservation.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context as _;
+use futures::TryStreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -75,11 +96,17 @@ use crate::index::Index;
 use crate::models;
 use crate::prelude::*;
 use crate::remote::{self, EmbeddingBackend, RemoteEmbedder};
-use crate::vectors::VectorTable;
+use crate::vectors::{LegacyVectors, Row, VectorTable, parse_key};
+use crate::workspace::classifications::Classifications;
+use crate::workspace::{DocState, DocumentId, VectorLock};
 
 /// The batch to fall back on when the machine will not say what it can hold. Measured,
 /// on an M1 Max, back when a group only amortised context creation.
 const DEFAULT_BATCH: usize = 32;
+
+/// Chunks per lookup when a placement's vector is copied from another row of the table.
+/// One `IN (…)` predicate each, served by the hash index once `maintain` has built it.
+const COPY_WINDOW: usize = 256;
 
 /// The word for "size it to this machine", in the config file and on the flag alike.
 pub const AUTO: &str = "auto";
@@ -241,17 +268,23 @@ pub struct EmbedReport {
     pub model: String,
     pub variant: String,
     pub dims: usize,
-    /// Where the vectors went — `vectors.lance/`.
+    /// Where the vectors went — `chunks.lance/`.
     pub vectors: std::path::PathBuf,
-    /// Chunks in the index.
+    /// Chunk placements in the index: one for each chunk in each document that holds it.
     pub indexed: usize,
-    /// Already stored when the run started — the resumed-past portion.
+    /// Placements that already had a row when the run started — the resumed-past portion.
     pub already_embedded: usize,
+    /// Placements written this run from a vector the store already held: another
+    /// document's row for the same chunk, or the `vectors` table from before this layout.
+    /// Nothing was sent to a model for them.
+    #[serde(default)]
+    pub filled: usize,
+    /// Chunks the model embedded this run; their placements were written with them.
     pub embedded: usize,
-    /// Still outstanding after this run, from `--limit` or from failures.
+    /// Placements still without a row after this run, from `--limit` or from failures.
     pub remaining: usize,
-    /// Rows for chunks the index no longer had when the run started — what a rebuilt
-    /// index or a cleared source leaves behind.
+    /// Rows for placements the index no longer had when the run started — what a rebuilt
+    /// index, a cleared source or a re-extracted page leaves behind.
     #[serde(default)]
     pub stale: usize,
     /// Of those, how many this run deleted. Zero on a dry run.
@@ -261,18 +294,29 @@ pub struct EmbedReport {
     #[serde(default)]
     pub versions_removed: u64,
     pub elapsed_secs: f64,
-    /// Sustained rate, for planning the rest of a corpus.
+    /// Sustained rate of the model, for planning the rest of a corpus.
     pub chunks_per_sec: f64,
     /// Chunks per forward pass, once the three tiers settled it. Reported because it is
     /// what makes `chunks_per_sec` mean anything — the same corpus and the same model
     /// give different rates at different widths.
     ///
     /// Absent on a dry run, which never loads the weights `auto` reads the machine
-    /// through, and so never chooses.
+    /// through, and so never chooses; and on a run the copies finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<Skipped>,
+}
+
+/// A chunk's hash as 32 bytes and its document as a position in the index's document
+/// list: a placement, small enough that a million and a half of them sit beside a model.
+type Pair = ([u8; 32], u32);
+
+fn hash_bytes(hex: &str) -> anyhow::Result<[u8; 32]> {
+    hex::decode(hex)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| anyhow::anyhow!("`{hex}` is not a chunk hash"))
 }
 
 /// Embed indexed chunks into the vector table.
@@ -290,11 +334,11 @@ pub async fn embed(
 
     // Shortest first, so batches carry texts of one kind and the oversized tail — the
     // chunks that force a bespoke context — arrives together at the end of the run.
-    // Said before it runs, not after: with no index on `chars` this is a full table
-    // scan and sort, and on a large corpus it is the first thing a caller waits on.
+    // Said before it runs, not after: on a large corpus it is the first thing a caller
+    // waits on.
     progress.say("reading the index");
     let index = Index::open(ctx.store.require_index()?)?;
-    let indexed = index.chunk_hashes_by_length()?;
+    let placements = index.placements_by_length()?;
 
     // The flag, else the config file's standing preference — [`resolve_batch`]'s first
     // two tiers, resolved here so `centinel embed` typed by hand embeds with the model
@@ -336,30 +380,67 @@ pub async fn embed(
     } else {
         None
     };
-    let stored = match &table {
-        Some(table) => {
-            progress.say("checking stored vectors");
-            table
-                .hashes()
-                .await
-                .with_context(|| verify_hint("reading the stored chunk hashes"))?
-        }
-        None => std::collections::HashSet::new(),
-    };
-    let keep: std::collections::HashSet<String> = indexed.iter().cloned().collect();
-    let already_embedded = indexed.iter().filter(|h| stored.contains(*h)).count();
-    // Rows no chunk claims. Counted here and removed below, so a dry run can say.
-    let stale = stored.iter().filter(|h| !keep.contains(*h)).count();
 
-    let mut todo: Vec<String> = indexed
-        .iter()
-        .filter(|h| !stored.contains(*h))
-        .cloned()
-        .collect();
-    let outstanding = todo.len();
-    if let Some(limit) = args.limit {
-        todo.truncate(limit);
+    // The work list is a set difference over placements. The table's keys are streamed
+    // past the index's pairs rather than collected: what is in both is done, what is only
+    // in the table is stale, and what is only in the index is the work.
+    let mut all: HashSet<Pair> = HashSet::with_capacity(placements.pairs.len());
+    for (hash, document) in &placements.pairs {
+        all.insert((hash_bytes(hash)?, *document));
     }
+    let mut todo = all.clone();
+    let by_document: HashMap<&DocumentId, u32> = placements
+        .documents
+        .iter()
+        .enumerate()
+        .map(|(i, document)| (document, i as u32))
+        .collect();
+    // Rows the index no longer has, by key, and the chunks the table holds a vector for
+    // under some document.
+    let mut stale: Vec<String> = Vec::new();
+    let mut known: HashSet<[u8; 32]> = HashSet::new();
+    if let Some(table) = &table {
+        progress.say("checking stored vectors");
+        table
+            .keys(|key| {
+                let pair = parse_key(key).and_then(|(hash, document)| {
+                    Some((hash_bytes(hash).ok()?, *by_document.get(&document)?))
+                });
+                match pair {
+                    Some(pair) if all.contains(&pair) => {
+                        known.insert(pair.0);
+                        todo.remove(&pair);
+                    }
+                    Some((hash, _)) => {
+                        known.insert(hash);
+                        stale.push(key.to_owned());
+                    }
+                    None => stale.push(key.to_owned()),
+                }
+            })
+            .await
+            .with_context(|| verify_hint("reading the stored keys"))?;
+    }
+    let already_embedded = all.len() - todo.len();
+    let outstanding = todo.len();
+    drop(all);
+
+    // The work grouped by chunk, in index order: each chunk once, with the documents
+    // still owed a row for it.
+    let mut order: Vec<String> = Vec::new();
+    let mut pending: HashMap<[u8; 32], Vec<u32>> = HashMap::new();
+    for (hash, document) in &placements.pairs {
+        let bytes = hash_bytes(hash)?;
+        if !todo.contains(&(bytes, *document)) {
+            continue;
+        }
+        let documents = pending.entry(bytes).or_default();
+        if documents.is_empty() {
+            order.push(hash.clone());
+        }
+        documents.push(*document);
+    }
+    drop(todo);
 
     let base = EmbedReport {
         model: model_id.to_string(),
@@ -374,11 +455,12 @@ pub async fn embed(
         },
         dims,
         vectors: ctx.store.vectors_path(),
-        indexed: indexed.len(),
+        indexed: placements.pairs.len(),
         already_embedded,
+        filled: 0,
         embedded: 0,
         remaining: outstanding,
-        stale,
+        stale: stale.len(),
         pruned: 0,
         versions_removed: 0,
         elapsed_secs: 0.0,
@@ -394,21 +476,112 @@ pub async fn embed(
     // creating an empty table to say so would leave the store looking embedded.
     let table = match table {
         Some(table) => table,
-        None if todo.is_empty() => return Ok(base),
+        None if order.is_empty() => return Ok(base),
         None => VectorTable::open(&ctx.store.vectors_db(), model_id, dims).await?,
     };
 
+    // What the workspace changed since the last drain lands first, so no row written
+    // below is older than a change the workspace already made.
+    crate::workspace::sync_vectors(&ctx.store).await?;
+
     // Reconciled before anything new is written, so the table never holds the old
-    // chunks beside the new and `already_embedded` means what it says.
-    let pruned = match stale {
+    // placements beside the new and `already_embedded` means what it says.
+    let pruned = match stale.len() {
         0 => 0,
-        _ => {
+        n => {
             cancel.check()?;
-            progress.say(format!("pruning {stale} vectors the index no longer has"));
-            table.retain(&keep).await?
+            progress.say(format!("pruning {n} rows the index no longer has"));
+            let _lock = VectorLock::take(&ctx.store).await?;
+            table.remove(&stale).await?;
+            n
         }
     };
+    drop(stale);
 
+    let started = Instant::now();
+    let mut writer = Writer::new(
+        table.clone(),
+        ctx.store.clone(),
+        Arc::new(placements.documents),
+        pending,
+    )?;
+
+    // Copies first: a chunk the table already holds under another document, then the
+    // table from before this layout. Neither asks a model anything.
+    let copyable: Vec<String> = order
+        .iter()
+        .filter(|hash| hash_bytes(hash).is_ok_and(|bytes| known.contains(&bytes)))
+        .cloned()
+        .collect();
+    drop(known);
+    if !copyable.is_empty() {
+        progress.step(
+            "copying vectors held under other documents",
+            0,
+            copyable.len() as u64,
+        );
+        for (i, window) in copyable.chunks(COPY_WINDOW).enumerate() {
+            cancel.check()?;
+            let vectors = table.vectors_of(window).await?;
+            writer.write(vectors.into_iter().collect()).await?;
+            progress.step(
+                "copying vectors held under other documents",
+                ((i + 1) * COPY_WINDOW).min(copyable.len()) as u64,
+                copyable.len() as u64,
+            );
+        }
+    }
+    if writer.has_pending()
+        && let Some(legacy) = LegacyVectors::open(&ctx.store.vectors_db(), model_id).await?
+    {
+        anyhow::ensure!(
+            legacy.dims() == dims,
+            "the `vectors` table holds {}-dimensional vectors, not {dims}",
+            legacy.dims()
+        );
+        progress.say("copying vectors from the vectors table");
+        let mut rows = legacy.rows().await?;
+        while let Some(batch) = rows.try_next().await? {
+            cancel.check()?;
+            let wanted: Vec<_> = batch
+                .into_iter()
+                .filter(|(hash, _)| writer.wants(hash))
+                .collect();
+            writer.write(wanted).await?;
+            if !writer.has_pending() {
+                break;
+            }
+        }
+    }
+    let filled = writer.rows;
+
+    // The rest through the model, shortest first, as many as `--limit` allows.
+    let mut todo: Vec<String> = order
+        .into_iter()
+        .filter(|hash| writer.wants(hash))
+        .collect();
+    if let Some(limit) = args.limit {
+        todo.truncate(limit);
+    }
+    let finish = |writer: &Writer,
+                  embedded: usize,
+                  skipped: Vec<Skipped>,
+                  batch: Option<usize>,
+                  done: crate::vectors::Maintenance| {
+        let elapsed = started.elapsed().as_secs_f64();
+        EmbedReport {
+            filled,
+            embedded,
+            remaining: writer.remaining_rows(),
+            pruned,
+            versions_removed: done.versions_removed,
+            elapsed_secs: elapsed,
+            chunks_per_sec: embedded as f64 / elapsed.max(f64::EPSILON),
+            batch,
+            skipped,
+            ..base
+        }
+    };
     if todo.is_empty() {
         cancel.check()?;
         progress.say("maintaining the vector table");
@@ -416,15 +589,12 @@ pub async fn embed(
             .maintain(args.ann_index)
             .await
             .with_context(|| verify_hint("maintaining the vector table"))?;
-        return Ok(EmbedReport {
-            pruned,
-            versions_removed: done.versions_removed,
-            ..base
-        });
+        crate::workspace::sync_vectors(&ctx.store).await?;
+        return Ok(finish(&writer, 0, Vec::new(), None, done));
     }
 
-    let started = Instant::now();
-    let (embedded, skipped, batch_size) = match backend {
+    let chunks_before = writer.chunks;
+    let (writer, skipped, batch_size) = match backend {
         EmbeddingBackend::Local(spec) => {
             progress.say(format!(
                 "loading {} ({})",
@@ -452,8 +622,7 @@ pub async fn embed(
             // matters here more than usual, because an HTTP caller's connection has to
             // stay responsive across hours. One task also means the model is moved once
             // instead of round-tripping per batch.
-            let (embedded, skipped) = {
-                let table = table.clone();
+            let (writer, skipped) = {
                 let host = Host {
                     progress: progress.clone(),
                     cancel: cancel.clone(),
@@ -465,11 +634,11 @@ pub async fn embed(
                     handle: tokio::runtime::Handle::current(),
                 };
                 tokio::task::spawn_blocking(move || {
-                    run(embedder, index, table, todo, batch_size, host)
+                    run(embedder, index, writer, todo, batch_size, host)
                 })
                 .await??
             };
-            (embedded, skipped, batch_size)
+            (writer, skipped, batch_size)
         }
         EmbeddingBackend::Remote(spec) => {
             // Said before the first byte moves, because it is the run's one departure
@@ -478,17 +647,9 @@ pub async fn embed(
             let embedder = RemoteEmbedder::new(spec, crate::spend::Ledger::new(&ctx.store))?;
             let batch_size = resolve_remote_batch(args.batch)?;
             progress.say(format!("{batch_size} chunks per request"));
-            let (embedded, skipped) = run_remote(
-                embedder,
-                index,
-                table.clone(),
-                todo,
-                batch_size,
-                progress,
-                cancel,
-            )
-            .await?;
-            (embedded, skipped, batch_size)
+            let (writer, skipped) =
+                run_remote(embedder, index, writer, todo, batch_size, progress, cancel).await?;
+            (writer, skipped, batch_size)
         }
     };
 
@@ -498,18 +659,105 @@ pub async fn embed(
         .maintain(args.ann_index)
         .await
         .with_context(|| verify_hint("maintaining the vector table"))?;
-    let elapsed = started.elapsed().as_secs_f64();
-    Ok(EmbedReport {
-        embedded,
-        remaining: outstanding - embedded,
-        pruned,
-        versions_removed: done.versions_removed,
-        elapsed_secs: elapsed,
-        chunks_per_sec: embedded as f64 / elapsed.max(f64::EPSILON),
-        batch: Some(batch_size),
+    crate::workspace::sync_vectors(&ctx.store).await?;
+    Ok(finish(
+        &writer,
+        writer.chunks - chunks_before,
         skipped,
-        ..base
-    })
+        Some(batch_size),
+        done,
+    ))
+}
+
+/// The one writer of rows for a run: it knows which documents still owe a row for each
+/// chunk, and for every vector it is handed it writes those rows with what the workspace
+/// says about each document right now — read under the table's lock, so a change the
+/// workspace makes after the read is a revision the next sync carries.
+struct Writer {
+    table: VectorTable,
+    store: Store,
+    documents: Arc<Vec<DocumentId>>,
+    /// The documents owed a row for each chunk, by hash. A chunk written leaves the map.
+    pending: HashMap<[u8; 32], Vec<u32>>,
+    classifications: Classifications,
+    /// Chunks written, whichever way their vector arrived.
+    chunks: usize,
+    /// Rows written.
+    rows: usize,
+}
+
+impl Writer {
+    fn new(
+        table: VectorTable,
+        store: Store,
+        documents: Arc<Vec<DocumentId>>,
+        pending: HashMap<[u8; 32], Vec<u32>>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            table,
+            classifications: Classifications::open(&store)?,
+            store,
+            documents,
+            pending,
+            chunks: 0,
+            rows: 0,
+        })
+    }
+
+    /// Whether some document still owes a row for this chunk.
+    fn wants(&self, hash: &str) -> bool {
+        hash_bytes(hash).is_ok_and(|bytes| self.pending.contains_key(&bytes))
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Placements still without a row.
+    fn remaining_rows(&self) -> usize {
+        self.pending.values().map(Vec::len).sum()
+    }
+
+    /// Writes the rows these vectors are owed, one durable commit. A chunk nobody owes a
+    /// row for any more is skipped: a copy and the model may both offer it.
+    async fn write(&mut self, entries: Vec<(String, Vec<f32>)>) -> anyhow::Result<()> {
+        let mut owed: Vec<(String, u32, Vec<f32>)> = Vec::new();
+        for (hash, vector) in entries {
+            let Some(documents) = self.pending.remove(&hash_bytes(&hash)?) else {
+                continue;
+            };
+            self.chunks += 1;
+            for document in documents {
+                owed.push((hash.clone(), document, vector.clone()));
+            }
+        }
+        if owed.is_empty() {
+            return Ok(());
+        }
+        let _lock = VectorLock::take(&self.store).await?;
+        let mut states: HashMap<u32, DocState> = HashMap::new();
+        let mut rows = Vec::with_capacity(owed.len());
+        for (chunk_hash, document, vector) in owed {
+            let id = &self.documents[document as usize];
+            let state = match states.get(&document) {
+                Some(state) => state.clone(),
+                None => {
+                    let state = self.classifications.state_of(id)?;
+                    states.insert(document, state.clone());
+                    state
+                }
+            };
+            rows.push(Row {
+                chunk_hash,
+                document: id.clone(),
+                state,
+                vector,
+            });
+        }
+        self.table.append(&rows).await?;
+        self.rows += rows.len();
+        Ok(())
+    }
 }
 
 /// Context for a failed pass over the whole vector table, naming the op that can say
@@ -579,12 +827,12 @@ fn resolve_remote_batch(flag: Option<BatchSize>) -> anyhow::Result<usize> {
     })
 }
 
-/// The remote pipeline: read → request → append, with [`REMOTE_IN_FLIGHT`] requests on
+/// The remote pipeline: read → request → write, with [`REMOTE_IN_FLIGHT`] requests on
 /// the wire at once.
 ///
 /// [`run`]'s shape with the decode swapped for HTTP: the reader thread keeps windows of
 /// text coming off SQLite, in-flight requests overlap the network's latency, and the
-/// writer task appends what has come back. `buffered` completes in submission order, so
+/// writer task writes what has come back. `buffered` completes in submission order, so
 /// the writer receives windows in work-list order and the durable count means what it
 /// does locally: everything before it landed.
 ///
@@ -594,12 +842,12 @@ fn resolve_remote_batch(flag: Option<BatchSize>) -> anyhow::Result<usize> {
 async fn run_remote(
     embedder: RemoteEmbedder,
     index: Index,
-    table: VectorTable,
+    writer: Writer,
     todo: Vec<String>,
     batch_size: usize,
     progress: &Progress,
     cancel: &Cancel,
-) -> anyhow::Result<(usize, Vec<Skipped>)> {
+) -> anyhow::Result<(Writer, Vec<Skipped>)> {
     use futures::StreamExt;
 
     let total = todo.len() as u64;
@@ -626,16 +874,12 @@ async fn run_remote(
 
     let (write_tx, mut write_rx) =
         tokio::sync::mpsc::channel::<Vec<(String, Vec<f32>)>>(PIPELINE_SLACK);
-    let writer = tokio::spawn({
-        let table = table.clone();
-        async move {
-            let mut written = 0usize;
-            while let Some(entries) = write_rx.recv().await {
-                table.append(&entries).await?;
-                written += entries.len();
-            }
-            anyhow::Ok(written)
+    let writer = tokio::spawn(async move {
+        let mut writer = writer;
+        while let Some(entries) = write_rx.recv().await {
+            writer.write(entries).await?;
         }
+        anyhow::Ok(writer)
     });
 
     let mut sent = 0usize;
@@ -687,7 +931,7 @@ async fn run_remote(
     match (written, decoded) {
         (Err(append_error), _) => Err(append_error),
         (_, Err(decode_error)) => Err(decode_error),
-        (Ok(written), Ok(())) => Ok((written, skipped)),
+        (Ok(writer), Ok(())) => Ok((writer, skipped)),
     }
 }
 
@@ -741,26 +985,26 @@ struct Host {
 /// nothing and widens the gap between the progress count and the table.
 const PIPELINE_SLACK: usize = 2;
 
-/// The pipeline: read → decode → append, each on its own thread.
+/// The pipeline: read → decode → write, each on its own thread.
 ///
 /// The GPU must never wait on SQLite or on Lance. A reader thread keeps the next
 /// window's text ready, this thread decodes through one standing session, and a writer
-/// task appends what the last decode produced — the seconds of inference overlap the
+/// task writes what the last decode produced — the seconds of inference overlap the
 /// milliseconds of I/O instead of following them.
 ///
-/// The durable count is the writer's. Lance commits a version per append, chunk identity
-/// is the hash of its text, and the next run subtracts what is stored — so stopping
-/// mid-corpus costs nothing but what was in flight. The progress count runs at most
-/// [`PIPELINE_SLACK`] batches ahead of the table; the report's `embedded` is what
+/// The durable count is the writer's. Lance commits a version per append, a row's
+/// identity is its chunk and document, and the next run subtracts what is stored — so
+/// stopping mid-corpus costs nothing but what was in flight. The progress count runs at
+/// most [`PIPELINE_SLACK`] batches ahead of the table; the report's figures are what
 /// actually landed.
 fn run(
     embedder: Embedder,
     index: Index,
-    table: VectorTable,
+    writer: Writer,
     todo: Vec<String>,
     batch_size: usize,
     host: Host,
-) -> anyhow::Result<(usize, Vec<Skipped>)> {
+) -> anyhow::Result<(Writer, Vec<Skipped>)> {
     let Host {
         progress,
         cancel,
@@ -794,16 +1038,12 @@ fn run(
 
     let (write_tx, mut write_rx) =
         tokio::sync::mpsc::channel::<Vec<(String, Vec<f32>)>>(PIPELINE_SLACK);
-    let writer = handle.spawn({
-        let table = table.clone();
-        async move {
-            let mut written = 0usize;
-            while let Some(entries) = write_rx.recv().await {
-                table.append(&entries).await?;
-                written += entries.len();
-            }
-            anyhow::Ok(written)
+    let writer = handle.spawn(async move {
+        let mut writer = writer;
+        while let Some(entries) = write_rx.recv().await {
+            writer.write(entries).await?;
         }
+        anyhow::Ok(writer)
     });
 
     let mut sent = 0usize;
@@ -847,7 +1087,7 @@ fn run(
     match (written, decoded) {
         (Err(append_error), _) => Err(append_error),
         (_, Err(decode_error)) => Err(decode_error),
-        (Ok(written), Ok(())) => Ok((written, skipped)),
+        (Ok(writer), Ok(())) => Ok((writer, skipped)),
     }
 }
 
@@ -925,13 +1165,16 @@ impl Render for EmbedReport {
         )?;
         p.nest(|p| {
             let mut figures = vec![
-                (self.indexed as u64, "chunks indexed"),
-                (self.already_embedded as u64, "already embedded"),
-                (self.embedded as u64, "embedded"),
-                (self.remaining as u64, "remaining"),
+                (self.indexed as u64, "placements indexed"),
+                (self.already_embedded as u64, "already stored"),
             ];
-            // Only when there were any: a corpus in step with its index has nothing to
-            // say here, and a figure printed every run is a figure nobody reads.
+            // Only when there were any: a run with nothing to copy has nothing to say
+            // here, and a figure printed every run is a figure nobody reads.
+            if self.filled > 0 {
+                figures.push((self.filled as u64, "filled from stored vectors"));
+            }
+            figures.push((self.embedded as u64, "chunks embedded"));
+            figures.push((self.remaining as u64, "remaining"));
             if self.stale > 0 {
                 figures.push((self.stale as u64, "stale"));
                 figures.push((self.pruned as u64, "pruned"));
@@ -981,6 +1224,7 @@ mod tests {
     use crate::chunk::Chunk;
     use crate::index::Placement;
     use crate::store::Store;
+    use crate::vectors::key_of;
 
     #[test]
     fn a_bad_chunk_does_not_serialize_the_healthy_batch() {
@@ -1105,6 +1349,25 @@ mod tests {
         (dir, Ctx::new(store))
     }
 
+    /// The document at `https://example.gov/{i}` in an [`indexed_store`].
+    fn document(i: usize) -> DocumentId {
+        DocumentId {
+            source: "test".into(),
+            resource: format!("https://example.gov/{i}"),
+            derived_sha: DERIVED.into(),
+        }
+    }
+
+    /// A row for `passage(i)` in its document, with a zero vector of the default width.
+    fn stored(i: usize) -> Row {
+        Row {
+            chunk_hash: passage(i).chunk_hash,
+            document: document(i),
+            state: DocState::default(),
+            vector: vec![0.0; 2560],
+        }
+    }
+
     #[tokio::test]
     async fn a_dry_run_reports_the_work_without_loading_a_model() {
         let (_d, ctx) = indexed_store(7).await;
@@ -1181,14 +1444,20 @@ mod tests {
     /// And the coverage claim with it. `embed --dry-run` is where "how much of the corpus
     /// has a vector" is answered — `search` used to print a share from a plain chunk
     /// count, which ignored the shapes below — so its figures are proven here against
-    /// each of them: a passage carried by two documents is one chunk, and a vector for a
-    /// chunk the index never had is stale.
+    /// each of them: a passage carried by two documents is two placements with one
+    /// vector; a row for a document the index no longer has is stale; and the second
+    /// document's row is filled from the first's without a model.
     #[tokio::test]
     async fn stored_chunks_are_subtracted_from_the_work_list() {
         let (_dir, ctx) = indexed_store(10).await;
 
         // The same passage under two addresses: one chunk, two placements.
         let shared = Chunk::new("the same notice, carried twice".into(), 0, String::new(), 0);
+        let shared_in = |resource: &str| DocumentId {
+            source: "test".into(),
+            resource: resource.into(),
+            derived_sha: DERIVED.into(),
+        };
         {
             let mut index = Index::open(ctx.store.require_index().unwrap()).unwrap();
             for resource in [
@@ -1201,26 +1470,30 @@ mod tests {
             }
         }
 
-        // Stored: five live chunks, the shared one, and a hash no chunk has ever had.
+        // Stored: five passages in their documents, the shared one under its first
+        // address, and a row for a document the index never had.
         let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
             .await
             .unwrap();
-        let mut seeded: Vec<(String, Vec<f32>)> = (0..=4)
-            .map(|i| (passage(i).chunk_hash, vec![0.0; 2560]))
-            .collect();
-        seeded.push((shared.chunk_hash.clone(), vec![0.0; 2560]));
-        seeded.push(("a".repeat(64), vec![0.0; 2560]));
+        let mut seeded: Vec<Row> = (0..=4).map(stored).collect();
+        seeded.push(Row {
+            chunk_hash: shared.chunk_hash.clone(),
+            document: shared_in("https://example.gov/shared-a"),
+            state: DocState::default(),
+            vector: vec![0.5; 2560],
+        });
+        seeded.push(Row {
+            document: shared_in("https://example.gov/gone"),
+            ..stored(9)
+        });
         table.append(&seeded).await.unwrap();
 
         let report = embed(
             &ctx,
             EmbedArgs {
                 model: default_model(),
-                variant: None,
-                batch: None,
-                limit: None,
                 dry_run: true,
-                ann_index: false,
+                ..Default::default()
             },
             &Progress::none(),
             &Cancel::none(),
@@ -1228,43 +1501,64 @@ mod tests {
         .await
         .unwrap();
 
-        // Ten passages plus the shared one.
-        assert_eq!(report.indexed, 11, "one chunk per distinct passage");
-        assert_eq!(report.already_embedded, 6, "the shared chunk counts once");
-        assert_eq!(report.remaining, 5, "only unembedded chunks are work");
-        assert_eq!(report.stale, 1, "the orphan is stale");
+        // Ten passages plus the shared one twice.
+        assert_eq!(report.indexed, 12, "one row per placement");
+        assert_eq!(report.already_embedded, 6);
+        assert_eq!(
+            report.remaining, 6,
+            "only placements without a row are work"
+        );
+        assert_eq!(report.stale, 1, "the row for the vanished document");
+        assert_eq!(report.filled, 0, "a plan copies nothing");
+
+        // A run that may embed nothing still fills what it can copy: the shared chunk's
+        // second placement gets the first's vector, and the stale row goes.
+        let report = embed(
+            &ctx,
+            EmbedArgs {
+                model: default_model(),
+                limit: Some(0),
+                ..Default::default()
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.filled, 1);
+        assert_eq!(report.embedded, 0);
+        assert_eq!(
+            report.remaining, 5,
+            "the five unembedded passages wait for a model"
+        );
+        assert_eq!(report.pruned, 1);
+        let vectors = table
+            .vectors_of(&[shared.chunk_hash.clone()])
+            .await
+            .unwrap();
+        assert_eq!(vectors[&shared.chunk_hash], vec![0.5; 2560]);
+        assert_eq!(table.len().await.unwrap(), 7);
     }
 
     /// The field failure end to end: a data file the storage never wrote blocks the
     /// pre-flight scan, the error names `centinel verify`, and after `verify --repair`
-    /// the dropped chunks are back on the work list rather than left as ghost rows.
+    /// the dropped rows are back on the work list rather than left as ghost rows.
     #[tokio::test]
     async fn a_repaired_table_puts_the_dropped_chunks_back_on_the_work_list() {
         let (_dir, ctx) = indexed_store(3).await;
-        let hashes = Index::open(ctx.store.require_index().unwrap())
-            .unwrap()
-            .chunk_hashes()
-            .unwrap();
 
-        // Every chunk embedded, in two fragments; then one fragment's file goes bad.
+        // Every placement stored, in two fragments; then one fragment's file goes bad.
         let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
             .await
             .unwrap();
-        let row = |h: &String| (h.clone(), vec![0.0_f32; 2560]);
-        table.append(&[row(&hashes[0])]).await.unwrap();
-        table
-            .append(&hashes[1..].iter().map(row).collect::<Vec<_>>())
-            .await
-            .unwrap();
+        table.append(&[stored(0)]).await.unwrap();
+        table.append(&[stored(1), stored(2)]).await.unwrap();
         super::super::verify::tests::damage_a_data_file(&ctx);
 
         let plan = || EmbedArgs {
             model: default_model(),
-            variant: None,
-            batch: None,
-            limit: None,
             dry_run: true,
-            ann_index: false,
+            ..Default::default()
         };
         let err = embed(&ctx, plan(), &Progress::none(), &Cancel::none())
             .await
@@ -1293,29 +1587,35 @@ mod tests {
         assert_eq!(report.already_embedded, 3 - repaired.estimated_rows);
         assert_eq!(
             report.remaining, repaired.estimated_rows,
-            "the dropped chunks are work again, not ghost rows"
+            "the dropped rows are work again, not ghost rows"
         );
         assert_eq!(report.stale, 0);
     }
 
-    /// The subtraction the other way. A rebuilt index or a cleared source leaves rows no
-    /// chunk claims: a dry run counts them, a run removes them before it embeds — and
-    /// with every chunk already stored, the run needs no weights to show it.
+    /// The subtraction the other way. A rebuilt index or a cleared source leaves rows
+    /// no placement claims: a dry run counts them, a run removes them before it embeds —
+    /// and with every placement already stored, the run needs no weights to show it.
     #[tokio::test]
     async fn stale_vectors_are_counted_by_a_plan_and_pruned_by_a_run() {
         let (_dir, ctx) = indexed_store(3).await;
-        let index = Index::open(ctx.store.require_index().unwrap()).unwrap();
-        let hashes = index.chunk_hashes().unwrap();
 
         let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
             .await
             .unwrap();
-        let mut seeded: Vec<(String, Vec<f32>)> = hashes
-            .iter()
-            .map(|h| (h.clone(), vec![0.0; 2560]))
-            .collect();
-        seeded.push(("a".repeat(64), vec![0.0; 2560]));
-        seeded.push(("b".repeat(64), vec![0.0; 2560]));
+        let mut seeded: Vec<Row> = (0..3).map(stored).collect();
+        // Two rows for documents the index does not have: one a page re-extracted to a
+        // new derived text, one an address gone altogether.
+        seeded.push(Row {
+            document: DocumentId {
+                derived_sha: "2".repeat(64),
+                ..document(0)
+            },
+            ..stored(0)
+        });
+        seeded.push(Row {
+            document: document(7),
+            ..stored(1)
+        });
         table.append(&seeded).await.unwrap();
 
         let plan = embed(
@@ -1353,10 +1653,89 @@ mod tests {
         let reopened = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
             .await
             .unwrap();
+        let mut keys = HashSet::new();
+        reopened
+            .keys(|key| {
+                keys.insert(key.to_string());
+            })
+            .await
+            .unwrap();
         assert_eq!(
-            reopened.hashes().await.unwrap(),
-            hashes.into_iter().collect::<std::collections::HashSet<_>>(),
-            "exactly the index's chunks remain"
+            keys,
+            (0..3)
+                .map(|i| key_of(&passage(i).chunk_hash, &document(i)))
+                .collect::<HashSet<_>>(),
+            "exactly the index's placements remain"
+        );
+    }
+
+    /// Upgrading a store is `embed --limit 0`: every placement whose chunk the `vectors`
+    /// table from before this layout holds is written from it, nothing is sent to a model,
+    /// the legacy table is left as it was, and each row carries what the workspace says
+    /// about its document — here, one the operator took out of search.
+    #[tokio::test]
+    async fn a_legacy_table_fills_the_new_one_without_a_model() {
+        let (_dir, ctx) = indexed_store(3).await;
+        let legacy: Vec<(String, Vec<f32>)> = (0..3)
+            .map(|i| {
+                let mut vector = vec![0.0; 2560];
+                vector[i] = 1.0;
+                (passage(i).chunk_hash, vector)
+            })
+            .collect();
+        crate::vectors::tests::legacy_table(&ctx.store.vectors_db(), "qwen3-embedding-4b", &legacy)
+            .await;
+        let saved = crate::workspace::Workspace::new(&ctx.store)
+            .questions()
+            .unwrap();
+        Classifications::open(&ctx.store)
+            .unwrap()
+            .set_usage(
+                &document(1),
+                true,
+                "review",
+                &crate::workspace::classifications::Policy::new(&saved),
+            )
+            .unwrap();
+
+        let report = embed(
+            &ctx,
+            EmbedArgs {
+                model: default_model(),
+                limit: Some(0),
+                ..Default::default()
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.filled, 3);
+        assert_eq!(report.embedded, 0);
+        assert_eq!(report.remaining, 0);
+        assert!(!ctx.store.spend_dir().exists(), "no model ran");
+
+        let table = VectorTable::open_existing(&ctx.store.vectors_db())
+            .await
+            .unwrap();
+        assert_eq!(table.len().await.unwrap(), 3);
+        let mut query = vec![0.0; 2560];
+        query[1] = 1.0;
+        let hits = table
+            .nearest(&query, 3, &crate::index::Filter::default())
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().all(|h| h.document != document(1)),
+            "the excluded document's row was written excluded: {hits:?}"
+        );
+        assert_eq!(hits.len(), 2);
+        assert!(
+            crate::vectors::LegacyVectors::open(&ctx.store.vectors_db(), "qwen3-embedding-4b")
+                .await
+                .unwrap()
+                .is_some(),
+            "the legacy table is left for the operator to delete"
         );
     }
 

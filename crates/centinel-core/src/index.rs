@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chunk::Chunk;
 use crate::store::Store;
+use crate::workspace::DocumentId;
 use crate::workspace::classifications::Classifications;
 
 /// Where a chunk was found, and everything needed to cite it.
@@ -114,6 +115,15 @@ fn admits(filter: &Filter<'_>, values: &mut Vec<rusqlite::types::Value>) -> Stri
     sql
 }
 
+/// Every placement in the index as `embed` walks them: the documents once, and each
+/// `(chunk_hash, document)` pair as an index into them. See
+/// [`Index::placements_by_length`].
+#[derive(Clone, Debug, Default)]
+pub struct Placements {
+    pub documents: Vec<DocumentId>,
+    pub pairs: Vec<(String, u32)>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct IndexStats {
     pub chunks: usize,
@@ -138,7 +148,7 @@ CREATE TABLE IF NOT EXISTS chunk (
     chars       INTEGER NOT NULL
 );
 
--- Covers `chunk_hashes_by_length`'s `ORDER BY chars, id` — chunk_hash trails so the
+-- Covers `placements_by_length`'s `ORDER BY chars, id` — chunk_hash trails so the
 -- scan never touches the table's `text` column. Without it that query is a full
 -- table scan into a temp b-tree sort, and `embed` pays that on every run, not just
 -- the first.
@@ -472,19 +482,64 @@ impl Index {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Every chunk hash, shortest text first.
+    /// Every chunk placed in every document, shortest text first, each document named
+    /// once and the placements pointing at it.
     ///
     /// The order `embed` wants its work list in. A batch decodes as physical passes of
     /// whole sequences, so texts of one length pack them evenly — and the oversized
     /// tail, each of which forces its whole group through a bespoke context, arrives
-    /// together at the end instead of taxing every group it would otherwise visit.
+    /// together at the end instead of taxing every group it would otherwise visit. The
+    /// placements of one chunk are adjacent, so a chunk is embedded once for all of them.
     /// The order is free to vary: resumability is a set difference against the vector
     /// table, not a cursor into this list.
-    pub fn chunk_hashes_by_length(&self) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT chunk_hash FROM chunk ORDER BY chars, id")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    ///
+    /// Documents are interned because a corpus has fifty placements per document, and
+    /// a million and a half of them each carrying three strings is memory the machine
+    /// doing the embedding wants for the model.
+    pub fn placements_by_length(&self) -> anyhow::Result<Placements> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT p.chunk_hash, p.source, p.resource, p.derived_sha
+             FROM placement p JOIN chunk c ON c.chunk_hash = p.chunk_hash
+             ORDER BY c.chars, c.id, p.source, p.resource, p.derived_sha",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Placements::default();
+        let mut seen: HashMap<(String, String, String), u32> = HashMap::new();
+        for row in rows {
+            let (chunk_hash, source, resource, derived_sha) = row?;
+            let next = out.documents.len() as u32;
+            let document = *seen
+                .entry((source.clone(), resource.clone(), derived_sha.clone()))
+                .or_insert_with(|| {
+                    out.documents.push(DocumentId {
+                        source,
+                        resource,
+                        derived_sha,
+                    });
+                    next
+                });
+            out.pairs.push((chunk_hash, document));
+        }
+        Ok(out)
+    }
+
+    /// The distinct chunks placed in one document — the rows the vector table holds for
+    /// it.
+    pub fn chunk_hashes_of(&self, document: &DocumentId) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT chunk_hash FROM placement WHERE source=?1 AND resource=?2 AND derived_sha=?3",
+        )?;
+        let rows = stmt.query_map(
+            params![document.source, document.resource, document.derived_sha],
+            |r| r.get::<_, String>(0),
+        )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -527,35 +582,6 @@ impl Index {
                     .ok_or_else(|| anyhow::anyhow!("chunk {h} is not in the index"))
             })
             .collect()
-    }
-
-    /// Which of `hashes` have a placement the filter admits.
-    ///
-    /// The vector arm's half of the filter, applied after retrieval in one query for the
-    /// whole candidate set, from the same clauses the keyword arm's `WHERE` is built from.
-    pub fn eligible(
-        &self,
-        hashes: &[String],
-        filter: &Filter<'_>,
-    ) -> anyhow::Result<std::collections::HashSet<String>> {
-        if hashes.is_empty() {
-            return Ok(std::collections::HashSet::new());
-        }
-        let holes = std::iter::repeat_n("?", hashes.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut values: Vec<rusqlite::types::Value> =
-            hashes.iter().map(|h| h.clone().into()).collect();
-        let admits = admits(filter, &mut values);
-        let sql = format!(
-            "SELECT DISTINCT p.chunk_hash FROM placement p WHERE p.chunk_hash IN ({holes}){admits}"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        Ok(stmt
-            .query_map(rusqlite::params_from_iter(values.iter()), |r| {
-                r.get::<_, String>(0)
-            })?
-            .collect::<Result<std::collections::HashSet<_>, _>>()?)
     }
 
     /// The tags on one document, for the result that cites it.
@@ -845,12 +871,12 @@ mod tests {
         idx
     }
 
-    /// The work-list order `embed` batches by: texts of one length ride together, and
-    /// the long tail comes last.
+    /// The work-list order `embed` batches by: texts of one length ride together, the
+    /// long tail comes last, and a chunk's placements sit together.
     #[test]
-    fn hashes_by_length_run_shortest_first() {
+    fn placements_by_length_run_shortest_first_with_a_chunks_documents_together() {
         let long = "A much longer passage. ".repeat(20);
-        let idx = indexed(&[
+        let mut idx = indexed(&[
             ("https://example.gov/long", long.as_str()),
             ("https://example.gov/short", "Tiny."),
             (
@@ -858,17 +884,38 @@ mod tests {
                 "A middling passage about drainage.",
             ),
         ]);
+        // The short passage under a second address: one chunk, two placements.
+        for c in chunk_markdown("Tiny.", &ChunkConfig::default()) {
+            idx.insert(
+                &c,
+                &placement("tampa", "https://example.gov/short-too", &"9".repeat(64)),
+            )
+            .unwrap();
+        }
 
-        let ordered = idx.chunk_hashes_by_length().unwrap();
-        let texts = idx.chunk_texts(&ordered).unwrap();
+        let placements = idx.placements_by_length().unwrap();
+        let hashes: Vec<String> = placements.pairs.iter().map(|(h, _)| h.clone()).collect();
+        let texts = idx.chunk_texts(&hashes).unwrap();
         let lengths: Vec<usize> = texts.iter().map(String::len).collect();
         let mut sorted = lengths.clone();
         sorted.sort_unstable();
         assert_eq!(lengths, sorted, "not shortest-first: {lengths:?}");
+        assert_eq!(placements.documents.len(), 4);
         assert_eq!(
-            ordered.len(),
-            idx.chunk_hashes().unwrap().len(),
-            "an order must never drop a chunk"
+            placements.pairs.len(),
+            idx.stats().unwrap().placements,
+            "an order must never drop a placement"
+        );
+        assert_eq!(
+            hashes[0], hashes[1],
+            "the shared short chunk's two placements are adjacent"
+        );
+        assert_ne!(placements.pairs[0].1, placements.pairs[1].1);
+        let short = &placements.documents[placements.pairs[0].1 as usize];
+        assert_eq!(
+            idx.chunk_hashes_of(short).unwrap(),
+            [hashes[0].clone()],
+            "one chunk in the short document"
         );
     }
 

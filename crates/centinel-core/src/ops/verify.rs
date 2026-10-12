@@ -26,7 +26,7 @@ pub struct VerifyTableArgs {
     /// Drop the unreadable fragments from the table and commit a new version.
     ///
     /// Without this `verify` only reads: nothing is committed, and nothing is created when
-    /// `vectors.lance` does not exist yet. The dropped chunks are not lost — the next
+    /// `chunks.lance` does not exist yet. The dropped chunks are not lost — the next
     /// `centinel embed` sees their hashes fall out of the table and re-embeds them. Check
     /// the storage before you let it.
     #[arg(long)]
@@ -36,7 +36,7 @@ pub struct VerifyTableArgs {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct VerifyReport {
-    /// `vectors.lance/`.
+    /// `chunks.lance/`.
     pub vectors: PathBuf,
     pub fragments: usize,
     pub readable: usize,
@@ -178,11 +178,22 @@ fn render_repaired(p: &mut Painter<'_>, done: &VectorRepair) -> std::io::Result<
 pub(super) mod tests {
     use super::*;
     use crate::store::Store;
+    use crate::vectors::Row;
+    use crate::workspace::{DocState, DocumentId};
 
     const DIMS: usize = 4;
 
-    fn hash(byte: u8) -> String {
-        hex::encode([byte; 32])
+    fn row(byte: u8, vector: Vec<f32>) -> Row {
+        Row {
+            chunk_hash: hex::encode([byte; 32]),
+            document: DocumentId {
+                source: "test".into(),
+                resource: format!("https://example.gov/{byte}"),
+                derived_sha: hex::encode([byte; 32]),
+            },
+            state: DocState::default(),
+            vector,
+        }
     }
 
     fn args(repair: bool) -> VerifyTableArgs {
@@ -199,11 +210,11 @@ pub(super) mod tests {
             .await
             .unwrap();
         table
-            .append(&[(hash(1), vec![1.0, 0.0, 0.0, 0.0])])
+            .append(&[row(1, vec![1.0, 0.0, 0.0, 0.0])])
             .await
             .unwrap();
         table
-            .append(&[(hash(2), vec![0.0, 1.0, 0.0, 0.0])])
+            .append(&[row(2, vec![0.0, 1.0, 0.0, 0.0])])
             .await
             .unwrap();
         (dir, ctx)
@@ -211,7 +222,7 @@ pub(super) mod tests {
 
     /// Overwrites one data file with filler of the same length — the shape of the field
     /// failure: a file of the right size holding nothing Lance can read. Returns the path
-    /// the report should name, relative to `vectors.lance/`. `embed`'s tests use it too.
+    /// the report should name, relative to `chunks.lance/`. `embed`'s tests use it too.
     pub(in crate::ops) fn damage_a_data_file(ctx: &Ctx) -> String {
         let data = ctx.store.vectors_path().join("data");
         let mut files: Vec<_> = std::fs::read_dir(&data)
