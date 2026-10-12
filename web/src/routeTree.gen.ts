@@ -16,6 +16,7 @@ import { Route as ReviewRouteImport } from './routes/review'
 import { Route as RunsRouteImport } from './routes/runs'
 import { Route as SkillsRouteImport } from './routes/skills'
 import { Route as SpendRouteImport } from './routes/spend'
+import { Route as DocsSplatRouteImport } from './routes/docs.$'
 import { Route as DocumentShaRouteImport } from './routes/document.$sha'
 
 const IndexRoute = IndexRouteImport.update({
@@ -53,6 +54,11 @@ const SpendRoute = SpendRouteImport.update({
   path: '/spend',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DocsSplatRoute = DocsSplatRouteImport.update({
+  id: '/docs/$',
+  path: '/docs/$',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const DocumentShaRoute = DocumentShaRouteImport.update({
   id: '/document/$sha',
   path: '/document/$sha',
@@ -67,6 +73,7 @@ export interface FileRoutesByFullPath {
   '/runs': typeof RunsRoute
   '/skills': typeof SkillsRoute
   '/spend': typeof SpendRoute
+  '/docs/$': typeof DocsSplatRoute
   '/document/$sha': typeof DocumentShaRoute
 }
 export interface FileRoutesByTo {
@@ -77,6 +84,7 @@ export interface FileRoutesByTo {
   '/runs': typeof RunsRoute
   '/skills': typeof SkillsRoute
   '/spend': typeof SpendRoute
+  '/docs/$': typeof DocsSplatRoute
   '/document/$sha': typeof DocumentShaRoute
 }
 export interface FileRoutesById {
@@ -88,6 +96,7 @@ export interface FileRoutesById {
   '/runs': typeof RunsRoute
   '/skills': typeof SkillsRoute
   '/spend': typeof SpendRoute
+  '/docs/$': typeof DocsSplatRoute
   '/document/$sha': typeof DocumentShaRoute
 }
 export interface FileRouteTypes {
@@ -100,6 +109,7 @@ export interface FileRouteTypes {
     | '/runs'
     | '/skills'
     | '/spend'
+    | '/docs/$'
     | '/document/$sha'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -110,6 +120,7 @@ export interface FileRouteTypes {
     | '/runs'
     | '/skills'
     | '/spend'
+    | '/docs/$'
     | '/document/$sha'
   id:
     | '__root__'
@@ -120,6 +131,7 @@ export interface FileRouteTypes {
     | '/runs'
     | '/skills'
     | '/spend'
+    | '/docs/$'
     | '/document/$sha'
   fileRoutesById: FileRoutesById
 }
@@ -131,6 +143,7 @@ export interface RootRouteChildren {
   RunsRoute: typeof RunsRoute
   SkillsRoute: typeof SkillsRoute
   SpendRoute: typeof SpendRoute
+  DocsSplatRoute: typeof DocsSplatRoute
   DocumentShaRoute: typeof DocumentShaRoute
 }
 
@@ -185,6 +198,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SpendRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/docs/$': {
+      id: '/docs/$'
+      path: '/docs/$'
+      fullPath: '/docs/$'
+      preLoaderRoute: typeof DocsSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/document/$sha': {
       id: '/document/$sha'
       path: '/document/$sha'
@@ -203,6 +223,7 @@ const rootRouteChildren: RootRouteChildren = {
   RunsRoute: RunsRoute,
   SkillsRoute: SkillsRoute,
   SpendRoute: SpendRoute,
+  DocsSplatRoute: DocsSplatRoute,
   DocumentShaRoute: DocumentShaRoute,
 }
 export const routeTree = rootRouteImport

@@ -429,10 +429,11 @@ breaks transcription. See [Install](start/install.md).
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-just book                  # this book, rebuilt on every save
+npm run dev                # the web workspace and these docs, rebuilt on every save
 ```
 
-Those first three are CI, exactly as written. Warnings are errors.
+Those first three are CI, exactly as written. Warnings are errors. These pages are the
+Markdown in `web/src/docs/`, bundled into the web app and served at `/web/docs`.
 
 **Releases decide themselves.** A green push to master runs `Release`, which reads the
 conventional commits, bumps the workspace version, writes the changelog with `git cliff`,

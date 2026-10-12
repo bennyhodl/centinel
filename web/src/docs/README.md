@@ -1,4 +1,4 @@
-<img src="assets/centinel-watchman.jpg" alt="Centinel — a 1787-era ink etching of a lone watchman on the rampart with candle, scroll, and quill, gazing over a sleeping colonial town" style="display:block;width:100%;height:auto">
+![Centinel — a 1787-era ink etching of a lone watchman on the rampart with candle, scroll, and quill, gazing over a sleeping colonial town](assets/centinel-watchman.jpg)
 
 *A civic transparency toolkit — built on the warnings of a Pennsylvania watchman.*
 
