@@ -9,222 +9,362 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as IndexRouteImport } from './routes/index'
-import { Route as ClassifiersRouteImport } from './routes/classifiers'
-import { Route as ConnectRouteImport } from './routes/connect'
-import { Route as ReviewRouteImport } from './routes/review'
-import { Route as RunsRouteImport } from './routes/runs'
-import { Route as SkillsRouteImport } from './routes/skills'
-import { Route as SpendRouteImport } from './routes/spend'
-import { Route as DocsSplatRouteImport } from './routes/docs.$'
-import { Route as DocumentShaRouteImport } from './routes/document.$sha'
+import { Route as EntryRouteImport } from './routes/_entry'
+import { Route as WorkspaceRouteImport } from './routes/_workspace'
+import { Route as EntryConsentRouteImport } from './routes/_entry/consent'
+import { Route as EntryLoginRouteImport } from './routes/_entry/login'
+import { Route as WorkspaceIndexRouteImport } from './routes/_workspace/index'
+import { Route as WorkspaceAdminRouteImport } from './routes/_workspace/_admin'
+import { Route as WorkspaceConnectRouteImport } from './routes/_workspace/connect'
+import { Route as WorkspaceSkillsRouteImport } from './routes/_workspace/skills'
+import { Route as WorkspaceAdminClassifiersRouteImport } from './routes/_workspace/_admin/classifiers'
+import { Route as WorkspaceAdminReviewRouteImport } from './routes/_workspace/_admin/review'
+import { Route as WorkspaceAdminRunsRouteImport } from './routes/_workspace/_admin/runs'
+import { Route as WorkspaceAdminSpendRouteImport } from './routes/_workspace/_admin/spend'
+import { Route as WorkspaceAdminUsersRouteImport } from './routes/_workspace/_admin/users'
+import { Route as WorkspaceDocsSplatRouteImport } from './routes/_workspace/docs.$'
+import { Route as WorkspaceDocumentShaRouteImport } from './routes/_workspace/document.$sha'
 
-const IndexRoute = IndexRouteImport.update({
+const EntryRoute = EntryRouteImport.update({
+  id: '/_entry',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const WorkspaceRoute = WorkspaceRouteImport.update({
+  id: '/_workspace',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EntryConsentRoute = EntryConsentRouteImport.update({
+  id: '/consent',
+  path: '/consent',
+  getParentRoute: () => EntryRoute,
+} as any)
+const EntryLoginRoute = EntryLoginRouteImport.update({
+  id: '/login',
+  path: '/login',
+  getParentRoute: () => EntryRoute,
+} as any)
+const WorkspaceIndexRoute = WorkspaceIndexRouteImport.update({
   id: '/',
   path: '/',
-  getParentRoute: () => rootRouteImport,
+  getParentRoute: () => WorkspaceRoute,
 } as any)
-const ClassifiersRoute = ClassifiersRouteImport.update({
-  id: '/classifiers',
-  path: '/classifiers',
-  getParentRoute: () => rootRouteImport,
+const WorkspaceAdminRoute = WorkspaceAdminRouteImport.update({
+  id: '/_admin',
+  getParentRoute: () => WorkspaceRoute,
 } as any)
-const ConnectRoute = ConnectRouteImport.update({
+const WorkspaceConnectRoute = WorkspaceConnectRouteImport.update({
   id: '/connect',
   path: '/connect',
-  getParentRoute: () => rootRouteImport,
+  getParentRoute: () => WorkspaceRoute,
 } as any)
-const ReviewRoute = ReviewRouteImport.update({
-  id: '/review',
-  path: '/review',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const RunsRoute = RunsRouteImport.update({
-  id: '/runs',
-  path: '/runs',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SkillsRoute = SkillsRouteImport.update({
+const WorkspaceSkillsRoute = WorkspaceSkillsRouteImport.update({
   id: '/skills',
   path: '/skills',
-  getParentRoute: () => rootRouteImport,
+  getParentRoute: () => WorkspaceRoute,
 } as any)
-const SpendRoute = SpendRouteImport.update({
+const WorkspaceAdminClassifiersRoute =
+  WorkspaceAdminClassifiersRouteImport.update({
+    id: '/classifiers',
+    path: '/classifiers',
+    getParentRoute: () => WorkspaceAdminRoute,
+  } as any)
+const WorkspaceAdminReviewRoute = WorkspaceAdminReviewRouteImport.update({
+  id: '/review',
+  path: '/review',
+  getParentRoute: () => WorkspaceAdminRoute,
+} as any)
+const WorkspaceAdminRunsRoute = WorkspaceAdminRunsRouteImport.update({
+  id: '/runs',
+  path: '/runs',
+  getParentRoute: () => WorkspaceAdminRoute,
+} as any)
+const WorkspaceAdminSpendRoute = WorkspaceAdminSpendRouteImport.update({
   id: '/spend',
   path: '/spend',
-  getParentRoute: () => rootRouteImport,
+  getParentRoute: () => WorkspaceAdminRoute,
 } as any)
-const DocsSplatRoute = DocsSplatRouteImport.update({
+const WorkspaceAdminUsersRoute = WorkspaceAdminUsersRouteImport.update({
+  id: '/users',
+  path: '/users',
+  getParentRoute: () => WorkspaceAdminRoute,
+} as any)
+const WorkspaceDocsSplatRoute = WorkspaceDocsSplatRouteImport.update({
   id: '/docs/$',
   path: '/docs/$',
-  getParentRoute: () => rootRouteImport,
+  getParentRoute: () => WorkspaceRoute,
 } as any)
-const DocumentShaRoute = DocumentShaRouteImport.update({
+const WorkspaceDocumentShaRoute = WorkspaceDocumentShaRouteImport.update({
   id: '/document/$sha',
   path: '/document/$sha',
-  getParentRoute: () => rootRouteImport,
+  getParentRoute: () => WorkspaceRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
-  '/': typeof IndexRoute
-  '/classifiers': typeof ClassifiersRoute
-  '/connect': typeof ConnectRoute
-  '/review': typeof ReviewRoute
-  '/runs': typeof RunsRoute
-  '/skills': typeof SkillsRoute
-  '/spend': typeof SpendRoute
-  '/docs/$': typeof DocsSplatRoute
-  '/document/$sha': typeof DocumentShaRoute
+  '/': typeof WorkspaceIndexRoute
+  '/consent': typeof EntryConsentRoute
+  '/login': typeof EntryLoginRoute
+  '/connect': typeof WorkspaceConnectRoute
+  '/skills': typeof WorkspaceSkillsRoute
+  '/classifiers': typeof WorkspaceAdminClassifiersRoute
+  '/review': typeof WorkspaceAdminReviewRoute
+  '/runs': typeof WorkspaceAdminRunsRoute
+  '/spend': typeof WorkspaceAdminSpendRoute
+  '/users': typeof WorkspaceAdminUsersRoute
+  '/docs/$': typeof WorkspaceDocsSplatRoute
+  '/document/$sha': typeof WorkspaceDocumentShaRoute
 }
 export interface FileRoutesByTo {
-  '/': typeof IndexRoute
-  '/classifiers': typeof ClassifiersRoute
-  '/connect': typeof ConnectRoute
-  '/review': typeof ReviewRoute
-  '/runs': typeof RunsRoute
-  '/skills': typeof SkillsRoute
-  '/spend': typeof SpendRoute
-  '/docs/$': typeof DocsSplatRoute
-  '/document/$sha': typeof DocumentShaRoute
+  '/': typeof WorkspaceIndexRoute
+  '/consent': typeof EntryConsentRoute
+  '/login': typeof EntryLoginRoute
+  '/connect': typeof WorkspaceConnectRoute
+  '/skills': typeof WorkspaceSkillsRoute
+  '/classifiers': typeof WorkspaceAdminClassifiersRoute
+  '/review': typeof WorkspaceAdminReviewRoute
+  '/runs': typeof WorkspaceAdminRunsRoute
+  '/spend': typeof WorkspaceAdminSpendRoute
+  '/users': typeof WorkspaceAdminUsersRoute
+  '/docs/$': typeof WorkspaceDocsSplatRoute
+  '/document/$sha': typeof WorkspaceDocumentShaRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
-  '/': typeof IndexRoute
-  '/classifiers': typeof ClassifiersRoute
-  '/connect': typeof ConnectRoute
-  '/review': typeof ReviewRoute
-  '/runs': typeof RunsRoute
-  '/skills': typeof SkillsRoute
-  '/spend': typeof SpendRoute
-  '/docs/$': typeof DocsSplatRoute
-  '/document/$sha': typeof DocumentShaRoute
+  '/_entry': typeof EntryRouteWithChildren
+  '/_workspace': typeof WorkspaceRouteWithChildren
+  '/_entry/consent': typeof EntryConsentRoute
+  '/_entry/login': typeof EntryLoginRoute
+  '/_workspace/_admin': typeof WorkspaceAdminRouteWithChildren
+  '/_workspace/connect': typeof WorkspaceConnectRoute
+  '/_workspace/skills': typeof WorkspaceSkillsRoute
+  '/_workspace/': typeof WorkspaceIndexRoute
+  '/_workspace/_admin/classifiers': typeof WorkspaceAdminClassifiersRoute
+  '/_workspace/_admin/review': typeof WorkspaceAdminReviewRoute
+  '/_workspace/_admin/runs': typeof WorkspaceAdminRunsRoute
+  '/_workspace/_admin/spend': typeof WorkspaceAdminSpendRoute
+  '/_workspace/_admin/users': typeof WorkspaceAdminUsersRoute
+  '/_workspace/docs/$': typeof WorkspaceDocsSplatRoute
+  '/_workspace/document/$sha': typeof WorkspaceDocumentShaRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/classifiers'
+    | '/consent'
+    | '/login'
     | '/connect'
+    | '/skills'
+    | '/classifiers'
     | '/review'
     | '/runs'
-    | '/skills'
     | '/spend'
+    | '/users'
     | '/docs/$'
     | '/document/$sha'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/classifiers'
+    | '/consent'
+    | '/login'
     | '/connect'
+    | '/skills'
+    | '/classifiers'
     | '/review'
     | '/runs'
-    | '/skills'
     | '/spend'
+    | '/users'
     | '/docs/$'
     | '/document/$sha'
   id:
     | '__root__'
-    | '/'
-    | '/classifiers'
-    | '/connect'
-    | '/review'
-    | '/runs'
-    | '/skills'
-    | '/spend'
-    | '/docs/$'
-    | '/document/$sha'
+    | '/_entry'
+    | '/_workspace'
+    | '/_entry/consent'
+    | '/_entry/login'
+    | '/_workspace/_admin'
+    | '/_workspace/connect'
+    | '/_workspace/skills'
+    | '/_workspace/'
+    | '/_workspace/_admin/classifiers'
+    | '/_workspace/_admin/review'
+    | '/_workspace/_admin/runs'
+    | '/_workspace/_admin/spend'
+    | '/_workspace/_admin/users'
+    | '/_workspace/docs/$'
+    | '/_workspace/document/$sha'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute
-  ClassifiersRoute: typeof ClassifiersRoute
-  ConnectRoute: typeof ConnectRoute
-  ReviewRoute: typeof ReviewRoute
-  RunsRoute: typeof RunsRoute
-  SkillsRoute: typeof SkillsRoute
-  SpendRoute: typeof SpendRoute
-  DocsSplatRoute: typeof DocsSplatRoute
-  DocumentShaRoute: typeof DocumentShaRoute
+  EntryRoute: typeof EntryRouteWithChildren
+  WorkspaceRoute: typeof WorkspaceRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/': {
-      id: '/'
+    '/_entry': {
+      id: '/_entry'
+      path: ''
+      fullPath: '/'
+      preLoaderRoute: typeof EntryRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_workspace': {
+      id: '/_workspace'
+      path: ''
+      fullPath: '/'
+      preLoaderRoute: typeof WorkspaceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_entry/consent': {
+      id: '/_entry/consent'
+      path: '/consent'
+      fullPath: '/consent'
+      preLoaderRoute: typeof EntryConsentRouteImport
+      parentRoute: typeof EntryRoute
+    }
+    '/_entry/login': {
+      id: '/_entry/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof EntryLoginRouteImport
+      parentRoute: typeof EntryRoute
+    }
+    '/_workspace/': {
+      id: '/_workspace/'
       path: '/'
       fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
-      parentRoute: typeof rootRouteImport
+      preLoaderRoute: typeof WorkspaceIndexRouteImport
+      parentRoute: typeof WorkspaceRoute
     }
-    '/classifiers': {
-      id: '/classifiers'
-      path: '/classifiers'
-      fullPath: '/classifiers'
-      preLoaderRoute: typeof ClassifiersRouteImport
-      parentRoute: typeof rootRouteImport
+    '/_workspace/_admin': {
+      id: '/_workspace/_admin'
+      path: ''
+      fullPath: '/'
+      preLoaderRoute: typeof WorkspaceAdminRouteImport
+      parentRoute: typeof WorkspaceRoute
     }
-    '/connect': {
-      id: '/connect'
+    '/_workspace/connect': {
+      id: '/_workspace/connect'
       path: '/connect'
       fullPath: '/connect'
-      preLoaderRoute: typeof ConnectRouteImport
-      parentRoute: typeof rootRouteImport
+      preLoaderRoute: typeof WorkspaceConnectRouteImport
+      parentRoute: typeof WorkspaceRoute
     }
-    '/review': {
-      id: '/review'
-      path: '/review'
-      fullPath: '/review'
-      preLoaderRoute: typeof ReviewRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/runs': {
-      id: '/runs'
-      path: '/runs'
-      fullPath: '/runs'
-      preLoaderRoute: typeof RunsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/skills': {
-      id: '/skills'
+    '/_workspace/skills': {
+      id: '/_workspace/skills'
       path: '/skills'
       fullPath: '/skills'
-      preLoaderRoute: typeof SkillsRouteImport
-      parentRoute: typeof rootRouteImport
+      preLoaderRoute: typeof WorkspaceSkillsRouteImport
+      parentRoute: typeof WorkspaceRoute
     }
-    '/spend': {
-      id: '/spend'
+    '/_workspace/_admin/classifiers': {
+      id: '/_workspace/_admin/classifiers'
+      path: '/classifiers'
+      fullPath: '/classifiers'
+      preLoaderRoute: typeof WorkspaceAdminClassifiersRouteImport
+      parentRoute: typeof WorkspaceAdminRoute
+    }
+    '/_workspace/_admin/review': {
+      id: '/_workspace/_admin/review'
+      path: '/review'
+      fullPath: '/review'
+      preLoaderRoute: typeof WorkspaceAdminReviewRouteImport
+      parentRoute: typeof WorkspaceAdminRoute
+    }
+    '/_workspace/_admin/runs': {
+      id: '/_workspace/_admin/runs'
+      path: '/runs'
+      fullPath: '/runs'
+      preLoaderRoute: typeof WorkspaceAdminRunsRouteImport
+      parentRoute: typeof WorkspaceAdminRoute
+    }
+    '/_workspace/_admin/spend': {
+      id: '/_workspace/_admin/spend'
       path: '/spend'
       fullPath: '/spend'
-      preLoaderRoute: typeof SpendRouteImport
-      parentRoute: typeof rootRouteImport
+      preLoaderRoute: typeof WorkspaceAdminSpendRouteImport
+      parentRoute: typeof WorkspaceAdminRoute
     }
-    '/docs/$': {
-      id: '/docs/$'
+    '/_workspace/_admin/users': {
+      id: '/_workspace/_admin/users'
+      path: '/users'
+      fullPath: '/users'
+      preLoaderRoute: typeof WorkspaceAdminUsersRouteImport
+      parentRoute: typeof WorkspaceAdminRoute
+    }
+    '/_workspace/docs/$': {
+      id: '/_workspace/docs/$'
       path: '/docs/$'
       fullPath: '/docs/$'
-      preLoaderRoute: typeof DocsSplatRouteImport
-      parentRoute: typeof rootRouteImport
+      preLoaderRoute: typeof WorkspaceDocsSplatRouteImport
+      parentRoute: typeof WorkspaceRoute
     }
-    '/document/$sha': {
-      id: '/document/$sha'
+    '/_workspace/document/$sha': {
+      id: '/_workspace/document/$sha'
       path: '/document/$sha'
       fullPath: '/document/$sha'
-      preLoaderRoute: typeof DocumentShaRouteImport
-      parentRoute: typeof rootRouteImport
+      preLoaderRoute: typeof WorkspaceDocumentShaRouteImport
+      parentRoute: typeof WorkspaceRoute
     }
   }
 }
 
+interface EntryRouteChildren {
+  EntryConsentRoute: typeof EntryConsentRoute
+  EntryLoginRoute: typeof EntryLoginRoute
+}
+
+const EntryRouteChildren: EntryRouteChildren = {
+  EntryConsentRoute: EntryConsentRoute,
+  EntryLoginRoute: EntryLoginRoute,
+}
+
+const EntryRouteWithChildren = EntryRoute._addFileChildren(EntryRouteChildren)
+
+interface WorkspaceAdminRouteChildren {
+  WorkspaceAdminClassifiersRoute: typeof WorkspaceAdminClassifiersRoute
+  WorkspaceAdminReviewRoute: typeof WorkspaceAdminReviewRoute
+  WorkspaceAdminRunsRoute: typeof WorkspaceAdminRunsRoute
+  WorkspaceAdminSpendRoute: typeof WorkspaceAdminSpendRoute
+  WorkspaceAdminUsersRoute: typeof WorkspaceAdminUsersRoute
+}
+
+const WorkspaceAdminRouteChildren: WorkspaceAdminRouteChildren = {
+  WorkspaceAdminClassifiersRoute: WorkspaceAdminClassifiersRoute,
+  WorkspaceAdminReviewRoute: WorkspaceAdminReviewRoute,
+  WorkspaceAdminRunsRoute: WorkspaceAdminRunsRoute,
+  WorkspaceAdminSpendRoute: WorkspaceAdminSpendRoute,
+  WorkspaceAdminUsersRoute: WorkspaceAdminUsersRoute,
+}
+
+const WorkspaceAdminRouteWithChildren = WorkspaceAdminRoute._addFileChildren(
+  WorkspaceAdminRouteChildren,
+)
+
+interface WorkspaceRouteChildren {
+  WorkspaceAdminRoute: typeof WorkspaceAdminRouteWithChildren
+  WorkspaceConnectRoute: typeof WorkspaceConnectRoute
+  WorkspaceSkillsRoute: typeof WorkspaceSkillsRoute
+  WorkspaceIndexRoute: typeof WorkspaceIndexRoute
+  WorkspaceDocsSplatRoute: typeof WorkspaceDocsSplatRoute
+  WorkspaceDocumentShaRoute: typeof WorkspaceDocumentShaRoute
+}
+
+const WorkspaceRouteChildren: WorkspaceRouteChildren = {
+  WorkspaceAdminRoute: WorkspaceAdminRouteWithChildren,
+  WorkspaceConnectRoute: WorkspaceConnectRoute,
+  WorkspaceSkillsRoute: WorkspaceSkillsRoute,
+  WorkspaceIndexRoute: WorkspaceIndexRoute,
+  WorkspaceDocsSplatRoute: WorkspaceDocsSplatRoute,
+  WorkspaceDocumentShaRoute: WorkspaceDocumentShaRoute,
+}
+
+const WorkspaceRouteWithChildren = WorkspaceRoute._addFileChildren(
+  WorkspaceRouteChildren,
+)
+
 const rootRouteChildren: RootRouteChildren = {
-  IndexRoute: IndexRoute,
-  ClassifiersRoute: ClassifiersRoute,
-  ConnectRoute: ConnectRoute,
-  ReviewRoute: ReviewRoute,
-  RunsRoute: RunsRoute,
-  SkillsRoute: SkillsRoute,
-  SpendRoute: SpendRoute,
-  DocsSplatRoute: DocsSplatRoute,
-  DocumentShaRoute: DocumentShaRoute,
+  EntryRoute: EntryRouteWithChildren,
+  WorkspaceRoute: WorkspaceRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

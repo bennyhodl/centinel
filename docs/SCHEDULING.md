@@ -10,8 +10,8 @@ belongs to #7*". It settles cadence, idempotency and resumability. It does **not
 when `Live` becomes `Gone`, the `fingerprint` normalization rules, or the phantom-diff
 policy; those stay with #7 and are named in §12.
 
-It also closes a hole that exists in the code today: `POST /ops/run` is reachable, with no
-authentication, on the same server whose access control SPEC §8 calls unspecified.
+It also closed the original unauthenticated `POST /ops/run` route. The reach model keeps
+collection local; Better Auth now authenticates the remaining remote operations.
 
 ---
 
@@ -51,7 +51,7 @@ So the test for whether an op may fire is not "is it dangerous" but **"who asked
 that can trigger a crawl decides what the corpus contains, and "what is collected does not
 depend on what any model happened to think that day" (README) stops being true. It is also
 the concrete denial-of-service: `POST /ops/run` twenty times is twenty crawls against a
-city's web server, attributed to the operator, from a port with no authentication.
+city's web server, attributed to the operator, through a remote client. Authentication does not grant collection authority.
 
 ### 1.2 A schedule is a saved `run` and a cadence — nothing more
 

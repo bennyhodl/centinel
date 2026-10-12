@@ -275,7 +275,9 @@ outcome and its elapsed time, under a span naming the op and the surface it arri
 
 Op failures are **400, not 500** — nearly every failure reachable here is a bad argument or an unreachable upstream, which is caller-actionable.
 
-**There is no access control**, which is why the default bind is loopback. [`SPEC.md`](SPEC.md) §8 lists server access control as unspecified, and inventing a scheme here would foreclose that decision. Binding to a non-loopback address logs a warning rather than silently exposing the store.
+TanStack Start is the public HTTP entry point. Better Auth stores accounts, sessions and OAuth state in local SQLite. The first account becomes an approved administrator; subsequent accounts require approval. Start validates sessions or MCP OAuth tokens and reads current account access on every request. It forwards a trusted role over a private Rust connection protected by a random per-launch credential. Rust enforces read versus admin permissions across HTTP and MCP. Collection and host operations remain local.
+
+`serve` supervises the Node.js process, including startup failure and shutdown. Browser assets and the bundled Start server ship inside the Rust binary; Node.js 22.13+ is required when serving. Remote deployments set `CENTINEL_PUBLIC_URL` to their HTTPS origin, or use `--tailscale`.
 
 ## Try it
 
@@ -335,7 +337,7 @@ not count as changed.
 
 ## Requirements
 
-Rust 1.85+. Centinel shells out to standalone binaries rather than running a second language runtime. Every call goes through `tool`, the module that owns child processes: each child is killed when its caller is dropped, carries a deadline sized for what it is doing, and never inherits our stdin. `open`'s launcher is the stated exception — it may be somebody's editor, so it takes the terminal and waits.
+Rust 1.85+. Corpus processing shells out to standalone binaries. The authenticated web gateway separately runs Node.js. Every call goes through `tool`, the module that owns child processes: each child is killed when its caller is dropped, carries a deadline sized for what it is doing, and never inherits our stdin. `open`'s launcher is the stated exception — it may be somebody's editor, so it takes the terminal and waits.
 
 | Binary | Needed for | Required |
 |---|---|---|
@@ -398,10 +400,10 @@ interrupted upgrade never leaves a half-new model. `models prune` collects what 
 leaves behind, and previews by default.
 
 `models` is **host-local**: excluded from MCP and HTTP entirely. It writes outside the
-store and can be made to pull gigabytes, which over an unauthenticated server is disk and
-bandwidth exhaustion. Weight *status* is reported by `doctor` instead, beside the binary
+store and can be made to pull gigabytes, which would allow remote callers to exhaust disk and
+bandwidth. Weight *status* is reported by `doctor` instead, beside the binary
 probes — §3.2 says missing weights are fatal "exactly like a missing binary", and `doctor`
-is remotely reachable, so an agent can learn that search is about to fail for want of a
+is remotely reachable by administrators, so an operator’s agent can learn that search is about to fail for want of a
 model without being able to trigger a download.
 
 Readiness is split — `binaries_ready`, `models_ready`, `ready` as the conjunction —

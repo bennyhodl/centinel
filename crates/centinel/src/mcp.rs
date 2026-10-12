@@ -72,6 +72,10 @@ pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
 ///
 /// Shared with the HTTP surface so MCP-over-stdio and MCP-over-HTTP cannot drift.
 pub async fn handle(ctx: &Arc<Ctx>, req: Value) -> Option<Value> {
+    handle_as(ctx, req, crate::access::Role::Admin).await
+}
+
+pub async fn handle_as(ctx: &Arc<Ctx>, req: Value, role: crate::access::Role) -> Option<Value> {
     let id = req.get("id").cloned();
     let method = req
         .get("method")
@@ -116,8 +120,8 @@ pub async fn handle(ctx: &Arc<Ctx>, req: Value) -> Option<Value> {
             }))
         }
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tool_list() })),
-        "tools/call" => return Some(call_tool(ctx, id, params).await),
+        "tools/list" => Ok(json!({ "tools": tool_list(role) })),
+        "tools/call" => return Some(call_tool(ctx, id, params, role).await),
         other => {
             tracing::warn!(method = other, "method not found");
             Err((-32601, format!("method not found: {other}")))
@@ -131,9 +135,10 @@ pub async fn handle(ctx: &Arc<Ctx>, req: Value) -> Option<Value> {
 }
 
 /// The tool list, rendered straight from the registry.
-fn tool_list() -> Vec<Value> {
+fn tool_list(role: crate::access::Role) -> Vec<Value> {
     op::mcp_tools()
         .into_iter()
+        .filter(|def| role.allows_op(def.name))
         .map(|def| {
             let mut schema = (def.schema)();
             // `$schema` is meta-information about the schema dialect, not part of the
@@ -151,7 +156,7 @@ fn tool_list() -> Vec<Value> {
         .collect()
 }
 
-async fn call_tool(ctx: &Arc<Ctx>, id: Value, params: Value) -> Value {
+async fn call_tool(ctx: &Arc<Ctx>, id: Value, params: Value, role: crate::access::Role) -> Value {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -168,7 +173,7 @@ async fn call_tool(ctx: &Arc<Ctx>, id: Value, params: Value) -> Value {
     // Checked on call, not merely omitted from `tools/list` — a client may hold a stale
     // list, or simply guess a name. Hiding alone is not access control, and for a
     // non-`Public` op the thing being refused is the authority to start a crawl.
-    if !def.mcp || !def.reach.is_remote() {
+    if !def.mcp || !def.reach.is_remote() || !role.allows_op(def.name) {
         tracing::warn!(tool = def.name, "tool refused: not exposed over MCP");
         return error_response(
             id,

@@ -36,6 +36,7 @@
     /* Logs, source and commands sit on ink in either mode. */
     --terminal: #1F1C17;
     --terminal-ink: #F4EEE1;
+    --night: #121212;
     /* Motion: a press, an indicator, a progress fill. Every animation uses one. */
     --motion-micro: 180ms;
     --motion-indicator: 250ms;
@@ -109,6 +110,8 @@
     --ink-soft: #CFC5B3;
     --terminal: #0D0B09;
     --terminal-ink: #F4EEE1;
+    /* The pages before the workspace at night: a near-black grey, no warmth, nothing else lit. */
+    --night: #121212;
     --slate: #94B4D0;
     --slate-soft: #1C2733;
     --slate-line: #34485C;
@@ -177,6 +180,7 @@
     --color-ink-soft: var(--ink-soft);
     --color-terminal: var(--terminal);
     --color-terminal-ink: var(--terminal-ink);
+    --color-night: var(--night);
     --animate-activity-creep: activity-creep 8s cubic-bezier(0.1, 0.6, 0.2, 1) forwards;
     --animate-activity-glint: activity-glint 1.6s ease-in-out infinite;
     --animate-flicker: flicker 2.4s ease-in-out infinite;

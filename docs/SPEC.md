@@ -51,11 +51,11 @@ Centinel profiles the host and downloads a model tier that fits it. A consequenc
 
 Everything else — the metadata database, the search index — is **derived and rebuildable**. `rm centinel.db && centinel reindex` must reproduce identical state.
 
-This is the strongest form of the premise, and it forces the append-only log in §5.
+This is the strongest form of the corpus premise, and it forces the append-only log in §5. Authentication records are a separate exception: `auth/auth.sqlite` and `auth/secret` are durable account state and must be backed up; the corpus cannot reconstruct them.
 
 ### 2.3 No second runtime
 
-Rust plus one-shot subprocess binaries. **No long-lived second-language service.**
+Rust plus one-shot subprocess binaries for corpus work. **Reopened for authentication (2026-10):** `centinel serve` and `centinel web` supervise a TanStack Start Node.js process. Start is the public HTTP entry point and owns Better Auth with SQLite; the Rust HTTP listener is private and requires a per-launch credential. CLI and stdio MCP continue to run locally. This exception does not add another corpus-processing runtime.
 
 Not foreclosed: **the file tree is the contract**, so a sidecar could later read and write the same store without an API being designed for it now. Any decision that requires a Python service is *reopening* this — say so explicitly rather than assuming it.
 
@@ -473,7 +473,7 @@ The **`centinel.toml` schema** is now partly settled, and its decision is record
 
 What that does **not** settle is scheduling. `centinel run` walks the sources and every stage skips work it has already done, so a cron entry is enough for cadence — but *when* to recrawl, when `Live` becomes `Gone`, and whether a vendor `LastModifiedUtc` can be trusted instead of a crawl all still belong to [#7](https://github.com/bennyhodl/centinel/issues/7).
 
-Also unspecified: server access control, and the teardown plan for the v1 codebase.
+Server access control uses Better Auth email/password or Nostr login. The first account is an approved admin; later accounts require admin approval. Approved users can search and read, and admins can classify and manage user access. Remote MCP uses OAuth with the same approval state. The teardown plan for the v1 codebase remains unspecified.
 
 ### 8.1 Specified and unbuilt
 

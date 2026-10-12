@@ -1,8 +1,8 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { queries } from '../queries'
-import { Review, REVIEW_QUEUE, ReviewSkeleton } from '../review'
+import { queries } from '../../../queries'
+import { Review, REVIEW_QUEUE, ReviewSkeleton } from '../../../review'
 
-export const Route = createFileRoute('/review')({
+export const Route = createFileRoute('/_workspace/_admin/review')({
   loader: ({ context: { queryClient } }) => {
     void queryClient.prefetchQuery(queries.evaluation())
     return Promise.all([

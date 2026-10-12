@@ -15,11 +15,37 @@ if (typeof document !== 'undefined' && document.startViewTransition) {
   }) as typeof document.startViewTransition
 }
 
+/**
+ * Search params stay as the URL carries them. The default serializer rewrites them as JSON
+ * and redirects to its rewrite, which corrupts a query somebody else signed: the
+ * authorization request Better Auth sends to the sign-in and consent pages. Every page
+ * coerces its own params, so strings are all they need; a repeated key is a list.
+ */
+type Search = Record<string, string | string[]>
+function parseSearch(searchStr: string): Search {
+  const search: Search = {}
+  for (const [key, value] of new URLSearchParams(searchStr)) {
+    const seen = search[key]
+    search[key] = seen === undefined ? value : [seen, value].flat()
+  }
+  return search
+}
+function stringifySearch(search: Record<string, unknown>): string {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(search)) {
+    for (const item of Array.isArray(value) ? value : [value]) if (item != null) params.append(key, String(item))
+  }
+  const searchStr = params.toString()
+  return searchStr ? `?${searchStr}` : ''
+}
+
 export function getRouter() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 30_000, retry: 1 } } })
   return createRouter({
     routeTree,
     basepath: '/web',
+    parseSearch,
+    stringifySearch,
     context: { queryClient },
     // Hovering or focusing a link runs its page's loader, so the data is usually there
     // by the click. The query cache decides what is fresh, not the router.

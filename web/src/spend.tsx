@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useNavigate, useSearch } from '@tanstack/react-router'
+import { getRouteApi } from '@tanstack/react-router'
 import { cn } from 'cn'
 import { RefreshCw } from 'lucide-react'
 import type { SpendPrice, SpendStage } from './api'
@@ -15,6 +15,8 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+
+const route = getRouteApi('/_workspace/_admin/spend')
 
 /**
  * What every model call cost: Jev, OpenRouter, and the local models priced as the cloud
@@ -31,8 +33,8 @@ export const spendSearch = (search: Record<string, unknown>): SpendSearch => ({
 const windowLabels: Array<[string, string]> = [['1', 'Past 24h'], ['7', '7 days'], ['30', '30 days'], ['90', '90 days']]
 
 export function Spend() {
-  const { metric, days } = useSearch({ from: '/spend' })
-  const navigate = useNavigate({ from: '/spend' })
+  const { metric, days } = route.useSearch()
+  const navigate = route.useNavigate()
   const span = windowFor(days)
   const query = useQuery(queries.spend(span.since))
   const priceList = useQuery(queries.prices())

@@ -159,7 +159,7 @@ It links without a warning, runs without a crash, and transcribes nothing. There
 
 ### External tools
 
-Centinel shells out rather than running a second language runtime.
+Corpus processing shells out to standalone tools. Serving the web app and remote MCP also requires Node.js 22.13+ for the managed TanStack Start authentication server.
 
 | Binary | Needed for | Required |
 |---|---|---|

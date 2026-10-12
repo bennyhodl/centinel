@@ -2,17 +2,17 @@ import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { ArrowLeft, Download, ExternalLink, Play, RotateCcw } from 'lucide-react'
-import { api, DEFAULT_MODEL, originalUrl, type ReadReport } from '../api'
-import { queries } from '../queries'
-import { parseCsv } from '../csv'
-import { number, tail } from '../format'
-import { documentTransition, ErrorBox, PageHeader, SectionRule, shortSha } from '../ui'
+import { api, DEFAULT_MODEL, originalUrl, type ReadReport } from '../../api'
+import { queries } from '../../queries'
+import { parseCsv } from '../../csv'
+import { number, tail } from '../../format'
+import { documentTransition, ErrorBox, PageHeader, SectionRule, shortSha } from '../../ui'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
-export const Route = createFileRoute('/document/$sha')({
+export const Route = createFileRoute('/_workspace/document/$sha')({
   validateSearch: (search: Record<string, unknown>) => ({ source: String(search.source || ''), resource: String(search.resource || '') }),
   loaderDeps: ({ search }) => search,
   loader: ({ context: { queryClient }, params, deps }) => queryClient.ensureQueryData(queries.read({ derived_sha: params.sha, source: deps.source, resource: deps.resource })),
@@ -27,6 +27,7 @@ const originals: Record<string, string[]> = { pdf: ['Original'], csv: ['Table'],
 
 function Reader() {
   const { sha } = Route.useParams()
+  const admin = Route.useRouteContext().account.role === 'admin'
   const search = Route.useSearch()
   const doc = { derived_sha: sha, source: search.source, resource: search.resource }
   const query = useQuery(queries.read(doc))
@@ -78,9 +79,9 @@ function Reader() {
             <Fact label="Text extracted by">{read.tool}</Fact>
             <Fact label="Collected">{read.observed_at}</Fact>
           </div>
-          <Button disabled={classify.isPending || !questions.data?.questions.length} onClick={() => classify.mutate()}><Play />Classify</Button>
+          {admin && <Button disabled={classify.isPending || !questions.data?.questions.length} onClick={() => classify.mutate()}><Play />Classify</Button>}
           {classify.error && <ErrorBox error={classify.error} />}
-          <Button variant="outline" disabled={restore.isPending} onClick={() => restore.mutate()}><RotateCcw />Restore usage</Button>
+          {admin && <Button variant="outline" disabled={restore.isPending} onClick={() => restore.mutate()}><RotateCcw />Restore usage</Button>}
           {restore.isSuccess && <p className="text-sm">Restored to corpus usage.</p>}
           {restore.error && <ErrorBox error={restore.error} />}
         </aside>

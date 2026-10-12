@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { createFileRoute } from '@tanstack/react-router'
-import { api } from '../api'
-import { queries } from '../queries'
-import { ErrorBox, PageHeader, SectionRule } from '../ui'
-import { CopyBlock } from '../copy'
+import { api } from '../../api'
+import { queries } from '../../queries'
+import { ErrorBox, PageHeader, SectionRule } from '../../ui'
+import { CopyBlock } from '../../copy'
 
-export const Route = createFileRoute('/connect')({
+export const Route = createFileRoute('/_workspace/connect')({
   loader: ({ context: { queryClient } }) => Promise.all([queryClient.ensureQueryData(queries.ops()), queryClient.ensureQueryData(queries.system())]),
   component: Connect,
 })
@@ -29,7 +29,7 @@ function Connect() {
   const url = `${base}/mcp`
   const chosen = clients.find(c => c.id === client) || clients[0]
   return <>
-    <PageHeader title="Connect an agent" detail="Give Claude, Cursor, or any MCP client this corpus. It can search, read and download. Collecting and classifying stay with you." />
+    <PageHeader title="Connect an agent" detail="Connect an OAuth-capable MCP client to this corpus. It can search, read and download. Collecting and classifying stay with you." />
     <div className="grid max-w-3xl gap-10">
       <section className="grid gap-4">
         <SectionRule aside={<span className="font-mono">{url}</span>}>1 · Add the server</SectionRule>
@@ -37,7 +37,7 @@ function Connect() {
           {clients.map(c => <button type="button" role="tab" aria-selected={client === c.id} key={c.id} onClick={() => setClient(c.id)} className={`h-[30px] rounded-md px-3 text-[13px] ${client === c.id ? 'bg-background font-semibold shadow-xs' : 'text-muted-foreground hover:text-foreground'}`}>{c.label}</button>)}
         </div>
         <CopyBlock text={chosen.body(url)} shell={chosen.shell} />
-        <p className="text-[13px] text-muted-foreground">{chosen.note} {system.data?.public_url ? 'The address is the one the server publishes: CENTINEL_PUBLIC_URL, or its tailnet address under serve --tailscale.' : 'The address is this page’s host. Run serve --tailscale, or set CENTINEL_PUBLIC_URL, when agents reach it somewhere else.'}</p>
+        <p className="text-[13px] text-muted-foreground">{chosen.note} Sign in and allow access when the client opens your browser. Your account must be approved. {system.data?.public_url ? 'The address is the one the server publishes: CENTINEL_PUBLIC_URL, or its tailnet address under serve --tailscale.' : 'The address is this page’s host. Run serve --tailscale, or set CENTINEL_PUBLIC_URL, when agents reach it somewhere else.'}</p>
       </section>
       <section className="grid">
         <SectionRule aside={`${tools.length} tools · read only`}>2 · What the agent gets</SectionRule>

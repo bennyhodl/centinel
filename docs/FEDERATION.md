@@ -161,7 +161,7 @@ The control plane of §1.3. The pact owns the **agreement**, the transport owns 
 
 ### 5.1 Why
 
-- **Rust-native and embeddable** in the existing tokio/axum `serve` process. SPEC §2.3 forbids a second daemon or a second language runtime, and most candidates fail that before merit is considered.
+- **Rust-native and embeddable** in the existing tokio/axum `serve` process. SPEC §2.3 permits a managed Node.js gateway for authentication only; federation still runs inside Rust, and most candidates fail that requirement before merit is considered.
 - **QUIC gives an authenticated, persistent, multiplexed connection by construction.** This is what *deleted* the session layer rather than filling it.
 - **An ed25519 node identity arrives with the transport**, so §3's pact can sign with the key the connection already proves. One key, not two.
 - **Content-addressed transfer** suits a store where every blob is already named by its hash, and **hole-punching with relay fallback** suits nodes on residential connections.

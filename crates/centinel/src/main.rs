@@ -5,7 +5,9 @@
 //! [`centinel_core::op::all`]. Adding an op in the library makes it appear in all three
 //! without touching this file, which is the property ticket #9 was about.
 
+mod access;
 mod bundle;
+mod gateway;
 mod http;
 mod logging;
 mod mcp;
@@ -433,11 +435,6 @@ async fn serve(ctx: Arc<Ctx>, bind: &str, matches: &clap::ArgMatches) -> Result<
     } else {
         None
     };
-    let running = service::Running::new(local, tailnet.as_ref().map(|t| t.origin.clone()));
-    if let Err(e) = running.write(&ctx.store) {
-        tracing::warn!(error = %e, "`centinel serve status` will not see this server");
-    }
-
     let store = ctx.store.clone();
     let served = http::serve_until(ctx, listener, terminate()).await;
 

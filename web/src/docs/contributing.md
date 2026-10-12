@@ -13,26 +13,18 @@ optimises one of them away is a regression that no test catches.
 
 ## 1. Authentication for MCP and HTTP
 
-**Today:** there is none. `centinel serve` binds `127.0.0.1` and logs a warning rather than
-silently exposing the store when told to bind anything else. `serve --tailscale` keeps that
-bind and hands the question to the tailnet's policy: Tailscale proxies to loopback, and the
-tailnet address is the one non-loopback origin a workspace write is accepted from. Ops carry a **reach** —
-`Public`, `Operator`, `Host` — and the remote surfaces enforce it by refusing to route
-anything that is not `Public`. A remote caller cannot collect, cannot add a source, cannot
-pull a model.
+**Today:** TanStack Start handles Better Auth email/password and Nostr sign-in with SQLite.
+The first account is an administrator; subsequent accounts require approval. Remote MCP
+uses OAuth. Rust accepts only the supervised gateway's credential and enforces permissions.
+The operation reach distinction remains: remote callers cannot collect, add a source or
+pull a model, even after signing in.
 
-**Missing:** everything that would let a node serve a corpus to someone who is not sitting
-at the machine. Loopback-only is a placeholder standing in for a decision nobody has made.
+**Next:** a classifier role between readers and administrators, plus operator account
+recovery. Nostr public keys identify users, not federation nodes; federation keeps its
+existing node identity.
 
-**Where to start:** the reach model in `crates/centinel-core/src/op.rs`, and the HTTP and
-MCP surfaces that read it. See [Ops](internals/ops.md) and the reach table in
-[Agents and programs](use/agents.md).
-
-**The constraint:** a scheme here is deliberately unspecified because inventing one would
-foreclose the decision. Two things it must not do — collapse the reach distinction into
-"authenticated callers may do anything", and introduce a *second* node identity. Federation
-has already settled on one key per node, and an auth design that grows its own keypair
-makes two things to lose.
+**Where to start:** `web/src/server/`, `crates/centinel/src/access.rs`, and
+`crates/centinel/src/gateway.rs`. See [Serving](operate/serve.md).
 
 ---
 
@@ -429,22 +421,10 @@ breaks transcription. See [Install](start/install.md).
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-npm run dev                # the web workspace and these docs, rebuilt on every save
+just book                  # this book, rebuilt on every save
 ```
 
 Those first three are CI, exactly as written. Warnings are errors.
-
-**The workspace** is a TanStack Start app in `web/`, in single-page mode: file routes under
-`web/src/routes/`, Tailwind v4 and shadcn components. `npm run dev` serves it with hot reload
-and forwards `/workspace`, `/ops` and `/mcp` to a `centinel serve` on port 8787, so start one
-first. `npm run typecheck` and `npm test` check it. `npm run build` makes the page that
-`cargo build` embeds in the binary, and `centinel web --rebuild` serves a fresh build from the
-checkout without a `cargo build`. A source build needs Node.js 22.12 or newer.
-
-**These pages** are the Markdown in `web/src/docs/`, bundled into the page and served at
-`/web/docs`. `SUMMARY.md` there is the sidebar, so a page nobody lists is a page nobody sees,
-and the tests fail on one. They also fail on a link or an image that points nowhere.
-Raw HTML is escaped, so write a tag name like `<sitemapindex>` in backticks.
 
 **Releases decide themselves.** A green push to master runs `Release`, which reads the
 conventional commits, bumps the workspace version, writes the changelog with `git cliff`,

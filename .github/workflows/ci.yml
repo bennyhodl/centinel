@@ -79,8 +79,8 @@ jobs:
       # second reuses the first's C++ build output instead of compiling llama.cpp twice.
       - uses: Swatinem/rust-cache@v2
 
-      # The workspace is compiled into the centinel binary. Node is a build input only;
-      # the installed program serves static bytes and has no Node runtime dependency.
+      # The client assets and Start server are embedded in the binary. Node is required
+      # for both building the bundle and serving authenticated web/MCP requests.
       - uses: actions/setup-node@v4
         with:
           node-version: 22

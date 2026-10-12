@@ -630,7 +630,7 @@ pub fn in_group(group: Group) -> Vec<&'static OpDef> {
 /// *Why it matters:* an agent is a client of the record, never its author (SPEC §1). A
 /// model that can trigger a crawl decides what the corpus contains. It is also the
 /// concrete denial of service — `POST /ops/run` twenty times is twenty crawls against a
-/// city's web server, from a port with no authentication.
+/// city's web server. Signing in does not grant collection authority.
 ///
 /// **Why an enum and not a second bool** beside `mcp`: two independent booleans describe
 /// four states and only three exist. The fourth — "the scheduler may fire it *and* so may

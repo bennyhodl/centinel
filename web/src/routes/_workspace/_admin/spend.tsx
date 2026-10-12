@@ -1,9 +1,9 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { queries } from '../queries'
-import { Spend, SpendSkeleton, spendSearch } from '../spend'
-import { windowFor } from '../spend-logic'
+import { queries } from '../../../queries'
+import { Spend, SpendSkeleton, spendSearch } from '../../../spend'
+import { windowFor } from '../../../spend-logic'
 
-export const Route = createFileRoute('/spend')({
+export const Route = createFileRoute('/_workspace/_admin/spend')({
   validateSearch: spendSearch,
   loaderDeps: ({ search }) => ({ days: search.days }),
   loader: ({ context: { queryClient }, deps }) => {

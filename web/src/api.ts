@@ -48,6 +48,19 @@ export type CorpusFacets = {
   kinds?: Record<string, number>
 }
 
+/** Who is signed in, as the gateway keeps it. The first account to sign up is the administrator. */
+export type Account = {
+  id: string
+  name: string
+  email: string
+  image: string | null
+  role: 'admin' | 'user'
+  /** A new account waits for the administrator. Every request re-reads this, so revoking is immediate. */
+  access: 'pending' | 'approved' | 'revoked'
+  /** Set when the account signed in with Nostr. */
+  publicKey?: string
+}
+
 export type QuestionAction = 'exclude' | 'tag' | 'keep'
 export type QuestionKind = 'noul' | 'choice'
 
@@ -427,6 +440,11 @@ export const originalUrl = (blob: string, source: string, download = false) =>
 export const DEFAULT_MODEL = 'jev-1.13.0'
 
 export const api = {
+  /** The signed-in account, or null when nobody is. */
+  account: () => request<{ account: Account | null }>('/api/account').then(value => value.account),
+  /** Every account, newest first. The administrator only. */
+  users: () => request<{ users: Account[] }>('/api/admin/users').then(value => withArray(value, 'users', '/api/admin/users').users),
+  setAccess: (id: string, access: Account['access']) => request<Account>('/api/admin/users', { method: 'POST', body: JSON.stringify({ id, access }) }),
   system: () => request<SystemInfo>('/workspace/system'),
   ops: () => request<{ ops: RemoteOp[] }>('/ops').then(value => withArray(value, 'ops', '/ops')),
   corpus: (params: URLSearchParams) => {
