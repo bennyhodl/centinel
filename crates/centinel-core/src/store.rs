@@ -9,6 +9,7 @@
 //!   workspace/questions.jsonl  TRUTH    saved classifier question sets
 //!   workspace/workspace.db     TRUTH    classifier runs, answers, reviews, usage overrides
 //!   workspace/vectors.lock     RUNTIME  the one writer of chunks.lance at a time
+//!   workspace/embed.lock       RUNTIME  the one `embed` run at a time
 //!   spend/YYYY-MM.jsonl        TRUTH    every model call, its tokens and its cost
 //!   crumbs/<source>.jsonl      DERIVED  the off-host links each page dropped
 //!   current/<source>/…         DERIVED  URL-mirroring tree. Regenerable.
@@ -289,6 +290,12 @@ impl Store {
     /// `embed` appending rows, a classifier run or a review syncing tags onto them.
     pub fn vectors_lock_path(&self) -> PathBuf {
         self.workspace_dir().join("vectors.lock")
+    }
+
+    /// `workspace/embed.lock` — held for a whole `embed` run, so two cannot both work out
+    /// the same missing rows and append them twice.
+    pub fn embed_lock_path(&self) -> PathBuf {
+        self.workspace_dir().join("embed.lock")
     }
 
     /// `workspace/runs.jsonl` — the ledger classifier runs were written to before
@@ -1191,6 +1198,7 @@ mod tests {
         );
         assert!(s.workspace_db_path().ends_with("workspace/workspace.db"));
         assert!(s.vectors_lock_path().ends_with("workspace/vectors.lock"));
+        assert!(s.embed_lock_path().ends_with("workspace/embed.lock"));
         assert!(s.workspace_runs_path().ends_with("workspace/runs.jsonl"));
         assert!(
             s.workspace_decisions_path()

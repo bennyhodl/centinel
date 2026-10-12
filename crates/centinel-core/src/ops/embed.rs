@@ -39,21 +39,27 @@
 //! changed documents is drained before the first row and after the last — so a row is
 //! never older than a change the workspace already made without a pending revision
 //! saying so.
+//!
 //! ## The subtraction runs the other way too
 //!
-//! Before anything is embedded, rows whose hash the index no longer has are deleted
-//! ([`VectorTable::retain`]). A rebuilt index or a `--rebuild --source` used to leave
-//! them behind for good — nothing read them, `search` counted them, and on one store
-//! they were 1.09 million of 1.35 million rows and four of every five bytes a query
-//! scanned. One stage owns the table in both directions, so there is one definition of
-//! a stored vector: a row whose hash is in the index. After the run the table is
-//! compacted and its superseded versions dropped ([`VectorTable::maintain`]), which is
-//! what keeps a query from reading one fragment per batch ever appended.
+//! Rows for placements the index no longer has are deleted ([`VectorTable::remove`]) —
+//! after the copies, because a re-derived page's unchanged chunks are copied off its old
+//! rows before they go. A rebuilt index or a `--rebuild --source` used to leave such rows
+//! behind for good — nothing read them, `search` counted them, and on one store they were
+//! 1.09 million of 1.35 million rows and four of every five bytes a query scanned. One
+//! stage owns the table in both directions, so there is one definition of a stored row: a
+//! placement the index has. After the run the table is compacted and its superseded
+//! versions dropped ([`VectorTable::maintain`]), which is what keeps a query from reading
+//! one fragment per batch ever appended.
 //!
-//! The one thing this will not do is empty the table on an empty index — see `retain`.
-//! The cost that remains is an index rebuilt and not yet re-indexed when `embed` runs:
-//! those vectors go, and come back at the price of embedding them again. `run` orders
-//! `index` before `embed` for exactly that reason, and the report says what was pruned.
+//! The one thing this will not do is empty the table on an empty index: zero placements is
+//! an index before `centinel index` has run. The cost that remains is an index rebuilt
+//! and partly re-indexed when `embed` runs: the rows it lacks go, and come back at the
+//! price of embedding them again. `run` orders `index` before `embed` for exactly that
+//! reason, and the report says what was pruned.
+//!
+//! Only one `embed` runs on a store at a time (`workspace/embed.lock`), so two runs never
+//! work out the same missing rows and append them twice.
 //!
 //! ## Batching is not optional
 //!
@@ -96,9 +102,9 @@ use crate::index::Index;
 use crate::models;
 use crate::prelude::*;
 use crate::remote::{self, EmbeddingBackend, RemoteEmbedder};
-use crate::vectors::{LegacyVectors, Row, VectorTable, parse_key};
+use crate::vectors::{LegacyVectors, Row, VectorLock, VectorTable, parse_key};
 use crate::workspace::classifications::Classifications;
-use crate::workspace::{DocState, DocumentId, VectorLock};
+use crate::workspace::{DocState, DocumentId};
 
 /// The batch to fall back on when the machine will not say what it can hold. Measured,
 /// on an M1 Max, back when a group only amortised context creation.
@@ -331,6 +337,11 @@ pub async fn embed(
     // this catches only the third way in: a caller building `EmbedArgs` in code.
     let zero = Some(BatchSize::Fixed(0));
     anyhow::ensure!(args.batch != zero, "--batch must be at least 1");
+    // Before the work list is worked out, so a second run cannot work out the same one.
+    let _run = match args.dry_run {
+        true => None,
+        false => Some(hold_embed_lock(&ctx.store)?),
+    };
 
     // Shortest first, so batches carry texts of one kind and the oversized tail — the
     // chunks that force a bespoke context — arrives together at the end of the run.
@@ -395,32 +406,38 @@ pub async fn embed(
         .enumerate()
         .map(|(i, document)| (document, i as u32))
         .collect();
-    // Rows the index no longer has, by key, and the chunks the table holds a vector for
-    // under some document.
+    // Rows the index no longer has, by key, and every chunk the table holds a vector for
+    // under any document — the index's or one it no longer has. A recrawl that re-derives
+    // a page keeps most of its chunks, and the old derivation's rows are where their
+    // vectors are copied from before those rows are pruned.
     let mut stale: Vec<String> = Vec::new();
     let mut known: HashSet<[u8; 32]> = HashSet::new();
     if let Some(table) = &table {
         progress.say("checking stored vectors");
         table
             .keys(|key| {
-                let pair = parse_key(key).and_then(|(hash, document)| {
-                    Some((hash_bytes(hash).ok()?, *by_document.get(&document)?))
-                });
-                match pair {
-                    Some(pair) if all.contains(&pair) => {
-                        known.insert(pair.0);
-                        todo.remove(&pair);
+                let Some((hash, document)) = parse_key(key) else {
+                    stale.push(key.to_owned());
+                    return;
+                };
+                let Ok(hash) = hash_bytes(hash) else {
+                    stale.push(key.to_owned());
+                    return;
+                };
+                known.insert(hash);
+                match by_document.get(&document) {
+                    Some(&document) if all.contains(&(hash, document)) => {
+                        todo.remove(&(hash, document));
                     }
-                    Some((hash, _)) => {
-                        known.insert(hash);
-                        stale.push(key.to_owned());
-                    }
-                    None => stale.push(key.to_owned()),
+                    _ => stale.push(key.to_owned()),
                 }
             })
             .await
             .with_context(|| verify_hint("reading the stored keys"))?;
     }
+    // Zero placements is what an index looks like before `centinel index` has run, not a
+    // statement that every row is stale, and rows are what cost hours or money to replace.
+    let prunable = !placements.pairs.is_empty();
     let already_embedded = all.len() - todo.len();
     let outstanding = todo.len();
     drop(all);
@@ -484,20 +501,6 @@ pub async fn embed(
     // below is older than a change the workspace already made.
     crate::workspace::sync_vectors(&ctx.store).await?;
 
-    // Reconciled before anything new is written, so the table never holds the old
-    // placements beside the new and `already_embedded` means what it says.
-    let pruned = match stale.len() {
-        0 => 0,
-        n => {
-            cancel.check()?;
-            progress.say(format!("pruning {n} rows the index no longer has"));
-            let _lock = VectorLock::take(&ctx.store).await?;
-            table.remove(&stale).await?;
-            n
-        }
-    };
-    drop(stale);
-
     let started = Instant::now();
     let mut writer = Writer::new(
         table.clone(),
@@ -555,6 +558,19 @@ pub async fn embed(
     }
     let filled = writer.rows;
 
+    // Pruned after the copies, which may have read a vector off a row about to go.
+    let pruned = match stale.len() {
+        n if n > 0 && prunable => {
+            cancel.check()?;
+            progress.say(format!("pruning {n} rows the index no longer has"));
+            let lock = VectorLock::take(&ctx.store).await?;
+            table.remove(&lock, &stale).await?;
+            n
+        }
+        _ => 0,
+    };
+    drop(stale);
+
     // The rest through the model, shortest first, as many as `--limit` allows.
     let mut todo: Vec<String> = order
         .into_iter()
@@ -585,10 +601,7 @@ pub async fn embed(
     if todo.is_empty() {
         cancel.check()?;
         progress.say("maintaining the vector table");
-        let done = table
-            .maintain(args.ann_index)
-            .await
-            .with_context(|| verify_hint("maintaining the vector table"))?;
+        let done = maintain(&ctx.store, &table, args.ann_index).await?;
         crate::workspace::sync_vectors(&ctx.store).await?;
         return Ok(finish(&writer, 0, Vec::new(), None, done));
     }
@@ -655,10 +668,7 @@ pub async fn embed(
 
     cancel.check()?;
     progress.say("maintaining the vector table");
-    let done = table
-        .maintain(args.ann_index)
-        .await
-        .with_context(|| verify_hint("maintaining the vector table"))?;
+    let done = maintain(&ctx.store, &table, args.ann_index).await?;
     crate::workspace::sync_vectors(&ctx.store).await?;
     Ok(finish(
         &writer,
@@ -734,7 +744,7 @@ impl Writer {
         if owed.is_empty() {
             return Ok(());
         }
-        let _lock = VectorLock::take(&self.store).await?;
+        let lock = VectorLock::take(&self.store).await?;
         let mut states: HashMap<u32, DocState> = HashMap::new();
         let mut rows = Vec::with_capacity(owed.len());
         for (chunk_hash, document, vector) in owed {
@@ -754,9 +764,42 @@ impl Writer {
                 vector,
             });
         }
-        self.table.append(&rows).await?;
+        self.table.append(&lock, &rows).await?;
         self.rows += rows.len();
         Ok(())
+    }
+}
+
+/// Compacts the table and brings its indexes up to date, under the write lock — released
+/// before returning, since the sync that follows takes it again.
+async fn maintain(
+    store: &Store,
+    table: &VectorTable,
+    build_index: bool,
+) -> anyhow::Result<crate::vectors::Maintenance> {
+    let lock = VectorLock::take(store).await?;
+    table
+        .maintain(&lock, build_index)
+        .await
+        .with_context(|| verify_hint("maintaining the vector table"))
+}
+
+/// Held for a whole `embed`, so two runs cannot both work out the same missing rows and
+/// both append them. Taken without waiting: the second run is told the first is going.
+/// Released when the file is dropped at the end of the run.
+fn hold_embed_lock(store: &Store) -> anyhow::Result<std::fs::File> {
+    std::fs::create_dir_all(store.workspace_dir())?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(store.embed_lock_path())?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+            "another `centinel embed` is writing this store's vectors; wait for it to finish"
+        ),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
     }
 }
 
@@ -1486,7 +1529,9 @@ mod tests {
             document: shared_in("https://example.gov/gone"),
             ..stored(9)
         });
-        table.append(&seeded).await.unwrap();
+        let lock = VectorLock::take(&ctx.store).await.unwrap();
+        table.append(&lock, &seeded).await.unwrap();
+        drop(lock);
 
         let report = embed(
             &ctx,
@@ -1551,8 +1596,10 @@ mod tests {
         let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
             .await
             .unwrap();
-        table.append(&[stored(0)]).await.unwrap();
-        table.append(&[stored(1), stored(2)]).await.unwrap();
+        let lock = VectorLock::take(&ctx.store).await.unwrap();
+        table.append(&lock, &[stored(0)]).await.unwrap();
+        table.append(&lock, &[stored(1), stored(2)]).await.unwrap();
+        drop(lock);
         super::super::verify::tests::damage_a_data_file(&ctx);
 
         let plan = || EmbedArgs {
@@ -1592,9 +1639,83 @@ mod tests {
         assert_eq!(report.stale, 0);
     }
 
+    /// An index rebuilt and not yet re-indexed holds no placements. That is not a
+    /// statement that every row is stale: rows cost hours or money to put back.
+    #[tokio::test]
+    async fn an_empty_index_prunes_nothing() {
+        let (_dir, ctx) = indexed_store(0).await;
+        let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
+            .await
+            .unwrap();
+        let lock = VectorLock::take(&ctx.store).await.unwrap();
+        table.append(&lock, &[stored(0), stored(1)]).await.unwrap();
+        drop(lock);
+
+        let report = embed(
+            &ctx,
+            EmbedArgs {
+                model: default_model(),
+                ..Default::default()
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.stale, 2, "counted, so the report says so");
+        assert_eq!(report.pruned, 0);
+        let reopened = VectorTable::open_existing(&ctx.store.vectors_db())
+            .await
+            .unwrap();
+        assert_eq!(reopened.len().await.unwrap(), 2);
+    }
+
+    /// A page re-extracted to new derived text keeps most of its chunks. Their vectors
+    /// are copied off the old derivation's rows before those rows are pruned, so nothing
+    /// goes back through a model.
+    #[tokio::test]
+    async fn a_rederived_page_copies_its_unchanged_chunks_before_the_old_rows_go() {
+        let (_dir, ctx) = indexed_store(2).await;
+        let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
+            .await
+            .unwrap();
+        let previous = |i: usize| Row {
+            document: DocumentId {
+                derived_sha: "2".repeat(64),
+                ..document(i)
+            },
+            ..stored(i)
+        };
+        let lock = VectorLock::take(&ctx.store).await.unwrap();
+        table
+            .append(&lock, &[previous(0), previous(1)])
+            .await
+            .unwrap();
+        drop(lock);
+
+        let report = embed(
+            &ctx,
+            EmbedArgs {
+                model: default_model(),
+                limit: Some(0),
+                ..Default::default()
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.filled, 2, "both chunks copied from the old rows");
+        assert_eq!(report.embedded, 0);
+        assert_eq!(report.remaining, 0);
+        assert_eq!(report.pruned, 2, "and then the old rows went");
+        assert!(!ctx.store.spend_dir().exists(), "no model ran");
+    }
+
     /// The subtraction the other way. A rebuilt index or a cleared source leaves rows
-    /// no placement claims: a dry run counts them, a run removes them before it embeds —
-    /// and with every placement already stored, the run needs no weights to show it.
+    /// no placement claims: a dry run counts them, a run removes them once nothing is left
+    /// to copy off them — and with every placement already stored, the run needs no
+    /// weights to show it.
     #[tokio::test]
     async fn stale_vectors_are_counted_by_a_plan_and_pruned_by_a_run() {
         let (_dir, ctx) = indexed_store(3).await;
@@ -1616,7 +1737,9 @@ mod tests {
             document: document(7),
             ..stored(1)
         });
-        table.append(&seeded).await.unwrap();
+        let lock = VectorLock::take(&ctx.store).await.unwrap();
+        table.append(&lock, &seeded).await.unwrap();
+        drop(lock);
 
         let plan = embed(
             &ctx,
@@ -1685,17 +1808,9 @@ mod tests {
             .collect();
         crate::vectors::tests::legacy_table(&ctx.store.vectors_db(), "qwen3-embedding-4b", &legacy)
             .await;
-        let saved = crate::workspace::Workspace::new(&ctx.store)
-            .questions()
-            .unwrap();
         Classifications::open(&ctx.store)
             .unwrap()
-            .set_usage(
-                &document(1),
-                true,
-                "review",
-                &crate::workspace::classifications::Policy::new(&saved),
-            )
+            .set_usage(&document(1), true, "review")
             .unwrap();
 
         let report = embed(

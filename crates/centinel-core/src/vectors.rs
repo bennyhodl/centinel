@@ -24,8 +24,9 @@
 //! the workspace said when the row was written; the workspace queues every document whose
 //! tags or exclusion change, and [`VectorTable::set_metadata`] rewrites those two columns
 //! in place — Lance patches the columns inside the existing fragments and never touches a
-//! vector. All of that happens under one file lock, `workspace/vectors.lock`, taken by
-//! whoever writes: `embed` for each append, a classifier run or a review for each sync.
+//! vector. Every one of those writes, and maintenance and repair, happens under one file
+//! lock, `workspace/vectors.lock`: each writing method takes a [`VectorLock`], so a write
+//! without it does not compile, and each starts from the table's latest version.
 //!
 //! ## What a filter costs
 //!
@@ -106,6 +107,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::index::Filter;
 use crate::op::{Cancel, Progress};
+use crate::store::Store;
 use crate::workspace::{DocState, DocumentId};
 
 /// The table inside the database, which is what names `chunks.lance` on disk.
@@ -322,6 +324,35 @@ impl std::fmt::Debug for VectorTable {
     }
 }
 
+/// Held for the length of one write to the table: the one writer at a time, across
+/// processes — `embed` in a terminal, the web server carrying tags onto rows. Every method
+/// that writes asks for one. Released when dropped.
+pub struct VectorLock {
+    _file: std::fs::File,
+}
+
+impl VectorLock {
+    /// Waits for `workspace/vectors.lock`, on a blocking thread: another writer may hold
+    /// it for the length of an append, and the async runtime must not wait with it.
+    pub async fn take(store: &Store) -> anyhow::Result<Self> {
+        let path = store.vectors_lock_path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?;
+        let file = tokio::task::spawn_blocking(move || {
+            file.lock()?;
+            Ok::<_, std::io::Error>(file)
+        })
+        .await??;
+        Ok(Self { _file: file })
+    }
+}
+
 async fn connect(dir: &Path) -> anyhow::Result<lancedb::Connection> {
     let dir = dir
         .to_str()
@@ -346,14 +377,18 @@ impl VectorTable {
         let schema = schema_for(model_id, dims);
 
         let table = if has_table(&db, TABLE).await? {
-            let table = db.open_table(TABLE).execute().await?;
-            validate(table.schema().await?.as_ref(), model_id, dims)?;
-            table
+            db.open_table(TABLE).execute().await?
         } else {
-            db.create_empty_table(TABLE, schema.clone())
-                .execute()
-                .await?
+            match db.create_empty_table(TABLE, schema.clone()).execute().await {
+                Ok(table) => table,
+                // Another process created it between the look and the create.
+                Err(lancedb::Error::TableAlreadyExists { .. }) => {
+                    db.open_table(TABLE).execute().await?
+                }
+                Err(error) => return Err(error.into()),
+            }
         };
+        validate(table.schema().await?.as_ref(), model_id, dims)?;
 
         Ok(Self {
             table,
@@ -456,10 +491,11 @@ impl VectorTable {
     /// Lance commits a version per call, so an interrupted run keeps every batch that
     /// landed before the kill and the work list is recomputed from what is there. That is
     /// what makes `embed` resumable without a checkpoint file.
-    pub async fn append(&self, rows: &[Row]) -> anyhow::Result<()> {
+    pub async fn append(&self, _lock: &VectorLock, rows: &[Row]) -> anyhow::Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
+        self.table.checkout_latest().await?;
         for row in rows {
             anyhow::ensure!(
                 row.vector.len() == self.dims,
@@ -520,7 +556,8 @@ impl VectorTable {
     /// by a merge against everything to keep, because what the index lacks is usually a
     /// cleared source — thousands of rows against a million kept — and the million is the
     /// expensive side to send.
-    pub async fn remove(&self, keys: &[String]) -> anyhow::Result<()> {
+    pub async fn remove(&self, _lock: &VectorLock, keys: &[String]) -> anyhow::Result<()> {
+        self.table.checkout_latest().await?;
         for chunk in keys.chunks(PREDICATE_ROWS) {
             self.table
                 .delete(&format!("{KEY_COLUMN} IN ({})", quoted_list(chunk)))
@@ -536,10 +573,15 @@ impl VectorTable {
     /// inside the fragments that hold the rows, and the vector column is never read or
     /// written. Keys the table does not hold are ignored — a document's chunks may not be
     /// embedded yet, and when they are, they arrive with the state of that moment.
-    pub async fn set_metadata(&self, rows: &[(String, DocState)]) -> anyhow::Result<()> {
+    pub async fn set_metadata(
+        &self,
+        _lock: &VectorLock,
+        rows: &[(String, DocState)],
+    ) -> anyhow::Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
+        self.table.checkout_latest().await?;
         let schema = Arc::new(Schema::new(vec![
             Field::new(KEY_COLUMN, DataType::Utf8, false),
             tags_field(),
@@ -603,16 +645,23 @@ impl VectorTable {
     /// stays opt-in through `build_index` — small corpora keep exact search, and IVF_FLAT
     /// keeps full-precision vectors, so only partition selection is approximate. An index
     /// that exists is brought up to date either way.
-    pub async fn maintain(&self, build_index: bool) -> anyhow::Result<Maintenance> {
-        self.maintain_keeping(build_index, VERSION_RETENTION).await
+    pub async fn maintain(
+        &self,
+        lock: &VectorLock,
+        build_index: bool,
+    ) -> anyhow::Result<Maintenance> {
+        self.maintain_keeping(lock, build_index, VERSION_RETENTION)
+            .await
     }
 
     /// [`Self::maintain`] with the retention spelled out, so a test can watch versions go.
     async fn maintain_keeping(
         &self,
+        _lock: &VectorLock,
         build_index: bool,
         retention: Duration,
     ) -> anyhow::Result<Maintenance> {
+        self.table.checkout_latest().await?;
         let compacted = self
             .table
             .optimize(OptimizeAction::Compact {
@@ -785,6 +834,7 @@ impl VectorTable {
     /// fragment the audit never saw. A clean audit commits nothing.
     pub async fn repair(
         &self,
+        _lock: &VectorLock,
         audit: &VectorAudit,
         cancel: &Cancel,
     ) -> anyhow::Result<VectorRepair> {
@@ -1242,6 +1292,11 @@ pub(crate) mod tests {
         VectorTable::open(dir, "test-model", DIMS).await.unwrap()
     }
 
+    /// The write lock for the table under `dir`, taken for one statement at a time.
+    async fn lock(dir: &Path) -> VectorLock {
+        VectorLock::take(&Store::at(dir)).await.unwrap()
+    }
+
     async fn all_keys(t: &VectorTable) -> HashSet<String> {
         let mut keys = HashSet::new();
         t.keys(|key| {
@@ -1303,9 +1358,13 @@ pub(crate) mod tests {
                 }
             })
             .collect();
-        t.append(&rows[..2048]).await.unwrap();
-        t.append(&rows[2048..]).await.unwrap();
-        t.maintain(false).await.unwrap();
+        t.append(&lock(dir.path()).await, &rows[..2048])
+            .await
+            .unwrap();
+        t.append(&lock(dir.path()).await, &rows[2048..])
+            .await
+            .unwrap();
+        t.maintain(&lock(dir.path()).await, false).await.unwrap();
         async fn indexed(t: &VectorTable) -> HashSet<String> {
             t.table
                 .list_indices()
@@ -1326,16 +1385,19 @@ pub(crate) mod tests {
         ] {
             assert!(scalar.contains(column), "no scalar index on {column}");
         }
-        t.maintain(true).await.unwrap();
+        t.maintain(&lock(dir.path()).await, true).await.unwrap();
         assert!(indexed(&t).await.contains(VECTOR_COLUMN));
         let query = unit([-1.0, 0.0, 0.0, 0.0]);
         let added = "f".repeat(64);
-        t.append(&[Row {
-            chunk_hash: added.clone(),
-            document: doc(1),
-            state: DocState::default(),
-            vector: query.clone(),
-        }])
+        t.append(
+            &lock(dir.path()).await,
+            &[Row {
+                chunk_hash: added.clone(),
+                document: doc(1),
+                state: DocState::default(),
+                vector: query.clone(),
+            }],
+        )
         .await
         .unwrap();
         // Lance must scan the unindexed tail as well as searching the ANN index.
@@ -1343,7 +1405,7 @@ pub(crate) mod tests {
             t.nearest(&query, 1, &Filter::default()).await.unwrap()[0].chunk_hash,
             added
         );
-        t.maintain(true).await.unwrap();
+        t.maintain(&lock(dir.path()).await, true).await.unwrap();
         let reopened = table(dir.path()).await;
         assert_eq!(reopened.len().await.unwrap(), 4097);
         assert_eq!(all_keys(&reopened).await.len(), 4097);
@@ -1376,10 +1438,13 @@ pub(crate) mod tests {
     async fn maintenance_leaves_small_tables_on_exact_search() {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
-        t.append(&[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))])
-            .await
-            .unwrap();
-        t.maintain(true).await.unwrap();
+        t.append(
+            &lock(dir.path()).await,
+            &[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))],
+        )
+        .await
+        .unwrap();
+        t.maintain(&lock(dir.path()).await, true).await.unwrap();
         assert!(
             !t.table
                 .list_indices()
@@ -1403,18 +1468,24 @@ pub(crate) mod tests {
     async fn remove_deletes_exactly_the_keys_it_is_given() {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
-        t.append(&[
-            row(1, 0, unit([1.0, 0.0, 0.0, 0.0])),
-            row(2, 0, unit([0.0, 1.0, 0.0, 0.0])),
-            row(3, 1, unit([0.0, 0.0, 1.0, 0.0])),
-        ])
+        t.append(
+            &lock(dir.path()).await,
+            &[
+                row(1, 0, unit([1.0, 0.0, 0.0, 0.0])),
+                row(2, 0, unit([0.0, 1.0, 0.0, 0.0])),
+                row(3, 1, unit([0.0, 0.0, 1.0, 0.0])),
+            ],
+        )
         .await
         .unwrap();
 
         // A key the table never had is not an error and not a row.
-        t.remove(&[key_of(&hash(2), &doc(0)), key_of(&hash(9), &doc(0))])
-            .await
-            .unwrap();
+        t.remove(
+            &lock(dir.path()).await,
+            &[key_of(&hash(2), &doc(0)), key_of(&hash(9), &doc(0))],
+        )
+        .await
+        .unwrap();
         assert_eq!(
             all_keys(&t).await,
             HashSet::from([key_of(&hash(1), &doc(0)), key_of(&hash(3), &doc(1))])
@@ -1430,7 +1501,7 @@ pub(crate) mod tests {
             hash(3),
             "the deleted row no longer answers queries"
         );
-        t.remove(&[]).await.unwrap();
+        t.remove(&lock(dir.path()).await, &[]).await.unwrap();
         assert_eq!(t.len().await.unwrap(), 2);
     }
 
@@ -1442,18 +1513,26 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         for i in 1..=5u8 {
-            t.append(&[row(i, 0, unit([i as f32, 1.0, 0.0, 0.0]))])
-                .await
-                .unwrap();
+            t.append(
+                &lock(dir.path()).await,
+                &[row(i, 0, unit([i as f32, 1.0, 0.0, 0.0]))],
+            )
+            .await
+            .unwrap();
         }
-        t.remove(&[key_of(&hash(5), &doc(0))]).await.unwrap();
+        t.remove(&lock(dir.path()).await, &[key_of(&hash(5), &doc(0))])
+            .await
+            .unwrap();
         let before = manifests(dir.path());
         assert!(
             before >= 6,
             "one version per append and one per delete: {before}"
         );
 
-        let done = t.maintain_keeping(false, Duration::ZERO).await.unwrap();
+        let done = t
+            .maintain_keeping(&lock(dir.path()).await, false, Duration::ZERO)
+            .await
+            .unwrap();
 
         // Four, not five: deleting the only row of a fragment empties it, and Lance drops
         // an empty fragment with the delete rather than leaving it for compaction.
@@ -1498,10 +1577,13 @@ pub(crate) mod tests {
     async fn rows_round_trip_with_their_documents_and_state() {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
-        t.append(&[
-            tagged(1, 0, unit([1.0, 0.0, 0.0, 0.0]), &["budget"], false),
-            tagged(1, 1, unit([1.0, 0.0, 0.0, 0.0]), &[], true),
-        ])
+        t.append(
+            &lock(dir.path()).await,
+            &[
+                tagged(1, 0, unit([1.0, 0.0, 0.0, 0.0]), &["budget"], false),
+                tagged(1, 1, unit([1.0, 0.0, 0.0, 0.0]), &[], true),
+            ],
+        )
         .await
         .unwrap();
 
@@ -1524,12 +1606,18 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         table(dir.path())
             .await
-            .append(&[row(1, 0, unit([1.0, 1.0, 1.0, 1.0]))])
+            .append(
+                &lock(dir.path()).await,
+                &[row(1, 0, unit([1.0, 1.0, 1.0, 1.0]))],
+            )
             .await
             .unwrap();
         table(dir.path())
             .await
-            .append(&[row(2, 0, unit([1.0, 0.0, 1.0, 0.0]))])
+            .append(
+                &lock(dir.path()).await,
+                &[row(2, 0, unit([1.0, 0.0, 1.0, 0.0]))],
+            )
             .await
             .unwrap();
         assert_eq!(table(dir.path()).await.len().await.unwrap(), 2);
@@ -1540,11 +1628,14 @@ pub(crate) mod tests {
     async fn nearest_ranks_by_similarity_with_higher_being_better() {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
-        t.append(&[
-            row(1, 0, unit([1.0, 0.0, 0.0, 0.0])),
-            row(2, 0, unit([0.9, 0.1, 0.0, 0.0])),
-            row(3, 0, unit([0.0, 0.0, 0.0, 1.0])),
-        ])
+        t.append(
+            &lock(dir.path()).await,
+            &[
+                row(1, 0, unit([1.0, 0.0, 0.0, 0.0])),
+                row(2, 0, unit([0.9, 0.1, 0.0, 0.0])),
+                row(3, 0, unit([0.0, 0.0, 0.0, 1.0])),
+            ],
+        )
         .await
         .unwrap();
 
@@ -1580,9 +1671,12 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         for i in 1..=5u8 {
-            t.append(&[row(i, 0, unit([i as f32, 1.0, 0.0, 0.0]))])
-                .await
-                .unwrap();
+            t.append(
+                &lock(dir.path()).await,
+                &[row(i, 0, unit([i as f32, 1.0, 0.0, 0.0]))],
+            )
+            .await
+            .unwrap();
         }
         assert_eq!(
             t.nearest(&unit([1.0, 1.0, 0.0, 0.0]), 2, &Filter::default())
@@ -1624,7 +1718,7 @@ pub(crate) mod tests {
                 row(i, if near { 0 } else { 1 }, unit(v))
             })
             .collect();
-        t.append(&rows).await.unwrap();
+        t.append(&lock(dir.path()).await, &rows).await.unwrap();
 
         let query = unit([1.0, 0.0, 0.0, 0.0]);
         let pinellas = t.nearest(&query, 10, &in_source("pinellas")).await.unwrap();
@@ -1650,12 +1744,15 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         let v = |i: u8| unit([1.0, 0.1 * i as f32, 0.0, 0.0]);
-        t.append(&[
-            tagged(1, 0, v(1), &["budget", "record_type:minutes"], false),
-            tagged(2, 1, v(2), &["budget"], false),
-            tagged(3, 2, v(3), &["record_type:agenda"], false),
-            tagged(4, 3, v(0), &["budget"], true),
-        ])
+        t.append(
+            &lock(dir.path()).await,
+            &[
+                tagged(1, 0, v(1), &["budget", "record_type:minutes"], false),
+                tagged(2, 1, v(2), &["budget"], false),
+                tagged(3, 2, v(3), &["record_type:agenda"], false),
+                tagged(4, 3, v(0), &["budget"], true),
+            ],
+        )
         .await
         .unwrap();
         let query = unit([1.0, 0.0, 0.0, 0.0]);
@@ -1709,17 +1806,20 @@ pub(crate) mod tests {
             .vectors_of(&[hash(1), hash(2), hash(3), hash(4)])
             .await
             .unwrap();
-        t.set_metadata(&[
-            (
-                key_of(&hash(4), &doc(3)),
-                DocState {
-                    tags: vec!["budget".into(), "record_type:minutes".into()],
-                    excluded: false,
-                },
-            ),
-            (key_of(&hash(2), &doc(1)), DocState::default()),
-            (key_of(&hash(9), &doc(9)), DocState::default()),
-        ])
+        t.set_metadata(
+            &lock(dir.path()).await,
+            &[
+                (
+                    key_of(&hash(4), &doc(3)),
+                    DocState {
+                        tags: vec!["budget".into(), "record_type:minutes".into()],
+                        excluded: false,
+                    },
+                ),
+                (key_of(&hash(2), &doc(1)), DocState::default()),
+                (key_of(&hash(9), &doc(9)), DocState::default()),
+            ],
+        )
         .await
         .unwrap();
         assert_eq!(
@@ -1754,7 +1854,7 @@ pub(crate) mod tests {
             .collect();
         rows.push(row(2, 0, unit([0.9, 0.1, 0.0, 0.0])));
         rows.push(row(3, 0, unit([0.8, 0.2, 0.0, 0.0])));
-        t.append(&rows).await.unwrap();
+        t.append(&lock(dir.path()).await, &rows).await.unwrap();
 
         let hits = t
             .nearest(&unit([1.0, 0.0, 0.0, 0.0]), 3, &Filter::default())
@@ -1776,7 +1876,10 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         table(dir.path())
             .await
-            .append(&[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))])
+            .append(
+                &lock(dir.path()).await,
+                &[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))],
+            )
             .await
             .unwrap();
 
@@ -1917,7 +2020,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         let err = t
-            .append(&[row(1, 0, vec![1.0; DIMS + 3])])
+            .append(&lock(dir.path()).await, &[row(1, 0, vec![1.0; DIMS + 3])])
             .await
             .unwrap_err()
             .to_string();
@@ -1929,7 +2032,7 @@ pub(crate) mod tests {
     async fn an_empty_append_is_a_no_op() {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
-        t.append(&[]).await.unwrap();
+        t.append(&lock(dir.path()).await, &[]).await.unwrap();
         assert!(t.is_empty().await.unwrap());
     }
 
@@ -1960,12 +2063,18 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         // Two appends, so two fragments: one to damage, one to prove untouched.
-        t.append(&[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))])
-            .await
-            .unwrap();
-        t.append(&[row(2, 0, unit([0.0, 1.0, 0.0, 0.0]))])
-            .await
-            .unwrap();
+        t.append(
+            &lock(dir.path()).await,
+            &[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))],
+        )
+        .await
+        .unwrap();
+        t.append(
+            &lock(dir.path()).await,
+            &[row(2, 0, unit([0.0, 1.0, 0.0, 0.0]))],
+        )
+        .await
+        .unwrap();
         let (bad, _, _) = damage_first_fragment(dir.path(), &t).await;
 
         // A fresh handle, as `verify` opens one: the damaged fragment was never read
@@ -1980,7 +2089,10 @@ pub(crate) mod tests {
         assert_eq!(audit.unreadable[0].id, bad);
         assert_eq!(audit.unreadable[0].physical_rows, Some(1));
 
-        let done = t.repair(&audit, &Cancel::none()).await.unwrap();
+        let done = t
+            .repair(&lock(dir.path()).await, &audit, &Cancel::none())
+            .await
+            .unwrap();
         assert_eq!(
             done,
             VectorRepair {
@@ -1996,10 +2108,13 @@ pub(crate) mod tests {
         );
         // The dropped row comes back the way it would from `embed`, and maintenance
         // folds the table as if nothing had happened.
-        t.append(&[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))])
-            .await
-            .unwrap();
-        t.maintain(false).await.unwrap();
+        t.append(
+            &lock(dir.path()).await,
+            &[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))],
+        )
+        .await
+        .unwrap();
+        t.maintain(&lock(dir.path()).await, false).await.unwrap();
         assert_eq!(all_keys(&t).await.len(), 2);
         assert_eq!(
             t.nearest(&unit([1.0, 0.0, 0.0, 0.0]), 1, &Filter::default())
@@ -2017,12 +2132,18 @@ pub(crate) mod tests {
     async fn a_stale_audit_cannot_drop_fragments_it_never_saw() {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
-        t.append(&[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))])
-            .await
-            .unwrap();
-        t.append(&[row(2, 0, unit([0.0, 1.0, 0.0, 0.0]))])
-            .await
-            .unwrap();
+        t.append(
+            &lock(dir.path()).await,
+            &[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))],
+        )
+        .await
+        .unwrap();
+        t.append(
+            &lock(dir.path()).await,
+            &[row(2, 0, unit([0.0, 1.0, 0.0, 0.0]))],
+        )
+        .await
+        .unwrap();
         let (_, file, original) = damage_first_fragment(dir.path(), &t).await;
 
         let t = table(dir.path()).await;
@@ -2032,10 +2153,17 @@ pub(crate) mod tests {
         // The bytes come back — a restore from backup, say — and before anyone acts on
         // the audit an `embed` compacts both fragments into one.
         std::fs::write(&file, original).unwrap();
-        let done = table(dir.path()).await.maintain(false).await.unwrap();
+        let done = table(dir.path())
+            .await
+            .maintain(&lock(dir.path()).await, false)
+            .await
+            .unwrap();
         assert_eq!(done.fragments_removed, 2, "{done:?}");
 
-        let err = t.repair(&stale, &Cancel::none()).await.unwrap_err();
+        let err = t
+            .repair(&lock(dir.path()).await, &stale, &Cancel::none())
+            .await
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains("Rewrite"),
             "Lance names the commit that got there first: {err:#}"

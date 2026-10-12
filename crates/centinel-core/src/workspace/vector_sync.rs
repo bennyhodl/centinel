@@ -14,11 +14,9 @@
 //! that bookkeeping sound: a state read before a change is always followed by a drain that
 //! sees the change.
 
-use std::sync::Arc;
-
 use crate::index::Index;
 use crate::store::Store;
-use crate::vectors::{VectorTable, key_of};
+use crate::vectors::{VectorLock, VectorTable, key_of};
 
 use super::classifications::Classifications;
 
@@ -42,29 +40,6 @@ pub struct VectorSync {
     pub rows: usize,
 }
 
-/// Holds `workspace/vectors.lock` for as long as the guard lives: the one writer of the
-/// vector table at a time. Taken on a blocking thread, because another writer may hold it
-/// for the length of an append and the async runtime must not wait with it.
-pub(crate) struct VectorLock {
-    _file: Arc<std::fs::File>,
-}
-
-impl VectorLock {
-    pub(crate) async fn take(store: &Store) -> anyhow::Result<Self> {
-        std::fs::create_dir_all(store.workspace_dir())?;
-        let file = Arc::new(
-            std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(store.vectors_lock_path())?,
-        );
-        let held = Arc::clone(&file);
-        tokio::task::spawn_blocking(move || held.lock()).await??;
-        Ok(Self { _file: file })
-    }
-}
-
 /// Rewrites the tags and exclusion on the vector rows of every document the workspace has
 /// queued, and empties the queue of what it wrote. With no vector table yet there is
 /// nothing to rewrite: the queue is cleared, because every row `embed` later writes
@@ -86,7 +61,7 @@ pub async fn sync_vectors(store: &Store) -> anyhow::Result<VectorSync> {
         }
     }
 
-    let _lock = VectorLock::take(store).await?;
+    let lock = VectorLock::take(store).await?;
     let table = VectorTable::open_existing(&store.vectors_db()).await?;
     let index = Index::open(store.require_index()?)?;
     loop {
@@ -101,14 +76,14 @@ pub async fn sync_vectors(store: &Store) -> anyhow::Result<VectorSync> {
             }
         }
         for batch in rows.chunks(ROWS_PER_WRITE) {
-            table.set_metadata(batch).await?;
+            table.set_metadata(&lock, batch).await?;
         }
         classifications.vectors_written(&stale)?;
         done.documents += stale.len();
         done.rows += rows.len();
     }
     if done.rows > MAINTAIN_AFTER_ROWS {
-        table.maintain(false).await?;
+        table.maintain(&lock, false).await?;
     }
     tracing::debug!(
         documents = done.documents,

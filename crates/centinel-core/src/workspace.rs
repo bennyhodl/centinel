@@ -32,10 +32,9 @@ mod defaults;
 pub(crate) mod fake_jev;
 mod vector_sync;
 use chain::{Chain, Verdicts, question_of};
+use classifications::Classifications;
 pub use classifications::DocState;
-use classifications::{Classifications, Policy};
 pub use defaults::{Preset, default_questions, presets};
-pub(crate) use vector_sync::VectorLock;
 pub use vector_sync::{VectorSync, sync_vectors};
 
 /// Results between drains of the vector metadata queue while a run scores. A drain is a
@@ -1361,7 +1360,7 @@ impl<'a> Workspace<'a> {
             };
         }
         append_json(&self.store.workspace_questions_path(), &next)?;
-        classifications.questions_changed(self.store, &previous, &next)?;
+        classifications.questions_changed(&previous, &next)?;
         Ok(next)
     }
 
@@ -1622,9 +1621,8 @@ impl<'a> Workspace<'a> {
                 wants = Some(wants.unwrap_or(false) || says_exclude);
             }
         }
-        let policy = Policy::new(&questions);
         let (before, after, tags) =
-            Classifications::open(self.store)?.record_review(&review, wants, &policy)?;
+            Classifications::open(self.store)?.record_review(&review, wants)?;
         Ok(ReviewReport {
             excluded: after,
             usage_changed: before != after,
@@ -1908,16 +1906,15 @@ impl<'a> Workspace<'a> {
         let classifications = Classifications::open(self.store)?;
         let mut done_in = Vec::new();
         let mut continue_from = None;
+        // A continuation finishes the run it continues, as that run was asked: its scope,
+        // its questions at their versions, its model, date and settings, whatever the
+        // caller sent. The answers are still decided under the questions saved now.
         if let Some(id) = request.continue_from.take() {
             let continuation = self.continuation(&classifications, &id)?;
             request.questions = continuation.questions;
             request.scope = Some(continuation.scope);
-            if request.model.trim().is_empty() {
-                request.model = continuation.model;
-            }
-            if request.evaluation_date.trim().is_empty() {
-                request.evaluation_date = continuation.evaluation_date;
-            }
+            request.model = continuation.model;
+            request.evaluation_date = continuation.evaluation_date;
             request.settings = continuation.settings;
             done_in = continuation.done_in;
             continue_from = Some(continuation.root);
@@ -1984,17 +1981,10 @@ impl<'a> Workspace<'a> {
             bail!("evaluation_date is required");
         }
         validate_date(&request.evaluation_date)?;
-        if request.record {
-            let saved_questions = self.questions()?;
-            if let Err(error) = require_current_questions(&saved_questions, &request.questions) {
-                match &continue_from {
-                    Some(root) => bail!(
-                        "the questions changed since `{root}` ran; start a new run instead of \
-                         continuing it"
-                    ),
-                    None => return Err(error),
-                }
-            }
+        // A continuation's questions were current when its root started; they are its
+        // snapshot, not a request to check against today's.
+        if request.record && continue_from.is_none() {
+            require_current_questions(&self.questions()?, &request.questions)?;
         }
 
         let api_key = secret("TYPESAFE_API_KEY", self.store.root()).ok_or_else(|| {
@@ -2161,14 +2151,13 @@ impl<'a> Workspace<'a> {
         } = prepared;
         let chain = Chain::new(&tree);
         let saved_chain = Chain::new(&saved);
-        let policy = Policy::new(&saved);
-        // What each document holds before it is asked, read a page at a time.
-        let reader = Classifications::open(self.store)?;
-        // A preview records nothing, so it opens nothing.
-        let classifications = match request.record {
-            true => Some(Classifications::open(self.store)?),
-            false => None,
-        };
+        // What each document holds before it is asked, read a page at a time, and where
+        // each answer is written as it lands. Behind a mutex because the connection is
+        // `Send` but not `Sync`, and this future is spawned: a shared borrow held across
+        // an await would make it neither. The lock is only ever taken between awaits.
+        let workspace_db = Mutex::new(Classifications::open(self.store)?);
+        let workspace_db = &workspace_db;
+        let db = || workspace_db.lock().unwrap_or_else(|e| e.into_inner());
         let _active = ActiveRun(run.id.clone());
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
@@ -2190,7 +2179,7 @@ impl<'a> Workspace<'a> {
                 if page.is_empty() {
                     break;
                 }
-                let priors = priors_for(&reader, &saved_chain, &chain, &page)?;
+                let priors = priors_for(&db(), &saved_chain, &chain, &page)?;
                 // Owned identities, and the futures built up front: a closure that takes
                 // `&DocumentId` is higher-ranked over that lifetime, and `tokio::spawn`
                 // cannot prove it for the future this all sits inside. Building the
@@ -2239,20 +2228,15 @@ impl<'a> Workspace<'a> {
                     run.duration_ms = Some(start.elapsed().as_millis() as u64);
                     progress.item(answered(&scored.result));
                     // Written as it lands, and kept nowhere else: the run's memory is its
-                    // counters, however many documents it covers.
-                    match &classifications {
-                        Some(classifications) => {
-                            classifications.record_result(
-                                &run,
-                                &scored.result,
-                                scored.usage,
-                                &policy,
-                            )?;
-                            if run.scored % VECTOR_SYNC_EVERY == 0 {
-                                self.sync_vectors().await?;
-                            }
+                    // counters, however many documents it covers. A preview records
+                    // nothing, and keeps what it was answered for the page to show.
+                    if request.record {
+                        db().record_result(&run, &scored.result, scored.usage)?;
+                        if run.scored % VECTOR_SYNC_EVERY == 0 {
+                            self.sync_vectors().await?;
                         }
-                        None => run.results.push(scored.result),
+                    } else {
+                        run.results.push(scored.result);
                     }
                     // Jev refused the account. What this document was answered is kept;
                     // the documents still in flight are dropped unasked, and a
@@ -2288,8 +2272,8 @@ impl<'a> Workspace<'a> {
             run.error = Some(message.clone());
             run.completed_at = Some(Timestamp::now().to_string());
             run.duration_ms = Some(start.elapsed().as_millis() as u64);
-            if let Some(classifications) = &classifications {
-                classifications.finish_run(&run)?;
+            if request.record {
+                db().finish_run(&run)?;
                 self.sync_vectors().await?;
             }
             publish(&run);
@@ -2304,8 +2288,8 @@ impl<'a> Workspace<'a> {
             }
             .into();
             run.completed_at = Some(Timestamp::now().to_string());
-            if let Some(classifications) = &classifications {
-                classifications.finish_run(&run)?;
+            if request.record {
+                db().finish_run(&run)?;
             }
             publish(&run);
             return Err(error);
@@ -2327,8 +2311,8 @@ impl<'a> Workspace<'a> {
             _ => None,
         };
         run.cost_estimated = run.cost_usd.is_some();
-        if let Some(classifications) = &classifications {
-            classifications.finish_run(&run)?;
+        if request.record {
+            db().finish_run(&run)?;
             self.sync_vectors().await?;
         }
         publish(&run);
@@ -2553,19 +2537,13 @@ impl<'a> Workspace<'a> {
         if !exists {
             bail!("selected document identity is not in the index");
         }
-        let questions = self.questions()?;
-        let policy = Policy::new(&questions);
         let id = DocumentId {
             source: request.source,
             resource: request.resource,
             derived_sha: request.derived_sha,
         };
-        let restored = Classifications::open(self.store)?.set_usage(
-            &id,
-            false,
-            "restored by operator",
-            &policy,
-        )?;
+        let restored =
+            Classifications::open(self.store)?.set_usage(&id, false, "restored by operator")?;
         Ok(RestoreReport { restored })
     }
 
@@ -3754,8 +3732,6 @@ mod tests {
     /// A finished run with these results, written the way a live run writes one: the
     /// start, one transaction per result under the saved policy, the end.
     fn stored_run(store: &Store, id: &str, questions: &[Question], results: Vec<RunResult>) {
-        let saved = saved_questions_at(&store.workspace_questions_path()).unwrap();
-        let policy = Policy::new(&saved);
         let classifications = Classifications::open(store).unwrap();
         let inputs: Vec<DocumentId> = results.iter().map(RunResult::id).collect();
         let mut run = ClassifierRun {
@@ -3792,7 +3768,7 @@ mod tests {
             add_usage(&mut run.output_tokens, 1);
             run.usage_documents += 1;
             classifications
-                .record_result(&run, &result, Some((10, 1)), &policy)
+                .record_result(&run, &result, Some((10, 1)))
                 .unwrap();
         }
         run.status = "completed".into();
@@ -3942,7 +3918,7 @@ mod tests {
         // everything and the policy decides afterwards.
         Classifications::open(&store)
             .unwrap()
-            .set_usage(&ids[1], true, "review", &Policy::new(&noise))
+            .set_usage(&ids[1], true, "review")
             .unwrap();
         assert_eq!(plan(RunScope::default()).documents, 3);
 
@@ -4822,7 +4798,7 @@ mod tests {
         classifications.insert_run(&run, &[result.id()]).unwrap();
         run.scored = 1;
         classifications
-            .record_result(&run, &result, Some((10, 1)), &Policy::new(&noise))
+            .record_result(&run, &result, Some((10, 1)))
             .unwrap();
         // No finish: the process that was scoring it is gone.
 

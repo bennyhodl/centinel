@@ -64,7 +64,8 @@ the derived blob alone — two pages can extract to byte-identical text.
 <root>/chunks.lance/      LanceDB: chunk vectors    — the vector arm
 ```
 
-Both are **derived**. Only `blobs/` and `log/` are truth; delete either store and it
+Both are **derived**. The truth is `blobs/` and `log/`, plus `workspace/workspace.db` for
+what classifiers and people decided about the documents; delete either store and it
 rebuilds from them.
 
 Derived does not mean cheap. `centinel.db` rebuilds in minutes. `chunks.lance/` is

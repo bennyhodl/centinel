@@ -34,8 +34,10 @@
 //! [`Classifications::open`] on a store that has them, replayed through the same
 //! per-event path a live run takes, and never written again. They stay on disk.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::Context as _;
@@ -62,13 +64,13 @@ pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(60);
 const REMATERIALIZE_CHUNK: usize = 1_000;
 
 /// The saved questions read as one tree: what [`materialize`] decides under.
-pub(crate) struct Policy<'q> {
-    pub questions: &'q [Question],
-    pub chain: Chain<'q>,
+struct Policy<'q> {
+    questions: &'q [Question],
+    chain: Chain<'q>,
 }
 
 impl<'q> Policy<'q> {
-    pub(crate) fn new(questions: &'q [Question]) -> Self {
+    fn new(questions: &'q [Question]) -> Self {
         Self {
             questions,
             chain: Chain::new(questions),
@@ -92,8 +94,17 @@ pub struct StaleDocument {
 }
 
 /// A connection to `workspace/workspace.db`, created and brought up to date on open.
+///
+/// It decides under the questions file as it stands at each write, not under whatever
+/// questions a caller held when it started: a run that is still going when someone moves a
+/// threshold decides its next document under the new one, and a rematerialization that
+/// began under older questions finishes under the newer. The file is read again only when
+/// its fingerprint moves.
 pub(crate) struct Classifications {
     conn: Connection,
+    questions_path: PathBuf,
+    /// The questions last read, under the fingerprint they were read at.
+    cached: RefCell<Option<(String, Arc<Vec<Question>>)>>,
 }
 
 const SCHEMA: &str = r#"
@@ -204,16 +215,22 @@ impl Classifications {
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
         create_tables(&conn, "")?;
-        let this = Self { conn };
+        let this = Self {
+            conn,
+            questions_path: store.workspace_questions_path(),
+            cached: RefCell::new(None),
+        };
         this.import_once(store)?;
-        this.catch_up(store)?;
+        this.catch_up()?;
         Ok(this)
     }
 
     /// Attaches the database as `ws` to a connection on `centinel.db`, opening it first so
-    /// an attach can never create an empty file that skips the import.
+    /// an attach can never create an empty file that skips the import. The connection's
+    /// lock wait becomes this file's, since it now waits on both.
     pub(crate) fn attach(conn: &Connection, store: &Store) -> anyhow::Result<()> {
         Self::open(store)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         let path = store.workspace_db_path();
         conn.execute(
             "ATTACH DATABASE ?1 AS ws",
@@ -253,17 +270,36 @@ impl Classifications {
 
     // ── policy ────────────────────────────────────────────────────────────────
 
+    /// The saved questions as the file holds them now, with the file's fingerprint. Every
+    /// write asks for this inside its transaction, so what it decides under is never older
+    /// than the file was when it took the write lock.
+    fn saved(&self) -> anyhow::Result<(String, Arc<Vec<Question>>)> {
+        loop {
+            let fingerprint = file_fingerprint(&self.questions_path)?;
+            if let Some((read_at, questions)) = self.cached.borrow().as_ref()
+                && *read_at == fingerprint
+            {
+                return Ok((fingerprint, Arc::clone(questions)));
+            }
+            let questions = Arc::new(saved_questions_at(&self.questions_path)?);
+            // Looked at on both sides of the read: a save that landed during it is read
+            // again rather than cached under the older fingerprint.
+            if file_fingerprint(&self.questions_path)? == fingerprint {
+                *self.cached.borrow_mut() = Some((fingerprint.clone(), Arc::clone(&questions)));
+                return Ok((fingerprint, questions));
+            }
+        }
+    }
+
     /// Rematerializes everything when the questions file is not the one the live state was
     /// decided under: a save that crashed halfway, a file edited by hand, or a first open.
-    fn catch_up(&self, store: &Store) -> anyhow::Result<()> {
-        let now = file_fingerprint(&store.workspace_questions_path())?;
-        if self.meta("questions_fingerprint")?.as_deref() == Some(&now) {
+    fn catch_up(&self) -> anyhow::Result<()> {
+        let (fingerprint, _) = self.saved()?;
+        if self.meta("questions_fingerprint")?.as_deref() == Some(&fingerprint) {
             return Ok(());
         }
-        let questions = saved_questions_at(&store.workspace_questions_path())?;
-        let policy = Policy::new(&questions);
         let documents = self.documents_with_state()?;
-        self.rematerialize(&documents, &policy, &now)
+        self.rematerialize(&documents)
     }
 
     /// Re-decides every document that holds an answer to a question whose policy, meaning,
@@ -274,7 +310,6 @@ impl Classifications {
     /// what any document reaches, so that re-decides everything that holds state.
     pub(crate) fn questions_changed(
         &self,
-        store: &Store,
         previous: &[Question],
         next: &[Question],
     ) -> anyhow::Result<usize> {
@@ -288,7 +323,7 @@ impl Classifications {
                 .any(|q| before.get(q.id.as_str()).is_none_or(|b| b.when != q.when));
         let changed: HashSet<&str> = before
             .iter()
-            .filter(|(id, b)| after.get(*id).is_none_or(|a| a != b))
+            .filter(|&(id, b)| after.get(id).is_none_or(|a| a != b))
             .map(|(id, _)| *id)
             .chain(
                 next.iter()
@@ -301,9 +336,7 @@ impl Classifications {
         } else {
             self.documents_touching(&changed)?
         };
-        let policy = Policy::new(next);
-        let fingerprint = file_fingerprint(&store.workspace_questions_path())?;
-        self.rematerialize(&documents, &policy, &fingerprint)?;
+        self.rematerialize(&documents)?;
         Ok(documents.len())
     }
 
@@ -340,31 +373,36 @@ impl Classifications {
         Ok(found.into_iter().collect())
     }
 
-    /// Rewrites the materialized rows of `documents` under `policy`, the roots every
-    /// document owes, and finally the fingerprint that says the live state matches the
-    /// questions file.
-    fn rematerialize(
-        &self,
-        documents: &[DocumentId],
-        policy: &Policy<'_>,
-        fingerprint: &str,
-    ) -> anyhow::Result<()> {
+    /// Rewrites `documents` under the saved questions — first the chain's deletions, so a
+    /// follow-up a reworded or moved parent no longer reaches loses its answers for good,
+    /// as it would have had the parent's answer moved in a run — then the roots every
+    /// document owes, and last the fingerprint of the questions it finished under.
+    ///
+    /// Each chunk reads the questions inside its own write lock. A save that lands midway
+    /// is what the remaining chunks decide under; the documents it changes are its own
+    /// rematerialization's to rewrite, and that one starts after the save, so it writes
+    /// after any chunk here that read the older file.
+    fn rematerialize(&self, documents: &[DocumentId]) -> anyhow::Result<()> {
         for chunk in documents.chunks(REMATERIALIZE_CHUNK) {
             let tx = self.immediate()?;
+            let (_, questions) = self.saved()?;
+            let policy = Policy::new(&questions);
             for doc in chunk {
-                materialize(&tx, doc, policy)?;
+                prune_unreached(&tx, doc, &policy.chain)?;
+                materialize(&tx, doc, &policy)?;
             }
             tx.commit()?;
         }
         let tx = self.immediate()?;
+        let (fingerprint, questions) = self.saved()?;
         tx.execute("DELETE FROM required_question", [])?;
-        for question in policy.questions.iter().filter(|q| q.when.is_none()) {
+        for question in questions.iter().filter(|q| q.when.is_none()) {
             tx.execute(
                 "INSERT INTO required_question(question) VALUES (?1)",
                 [&question.id],
             )?;
         }
-        Self::set_meta(&tx, "questions_fingerprint", fingerprint)?;
+        Self::set_meta(&tx, "questions_fingerprint", &fingerprint)?;
         tx.commit()?;
         Ok(())
     }
@@ -423,8 +461,9 @@ impl Classifications {
     }
 
     /// Writes one scored document in one transaction: the result, the run's counters as
-    /// the loop holds them, the answers under the run's question versions, the chain's
-    /// deletions, and the document's materialized rows under the current policy.
+    /// the loop holds them, the answers under the versions the run asked, the chain's
+    /// deletions, and the document's materialized rows under the questions saved now —
+    /// which may not be the ones the run started with.
     ///
     /// A result's answers count whether or not it carries an error: a document stopped
     /// halfway down its chain keeps the levels it was answered, and the error says the
@@ -434,11 +473,12 @@ impl Classifications {
         run: &ClassifierRun,
         result: &RunResult,
         usage: Option<(u64, u64)>,
-        policy: &Policy<'_>,
     ) -> anyhow::Result<()> {
         let doc = result.id();
         let at = Timestamp::now().to_string();
         let tx = self.immediate()?;
+        let (_, saved) = self.saved()?;
+        let policy = Policy::new(&saved);
         tx.execute(
             "INSERT OR REPLACE INTO run_result(run_id,source,resource,derived_sha,result,error,input_tokens,output_tokens,at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
@@ -482,7 +522,7 @@ impl Classifications {
             }
         }
         prune_unreached(&tx, &doc, &policy.chain)?;
-        materialize(&tx, &doc, policy)?;
+        materialize(&tx, &doc, &policy)?;
         tx.commit()?;
         Ok(())
     }
@@ -626,12 +666,13 @@ impl Classifications {
         &self,
         review: &Review,
         usage: Option<bool>,
-        policy: &Policy<'_>,
     ) -> anyhow::Result<(bool, bool, Vec<String>)> {
         let doc = review.id();
         let verdicts = serde_json::to_string(&review.verdicts)?;
         let proposed = serde_json::to_string(&review.proposed)?;
         let tx = self.immediate()?;
+        let (_, saved) = self.saved()?;
+        let policy = Policy::new(&saved);
         let before = is_excluded(&tx, &doc)?;
         tx.execute(
             "INSERT INTO review_history(source,resource,derived_sha,verdicts,proposed,note,reviewer,at)
@@ -667,7 +708,7 @@ impl Classifications {
             set_override(&tx, &doc, excluded, "review", &review.at)?;
         }
         prune_unreached(&tx, &doc, &policy.chain)?;
-        materialize(&tx, &doc, policy)?;
+        materialize(&tx, &doc, &policy)?;
         let after = is_excluded(&tx, &doc)?;
         let tags = tags_of(&tx, &doc)?;
         tx.commit()?;
@@ -681,12 +722,13 @@ impl Classifications {
         doc: &DocumentId,
         excluded: bool,
         reason: &str,
-        policy: &Policy<'_>,
     ) -> anyhow::Result<bool> {
         let tx = self.immediate()?;
+        let (_, saved) = self.saved()?;
+        let policy = Policy::new(&saved);
         let before = is_excluded(&tx, doc)?;
         set_override(&tx, doc, excluded, reason, &Timestamp::now().to_string())?;
-        materialize(&tx, doc, policy)?;
+        materialize(&tx, doc, &policy)?;
         tx.commit()?;
         Ok(before)
     }
@@ -718,7 +760,7 @@ impl Classifications {
 
     /// A document's stored answers the chain still reaches, keyed `key@version`, and the
     /// verdicts of its latest review.
-    pub(crate) fn reached(
+    pub(super) fn reached(
         &self,
         doc: &DocumentId,
         chain: &Chain<'_>,
@@ -817,7 +859,7 @@ impl Classifications {
         if done.is_some() {
             return Ok(());
         }
-        let questions = saved_questions_at(&store.workspace_questions_path())?;
+        let (_, questions) = self.saved()?;
         let policy = Policy::new(&questions);
         let runs = legacy_runs(&store.workspace_runs_path())?;
         let reviews = read_json_lines::<Review>(&store.workspace_reviews_path())?;
@@ -843,28 +885,30 @@ impl Classifications {
                 LegacyEvent::Review(review) => import_review(&tx, review, &policy.chain)?,
             }
         }
+        // A person's last word per document, whatever a commit wrote after it: a commit
+        // is policy, which is recomputed below, and a person's word outlasts policy.
         let mut latest: HashMap<DocumentId, LegacyDecision> = HashMap::new();
-        for decision in read_json_lines::<LegacyDecision>(&store.workspace_decisions_path())? {
+        for decision in read_json_lines::<LegacyDecision>(&store.workspace_decisions_path())?
+            .into_iter()
+            .filter(|d| matches!(d.reason.as_str(), "review" | "restored by operator"))
+        {
             latest.insert(decision.id(), decision);
         }
         for decision in latest.into_values() {
-            if matches!(decision.reason.as_str(), "review" | "restored by operator") {
-                set_override(
-                    &tx,
-                    &decision.id(),
-                    decision.excluded,
-                    &decision.reason,
-                    &decision.at,
-                )?;
-            }
+            set_override(
+                &tx,
+                &decision.id(),
+                decision.excluded,
+                &decision.reason,
+                &decision.at,
+            )?;
         }
         Self::set_meta(&tx, "import_done", &Timestamp::now().to_string())?;
         tx.commit()?;
         // Everything materialized under the saved questions, chunk by chunk; the
         // fingerprint lands with the last chunk, so an open that fails here starts over.
         let documents = self.documents_with_state()?;
-        let fingerprint = file_fingerprint(&store.workspace_questions_path())?;
-        self.rematerialize(&documents, &policy, &fingerprint)
+        self.rematerialize(&documents)
     }
 }
 
@@ -1531,7 +1575,6 @@ mod tests {
                 ],
             ),
             Some((100, 4)),
-            &policy,
         )
         .unwrap();
         cls.record_result(
@@ -1541,7 +1584,6 @@ mod tests {
                 &[("page_kind:record", 0.05), ("page_kind:navigation", 0.95)],
             ),
             Some((100, 4)),
-            &policy,
         )
         .unwrap();
 
@@ -1613,7 +1655,6 @@ mod tests {
     async fn reviews_replace_whole_and_overrides_outlast_policy() {
         let (_dir, store, saved) = gate_and_laws().await;
         let cls = Classifications::open(&store).unwrap();
-        let policy = Policy::new(&saved);
         let menu = doc("https://example.gov/menu");
         let run = run_of("run-1", &saved);
         cls.insert_run(&run, std::slice::from_ref(&menu)).unwrap();
@@ -1624,7 +1665,6 @@ mod tests {
                 &[("page_kind:record", 0.05), ("page_kind:navigation", 0.95)],
             ),
             None,
-            &policy,
         )
         .unwrap();
         assert!(cls.is_excluded(&menu).unwrap());
@@ -1647,7 +1687,6 @@ mod tests {
             .record_review(
                 &review(vec![("page_kind", json!("record")), ("laws", json!(true))]),
                 Some(false),
-                &policy,
             )
             .unwrap();
         assert!(before && !after);
@@ -1660,12 +1699,8 @@ mod tests {
 
         // A second review that says only `record` replaces the first whole: `laws` falls
         // back to the model, which never answered it, so the tag goes.
-        cls.record_review(
-            &review(vec![("page_kind", json!("record"))]),
-            Some(false),
-            &policy,
-        )
-        .unwrap();
+        cls.record_review(&review(vec![("page_kind", json!("record"))]), Some(false))
+            .unwrap();
         assert!(cls.tags_of(&menu).unwrap().is_empty());
         assert!(!cls.is_excluded(&menu).unwrap());
 
@@ -1685,8 +1720,7 @@ mod tests {
         // the newer revision pending.
         let pending = cls.stale_vectors(10).unwrap();
         assert_eq!(pending.len(), 1);
-        cls.set_usage(&menu, true, "review", &Policy::new(&saved))
-            .unwrap();
+        cls.set_usage(&menu, true, "review").unwrap();
         cls.vectors_written(&pending).unwrap();
         let still = cls.stale_vectors(10).unwrap();
         assert_eq!(still.len(), 1, "the newer revision is still owed");
@@ -1702,11 +1736,17 @@ mod tests {
     #[tokio::test]
     async fn legacy_ledgers_import_once_into_the_same_state() {
         let (_dir, store, saved) = gate_and_laws().await;
+        // Saving the questions opened the database; a store from before it had none.
+        let db = store.workspace_db_path();
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", db.display()));
+        }
         let budget = doc("https://example.gov/budget");
         let menu = doc("https://example.gov/menu");
         let moved = doc("https://example.gov/moved");
         let restored = doc("https://example.gov/restored");
         let committed = doc("https://example.gov/committed");
+        let recommitted = doc("https://example.gov/recommitted");
         let line = |value: Value| format!("{value}\n");
         let run = |id: &str, at: &str, results: Vec<RunResult>| {
             let mut run = run_of(id, &saved);
@@ -1743,6 +1783,7 @@ mod tests {
                     record(&moved),
                     junk(&restored),
                     junk(&committed),
+                    junk(&recommitted),
                 ],
             ),
             // The moved document becomes navigation: its `laws` answer goes and never comes back.
@@ -1762,6 +1803,10 @@ mod tests {
             line(json!({ "at": "2026-10-01T01:00:00Z", "source": "city", "resource": restored.resource, "derived_sha": restored.derived_sha, "excluded": true, "reason": "classifier run run-1" })),
             line(json!({ "at": "2026-10-01T02:00:00Z", "source": "city", "resource": restored.resource, "derived_sha": restored.derived_sha, "excluded": false, "reason": "restored by operator" })),
             line(json!({ "at": "2026-10-01T01:00:00Z", "source": "city", "resource": committed.resource, "derived_sha": committed.derived_sha, "excluded": true, "reason": "classifier run run-1" })),
+            // Restored by a person, then excluded again by a later commit: the person's
+            // word is the one that stands.
+            line(json!({ "at": "2026-10-01T02:00:00Z", "source": "city", "resource": recommitted.resource, "derived_sha": recommitted.derived_sha, "excluded": false, "reason": "restored by operator" })),
+            line(json!({ "at": "2026-10-02T01:00:00Z", "source": "city", "resource": recommitted.resource, "derived_sha": recommitted.derived_sha, "excluded": true, "reason": "classifier run run-2", "run_id": "run-2" })),
         ]
         .concat();
         let reviews = line(json!({
@@ -1786,6 +1831,10 @@ mod tests {
             "the person's restore stands"
         );
         assert!(
+            !cls.is_excluded(&recommitted).unwrap(),
+            "a commit after a restore does not undo the person"
+        );
+        assert!(
             cls.tags_of(&budget).unwrap().is_empty(),
             "the person said no to `laws`"
         );
@@ -1798,13 +1847,105 @@ mod tests {
         let (runs, total) = cls.runs(1, 10, &HashSet::new()).unwrap();
         assert_eq!(total, 3);
         assert!(runs.iter().all(|r| r.status == "completed"), "{runs:?}");
-        assert_eq!(cls.results("run-1").unwrap().len(), 5);
+        assert_eq!(cls.results("run-1").unwrap().len(), 6);
         assert_eq!(cls.review_history().unwrap().len(), 1);
 
         // A second open imports nothing again.
         let again = Classifications::open(&store).unwrap();
         assert_eq!(again.review_history().unwrap().len(), 1);
-        assert_eq!(again.results("run-1").unwrap().len(), 5);
+        assert_eq!(again.results("run-1").unwrap().len(), 6);
+    }
+
+    /// A run decides each document under the questions saved when the document lands,
+    /// not the ones it started with: a threshold moved mid-run governs every answer after
+    /// it, so a run cannot put back a tag the person just took away.
+    #[tokio::test]
+    async fn a_run_decides_under_the_policy_saved_now() {
+        let (_dir, store, saved) = gate_and_laws().await;
+        let cls = Classifications::open(&store).unwrap();
+        let budget = doc("https://example.gov/budget");
+        let run = run_of("run-1", &saved);
+        cls.insert_run(&run, std::slice::from_ref(&budget)).unwrap();
+
+        // Mid-run, `laws` is made stricter. Same meaning, so the run's snapshot still
+        // names the current version.
+        let mut stricter = saved.clone();
+        stricter[1].threshold = 0.9;
+        crate::workspace::Workspace::new(&store)
+            .save_questions(stricter)
+            .unwrap();
+
+        cls.record_result(
+            &run,
+            &result(
+                &budget,
+                &[
+                    ("page_kind:record", 0.95),
+                    ("page_kind:navigation", 0.05),
+                    ("laws", 0.85),
+                ],
+            ),
+            None,
+        )
+        .unwrap();
+        assert!(
+            cls.tags_of(&budget).unwrap().is_empty(),
+            "0.85 does not clear the threshold saved after the run began"
+        );
+    }
+
+    /// Rewording a parent leaves it no answer at its new version, so its follow-up is no
+    /// longer reached and the rematerialization deletes the follow-up's answer — as a run
+    /// moving the parent would. Answering the reworded parent onto the same tag again does
+    /// not bring the old follow-up answer back.
+    #[tokio::test]
+    async fn a_reworded_parent_takes_its_follow_ups_answers_for_good() {
+        let (_dir, store, saved) = gate_and_laws().await;
+        let cls = Classifications::open(&store).unwrap();
+        let budget = doc("https://example.gov/budget");
+        let run = run_of("run-1", &saved);
+        cls.insert_run(&run, std::slice::from_ref(&budget)).unwrap();
+        cls.record_result(
+            &run,
+            &result(
+                &budget,
+                &[
+                    ("page_kind:record", 0.95),
+                    ("page_kind:navigation", 0.05),
+                    ("laws", 0.85),
+                ],
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(cls.tags_of(&budget).unwrap(), ["laws"]);
+
+        let mut reworded = saved.clone();
+        reworded[0].instructions = format!("{} Read the whole page.", saved[0].instructions);
+        let reworded = crate::workspace::Workspace::new(&store)
+            .save_questions(reworded)
+            .unwrap();
+        assert!(reworded[0].version > saved[0].version);
+
+        // The reworded parent is answered onto `record` again; `laws` is not asked.
+        let again = run_of("run-2", &reworded[..1]);
+        cls.insert_run(&again, std::slice::from_ref(&budget))
+            .unwrap();
+        cls.record_result(
+            &again,
+            &result(
+                &budget,
+                &[("page_kind:record", 0.95), ("page_kind:navigation", 0.05)],
+            ),
+            None,
+        )
+        .unwrap();
+        let (answers, _) = cls.reached(&budget, &Policy::new(&reworded).chain).unwrap();
+        assert!(
+            !answers.keys().any(|key| key.starts_with("laws")),
+            "the old `laws` answer did not come back: {answers:?}"
+        );
+        assert!(cls.tags_of(&budget).unwrap().is_empty());
     }
 
     /// A questions file the live state was not decided under — here, edited by hand —
@@ -1828,7 +1969,6 @@ mod tests {
                 ],
             ),
             None,
-            &Policy::new(&saved),
         )
         .unwrap();
         assert_eq!(cls.tags_of(&budget).unwrap(), ["laws"]);

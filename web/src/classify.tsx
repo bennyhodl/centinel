@@ -5,7 +5,7 @@ import { Check, ListPlus, Play, Plus, Trash2, X } from 'lucide-react'
 import { Panel, ReactFlowProvider } from '@xyflow/react'
 import { chainOf, QuestionFlow, sourcesOf, type TreeQuestion } from './tree'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { api, type ChoiceOption, type CorpusFilters, type Document, type Preset, type Question, type QuestionAction, type RunDetailQuery } from './api'
+import { api, DEFAULT_MODEL, type ChoiceOption, type CorpusFilters, type Document, type Preset, type Question, type QuestionAction, type RunDetailQuery } from './api'
 import { queries } from './queries'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -20,7 +20,6 @@ import { priceOf } from './spend-logic'
 import { ErrorBox, Empty, PageHeader, Segmented, Spinner } from './ui'
 
 /** The Jev model a run starts with. The one price list prices it. */
-const DEFAULT_MODEL = 'jev-1.13.0'
 const usageOptions: Array<[string, string]> = [['all', 'All usage'], ['included', 'Included'], ['excluded', 'Excluded'], ['pending', 'Pending']]
 const actionOptions: Array<[QuestionAction, string]> = [['exclude', 'Exclude'], ['tag', 'Tag'], ['keep', 'Score only']]
 

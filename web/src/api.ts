@@ -423,6 +423,9 @@ export type RemoteOp = { name: string; about: string; mcp: boolean; long_running
 export const originalUrl = (blob: string, source: string, download = false) =>
   `/workspace/original?${new URLSearchParams({ blob, source, ...(download ? { download: 'true' } : {}) })}`
 
+/** The Jev model a run asks unless the person picks another. */
+export const DEFAULT_MODEL = 'jev-1.13.0'
+
 export const api = {
   system: () => request<SystemInfo>('/workspace/system'),
   ops: () => request<{ ops: RemoteOp[] }>('/ops').then(value => withArray(value, 'ops', '/ops')),

@@ -18,7 +18,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::prelude::*;
-use crate::vectors::{UnreadableFragment, VectorRepair, VectorTable};
+use crate::vectors::{UnreadableFragment, VectorLock, VectorRepair, VectorTable};
 
 // `VerifyTableArgs` rather than `VerifyArgs`, which `centinel models verify` already owns.
 #[derive(Clone, Debug, Default, clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -78,7 +78,10 @@ pub async fn verify(
     let table = VectorTable::open_existing(&ctx.store.vectors_db()).await?;
     let audit = table.audit(progress, cancel).await?;
     let repaired = match args.repair {
-        true => Some(table.repair(&audit, cancel).await?),
+        true => {
+            let lock = VectorLock::take(&ctx.store).await?;
+            Some(table.repair(&lock, &audit, cancel).await?)
+        }
         false => None,
     };
 
@@ -209,12 +212,13 @@ pub(super) mod tests {
         let table = VectorTable::open(&ctx.store.vectors_db(), "test-model", DIMS)
             .await
             .unwrap();
+        let lock = VectorLock::take(&ctx.store).await.unwrap();
         table
-            .append(&[row(1, vec![1.0, 0.0, 0.0, 0.0])])
+            .append(&lock, &[row(1, vec![1.0, 0.0, 0.0, 0.0])])
             .await
             .unwrap();
         table
-            .append(&[row(2, vec![0.0, 1.0, 0.0, 0.0])])
+            .append(&lock, &[row(2, vec![0.0, 1.0, 0.0, 0.0])])
             .await
             .unwrap();
         (dir, ctx)

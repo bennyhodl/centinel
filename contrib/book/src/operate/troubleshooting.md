@@ -108,7 +108,7 @@ vectors whose chunks are gone before it embeds the new ones.
 
 ## Embedding fails with a Lance read error
 
-`embed` starts by reading every stored chunk hash back out of `vectors.lance/`, and that
+`embed` starts by reading every stored row key back out of `chunks.lance/`, and that
 scan touches every fragment. If one data file cannot be read, the scan fails, and so does
 `embed` — before it has embedded anything, on one file among thousands of good ones. The
 error points you here:
@@ -137,13 +137,16 @@ did not read.
 
 ## Things that are safe to delete
 
-Only `blobs/` and `log/` are truth. Everything else rebuilds.
+`blobs/` and `log/` are truth, and so is `workspace/`: `workspace/workspace.db` holds every
+classifier answer, every review and every include or exclude a person made, and nothing
+rebuilds it. Everything else rebuilds.
 
 | | Cost to rebuild |
 |---|---|
 | `current/` | minutes |
 | `centinel.db` | minutes |
-| `vectors.lance/` | **about a day** on a 400,000-chunk corpus |
+| `chunks.lance/` | **about a day** on a 400,000-chunk corpus |
+| `vectors.lance/` | nothing — the table from before `chunks.lance/`, kept after the upgrade as a copy source; delete it once `centinel embed --limit 0` has filled `chunks.lance/` |
 
 Derived is not the same as cheap. Backing up the vectors is `cp -R`; a `.lance` dataset is
 an ordinary directory and the copy opens and queries.

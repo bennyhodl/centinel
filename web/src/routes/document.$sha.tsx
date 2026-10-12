@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { ArrowLeft, Download, ExternalLink, Play, RotateCcw } from 'lucide-react'
-import { api, originalUrl, type ReadReport } from '../api'
+import { api, DEFAULT_MODEL, originalUrl, type ReadReport } from '../api'
 import { queries } from '../queries'
 import { parseCsv } from '../csv'
 import { number, tail } from '../format'
@@ -21,7 +21,6 @@ export const Route = createFileRoute('/document/$sha')({
 })
 
 /** The Jev model a run from this page asks, the same the Classify page starts with. */
-const DEFAULT_MODEL = 'jev-1.13.0'
 
 /** The kinds the reader can show as collected. Everything else is read as text and downloaded. */
 const originals: Record<string, string[]> = { pdf: ['Original'], csv: ['Table'], html: ['Page', 'Source'] }

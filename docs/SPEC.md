@@ -236,7 +236,9 @@ The **policy** — re-extract, extract lazily, or accept a mixed corpus — belo
 
   current/<source>/…             DERIVED  URL-mirroring tree for CLI work. Regenerable.
   centinel.db                    DERIVED  SQLite: metadata + FTS5      — the BM25 arm
-  vectors.lance/                 DERIVED  LanceDB: chunk_hash → vector — the vector arm
+  chunks.lance/                  DERIVED  LanceDB: chunk placed in a document → vector, with
+                                          its source, tags and exclusion — the vector arm
+  workspace/workspace.db         TRUTH    classifier runs, answers, reviews, overrides
 ```
 
 ### 5.1 Two embedded stores, both derived
@@ -274,7 +276,7 @@ What survived was one property — append-only bytes the query engine never rewr
 
 So: `embed` writes vectors where `search` reads them. One artifact, one write path, no stage.
 
-*Accepted cost:* the vectors now live only inside a store that rewrites itself — compaction, reindexing, version cleanup. Losing `vectors.lance/` costs a full re-embed, which on a 400,000-chunk corpus is roughly a day. **A backup is `cp -R`, and it is the operator's to take.**
+*Accepted cost:* the vectors now live only inside a store that rewrites itself — compaction, reindexing, version cleanup. Losing `chunks.lance/` costs a full re-embed, which on a 400,000-chunk corpus is roughly a day. **A backup is `cp -R`, and it is the operator's to take.**
 
 *Accepted cost:* models are no longer additive on disk. The cache keyed on `(model_id, dims)`, so several could coexist; one table records its model in schema metadata and **refuses a query vector from any other**. That matches §6.2, which already makes changing the embedder a full re-embed rather than a config edit — but a second model is now a second table someone has to build, not a file that appears beside the first.
 

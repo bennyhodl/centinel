@@ -84,8 +84,9 @@ pub enum Stage {
     /// Chunk derived text into the search index.
     Index,
     /// Not run by the pipeline any more: classifying is `centinel classify` and the web's
-    /// Classify button. Kept so a journal written while it was a stage still reads, and
-    /// a `--skip classify` typed from habit is accepted.
+    /// Classify button. Kept only so a journal written while it was a stage still reads;
+    /// hidden from the flags, so nothing offers it.
+    #[value(skip)]
     Classify,
     /// Turn indexed chunks into vectors.
     Embed,

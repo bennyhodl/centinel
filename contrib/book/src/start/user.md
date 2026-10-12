@@ -182,7 +182,7 @@ A call, and what comes back:
 ```json
 {
   "method": "bm25→rerank",
-  "no_vectors": "no vectors at /data/agartha/vectors.lance — run `centinel embed` first",
+  "no_vectors": "no vectors at /data/agartha/chunks.lance — run `centinel embed` first",
   "query": "stormwater assessment",
   "results": [
     {

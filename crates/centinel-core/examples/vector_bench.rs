@@ -8,7 +8,8 @@
 use std::time::Instant;
 
 use centinel_core::index::Filter;
-use centinel_core::vectors::{Nearest, Row, VectorTable};
+use centinel_core::store::Store;
+use centinel_core::vectors::{Nearest, Row, VectorLock, VectorTable};
 use centinel_core::workspace::{DocState, DocumentId};
 
 /// Sources the rows are spread over, so a filter to one keeps a tenth.
@@ -46,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let dir = tempfile::tempdir()?;
     let table = VectorTable::open(dir.path(), "synthetic-benchmark", dims).await?;
+    let lock = VectorLock::take(&Store::at(dir.path())).await?;
     let mut state = 42u64;
     let mut vector = || {
         normalize(
@@ -70,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
                 vector: vector(),
             })
             .collect();
-        table.append(&batch).await?;
+        table.append(&lock, &batch).await?;
     }
     let queries: Vec<_> = (0..20).map(|_| vector()).collect();
     let plain = Filter::default();
@@ -94,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
     let exact_filtered_time = started.elapsed();
 
     let started = Instant::now();
-    table.maintain(true).await?;
+    table.maintain(&lock, true).await?;
     let build_time = started.elapsed();
     table.nearest(&queries[0], 10, &plain).await?;
 

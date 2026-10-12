@@ -7,10 +7,13 @@
   current/<source>/…             DERIVED  a tree that mirrors the URLs
   centinel.db                    DERIVED  SQLite metadata + FTS5   — the BM25 arm
   chunks.lance/                  DERIVED  LanceDB chunk vectors    — the vector arm
+  workspace/workspace.db         TRUTH    classifier runs, answers, reviews, a person's overrides
 ```
 
-Only the first two are truth. That is what makes the index disposable and the corpus
-something you can hand to somebody with `rsync`.
+Only the entries marked truth are. Blobs and logs are the evidence; `workspace.db` is what
+the classifiers and the people reviewing them decided, which no replay of the log can
+recover. That is what makes the index disposable and the corpus something you can hand to
+somebody with `rsync`.
 
 Blobs are **pooled across sources** — the same PDF on two `.gov` sites stores once. Logs
 and trees are **per source**, so a single city's corpus stays separable for handoff.
