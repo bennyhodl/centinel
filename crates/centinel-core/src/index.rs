@@ -12,14 +12,24 @@
 //! pages is **one** row in `chunk` and fifty rows in `placement`. That is what stops a
 //! site's boilerplate from crowding the index, and it means the eventual embedding step
 //! embeds each distinct passage once rather than once per page.
+//!
+//! ## What the workspace decided is read, not kept
+//!
+//! Tags and exclusions live in `workspace/workspace.db`, which every connection here
+//! attaches as `ws` (see [`crate::workspace`]). Search joins them; nothing here writes
+//! them, and nothing here caches them, so a threshold moved in the workspace is what the
+//! next query sees.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::chunk::Chunk;
+use crate::store::Store;
+use crate::workspace::DocumentId;
+use crate::workspace::classifications::Classifications;
 
 /// Where a chunk was found, and everything needed to cite it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,16 +71,17 @@ pub struct Hit {
 
 /// What a search is narrowed to, beyond "included".
 ///
-/// Both arms apply the same one: the keyword arm inside its SQL, the vector arm after
-/// retrieval through [`Index::eligible`] — built from the same clauses, so the two never
-/// disagree about which documents are in play. Exclusion is not a field here because it is
-/// not a choice: an excluded document is never in play for anyone.
+/// Both arms apply the same one: the keyword arm inside its SQL here, the vector arm
+/// inside its Lance query (`vectors::VectorTable::nearest`), and the placements any hit
+/// cites are filtered by it again on the way out — so a shared chunk never cites a
+/// document the filter left out. Exclusion is not a field here because it is not a
+/// choice: an excluded document is never in play for anyone.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Filter<'a> {
     /// Only placements in this source.
     pub source: Option<&'a str>,
     /// Every one of these must be on the placement's document. A yes-or-no question's id,
-    /// or `choice:option`, as `workspace_tag` spells them.
+    /// or `choice:option`, as the workspace spells them.
     pub tags: &'a [String],
     /// None of these may be.
     pub not_tags: &'a [String],
@@ -82,7 +93,7 @@ fn admits(filter: &Filter<'_>, values: &mut Vec<rusqlite::types::Value>) -> Stri
     const ON_DOCUMENT: &str =
         "t.source=p.source AND t.resource=p.resource AND t.derived_sha=p.derived_sha";
     let mut sql = String::from(
-        " AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x WHERE x.source=p.source \
+        " AND NOT EXISTS (SELECT 1 FROM ws.excluded x WHERE x.source=p.source \
          AND x.resource=p.resource AND x.derived_sha=p.derived_sha)",
     );
     if let Some(source) = filter.source {
@@ -91,17 +102,26 @@ fn admits(filter: &Filter<'_>, values: &mut Vec<rusqlite::types::Value>) -> Stri
     }
     for tag in filter.tags {
         sql.push_str(&format!(
-            " AND EXISTS (SELECT 1 FROM workspace_tag t WHERE {ON_DOCUMENT} AND t.tag=?)"
+            " AND EXISTS (SELECT 1 FROM ws.tag t WHERE {ON_DOCUMENT} AND t.tag=?)"
         ));
         values.push(tag.clone().into());
     }
     for tag in filter.not_tags {
         sql.push_str(&format!(
-            " AND NOT EXISTS (SELECT 1 FROM workspace_tag t WHERE {ON_DOCUMENT} AND t.tag=?)"
+            " AND NOT EXISTS (SELECT 1 FROM ws.tag t WHERE {ON_DOCUMENT} AND t.tag=?)"
         ));
         values.push(tag.clone().into());
     }
     sql
+}
+
+/// Every placement in the index as `embed` walks them: the documents once, and each
+/// `(chunk_hash, document)` pair as an index into them. See
+/// [`Index::placements_by_length`].
+#[derive(Clone, Debug, Default)]
+pub struct Placements {
+    pub documents: Vec<DocumentId>,
+    pub pairs: Vec<(String, u32)>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -128,7 +148,7 @@ CREATE TABLE IF NOT EXISTS chunk (
     chars       INTEGER NOT NULL
 );
 
--- Covers `chunk_hashes_by_length`'s `ORDER BY chars, id` — chunk_hash trails so the
+-- Covers `placements_by_length`'s `ORDER BY chars, id` — chunk_hash trails so the
 -- scan never touches the table's `text` column. Without it that query is a full
 -- table scan into a temp b-tree sort, and `embed` pays that on every run, not just
 -- the first.
@@ -149,30 +169,6 @@ CREATE TABLE IF NOT EXISTS placement (
     title       TEXT,
     PRIMARY KEY (chunk_hash, source, resource, derived_sha, ordinal)
 );
-
--- A disposable projection of durable classifier decisions. The workspace rebuilds it
--- from its JSONL ledger. Search reads it so one excluded placement does not hide shared
--- text that still has an included placement.
-CREATE TABLE IF NOT EXISTS workspace_exclusion (
-    source      TEXT NOT NULL,
-    resource    TEXT NOT NULL,
-    derived_sha TEXT NOT NULL,
-    reason      TEXT,
-    PRIMARY KEY (source, resource, derived_sha)
-);
-
--- The tags the workspace's policy put on each document, and who put them: `model` rows
--- are rebuilt from the runs ledger whenever it or the questions change, `human` rows come
--- from the review tool. Search filters on it and reports it; nothing here is truth.
-CREATE TABLE IF NOT EXISTS workspace_tag (
-    source      TEXT NOT NULL,
-    resource    TEXT NOT NULL,
-    derived_sha TEXT NOT NULL,
-    tag         TEXT NOT NULL,
-    by          TEXT NOT NULL,
-    PRIMARY KEY (source, resource, derived_sha, tag, by)
-);
-CREATE INDEX IF NOT EXISTS workspace_tag_by_tag ON workspace_tag(tag);
 
 -- External-content FTS5: the text lives once, in `chunk`.
 CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
@@ -210,12 +206,28 @@ CREATE INDEX IF NOT EXISTS placement_by_address ON placement(source, resource, d
 /// derived blob.
 const SCHEMA_VERSION: i64 = 2;
 
+/// The projections of the workspace's ledgers an older build kept in this file, rebuilt
+/// on every open. Their facts live in `workspace/workspace.db` now, so a table found here
+/// is dropped: it says nothing current, and a reader joining it would see a corpus with no
+/// tags and no exclusions.
+const RETIRED_PROJECTIONS: &str = r#"
+DROP TABLE IF EXISTS workspace_exclusion;
+DROP TABLE IF EXISTS workspace_tag;
+DROP TABLE IF EXISTS workspace_classification;
+DROP TABLE IF EXISTS workspace_current_key;
+DROP TABLE IF EXISTS workspace_required_question;
+DROP TABLE IF EXISTS workspace_review;
+DROP TABLE IF EXISTS workspace_open_follow_up;
+DELETE FROM meta WHERE key = 'workspace_decisions_fingerprint';
+"#;
+
 pub struct Index {
     conn: Connection,
 }
 
 impl Index {
-    /// Opens (and migrates) the index at `path`.
+    /// Opens (and migrates) the index at `path`, with the workspace's live state attached
+    /// as `ws`.
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = path.as_ref();
         let conn = Connection::open(path)?;
@@ -225,18 +237,20 @@ impl Index {
         conn.execute_batch(SCHEMA)?;
         let index = Self { conn };
         index.migrate()?;
+        // The store root is the index file's directory; `Store` names the layout.
         if let Some(root) = path.parent() {
-            crate::workspace::sync_for_search(&index.conn, root)?;
+            Classifications::attach(&index.conn, &Store::at(root))?;
         }
         Ok(index)
     }
 
-    /// An in-memory index, for tests.
+    /// An in-memory index, for tests, with an empty in-memory `ws` beside it.
     pub fn in_memory() -> anyhow::Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
         let index = Self { conn };
         index.migrate()?;
+        Classifications::attach_in_memory(&index.conn)?;
         Ok(index)
     }
 
@@ -252,19 +266,7 @@ impl Index {
     ///
     /// Chunk text is untouched, so no `chunk_hash` moves and no cached vector is orphaned.
     fn migrate(&self) -> anyhow::Result<()> {
-        let mut columns = self
-            .conn
-            .prepare("PRAGMA table_info(workspace_exclusion)")?;
-        let has_reason = columns
-            .query_map([], |r| r.get::<_, String>(1))?
-            .collect::<Result<Vec<_>, _>>()?
-            .iter()
-            .any(|name| name == "reason");
-        drop(columns);
-        if !has_reason {
-            self.conn
-                .execute("ALTER TABLE workspace_exclusion ADD COLUMN reason TEXT", [])?;
-        }
+        self.conn.execute_batch(RETIRED_PROJECTIONS)?;
         let recorded: Option<i64> = self
             .conn
             .query_row(
@@ -449,12 +451,11 @@ impl Index {
 
         let ranked = rows.collect::<Result<Vec<_>, _>>()?;
 
-        // Hydrated in one query rather than one per row. This loop used to call
-        // `placements_of` per hit, so a search at `ARM_DEPTH` fired a hundred round trips
-        // where the placements of all hundred chunks are a single `IN (…)` — the shape
-        // `eligible` next door has always used on the same table.
+        // Hydrated in one query rather than one per row, under the same filter: a chunk
+        // the filter admitted through one placement must not cite another the filter
+        // left out.
         let hashes: Vec<String> = ranked.iter().map(|(h, _, _)| h.clone()).collect();
-        let mut placements = self.placements_ofs(&hashes)?;
+        let mut placements = self.placements_ofs(&hashes, filter)?;
 
         Ok(ranked
             .into_iter()
@@ -476,32 +477,69 @@ impl Index {
     pub fn chunk_hashes(&self) -> anyhow::Result<Vec<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT c.chunk_hash FROM chunk c WHERE EXISTS (
-                SELECT 1 FROM placement p WHERE p.chunk_hash=c.chunk_hash
-                AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x
-                  WHERE x.source=p.source AND x.resource=p.resource AND x.derived_sha=p.derived_sha))
-                ORDER BY c.id")?;
+            .prepare("SELECT chunk_hash FROM chunk ORDER BY id")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Every chunk hash, shortest text first.
+    /// Every chunk placed in every document, shortest text first, each document named
+    /// once and the placements pointing at it.
     ///
     /// The order `embed` wants its work list in. A batch decodes as physical passes of
     /// whole sequences, so texts of one length pack them evenly — and the oversized
     /// tail, each of which forces its whole group through a bespoke context, arrives
-    /// together at the end instead of taxing every group it would otherwise visit.
+    /// together at the end instead of taxing every group it would otherwise visit. The
+    /// placements of one chunk are adjacent, so a chunk is embedded once for all of them.
     /// The order is free to vary: resumability is a set difference against the vector
     /// table, not a cursor into this list.
-    pub fn chunk_hashes_by_length(&self) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT c.chunk_hash FROM chunk c WHERE EXISTS (
-                SELECT 1 FROM placement p WHERE p.chunk_hash=c.chunk_hash
-                AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x
-                  WHERE x.source=p.source AND x.resource=p.resource AND x.derived_sha=p.derived_sha))
-                ORDER BY c.chars, c.id")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    ///
+    /// Documents are interned because a corpus has fifty placements per document, and
+    /// a million and a half of them each carrying three strings is memory the machine
+    /// doing the embedding wants for the model.
+    pub fn placements_by_length(&self) -> anyhow::Result<Placements> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT p.chunk_hash, p.source, p.resource, p.derived_sha
+             FROM placement p JOIN chunk c ON c.chunk_hash = p.chunk_hash
+             ORDER BY c.chars, c.id, p.source, p.resource, p.derived_sha",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Placements::default();
+        let mut seen: HashMap<(String, String, String), u32> = HashMap::new();
+        for row in rows {
+            let (chunk_hash, source, resource, derived_sha) = row?;
+            let next = out.documents.len() as u32;
+            let document = *seen
+                .entry((source.clone(), resource.clone(), derived_sha.clone()))
+                .or_insert_with(|| {
+                    out.documents.push(DocumentId {
+                        source,
+                        resource,
+                        derived_sha,
+                    });
+                    next
+                });
+            out.pairs.push((chunk_hash, document));
+        }
+        Ok(out)
+    }
+
+    /// The distinct chunks placed in one document — the rows the vector table holds for
+    /// it.
+    pub fn chunk_hashes_of(&self, document: &DocumentId) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT chunk_hash FROM placement WHERE source=?1 AND resource=?2 AND derived_sha=?3",
+        )?;
+        let rows = stmt.query_map(
+            params![document.source, document.resource, document.derived_sha],
+            |r| r.get::<_, String>(0),
+        )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -546,37 +584,6 @@ impl Index {
             .collect()
     }
 
-    /// Which of `hashes` have a placement the filter admits.
-    ///
-    /// The vector arm's half of the filter. Lance carries no source or tag column — a
-    /// chunk has many placements, across documents — so the filter is applied after
-    /// retrieval, in one query for the whole candidate set rather than one per hit, and
-    /// from the same clauses the keyword arm's `WHERE` is built from.
-    pub fn eligible(
-        &self,
-        hashes: &[String],
-        filter: &Filter<'_>,
-    ) -> anyhow::Result<HashSet<String>> {
-        if hashes.is_empty() {
-            return Ok(HashSet::new());
-        }
-        let holes = std::iter::repeat_n("?", hashes.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut values: Vec<rusqlite::types::Value> =
-            hashes.iter().map(|h| h.clone().into()).collect();
-        let admits = admits(filter, &mut values);
-        let sql = format!(
-            "SELECT DISTINCT p.chunk_hash FROM placement p WHERE p.chunk_hash IN ({holes}){admits}"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        Ok(stmt
-            .query_map(rusqlite::params_from_iter(values.iter()), |r| {
-                r.get::<_, String>(0)
-            })?
-            .collect::<Result<HashSet<_>, _>>()?)
-    }
-
     /// The tags on one document, for the result that cites it.
     ///
     /// `prepare_cached`, like `placements_of`: this runs once per hit handed to the
@@ -588,7 +595,7 @@ impl Index {
         derived_sha: &str,
     ) -> anyhow::Result<Vec<String>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT DISTINCT tag FROM workspace_tag
+            "SELECT DISTINCT tag FROM ws.tag
              WHERE source=?1 AND resource=?2 AND derived_sha=?3 ORDER BY tag",
         )?;
         let rows = stmt.query_map(params![source, resource, derived_sha], |r| {
@@ -597,24 +604,29 @@ impl Index {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Where a chunk sits, everywhere it sits.
+    /// Where a chunk sits, everywhere the filter admits it.
     ///
     /// `prepare_cached` because the hybrid arms reach 100 deep each, so this runs a
     /// hundred times per query rather than the ten it did when `search` was the only
     /// caller and took `limit` directly. Compiling the same statement each time measured
     /// 1.11 ms against 0.61 ms per query on a 460,000-placement corpus — small beside a
-    /// reranker pass, and free to not pay.
-    pub fn placements_of(&self, chunk_hash: &str) -> anyhow::Result<Vec<Placement>> {
-        let mut stmt = self.conn.prepare_cached(
+    /// reranker pass, and free to not pay. The filter changes the statement's text, and
+    /// the cache is keyed by it, so each shape of filter is compiled once.
+    pub fn placements_of(
+        &self,
+        chunk_hash: &str,
+        filter: &Filter<'_>,
+    ) -> anyhow::Result<Vec<Placement>> {
+        let mut values: Vec<rusqlite::types::Value> = vec![chunk_hash.to_owned().into()];
+        let admits = admits(filter, &mut values);
+        let sql = format!(
             "SELECT source, resource, blob_sha, derived_sha, ordinal, heading,
                     char_start, char_end, observed_at, tool, title
-             FROM placement p WHERE chunk_hash = ?1
-               AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x
-                 WHERE x.source=p.source AND x.resource=p.resource
-                   AND x.derived_sha=p.derived_sha)
-             ORDER BY source, resource",
-        )?;
-        let rows = stmt.query_map(params![chunk_hash], |r| {
+             FROM placement p WHERE chunk_hash = ?{admits}
+             ORDER BY source, resource"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |r| {
             Ok(Placement {
                 source: r.get(0)?,
                 resource: r.get(1)?,
@@ -636,11 +648,13 @@ impl Index {
     ///
     /// One `IN (…)` instead of one round trip per chunk. Both retrieval arms reach
     /// `ARM_DEPTH` deep, so the caller-per-hit version ran a hundred statements per query
-    /// on the way to a result that keeps forty of them. A chunk with no placements is
-    /// simply absent from the map, which is the same answer an empty `Vec` gave.
+    /// on the way to a result that keeps forty of them. A chunk with no placement the
+    /// filter admits is simply absent from the map, which is the same answer an empty
+    /// `Vec` gave.
     pub fn placements_ofs(
         &self,
         hashes: &[String],
+        filter: &Filter<'_>,
     ) -> anyhow::Result<HashMap<String, Vec<Placement>>> {
         if hashes.is_empty() {
             return Ok(HashMap::new());
@@ -648,20 +662,18 @@ impl Index {
         let holes = std::iter::repeat_n("?", hashes.len())
             .collect::<Vec<_>>()
             .join(",");
+        let mut values: Vec<rusqlite::types::Value> =
+            hashes.iter().map(|h| h.clone().into()).collect();
+        let admits = admits(filter, &mut values);
         let sql = format!(
             "SELECT chunk_hash, source, resource, blob_sha, derived_sha, ordinal, heading,
                     char_start, char_end, observed_at, tool, title
-             FROM placement p WHERE chunk_hash IN ({holes})
-               AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x
-                 WHERE x.source=p.source AND x.resource=p.resource
-                   AND x.derived_sha=p.derived_sha)
+             FROM placement p WHERE chunk_hash IN ({holes}){admits}
              ORDER BY source, resource"
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> =
-            hashes.iter().map(|h| h as &dyn rusqlite::ToSql).collect();
-        let rows = stmt.query_map(params.as_slice(), |r| {
+        let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 Placement {
@@ -859,12 +871,12 @@ mod tests {
         idx
     }
 
-    /// The work-list order `embed` batches by: texts of one length ride together, and
-    /// the long tail comes last.
+    /// The work-list order `embed` batches by: texts of one length ride together, the
+    /// long tail comes last, and a chunk's placements sit together.
     #[test]
-    fn hashes_by_length_run_shortest_first() {
+    fn placements_by_length_run_shortest_first_with_a_chunks_documents_together() {
         let long = "A much longer passage. ".repeat(20);
-        let idx = indexed(&[
+        let mut idx = indexed(&[
             ("https://example.gov/long", long.as_str()),
             ("https://example.gov/short", "Tiny."),
             (
@@ -872,17 +884,42 @@ mod tests {
                 "A middling passage about drainage.",
             ),
         ]);
+        // The short passage under a second address: one chunk, two placements.
+        for c in chunk_markdown("Tiny.", &ChunkConfig::default()) {
+            idx.insert(
+                &c,
+                &placement("tampa", "https://example.gov/short-too", &"9".repeat(64)),
+            )
+            .unwrap();
+        }
 
-        let ordered = idx.chunk_hashes_by_length().unwrap();
-        let texts = idx.chunk_texts(&ordered).unwrap();
+        let placements = idx.placements_by_length().unwrap();
+        let hashes: Vec<String> = placements.pairs.iter().map(|(h, _)| h.clone()).collect();
+        // `chunk_texts` takes each chunk once, as `embed` asks; a chunk's placements are
+        // adjacent, so dropping the repeats keeps the order being checked.
+        let mut chunks = hashes.clone();
+        chunks.dedup();
+        let texts = idx.chunk_texts(&chunks).unwrap();
         let lengths: Vec<usize> = texts.iter().map(String::len).collect();
         let mut sorted = lengths.clone();
         sorted.sort_unstable();
         assert_eq!(lengths, sorted, "not shortest-first: {lengths:?}");
+        assert_eq!(placements.documents.len(), 4);
         assert_eq!(
-            ordered.len(),
-            idx.chunk_hashes().unwrap().len(),
-            "an order must never drop a chunk"
+            placements.pairs.len(),
+            idx.stats().unwrap().placements,
+            "an order must never drop a placement"
+        );
+        assert_eq!(
+            hashes[0], hashes[1],
+            "the shared short chunk's two placements are adjacent"
+        );
+        assert_ne!(placements.pairs[0].1, placements.pairs[1].1);
+        let short = &placements.documents[placements.pairs[0].1 as usize];
+        assert_eq!(
+            idx.chunk_hashes_of(short).unwrap(),
+            [hashes[0].clone()],
+            "one chunk in the short document"
         );
     }
 
@@ -914,70 +951,10 @@ mod tests {
         }
     }
 
-    /// The vector arm's `--source` filter. Lance has no source column, so retrieval
-    /// over-fetches and this narrows the candidates in one query rather than one per hit.
+    /// The keyword arm's filter, and the placements a hit cites under it: a tag narrows
+    /// the hits, and a shared passage names only the documents the filter admits.
     #[test]
-    fn eligible_keeps_only_the_chunks_placed_in_that_source() {
-        let mut idx = Index::in_memory().unwrap();
-        let mut hashes = Vec::new();
-        for (i, (source, text)) in [
-            ("tampa", "the stormwater improvement fee funds new inlets"),
-            ("pinellas", "the county drainage district met on tuesday"),
-        ]
-        .iter()
-        .enumerate()
-        {
-            let derived = format!("{:064x}", i);
-            let chunk = Chunk::new(text.to_string(), 0, String::new(), 0);
-            hashes.push(chunk.chunk_hash.clone());
-            idx.insert(
-                &chunk,
-                &placement(source, &format!("https://x/{i}"), &derived),
-            )
-            .unwrap();
-        }
-
-        let kept = idx.eligible(&hashes, &in_source("tampa")).unwrap();
-        assert_eq!(kept, HashSet::from([hashes[0].clone()]));
-        assert!(
-            idx.eligible(&hashes, &in_source("nowhere"))
-                .unwrap()
-                .is_empty()
-        );
-        assert!(idx.eligible(&[], &in_source("tampa")).unwrap().is_empty());
-        assert_eq!(
-            idx.eligible(&hashes, &Filter::default()).unwrap().len(),
-            2,
-            "no filter admits every included chunk"
-        );
-    }
-
-    /// The same passage under two sources is one chunk with two placements, so filtering
-    /// by either source must keep it.
-    #[test]
-    fn eligible_finds_a_shared_chunk_under_each_of_its_sources() {
-        let mut idx = Index::in_memory().unwrap();
-        let chunk = Chunk::new("identical boilerplate notice".into(), 0, String::new(), 0);
-        for (i, source) in ["tampa", "pinellas"].iter().enumerate() {
-            idx.insert(
-                &chunk,
-                &placement(source, &format!("https://x/{i}"), &format!("{:064x}", i)),
-            )
-            .unwrap();
-        }
-
-        let hashes = vec![chunk.chunk_hash.clone()];
-        assert_eq!(idx.eligible(&hashes, &in_source("tampa")).unwrap().len(), 1);
-        assert_eq!(
-            idx.eligible(&hashes, &in_source("pinellas")).unwrap().len(),
-            1
-        );
-    }
-
-    /// One filter for both arms: the keyword arm's `WHERE` and the vector arm's
-    /// post-filter are built from the same clauses, so a tag narrows them identically.
-    #[test]
-    fn a_tag_filter_narrows_both_arms_from_the_same_clauses() {
+    fn a_tag_filter_narrows_the_hits_and_the_placements_they_cite() {
         let mut idx = Index::in_memory().unwrap();
         let docs = [
             (
@@ -991,11 +968,20 @@ mod tests {
                 "bb",
             ),
         ];
-        let mut hashes = Vec::new();
         for (url, text, derived) in docs {
             let chunk = Chunk::new(text.into(), 0, String::new(), 0);
-            hashes.push(chunk.chunk_hash.clone());
             idx.insert(&chunk, &placement("tampa", url, &derived.repeat(32)))
+                .unwrap();
+        }
+        // The same notice under both documents: one chunk, two placements.
+        let notice = Chunk::new(
+            "public comment is taken at every meeting".into(),
+            1,
+            String::new(),
+            0,
+        );
+        for (url, derived) in [("https://x/minutes", "aa"), ("https://x/agenda", "bb")] {
+            idx.insert(&notice, &placement("tampa", url, &derived.repeat(32)))
                 .unwrap();
         }
         for (url, derived, tag) in [
@@ -1006,7 +992,7 @@ mod tests {
         ] {
             idx.conn
                 .execute(
-                    "INSERT INTO workspace_tag(source,resource,derived_sha,tag,by) VALUES ('tampa',?1,?2,?3,'model')",
+                    "INSERT INTO ws.tag(source,resource,derived_sha,tag,by) VALUES ('tampa',?1,?2,?3,'model')",
                     params![url, derived.repeat(32), tag],
                 )
                 .unwrap();
@@ -1028,10 +1014,6 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(only(&tagged), ["https://x/minutes"]);
-        assert_eq!(
-            idx.eligible(&hashes, &tagged).unwrap(),
-            HashSet::from([hashes[0].clone()])
-        );
 
         let shared = Filter {
             tags: &budget,
@@ -1049,10 +1031,6 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(only(&without), ["https://x/agenda"]);
-        assert_eq!(
-            idx.eligible(&hashes, &without).unwrap(),
-            HashSet::from([hashes[1].clone()])
-        );
 
         let elsewhere = Filter {
             source: Some("pinellas"),
@@ -1060,6 +1038,26 @@ mod tests {
             not_tags: &[],
         };
         assert!(only(&elsewhere).is_empty(), "source and tags combine");
+
+        // The shared notice is found under the minutes tag, and cites the minutes alone:
+        // the agenda carries the same words, but the filter left it out.
+        let hits = idx.search("public comment", 10, &tagged).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0]
+                .placements
+                .iter()
+                .map(|p| p.resource.as_str())
+                .collect::<Vec<_>>(),
+            ["https://x/minutes"]
+        );
+        assert_eq!(
+            idx.placements_of(&notice.chunk_hash, &Filter::default())
+                .unwrap()
+                .len(),
+            2,
+            "unfiltered, both documents cite it"
+        );
 
         assert_eq!(
             idx.document_tags("tampa", "https://x/minutes", &"aa".repeat(32))
@@ -1377,7 +1375,7 @@ mod tests {
         }
         idx.conn
             .execute(
-                "INSERT INTO workspace_exclusion(source,resource,derived_sha) VALUES (?1,?2,?3)",
+                "INSERT INTO ws.excluded(source,resource,derived_sha,by,reason) VALUES (?1,?2,?3,'model','page_kind')",
                 params!["tampa", "https://example.gov/a", derived],
             )
             .unwrap();
@@ -1389,7 +1387,7 @@ mod tests {
 
         idx.conn
             .execute(
-                "INSERT INTO workspace_exclusion(source,resource,derived_sha) VALUES (?1,?2,?3)",
+                "INSERT INTO ws.excluded(source,resource,derived_sha,by,reason) VALUES (?1,?2,?3,'model','page_kind')",
                 params!["tampa", "https://example.gov/b", derived],
             )
             .unwrap();

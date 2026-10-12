@@ -61,6 +61,7 @@ pub async fn questions(ctx: &Ctx, args: QuestionsArgs) -> anyhow::Result<Questio
         }
         if !added.is_empty() {
             saved = ws.save_questions(saved)?;
+            ws.sync_vectors().await?;
         }
     }
     Ok(QuestionsReport {

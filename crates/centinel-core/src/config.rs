@@ -119,11 +119,11 @@ pub struct Config {
     #[serde(default)]
     pub defaults: Defaults,
 
-    /// `[classify]` — the Jev model the pipeline's classify stage sends documents to.
+    /// `[classify]` — the Jev model `centinel classify` sends documents to when the
+    /// command names none.
     ///
-    /// Absent means the stage is skipped. It is the one stage that sends corpus text off
-    /// the machine on a schedule, so it runs only where this file, which only the operator
-    /// writes, says so — the same authority story as `[[schedule]]`.
+    /// Classifying is never scheduled: it sends corpus text off the machine, and only a
+    /// person starts it, from the command or the web's Classify button.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub classify: Option<ClassifyConfig>,
 
@@ -145,7 +145,7 @@ pub struct Config {
     pub schedules: Vec<ScheduleConfig>,
 }
 
-/// The `[classify]` block: what `run`'s classify stage sends documents to.
+/// The `[classify]` block: what `centinel classify` sends documents to.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClassifyConfig {
@@ -896,10 +896,9 @@ embed_batch = "auto"
 transcribe_model = "whisper-large-v3-turbo"
 lang = "en"
 
-# Score every newly indexed document with Jev during `centinel run`: junk is excluded
-# from search and embedding, the rest is tagged. Document text leaves this machine for
-# api.typesafe.ai, and $TYPESAFE_API_KEY must be set. Without this block the stage is
-# skipped and nothing is sent.
+# The Jev model `centinel classify` scores documents with when no --model is given.
+# Classifying is never part of `centinel run`: document text leaves this machine for
+# api.typesafe.ai only when a person starts it, and $TYPESAFE_API_KEY must be set.
 #   [classify]
 #   model = "jev-1.13.0"
 

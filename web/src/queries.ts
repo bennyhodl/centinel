@@ -60,6 +60,14 @@ export const queries = {
     refetchInterval: 60_000,
   }),
 
+  /** What a classify run over a scope would send. The corpus changes under it, so it is short-lived. */
+  plan: (plan: Parameters<typeof api.classifyPlan>[0]) => queryOptions({
+    queryKey: ['classify-plan', plan],
+    queryFn: () => api.classifyPlan(plan),
+    staleTime: 10_000,
+    placeholderData: keepPreviousData,
+  }),
+
   reviewQueue: (pageSize: number) => queryOptions({
     queryKey: ['review-queue', pageSize],
     queryFn: () => api.reviewQueue({ page_size: pageSize }),

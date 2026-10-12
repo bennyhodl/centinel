@@ -50,10 +50,10 @@ answered by the corpus and an old refusal on it is stale rather than binding.
 
 ## The store
 
-**Truth vs derived** — only `blobs/` and `log/` are truth. `current/`, `centinel.db` and
-`vectors.lance/` are derived and rebuildable.
+**Truth vs derived** — only `blobs/`, `log/` and `workspace/` are truth. `current/`,
+`centinel.db` and `chunks.lance/` are derived and rebuildable.
 
-**Derived is not the same as cheap** — `centinel.db` is minutes; `vectors.lance/` is about
+**Derived is not the same as cheap** — `centinel.db` is minutes; `chunks.lance/` is about
 a day on a 400,000-chunk corpus.
 
 **Replay** — one Source's log, read once and answerable many times. A snapshot: it answers

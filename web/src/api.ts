@@ -80,6 +80,19 @@ export type Preset = {
   questions: Question[]
 }
 
+/** What a run covers when it is given no documents: the corpus, one source, or one document. */
+export type RunScope = {
+  source?: string
+  document?: DocumentIdentity
+}
+
+/** What a scoped run would send, priced the way the server prices every run. */
+export type RunPlan = {
+  documents: number
+  estimated_tokens: number
+  estimated_cost_usd?: number | null
+}
+
 /** The Corpus filter a run resolves on the server, plus how many top matches to take. */
 export type RunSelection = {
   search: string
@@ -185,6 +198,10 @@ export type Run = {
   effective_questions?: Question[]
   inputs: DocumentIdentity[]
   settings: Record<string, unknown>
+  /** The scope the run covered, when it was given one rather than documents. */
+  scope?: RunScope
+  /** The root of the chain this run continues. */
+  continue_from?: string
   document_count: number
   status: string
   input_tokens?: number | null
@@ -195,11 +212,10 @@ export type Run = {
   duration_ms?: number | null
   throughput_docs_sec?: number | null
   errors: number
-  preview: {
-    affected_documents: number
-    affected_chunks: number
-    affected_chars: number
-  }
+  /** Documents answered so far, failures included. */
+  scored?: number
+  /** Why the run stopped short: Jev's own words, or the failure that ended it. */
+  error?: string
   /** In a run detail: one page of results, filtered and sorted as asked. */
   results: RunResult[]
   view?: RunView
@@ -207,7 +223,7 @@ export type Run = {
 
 export type RunSummary = Pick<Run,
   'id' | 'created_at' | 'completed_at' | 'model' | 'evaluation_date' | 'document_count' |
-  'status' | 'input_tokens' | 'output_tokens' | 'cost_usd' | 'cost_estimated' | 'duration_ms' |
+  'status' | 'error' | 'input_tokens' | 'output_tokens' | 'cost_usd' | 'cost_estimated' | 'duration_ms' |
   'throughput_docs_sec' | 'errors'
 >
 
@@ -407,6 +423,9 @@ export type RemoteOp = { name: string; about: string; mcp: boolean; long_running
 export const originalUrl = (blob: string, source: string, download = false) =>
   `/workspace/original?${new URLSearchParams({ blob, source, ...(download ? { download: 'true' } : {}) })}`
 
+/** The Jev model a run asks unless the person picks another. */
+export const DEFAULT_MODEL = 'jev-1.13.0'
+
 export const api = {
   system: () => request<SystemInfo>('/workspace/system'),
   ops: () => request<{ ops: RemoteOp[] }>('/ops').then(value => withArray(value, 'ops', '/ops')),
@@ -442,6 +461,8 @@ export const api = {
     selection?: RunSelection
     /** Scores the exact inputs of this stored run again; the server copies them. */
     repeat?: string
+    /** Every indexed document in scope, resolved on the server as the run goes. No cap. */
+    scope?: RunScope
     questions: Question[]
     model: string
     evaluation_date: string
@@ -449,7 +470,15 @@ export const api = {
     /** `false` returns the scores without writing a run record. */
     record?: boolean
   }) => request<Run>('/workspace/runs', { method: 'POST', body: JSON.stringify(body) }),
-  commit: (id: string) => request<Run>(`/workspace/runs/${encodeURIComponent(id)}/commit`, { method: 'POST' }),
+  /** Carries a stopped run on: its scope, questions and settings, over what no run in its chain answered. */
+  continueRun: (id: string) => request<Run>('/workspace/runs', { method: 'POST', body: JSON.stringify({ continue_from: id }) }),
+  /** What a classify run over a scope would send, and its cost, from the server's one estimate. */
+  classifyPlan: (plan: { source?: string; document?: DocumentIdentity; questions: string[]; model: string }) => {
+    const params = new URLSearchParams({ questions: plan.questions.join(','), model: plan.model })
+    if (plan.document) Object.entries(plan.document).forEach(([key, value]) => params.set(key, value))
+    else if (plan.source) params.set('source', plan.source)
+    return request<RunPlan>(`/workspace/classify/plan?${params}`)
+  },
   restore: (identity: DocumentIdentity) => request<unknown>('/workspace/restore', {
     method: 'POST',
     body: JSON.stringify(identity),

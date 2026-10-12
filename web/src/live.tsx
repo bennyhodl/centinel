@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { ArrowRight, CircleAlert, CircleCheck, ShieldCheck, X } from 'lucide-react'
+import { ArrowRight, CircleAlert, CircleCheck, Play, X } from 'lucide-react'
 import { api, type Question, type ResultOutcome, type Run, type RunDetailQuery, type RunResult } from './api'
 import { queries } from './queries'
 import { Button } from '@/components/ui/button'
@@ -56,6 +56,19 @@ const segments = [
 /** What a run asks, in words: the question itself when there is one, the ids when there are several. */
 export const asked = (run: Run) => run.questions.length === 1 ? run.questions[0].instructions || run.questions[0].id : run.questions.map(question => question.id).join(' · ')
 
+/** Where a run reached, in words: its scope when it had one, else how many documents it was given. */
+export const covered = (run: Run) => run.scope?.document ? 'one document' : run.scope?.source ? `every document in ${run.scope.source}` : run.scope ? 'the whole corpus' : plural(run.document_count, 'document')
+
+/** The request that runs `run` again: the same scope, or the same documents. */
+export const again = (run: Run) => api.run({
+  ...(run.scope ? { scope: run.scope } : { repeat: run.id }),
+  questions: run.questions, model: String(run.settings.requested_model ?? run.model), evaluation_date: run.evaluation_date,
+  settings: { concurrency: run.settings.concurrency ?? 8 },
+})
+
+/** A run that stopped short with a scope can be carried on from where it stopped. */
+export const continuable = (run: Run) => Boolean(run.scope) && (run.status === 'stopped' || run.status === 'interrupted')
+
 /**
  * A run in one card: what it asks, how far it is, and how its documents fell. While it
  * scores, the documents out to Jev and the answers as they land; once it stops, the
@@ -90,15 +103,13 @@ export function LiveRun({ id, embedded, preview, actions, onDismiss, onOutcome }
     queryFn: () => api.runDetail(id, { outcome: 'error', page_size: 200 }),
     enabled: Boolean(run && !running && errors),
   })
-  const commit = useMutation({
-    mutationFn: () => api.commit(id),
-    onSuccess: () => Promise.all([
-      client.invalidateQueries({ queryKey: ['run'] }),
-      client.invalidateQueries({ queryKey: ['runs'] }),
-      client.invalidateQueries({ queryKey: ['corpus'] }),
-    ]),
+  const carryOn = useMutation({
+    mutationFn: () => api.continueRun(id),
+    onSuccess: continued => {
+      client.invalidateQueries({ queryKey: ['runs'] })
+      navigate({ to: '/runs', search: { run: continued.id, page: 1, outcome: '' } })
+    },
   })
-
   if (live.error) return <section className="mb-6 grid gap-3 rounded-xl border border-destructive p-6"><b className="inline-flex items-center gap-2 text-destructive"><CircleAlert className="size-4" />The run could not be read</b><ErrorBox error={live.error} /></section>
   if (!run) return <section className="mb-6 flex items-center gap-2 rounded-xl border border-flame-line bg-flame-wash p-6 text-sm text-flame-ink"><Spinner />Starting the run. Centinel is fixing the selection.</section>
 
@@ -110,16 +121,13 @@ export function LiveRun({ id, embedded, preview, actions, onDismiss, onOutcome }
   const rate = scored && elapsed > 0 ? scored / elapsed : null
   const left = rate ? (total - scored) / rate : null
   const questions = run.effective_questions?.length ? run.effective_questions : run.questions
-  const toExclude = run.preview?.affected_documents || 0
-  const failed = run.status === 'failed' || run.status === 'interrupted'
-  const canCommit = !preview && run.status === 'completed' && toExclude > 0
+  const failed = run.status === 'failed' || run.status === 'interrupted' || run.status === 'stopped'
   const go = (outcome: ResultOutcome) => onOutcome ? onOutcome(outcome) : !preview && navigate({ to: '/runs', search: { run: id, page: 1, outcome } })
   const failureGroups = groupErrors(failures.data?.results || [])
   const state = running
     ? { text: 'Scoring now', tone: 'text-flame-ink', mark: <span className="size-2 rounded-full bg-flame shadow-[0_0_0_4px_var(--flame-halo)]" /> }
     : failed ? { text: 'Stopped', tone: 'text-destructive', mark: <CircleAlert className="size-3.5" /> }
-      : run.status === 'committed' ? { text: 'Committed', tone: 'text-moss', mark: <ShieldCheck className="size-3.5" /> }
-        : { text: preview ? 'Preview finished' : 'Finished', tone: 'text-moss', mark: <CircleCheck className="size-3.5" /> }
+      : { text: preview ? 'Preview finished' : 'Finished', tone: 'text-moss', mark: <CircleCheck className="size-3.5" /> }
   const facts = [seconds(elapsed), run.cost_usd != null && money(run.cost_usd), run.input_tokens && `${compact(run.input_tokens)} tokens`].filter(Boolean).join(' · ')
 
   return <section aria-live="polite" className={`mb-6 grid gap-5 rounded-xl border p-6 ${running ? 'border-flame-line bg-flame-wash' : failed ? 'border-destructive-line bg-background' : 'bg-background'}`}>
@@ -127,12 +135,12 @@ export function LiveRun({ id, embedded, preview, actions, onDismiss, onOutcome }
       <div className="grid min-w-0 flex-1 gap-1.5">
         <span className={`inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.08em] ${state.tone}`}>{state.mark}{state.text} · {facts}</span>
         <h2 className="text-[22px] leading-7 font-semibold tracking-[-0.01em]">{asked(run)}</h2>
-        <span className="text-sm text-muted-foreground">{plural(total, 'document')} · {plural(run.questions.length, 'question')} · {run.model} · as of {run.evaluation_date}</span>
+        <span className="text-sm text-muted-foreground">{covered(run)}{run.scope ? ` · ${plural(total, 'document')}` : ''} · {plural(run.questions.length, 'question')} · {run.model} · as of {run.evaluation_date}{run.continue_from ? ' · continues an earlier run' : ''}</span>
         {embedded && <span className="font-mono text-xs text-muted-foreground">{run.id}</span>}
       </div>
       <div className="flex shrink-0 items-center gap-2">
         {actions}
-        {canCommit && <Button onClick={() => commit.mutate()} disabled={commit.isPending}>{commit.isPending ? <Spinner /> : <ShieldCheck />}Commit {plural(toExclude, 'exclusion')}</Button>}
+        {continuable(run) && <Button onClick={() => carryOn.mutate()} disabled={carryOn.isPending}>{carryOn.isPending ? <Spinner /> : <Play />}Continue</Button>}
         {!embedded && !preview && <Button variant="outline" className="bg-background" onClick={() => navigate({ to: '/runs', search: { run: id, page: 1, outcome: '' } })}>{running ? 'Open' : 'Every result'}<ArrowRight /></Button>}
         {!embedded && onDismiss && !running && <Button variant="ghost" size="icon" aria-label="Dismiss" onClick={onDismiss}><X /></Button>}
       </div>
@@ -168,14 +176,13 @@ export function LiveRun({ id, embedded, preview, actions, onDismiss, onOutcome }
       </Ledger>
     </div>}
 
-    {!running && <p className="text-sm text-muted-foreground">
-      {preview ? 'A preview: the scores are below. Nothing was saved, so it cannot be committed.'
-        : run.status === 'committed' ? `Its exclusions are committed.${toExclude ? ` A policy change since then would exclude ${plural(toExclude, 'more document')}.` : ''}`
-          : toExclude ? `Committing takes ${plural(toExclude, 'document')} out of search and future embedding. The archive does not change, and any document can be restored.`
-            : 'No document reaches an exclude threshold. Nothing needs committing.'}
-      {commit.isSuccess && ' Committed.'}
+    {!running && <p className={`text-sm ${run.error ? 'text-destructive' : 'text-muted-foreground'}`}>
+      {preview ? 'A preview: the scores are below. Nothing was saved.'
+        : run.error ? run.error
+          : 'Its answers are live: what it excluded is out of search and what it tagged can be filtered on, and any document can be restored.'}
+      {continuable(run) && ' Continue sends the documents in scope that no run in this chain has answered.'}
     </p>}
-    {commit.error && <ErrorBox error={commit.error} />}
+    {carryOn.error && <ErrorBox error={carryOn.error} />}
 
     {!running && errors > 0 && <div className="grid gap-1.5 border-t pt-4 text-destructive">
       <b className="text-[13px]">{plural(errors, 'document')} failed</b>

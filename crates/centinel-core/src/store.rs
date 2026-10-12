@@ -7,13 +7,14 @@
 //!   runs/YYYY-MM.jsonl         TRUTH    what this machine attempted
 //!   decisions.jsonl            TRUTH    what the operator decided
 //!   workspace/questions.jsonl  TRUTH    saved classifier question sets
-//!   workspace/runs.jsonl       TRUTH    classifier attempts and scores
-//!   workspace/decisions.jsonl  TRUTH    reversible corpus usage decisions
+//!   workspace/workspace.db     TRUTH    classifier runs, answers, reviews, usage overrides
+//!   workspace/vectors.lock     RUNTIME  the one writer of chunks.lance at a time
+//!   workspace/embed.lock       RUNTIME  the one `embed` run at a time
 //!   spend/YYYY-MM.jsonl        TRUTH    every model call, its tokens and its cost
 //!   crumbs/<source>.jsonl      DERIVED  the off-host links each page dropped
 //!   current/<source>/…         DERIVED  URL-mirroring tree. Regenerable.
 //!   centinel.db                DERIVED  SQLite: metadata + FTS5   — the BM25 arm
-//!   vectors.lance/             DERIVED  LanceDB: chunk vectors    — the vector arm
+//!   chunks.lance/              DERIVED  LanceDB: chunk vectors    — the vector arm
 //!   serve.json                 RUNTIME  the `centinel serve` running on this store, if any
 //!   serve.log                  RUNTIME  what the installed service said
 //! ```
@@ -141,7 +142,7 @@ impl Store {
     /// Opens (and creates, if absent) a store at `root`.
     pub async fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
-        // `vectors.lance/` is absent: Lance creates its own table directory, and an empty
+        // `chunks.lance/` is absent: Lance creates its own table directory, and an empty
         // one left here would be a database with a table that cannot be opened.
         for sub in ["blobs", "log", "current"] {
             let p = root.join(sub);
@@ -194,7 +195,7 @@ impl Store {
         self.root.clone()
     }
 
-    /// `vectors.lance/` — the chunk vectors. Derived, and safe to delete.
+    /// `chunks.lance/` — the chunk vectors. Derived, and safe to delete.
     ///
     /// Built from [`crate::vectors::TABLE`] rather than spelled out, because Lance
     /// derives the directory from the table name and the two must not be able to drift.
@@ -267,8 +268,8 @@ impl Store {
         self.root.join("decisions.jsonl")
     }
 
-    /// `workspace/` — durable classifier state. None of its files belong in the
-    /// disposable SQLite projection.
+    /// `workspace/` — durable classifier state. None of it belongs in the disposable
+    /// search index: an index rebuild must lose no answer and no verdict.
     pub fn workspace_dir(&self) -> PathBuf {
         self.root.join("workspace")
     }
@@ -278,19 +279,39 @@ impl Store {
         self.workspace_dir().join("questions.jsonl")
     }
 
-    /// `workspace/runs.jsonl` — classifier attempts, progress, scores, and metrics.
+    /// `workspace/workspace.db` — every classifier run and its results, the latest answer
+    /// per question, every review, a person's usage overrides, and what the current
+    /// policy makes of them. See [`crate::workspace`].
+    pub fn workspace_db_path(&self) -> PathBuf {
+        self.workspace_dir().join("workspace.db")
+    }
+
+    /// `workspace/vectors.lock` — held by whoever writes `chunks.lance` at the moment:
+    /// `embed` appending rows, a classifier run or a review syncing tags onto them.
+    pub fn vectors_lock_path(&self) -> PathBuf {
+        self.workspace_dir().join("vectors.lock")
+    }
+
+    /// `workspace/embed.lock` — held for a whole `embed` run, so two cannot both work out
+    /// the same missing rows and append them twice.
+    pub fn embed_lock_path(&self) -> PathBuf {
+        self.workspace_dir().join("embed.lock")
+    }
+
+    /// `workspace/runs.jsonl` — the ledger classifier runs were written to before
+    /// `workspace.db`. Read once into it, never written again.
     pub fn workspace_runs_path(&self) -> PathBuf {
         self.workspace_dir().join("runs.jsonl")
     }
 
-    /// `workspace/decisions.jsonl` — reversible document usage decisions.
+    /// `workspace/decisions.jsonl` — the ledger usage decisions were written to before
+    /// `workspace.db`. Read once into it, never written again.
     pub fn workspace_decisions_path(&self) -> PathBuf {
         self.workspace_dir().join("decisions.jsonl")
     }
 
-    /// `workspace/reviews.jsonl` — what a person said about the classifier's answers,
-    /// document by document. The labelled set every evaluation and threshold is tuned
-    /// against, so it is truth: no replay of the runs can recover a human's verdict.
+    /// `workspace/reviews.jsonl` — the ledger reviews were written to before
+    /// `workspace.db`. Read once into it, never written again.
     pub fn workspace_reviews_path(&self) -> PathBuf {
         self.workspace_dir().join("reviews.jsonl")
     }
@@ -1175,6 +1196,9 @@ mod tests {
             s.workspace_questions_path()
                 .ends_with("workspace/questions.jsonl")
         );
+        assert!(s.workspace_db_path().ends_with("workspace/workspace.db"));
+        assert!(s.vectors_lock_path().ends_with("workspace/vectors.lock"));
+        assert!(s.embed_lock_path().ends_with("workspace/embed.lock"));
         assert!(s.workspace_runs_path().ends_with("workspace/runs.jsonl"));
         assert!(
             s.workspace_decisions_path()
@@ -1189,7 +1213,7 @@ mod tests {
                 .ends_with("crumbs/tampa.jsonl")
         );
         assert!(s.index_path().ends_with("centinel.db"));
-        assert!(s.vectors_path().ends_with("vectors.lance"));
+        assert!(s.vectors_path().ends_with("chunks.lance"));
         assert!(
             s.blob_path_of(&BlobSha::from_bytes(b"x"))
                 .starts_with(s.blobs_dir())
@@ -1197,7 +1221,7 @@ mod tests {
     }
 
     /// The two arms sit beside each other under the root, and neither is created up
-    /// front: `centinel.db` is `index`'s to make, and `vectors.lance/` is Lance's.
+    /// front: `centinel.db` is `index`'s to make, and `chunks.lance/` is Lance's.
     #[tokio::test]
     async fn the_two_search_arms_are_siblings_and_neither_is_pre_created() {
         let dir = tempfile::tempdir().unwrap();

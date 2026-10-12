@@ -1,30 +1,30 @@
-//! `classify` — score indexed documents with Jev and act on the answers.
+//! `classify` — score indexed documents with Jev.
 //!
-//! The pipeline's labelling stage, and the CLI for running it by hand over the corpus, one
-//! source, or one document. It is the same run the web workspace starts from its Classify
-//! view: the saved questions go to Jev with each document's derived text, the answers land
-//! in `workspace/runs.jsonl`, and the current policy decides what they mean. What differs
-//! is what happens at the end — this op **commits**. A document whose junk probability
-//! clears the gate's threshold is excluded from search and embedding before `embed` ever
-//! sees it, and every tag that clears its threshold is on the record for search to filter
-//! by. The review band is left pending for a person, and `restore` undoes any exclusion.
+//! The command for running the classifiers over the corpus, one source, or one document,
+//! as often as wanted. It is the same run the web workspace starts from its Classify
+//! button: the saved questions go to Jev with each document's derived text, the answers
+//! land in the workspace, and the current policy decides what they mean — at once. A
+//! document whose junk probability clears the gate's threshold is out of search the
+//! moment its answer is written, every tag that clears its threshold is on the record for
+//! search to filter by, the review band is left for a person, and `restore` undoes any
+//! exclusion.
 //!
-//! ## The work list is a subtraction
+//! ## Everything in scope, every time
 //!
-//! Like every stage, this one asks what is left rather than what is new: an included
-//! document is pending when it has no answer for some saved question *at that question's
-//! current version*. Scoring a thousand documents and stopping leaves the next run the
-//! rest; rewording a question puts every document back in the queue for that question
-//! alone; a document the gate already excluded is not sent again to be tagged.
-//! `--rescore` ignores all of that and sends every included document.
+//! A run scores every indexed document in its scope, excluded ones included, with no cap:
+//! rerunning the corpus, moving a threshold, rewording a question and retagging are the
+//! normal uses. A document is sent again whether or not it has an answer. The one
+//! subtraction is `--continue`: a run that stopped — Jev refused the account, the process
+//! was interrupted — is carried on over the documents in its scope that no run in its
+//! chain has answered yet.
 //!
 //! ## Nothing leaves the machine unasked
 //!
-//! Text goes to TypeSafe only when this op runs, and the pipeline runs it only where
-//! `centinel.toml` has a `[classify]` block. `--dry-run` prices the work and sends
-//! nothing; `--preview` sends and shows, and writes nothing.
+//! Text goes to TypeSafe only when this command, or the web's button, runs. Classifying
+//! is not a pipeline stage. `--dry-run` prices the work and sends nothing; `--preview`
+//! sends and shows, and writes nothing.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -32,8 +32,8 @@ use serde_json::json;
 
 use crate::prelude::*;
 use crate::workspace::{
-    self, MAX_RUN_DOCUMENTS, MAX_TEXT_BYTES, PendingDocument, Question, QuestionKind,
-    RunDetailQuery, RunRequest, RunResult, RunSettings, Workspace,
+    self, Question, QuestionKind, RunDetailQuery, RunRequest, RunResult, RunScope, RunSettings,
+    Workspace,
 };
 
 #[derive(Clone, Debug, Default, clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -44,7 +44,7 @@ pub struct ClassifyArgs {
     pub source: Option<String>,
 
     /// One document: a URL, a substring of one, or a blob hash — the same targets `search`
-    /// prints. Scored whether or not it is pending.
+    /// prints.
     #[arg(long, value_name = "TARGET")]
     #[serde(default)]
     pub document: Option<String>,
@@ -54,15 +54,12 @@ pub struct ClassifyArgs {
     #[serde(default)]
     pub questions: Vec<String>,
 
-    /// Score documents that already have answers under the current question versions.
-    #[arg(long)]
+    /// Carry on a run that stopped: the same scope, questions and settings, over the
+    /// documents no run in its chain has answered. `--source`, `--document`, `--question`
+    /// and `--model` are taken from that run.
+    #[arg(long = "continue", value_name = "RUN")]
     #[serde(default)]
-    pub rescore: bool,
-
-    /// Stop after this many documents. The rest stay pending for the next run.
-    #[arg(long)]
-    #[serde(default)]
-    pub limit: Option<usize>,
+    pub continue_from: Option<String>,
 
     /// Count and price the work. Nothing is sent.
     #[arg(long)]
@@ -102,10 +99,8 @@ pub struct ClassifyReport {
     pub model: String,
     /// The question ids sent, in the saved order.
     pub questions: Vec<String>,
-    /// Documents chosen for this run, after `--limit`.
+    /// Documents in scope for this run.
     pub selected: usize,
-    /// Pending documents left behind by `--limit` or the run ceiling.
-    pub remaining: usize,
     /// Documents Jev answered for.
     pub scored: usize,
     pub failed: usize,
@@ -138,8 +133,6 @@ pub struct ClassifyReport {
     /// The recorded run, so its detail can be read back in the Runs view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    /// Exclusions written to `workspace/decisions.jsonl` by this run.
-    pub committed: usize,
     pub dry_run: bool,
     pub preview: bool,
     /// The first few failures, with Jev's own words.
@@ -159,13 +152,20 @@ pub async fn classify(
     cancel: &Cancel,
 ) -> anyhow::Result<ClassifyReport> {
     let ws = Workspace::new(&ctx.store);
-    let questions = chosen(&ws.questions()?, &args.questions)?;
+    // A continuation takes its questions, scope and model from the run it continues; the
+    // flags that would name them are not read.
+    let continuing = args.continue_from.is_some();
+    let questions = match continuing {
+        true => Vec::new(),
+        false => workspace::chosen(&ws.questions()?, &args.questions)?,
+    };
 
     // The config is opened only for what the flags did not say, so a run that names its
     // model works in a directory with no `centinel.toml` at all.
-    let (model, concurrency) = match &args.model {
-        Some(model) => (model.clone(), args.concurrency),
-        None => {
+    let (model, concurrency) = match (&args.model, continuing) {
+        (Some(model), _) => (model.clone(), args.concurrency),
+        (None, true) => (String::new(), args.concurrency),
+        (None, false) => {
             let (config, _) = super::load_config(args.config.as_deref())?;
             let block = config.classify.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -178,27 +178,31 @@ pub async fn classify(
     };
 
     progress.say("reading the index");
-    let mut pending = match &args.document {
-        Some(target) => vec![
-            ws.document_by_target(ctx, target, args.source.as_deref())
-                .await?,
-        ],
-        None => ws.pending_documents(&questions, args.source.as_deref(), args.rescore)?,
+    let scope = match (&args.document, continuing) {
+        (_, true) => None,
+        (Some(target), false) => Some(RunScope {
+            source: None,
+            document: Some(
+                ws.document_by_target(ctx, target, args.source.as_deref())
+                    .await?,
+            ),
+        }),
+        (None, false) => Some(RunScope {
+            source: args.source.clone(),
+            document: None,
+        }),
     };
-    let outstanding = pending.len();
-    pending.truncate(
-        args.limit
-            .unwrap_or(MAX_RUN_DOCUMENTS)
-            .min(MAX_RUN_DOCUMENTS),
-    );
-    let reach = ws.reach(&questions)?;
-    let (estimated_tokens, estimated_cost_usd) = estimate(&pending, &questions, &reach, &model);
+    let plan = ws.plan(
+        scope.as_ref(),
+        args.continue_from.as_deref(),
+        &questions,
+        &model,
+    )?;
 
     let mut report = ClassifyReport {
         model: model.clone(),
         questions: questions.iter().map(|q| q.id.clone()).collect(),
-        selected: pending.len(),
-        remaining: outstanding - pending.len(),
+        selected: plan.documents,
         scored: 0,
         failed: 0,
         excluded: 0,
@@ -207,18 +211,19 @@ pub async fn classify(
         kept: 0,
         not_asked: 0,
         tags: BTreeMap::new(),
-        estimated_tokens,
-        estimated_cost_usd,
+        estimated_tokens: plan.estimated_tokens,
+        estimated_cost_usd: plan.estimated_cost_usd,
         input_tokens: None,
         cost_usd: None,
         elapsed_secs: 0.0,
         run_id: None,
-        committed: 0,
         dry_run: args.dry_run,
         preview: args.preview,
         failures: Vec::new(),
     };
-    if args.dry_run || pending.is_empty() {
+    // A continuation with nothing left is refused by `prepare`, naming the run; an empty
+    // scope is simply nothing to do.
+    if args.dry_run || (plan.documents == 0 && !continuing) {
         return Ok(report);
     }
 
@@ -229,112 +234,61 @@ pub async fn classify(
             .insert("concurrency".into(), json!(concurrency));
     }
     let request = RunRequest {
-        questions: questions.clone(),
-        documents: pending.into_iter().map(|p| p.id).collect(),
+        questions,
+        documents: Vec::new(),
         selection: None,
         repeat: None,
+        scope,
+        continue_from: args.continue_from.clone(),
         model,
         evaluation_date: today(),
         settings,
         record: !args.preview,
     };
 
+    let prepared = ws.prepare(request)?;
+    // Said after `prepare`, which is where a continuation learns its model and questions.
+    report.model = prepared.run().model.clone();
+    report.questions = prepared
+        .run()
+        .questions
+        .iter()
+        .map(|q| q.id.clone())
+        .collect();
     progress.say(format!(
         "sending {} to {}",
         render::plural(report.selected, "document", "documents"),
         report.model
     ));
-    let prepared = ws.prepare(request)?;
     let run = ws.execute_with(prepared, progress, cancel).await?;
 
-    // The same counting the Runs view does, under the policy the run was asked with.
-    let (view, _) = workspace::view_results(
-        &run.questions,
-        run.results.clone(),
-        &RunDetailQuery::default(),
-        false,
-    );
-    report.scored = run.results.len() - view.documents.errors - view.documents.not_asked;
+    // The same counting the Runs view does, under the policy the run was asked with. A
+    // recorded run's results are read back from the workspace; a preview's travel with it.
+    let detail = ws.run_detail(
+        &run.id,
+        RunDetailQuery {
+            outcome: "error".into(),
+            page_size: FAILURES_SHOWN,
+            ..RunDetailQuery::default()
+        },
+    )?;
+    let view = detail.view.unwrap_or_default();
+    report.scored = view.scored - view.documents.errors - view.documents.not_asked;
     report.failed = view.documents.errors;
     report.excluded = view.documents.excluded;
     report.review = view.documents.review;
     report.tagged = view.documents.tagged;
     report.kept = view.documents.kept;
     report.not_asked = view.documents.not_asked;
-    report.tags = tag_counts(&questions, &view.questions);
+    report.tags = tag_counts(&run.questions, &view.questions);
     report.input_tokens = run.input_tokens;
     report.cost_usd = run.cost_usd;
     report.elapsed_secs = run.duration_ms.unwrap_or_default() as f64 / 1000.0;
-    report.failures = failures(&run.results);
-
+    report.failures = failures(&detail.results);
     if !args.preview {
-        progress.say("committing exclusions");
-        let committed = ws.commit(&run.id)?;
-        report.committed = committed.committed;
         report.run_id = Some(run.id);
     }
     Ok(report)
-}
-
-/// The saved questions a run asks: all of them, or the ids named. An id nobody saved is
-/// an error rather than a quiet omission — a typo would otherwise score a corpus with the
-/// wrong set and say nothing.
-fn chosen(saved: &[Question], ids: &[String]) -> anyhow::Result<Vec<Question>> {
-    if saved.is_empty() {
-        anyhow::bail!(
-            "no questions are saved — `centinel questions --add-defaults` restores the shipped \
-             set"
-        );
-    }
-    if ids.is_empty() {
-        return Ok(saved.to_vec());
-    }
-    if let Some(unknown) = ids.iter().find(|id| !saved.iter().any(|q| &q.id == *id)) {
-        anyhow::bail!("no saved question is called `{unknown}` — `centinel questions` lists them");
-    }
-    Ok(saved
-        .iter()
-        .filter(|q| ids.contains(&q.id))
-        .cloned()
-        .collect())
-}
-
-/// Input tokens and cost before anything is sent. Mirrors the web page's estimate: each
-/// document's text at the sampling limit, plus the questions, at about four characters a
-/// token. A run follows the chain, so a follow-up costs only for the documents it reaches —
-/// `reach` gives that share by question id, one when absent — and every group of
-/// follow-ups sharing a `when` is its own request, carrying the text again. Two groups
-/// that reach the same document at the same depth share a request, so this errs high.
-fn estimate(
-    pending: &[PendingDocument],
-    questions: &[Question],
-    reach: &HashMap<String, f64>,
-    model: &str,
-) -> (u64, Option<f64>) {
-    let reach_of = |q: &Question| reach.get(&q.id).copied().unwrap_or(1.0);
-    let question_chars: f64 = questions
-        .iter()
-        .map(|q| {
-            let chars = q.instructions.len()
-                + 70
-                + q.options
-                    .iter()
-                    .map(|o| o.id.len() + o.description.len())
-                    .sum::<usize>();
-            reach_of(q) * chars as f64
-        })
-        .sum();
-    let follow_ups: HashMap<&str, f64> = questions
-        .iter()
-        .filter_map(|q| Some((q.when.as_deref()?, reach_of(q))))
-        .collect();
-    let sends = 1.0 + follow_ups.values().sum::<f64>();
-    let chars: f64 = pending
-        .iter()
-        .map(|p| p.chars.min(MAX_TEXT_BYTES) as f64 * sends + question_chars)
-        .sum();
-    let tokens = (chars / 4.0) as u64;
-    (tokens, crate::spend::cost(model, tokens, 0))
 }
 
 /// Documents per tag, keyed the way search filters: a yes-or-no question under its own
@@ -360,6 +314,7 @@ fn tag_counts(
     out
 }
 
+/// The first page of a run's failed results, with Jev's own words.
 fn failures(results: &[RunResult]) -> Vec<ClassifyFailure> {
     results
         .iter()
@@ -403,10 +358,7 @@ impl Render for ClassifyReport {
                 );
                 p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
             } else if self.selected == 0 {
-                p.line(p.paint(
-                    "nothing pending — every included document is scored",
-                    Ink::Dim,
-                ))?;
+                p.line(p.paint("nothing in scope", Ink::Dim))?;
             } else {
                 let mut figures = vec![
                     (self.scored as u64, "scored"),
@@ -433,20 +385,9 @@ impl Render for ClassifyReport {
                 if self.preview {
                     line.push_str(" · preview, nothing written");
                 } else if let Some(id) = &self.run_id {
-                    line.push_str(&format!(
-                        " · {} committed · run {id}",
-                        render::plural(self.committed, "exclusion", "exclusions")
-                    ));
+                    line.push_str(&format!(" · run {id}"));
                 }
                 p.line(p.paint(&line, Ink::Dim))?;
-            }
-
-            if self.remaining > 0 {
-                let text = format!(
-                    "{} more pending — re-run to continue",
-                    render::count(self.remaining as u64)
-                );
-                p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
             }
 
             if !self.tags.is_empty() {
@@ -489,7 +430,6 @@ mod tests {
     use crate::chunk::{ChunkConfig, chunk_markdown};
     use crate::index::{Index, Placement};
     use crate::store::Store;
-    use crate::workspace::DocumentId;
     use crate::workspace::fake_jev::fake_jev;
     use jiff::Timestamp;
 
@@ -578,9 +518,10 @@ mod tests {
     }
 
     /// The whole loop: a dry run prices and sends nothing, a preview scores and writes
-    /// nothing, a run scores, commits the gate's exclusion, and leaves nothing pending.
+    /// nothing, a run scores everything in scope, the gate's exclusion is live at once,
+    /// and the next run scores everything again — only a continuation subtracts.
     #[tokio::test]
-    async fn a_run_scores_what_is_pending_and_commits_the_gate() {
+    async fn a_run_scores_the_scope_and_the_gate_excludes_live() {
         let endpoint = fake_jev().await;
         // SAFETY: the only reader is a run that holds a key, and the only test with a key
         // is this one, in its own store.
@@ -603,8 +544,9 @@ mod tests {
         assert!(dry.estimated_tokens > 0);
         assert!(dry.estimated_cost_usd.unwrap() > 0.0);
         assert!(dry.run_id.is_none());
-        assert!(
-            !ctx.store.workspace_runs_path().exists(),
+        assert_eq!(
+            ws.runs(Default::default()).unwrap().total,
+            0,
             "a dry run writes nothing"
         );
         assert!(!ctx.store.spend_dir().exists(), "a dry run spends nothing");
@@ -623,11 +565,16 @@ mod tests {
         assert_eq!(preview.scored, 2);
         assert_eq!(preview.excluded, 1);
         assert!(preview.run_id.is_none());
-        assert!(
-            !ctx.store.workspace_runs_path().exists(),
+        assert_eq!(
+            ws.runs(Default::default()).unwrap().total,
+            0,
             "a preview writes nothing"
         );
-        assert!(!ctx.store.workspace_decisions_path().exists());
+        assert_eq!(
+            ws.documents(Default::default()).unwrap().facets.usage["excluded"],
+            0,
+            "and excludes nothing"
+        );
 
         let run = classify(
             &ctx,
@@ -641,7 +588,6 @@ mod tests {
         assert_eq!(run.scored, 2);
         assert_eq!(run.failed, 0);
         assert_eq!(run.excluded, 1, "the menu is junk");
-        assert_eq!(run.committed, 1);
         assert_eq!(
             run.tags.get("laws"),
             Some(&1),
@@ -674,31 +620,35 @@ mod tests {
         assert!((ledger_cost - run.cost_usd.unwrap()).abs() < 1e-12);
         assert_eq!(run.questions, ["page_kind", "laws"]);
 
-        let decisions = std::fs::read_to_string(ctx.store.workspace_decisions_path()).unwrap();
-        assert_eq!(decisions.lines().count(), 1);
-        assert!(decisions.contains("example.gov/menu"));
-
-        // Search and embed both read the exclusion: the menu's chunks are gone from the
-        // hash list `embed` builds its work list from.
+        // The exclusion is live: search no longer cites the menu, and the Corpus says why.
         let index = Index::open(ctx.store.index_path()).unwrap();
-        let hashes = index.chunk_hashes().unwrap();
-        let texts = index.chunk_texts(&hashes).unwrap();
-        assert!(texts.iter().any(|t| t.contains("Budget hearing")));
-        assert!(!texts.iter().any(|t| t.contains("Quick Links")));
-        drop(index);
-
-        // Nothing pending: the record is answered, the menu is excluded.
-        let questions = ws.questions().unwrap();
-        let asked: Vec<Question> = questions
-            .iter()
-            .filter(|q| q.id == "page_kind" || q.id == "laws")
-            .cloned()
-            .collect();
         assert!(
-            ws.pending_documents(&asked, None, false)
+            index
+                .search("Quick Links", 10, &crate::index::Filter::default())
                 .unwrap()
                 .is_empty()
         );
+        assert!(
+            !index
+                .search("Budget hearing", 10, &crate::index::Filter::default())
+                .unwrap()
+                .is_empty()
+        );
+        drop(index);
+        let excluded = ws
+            .documents(crate::workspace::DocumentQuery {
+                usage: "excluded".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(excluded.total, 1);
+        assert_eq!(excluded.documents[0].resource, "https://example.gov/menu");
+        assert_eq!(
+            excluded.documents[0].exclusion_reason.as_deref(),
+            Some("page_kind")
+        );
+
+        // Run again: everything in scope is scored again, excluded or not.
         let again = classify(
             &ctx,
             args(&["page_kind", "laws"]),
@@ -707,20 +657,26 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(again.selected, 0);
-        assert!(again.run_id.is_none(), "nothing to send is not a run");
+        assert_eq!(again.selected, 2);
+        assert_eq!(again.scored, 2);
+        assert!(again.run_id.is_some());
 
-        // A question nobody has asked yet puts the record back in the queue, not the junk.
-        let budget: Vec<Question> = questions
-            .iter()
-            .filter(|q| q.id == "budget")
-            .cloned()
-            .collect();
-        let pending = ws.pending_documents(&budget, None, false).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].id.resource, "https://example.gov/budget");
+        // A finished run has nothing to continue.
+        let error = classify(
+            &ctx,
+            ClassifyArgs {
+                continue_from: again.run_id.clone(),
+                ..Default::default()
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("every document in scope"), "{error}");
 
-        // One document by its address, scored regardless of pending.
+        // One document by its address.
         let one = classify(
             &ctx,
             ClassifyArgs {
@@ -734,7 +690,6 @@ mod tests {
         .unwrap();
         assert_eq!(one.selected, 1);
         assert_eq!(one.scored, 1);
-        assert_eq!(one.committed, 0, "a tag is not a usage decision");
     }
 
     #[tokio::test]
@@ -750,7 +705,13 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("`nope`"), "{error}");
-        assert!(!ctx.store.workspace_runs_path().exists());
+        assert_eq!(
+            Workspace::new(&ctx.store)
+                .runs(Default::default())
+                .unwrap()
+                .total,
+            0
+        );
     }
 
     #[tokio::test]
@@ -773,75 +734,6 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("[classify]"), "{error}");
-    }
-
-    #[test]
-    fn the_estimate_counts_text_at_the_sampling_limit_plus_the_questions() {
-        let doc = |chars: usize| PendingDocument {
-            id: DocumentId {
-                source: "s".into(),
-                resource: "r".into(),
-                derived_sha: "d".into(),
-            },
-            chars,
-        };
-        let none = HashMap::new();
-        let (tokens, cost) = estimate(&[doc(4_000), doc(4_000)], &[], &none, "jev-test");
-        assert_eq!(tokens, 2_000);
-        assert!((cost.unwrap() - 2_000.0 * 0.042 / 1e6).abs() < 1e-12);
-        let (capped, _) = estimate(&[doc(10 * MAX_TEXT_BYTES)], &[], &none, "jev-test");
-        assert_eq!(capped, (MAX_TEXT_BYTES / 4) as u64);
-        let with_questions = estimate(
-            &[doc(4_000)],
-            &workspace::default_questions(),
-            &none,
-            "jev-test",
-        )
-        .0;
-        assert!(with_questions > 1_000);
-        assert_eq!(estimate(&[doc(4_000)], &[], &none, "other-model").1, None);
-    }
-
-    /// A follow-up sends the text again, but only for the documents expected to reach it:
-    /// priced at its share, and at every document while no share is known.
-    #[test]
-    fn a_follow_up_is_priced_for_the_share_of_documents_it_reaches() {
-        let doc = PendingDocument {
-            id: DocumentId {
-                source: "s".into(),
-                resource: "r".into(),
-                derived_sha: "d".into(),
-            },
-            chars: 40_000,
-        };
-        let defaults = workspace::default_questions();
-        let pick = |id: &str| defaults.iter().find(|q| q.id == id).unwrap().clone();
-        let gate = pick("page_kind");
-        let laws = Question {
-            when: Some("page_kind:record".into()),
-            ..pick("laws")
-        };
-        let chain = [gate.clone(), laws];
-        let estimate_with = |questions: &[Question], reach: &[(&str, f64)]| {
-            let reach = reach
-                .iter()
-                .map(|(id, share)| (id.to_string(), *share))
-                .collect();
-            estimate(std::slice::from_ref(&doc), questions, &reach, "jev-test").0
-        };
-
-        let gate_alone = estimate_with(std::slice::from_ref(&gate), &[]);
-        let unknown = estimate_with(&chain, &[]);
-        let quarter = estimate_with(&chain, &[("laws", 0.25)]);
-        assert!(
-            unknown >= gate_alone + 10_000,
-            "an unknown share sends the text twice: {unknown} against {gate_alone}"
-        );
-        assert!(gate_alone < quarter && quarter < unknown);
-        assert!(
-            quarter - gate_alone <= (unknown - gate_alone) / 4 + 2,
-            "a quarter of the documents cost a quarter of the follow-up"
-        );
     }
 
     #[test]
@@ -874,7 +766,6 @@ mod tests {
             model: "jev-1.13.0".into(),
             questions: vec!["page_kind".into(), "laws".into()],
             selected: 120,
-            remaining: 30,
             scored: 118,
             failed: 2,
             excluded: 40,
@@ -892,7 +783,6 @@ mod tests {
             cost_usd: Some(0.02),
             elapsed_secs: 61.0,
             run_id: Some("run-1".into()),
-            committed: 40,
             dry_run: false,
             preview: false,
             failures: vec![ClassifyFailure {
@@ -907,8 +797,7 @@ mod tests {
         }
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("40") && out.contains("excluded"), "{out}");
-        assert!(out.contains("40 exclusions committed"), "{out}");
-        assert!(out.contains("30 more pending"), "{out}");
+        assert!(out.contains("run run-1"), "{out}");
         assert!(out.contains("record_type:minutes"), "{out}");
         assert!(out.contains("too large"), "{out}");
         assert!(out.contains("and 1 more"), "{out}");

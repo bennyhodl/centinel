@@ -102,14 +102,18 @@ where refusing would drop a result the first stage chose. Nothing here is stored
 nothing can lie about what it covers. That is the entire difference: `embed` writes a
 record, and a record must not claim to cover text that was never read.
 
-## `--source`
+## `--source` and `--tag`
 
-The BM25 arm filters in SQL. The vector arm cannot: Lance carries no source column, and a
-chunk has many placements across sources.
+One filter, applied by each arm inside its own query. The BM25 arm applies it in SQL,
+against the workspace database the index attaches. The vector arm applies it in Lance:
+every row carries its document's source, tags and exclusion, so the filter runs before
+distance and the arm comes back with its full depth in distinct chunks however narrow the
+filter is. The placements a hit cites pass the same filter on the way out, so a passage
+shared by two documents never names one the filter left out.
 
-So it **over-fetches 5×, then post-filters** in one query for the whole candidate set. It
-can still under-fill on a corpus one source dominates — a known limit of the post-filter,
-not a bug in it.
+A filter is not free under an IVF index: Lance still reads the probed partitions and only
+skips the arithmetic for the rows it masks. A search narrowed to one source of thirty reads
+about as many bytes as an unfiltered one.
 
 ## What a result tells you about itself
 
@@ -136,7 +140,7 @@ trusts to know what they are looking at, and a stale literal there is worse than
 
 ```
 stormwater drainage fee    2 results · bm25→rerank
-! keyword search only — no vectors at ~/.centinel/vectors.lance — run `centinel embed` first
+! keyword search only — no vectors at ~/.centinel/chunks.lance — run `centinel embed` first
 ```
 
 What it does not say is how much of the corpus the vector arm could see. It used to: a

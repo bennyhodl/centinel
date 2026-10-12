@@ -463,7 +463,7 @@ impl Embedder {
 /// A group that does not fit the standing shape — any text longer than
 /// [`NOMINAL_SEQ_CELLS`] — falls back to a bespoke context for that group alone, the
 /// same shape `embed_documents` builds. With the work list sorted shortest-first
-/// (`Index::chunk_hashes_by_length`) such groups cluster at the tail of a run instead
+/// (`Index::placements_by_length`) such groups cluster at the tail of a run instead
 /// of surfacing in the middle of every group they would otherwise visit.
 pub struct EmbedSession<'m> {
     embedder: &'m Embedder,

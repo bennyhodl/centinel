@@ -38,7 +38,7 @@ them keeps a checkpoint file. The work list is always a subtraction:
 | `extract` | blobs with a derivation of bytes, or an `Underivable` | the log |
 | `transcribe` | blobs derived by the transcriber from the audio blobs | the log |
 | `index` | placements already written, per address | `centinel.db` |
-| `embed` | stored chunk hashes from indexed chunk hashes | `vectors.lance/` |
+| `embed` | stored rows, one per chunk placed in a document, from the index's placements | `chunks.lance/` |
 
 So a second run does nothing, at every stage, for the same structural reason the first one
 was resumable. Kill it at chunk 40,000 and re-run; it starts at 40,001.

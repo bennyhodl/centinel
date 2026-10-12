@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
+import { Link, createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
 import { ArrowUp, ChevronDown, ChevronLeft, ChevronRight, X } from 'lucide-react'
 import type { CorpusFacets, CorpusFilters, Document, Question } from '../api'
 import { classifierOptions } from '../classify'
@@ -87,7 +87,10 @@ function SearchPage() {
       <button type="button" onClick={() => navigate({ search: cleared })} className="inline-flex h-12 shrink-0 items-center gap-1 self-start text-[13px] text-muted-foreground hover:text-foreground" aria-label="New search"><ChevronLeft className="size-4" /><span className="hidden sm:inline">New</span></button>
       <SearchBox key={search.text} initial={search.text} ready busy={searching} onSearch={text => set({ text, page: 1 })}>{filtersFor(search, set)}</SearchBox>
     </div>
-    <p className="flex h-5 items-center gap-2 pl-12 text-[13px] text-muted-foreground">{searching ? <Searching /> : data ? `${number(data.total)} documents · ${characters(data.total_chars)}` : ''}</p>
+    <p className="flex h-5 items-center gap-2 pl-12 text-[13px] text-muted-foreground">
+      {searching ? <Searching /> : data ? `${number(data.total)} documents · ${characters(data.total_chars)}` : ''}
+      {!searching && sourcesIn(search.source).length === 1 && <Link to="/classifiers" search={{ source: sourcesIn(search.source)[0] }} className="ml-auto text-foreground underline underline-offset-2">Classify this source</Link>}
+    </p>
     <section aria-busy={searching} className={`mt-6 transition-opacity duration-(--motion-indicator) ${searching && data ? 'pointer-events-none opacity-45' : ''}`}>
       <div className="flex h-8 items-center gap-6 border-b border-foreground text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
         <span className="flex-1">Document</span><span className="hidden w-56 md:block">Scores</span><span className="w-16 text-right">Blob</span>

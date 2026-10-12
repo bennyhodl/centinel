@@ -295,11 +295,13 @@ from the store and not from the runner. See [Schedules](../operate/schedules.md)
   log/            TRUTH     append-only: observations, discovery runs, status, derivations
   current/        derived   a tree that mirrors the URLs
   centinel.db     derived   SQLite metadata + FTS5   — the keyword arm
-  vectors.lance/  derived   LanceDB chunk vectors    — the semantic arm
+  chunks.lance/   derived   LanceDB chunk vectors    — the semantic arm
+  workspace/      TRUTH     classifier questions, answers, reviews, overrides
 ```
 
-Only the first two are evidence. Delete everything else and you lose time, not facts. The
-corpus is one directory — you can hand it to somebody with `rsync`.
+Only `blobs/` and `log/` are evidence; `workspace/` is what you and the classifiers decided
+about it, and nothing rebuilds that either. Delete anything else and you lose time, not
+facts. The corpus is one directory — you can hand it to somebody with `rsync`.
 
 See [The store](../internals/store.md) and [The record](../internals/record.md).
 

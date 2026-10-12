@@ -53,7 +53,7 @@ too large to make it an option. [Search](../internals/search.md) has the mechani
 
 ```
 stormwater drainage fee    2 results · bm25→rerank
-! keyword search only — no vectors at ~/.centinel/vectors.lance — run `centinel embed` first
+! keyword search only — no vectors at ~/.centinel/chunks.lance — run `centinel embed` first
 ```
 
 The `method` field names which stages actually ran, and it is assembled from what ran

@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useSearch } from '@tanstack/react-router'
 import { Check, ListPlus, Play, Plus, Trash2, X } from 'lucide-react'
 import { Panel, ReactFlowProvider } from '@xyflow/react'
 import { chainOf, QuestionFlow, sourcesOf, type TreeQuestion } from './tree'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { api, type ChoiceOption, type CorpusFilters, type Document, type Preset, type Question, type QuestionAction, type RunDetailQuery } from './api'
+import { api, DEFAULT_MODEL, type ChoiceOption, type CorpusFilters, type Document, type Preset, type Question, type QuestionAction, type RunDetailQuery } from './api'
 import { queries } from './queries'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -18,9 +19,7 @@ import { ResultsSection } from './results'
 import { priceOf } from './spend-logic'
 import { ErrorBox, Empty, PageHeader, Segmented, Spinner } from './ui'
 
-/** The TypeSafe published rate for Jev input, used when a run names no rate of its own. */
-/** Must match `MAX_RUN_DOCUMENTS` in the workspace module. */
-const MAX_RUN_DOCUMENTS = 50_000
+/** The Jev model a run starts with. The one price list prices it. */
 const usageOptions: Array<[string, string]> = [['all', 'All usage'], ['included', 'Included'], ['excluded', 'Excluded'], ['pending', 'Pending']]
 const actionOptions: Array<[QuestionAction, string]> = [['exclude', 'Exclude'], ['tag', 'Tag'], ['keep', 'Score only']]
 
@@ -56,12 +55,17 @@ export function Classify() {
   const [loaded, setLoaded] = useState(false)
   const [scope, setScope] = useState<'all' | 'sample'>('sample')
   const [sample, setSample] = useState(25)
-  const [model, setModel] = useState('jev-1.13.0')
+  const [model, setModel] = useState(DEFAULT_MODEL)
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
   const [filters, setFilters] = useState<CorpusFilters>({ search: '', address: '', source: '', usage: 'included', classifier: '', min_score: '0.5', max_score: '' })
   const [output, setOutput] = useState<'record' | 'preview'>('record')
   const [concurrency, setConcurrency] = useState(8)
   const [active, setActive] = useState<{ id: string; preview: boolean } | null>(null)
+  // The one button: every indexed document in the corpus or one source, excluded ones too,
+  // through the checked questions. The server resolves the scope as the run goes, so there
+  // is no count to cap and nothing is paged back to the browser.
+  const preset = useSearch({ from: '/classifiers' })
+  const [classifySource, setClassifySource] = useState(preset.source || '')
 
   useEffect(() => {
     if (!loaded && saved.data) {
@@ -92,12 +96,29 @@ export function Classify() {
   const save = useMutation({ mutationFn: () => api.saveQuestions(wire), onSuccess: applySaved })
 
   const total = available.data?.total || 0
-  const count = scope === 'all' ? Math.min(total, MAX_RUN_DOCUMENTS) : Math.min(sample, total)
+  const count = scope === 'all' ? total : Math.min(sample, total)
   const recording = output === 'record'
   const prices = useQuery(queries.prices())
   const rate = priceOf(model, prices.data?.prices ?? [])?.input ?? null
   const reach = (question: Question) => reachOf(question, wire, available.data?.facets?.scores)
   const estimate = total ? estimateRun((available.data?.total_chars || 0) * count / total, count, checked.map(stripKey), rate ?? 0, undefined, reach) : null
+  // Priced by the server, over the saved questions among the checked ones; an unsaved
+  // question is priced once the tree is saved, which the button does on the way.
+  const chosenIds = checked.map(question => question.id).filter(id => savedById.has(id))
+  const plan = useQuery({ ...queries.plan({ source: classifySource || undefined, questions: chosenIds, model }), enabled: chosenIds.length > 0 })
+  const classifyAll = useMutation({
+    mutationFn: async () => {
+      let asked = checked.map(stripKey)
+      if (dirty) {
+        const response = await api.saveQuestions(wire)
+        applySaved(response)
+        const ids = new Set(asked.map(question => question.id))
+        asked = response.questions.filter(question => ids.has(question.id))
+      }
+      return api.run({ scope: { source: classifySource || undefined }, questions: asked, model, evaluation_date: date, settings: { concurrency } })
+    },
+    onSuccess: response => setActive({ id: response.id, preview: false }),
+  })
   const run = useMutation({
     mutationFn: async () => {
       let asked = checked.map(stripKey)
@@ -128,6 +149,8 @@ export function Classify() {
 
   const edit = (localKey: string, patch: Partial<LocalQuestion>) => setQuestions(current => current.map(question => question.localKey === localKey ? { ...question, ...patch } : question))
   const blocked = problems.length > 0 || !count || !checked.length || !model.trim() || run.isPending || Boolean(busy)
+  const everyQuestion = checked.length === questions.length
+  const classifyBlocked = problems.length > 0 || !checked.length || !model.trim() || classifyAll.isPending || Boolean(busy) || !plan.data?.documents
   const label = run.isPending ? 'Starting…' : `${recording ? (dirty ? 'Save and classify' : 'Classify') : 'Preview'} ${scope === 'all' ? 'all ' : ''}${plural(count, 'document')}`
 
   // Renaming a question keeps the follow-ups that hang off its answers.
@@ -187,6 +210,20 @@ export function Classify() {
           </Select>
           <AddMenu onAdd={addSource} count={questions.length} existing={questions.map(question => question.id)} presets={shipped.data?.presets || []} />
         </Panel>
+        <Panel position="top-center" className="!m-4 flex flex-wrap items-center gap-3 rounded-xl bg-background/95 px-4 py-2.5 shadow-[0_0_0_1px_var(--rule),0_4px_14px_rgba(26,23,18,0.06)]">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Run classifiers</span>
+          <Select value={classifySource || 'all'} onValueChange={value => setClassifySource(value === 'all' ? '' : value)}>
+            <SelectTrigger className="h-8 w-44 text-[13px]"><SelectValue /></SelectTrigger>
+            <SelectContent><SelectItem value="all">All sources</SelectItem>{(available.data?.sources || []).map(source => <SelectItem value={source} key={source}>{source}</SelectItem>)}</SelectContent>
+          </Select>
+          <span className="text-[13px] text-muted-foreground">{everyQuestion ? 'All questions' : plural(checked.length, 'question')}{dirty ? ' · saves the tree first' : ''}</span>
+          <span className="text-[13px]">{plan.data ? <>{plural(plan.data.documents, 'document')} · ~{compact(plan.data.estimated_tokens)} tokens{plan.data.estimated_cost_usd != null ? ` · ${money(plan.data.estimated_cost_usd)}` : ''}</> : plan.isLoading ? 'Pricing…' : ''}</span>
+          <Button disabled={classifyBlocked} onClick={() => classifyAll.mutate()}>{classifyAll.isPending || busy ? <Spinner /> : <Play />}{plan.data ? `Classify ${plural(plan.data.documents, 'document')}` : 'Classify'}</Button>
+          {(plan.error || classifyAll.error) && <ErrorBox error={(plan.error || classifyAll.error) as Error} />}
+        </Panel>
+        {active && !active.preview && dialog !== 'run' && <Panel position="bottom-left" className="!m-4 w-[600px] max-w-[calc(100vw-2rem)] [&>section]:mb-0">
+          <LiveRun key={active.id} id={active.id} onDismiss={() => setActive(null)} />
+        </Panel>}
         <Panel position="top-right" className="!m-4 flex items-center gap-2">
           <button type="button" onClick={() => setDialog('test')} className="inline-flex h-9 max-w-80 items-center gap-2.5 rounded-full bg-foreground pr-3 pl-3 text-[13px] text-parchment shadow-[0_4px_14px_rgba(26,23,18,0.18)]">
             <span className={`size-2 shrink-0 rounded-full ${test.doc ? 'bg-flame shadow-[0_0_0_3px_rgba(200,118,30,0.35)]' : 'bg-muted-foreground'}`} />
@@ -233,7 +270,7 @@ export function Classify() {
         {active?.preview && <PreviewResults id={active.id} />}
         <div className="grid gap-3">
         <div className="grid min-w-0 gap-2 text-xs font-medium [&_[data-slot=select-trigger]]:w-full"><span>Documents</span><Segmented label="Run scope" value={scope} onChange={setScope} options={[['sample', 'A sample'], ['all', 'All matching']]} /></div>
-          {scope === 'sample' && <label className="grid min-w-0 gap-2 text-xs font-medium [&_[data-slot=select-trigger]]:w-full"><span>How many</span><Input type="number" min="1" max={MAX_RUN_DOCUMENTS} value={sample} onChange={event => setSample(Math.min(MAX_RUN_DOCUMENTS, Math.max(1, Number(event.target.value) || 1)))} /></label>}
+          {scope === 'sample' && <label className="grid min-w-0 gap-2 text-xs font-medium [&_[data-slot=select-trigger]]:w-full"><span>How many</span><Input type="number" min="1" value={sample} onChange={event => setSample(Math.max(1, Number(event.target.value) || 1))} /></label>}
           <div className="grid grid-cols-2 gap-3">
             <label className="grid min-w-0 gap-2 text-xs font-medium [&_[data-slot=select-trigger]]:w-full"><span>Source</span><Select value={filters.source || 'all'} onValueChange={value => setFilters(current => ({ ...current, source: value === 'all' ? '' : value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All sources</SelectItem>{(available.data?.sources || []).map(source => <SelectItem value={source} key={source}>{source}</SelectItem>)}</SelectContent></Select></label>
             <label className="grid min-w-0 gap-2 text-xs font-medium [&_[data-slot=select-trigger]]:w-full"><span>Usage</span><Select value={filters.usage} onValueChange={usage => setFilters(current => ({ ...current, usage }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{usageOptions.map(([value, text]) => <SelectItem value={value} key={value}>{text}</SelectItem>)}</SelectContent></Select></label>
@@ -260,14 +297,14 @@ export function Classify() {
           <div className="grid grid-cols-[auto_1fr] items-baseline gap-x-2 rounded-md border bg-muted p-3 [&_b]:text-2xl [&_span]:text-xs [&_small]:col-span-full [&_small]:text-xs [&_small]:text-muted-foreground">
             <b>{number(count)}</b><span>{count === 1 ? 'document' : 'documents'} × {plural(checked.length, 'question')}</span>
             {estimate && <small>About {compact(estimate.tokens)} input tokens{rate != null ? ` · ${money(estimate.cost)}` : ' · no price for this model'}</small>}
-            <small>{number(total)} match the filters{total > MAX_RUN_DOCUMENTS ? `; one run holds ${number(MAX_RUN_DOCUMENTS)}` : ''}.</small>
+            <small>{number(total)} match the filters.</small>
           </div>
           {problems.length > 0 && <p className="rounded-md border bg-muted p-3 text-xs">Fix {problems[0][0]}: {problems[0][1]}</p>}
           {!checked.length && <p className="rounded-md border bg-muted p-3 text-xs">Check at least one question.</p>}
           <Button className="w-full h-11" disabled={blocked} onClick={() => run.mutate()}>{run.isPending ? <Spinner /> : <Play />}{label}</Button>
           {busy && <p className="text-xs leading-relaxed text-muted-foreground">A run is going. It shows above.</p>}
           {available.error && <ErrorBox error={available.error} />}{run.error && <ErrorBox error={run.error} />}
-          <p className="text-xs leading-relaxed text-muted-foreground">{recording ? 'A saved run does not change what search returns until you commit it.' : 'A preview is not saved and cannot be committed.'}</p>
+          <p className="text-xs leading-relaxed text-muted-foreground">{recording ? 'A saved run changes what search returns as each answer lands.' : 'A preview is not saved and changes nothing.'}</p>
         </div>
       </DialogContent>
     </Dialog>

@@ -15,7 +15,7 @@ this page stays local either way.
   derived text  ──────────────────────────►  centinel.db      chunk + placement + FTS5
         │
         │       centinel embed
-        └──────────────────────────────────►  vectors.lance/  chunk_hash → vector
+        └──────────────────────────────────►  chunks.lance/   one row per chunk placed in a document
 
   query
     ├─ BM25   (SQLite FTS5)          → top 100    instant, no model
@@ -61,13 +61,14 @@ the derived blob alone — two pages can extract to byte-identical text.
 
 ```
 <root>/centinel.db        SQLite: metadata + FTS5   — the BM25 arm
-<root>/vectors.lance/     LanceDB: chunk vectors    — the vector arm
+<root>/chunks.lance/      LanceDB: chunk vectors    — the vector arm
 ```
 
-Both are **derived**. Only `blobs/` and `log/` are truth; delete either store and it
+Both are **derived**. The truth is `blobs/` and `log/`, plus `workspace/workspace.db` for
+what classifiers and people decided about the documents; delete either store and it
 rebuilds from them.
 
-Derived does not mean cheap. `centinel.db` rebuilds in minutes. `vectors.lance/` is
+Derived does not mean cheap. `centinel.db` rebuilds in minutes. `chunks.lance/` is
 inference over the whole corpus — on 400,000 chunks, about a day. Nothing evidentiary is
 lost either way, and one of them is a very expensive thing to delete by accident. **Its
 backup is `cp -R`.**
@@ -221,14 +222,25 @@ monthly recrawl re-embeds only what changed.
 ## 4. The table
 
 ```
-vectors.lance/    one table, two columns
-                    chunk_hash  Utf8
-                    vector      FixedSizeList<Float32, dims>
+chunks.lance/     one table, one row per chunk placed in a document
+                    key          Utf8      chunk_hash ␟ source ␟ resource ␟ derived_sha
+                    chunk_hash   Utf8
+                    source, resource, derived_sha   Utf8
+                    tags         List<Utf8>          what the workspace's policy says of the document
+                    excluded     Boolean
+                    vector       FixedSizeList<Float32, dims>
 ```
 
-No text, no placements, no source. `centinel.db` holds those, and a second copy goes out
-of date the first time the corpus changes. `chunk_hash` is the join both stores already
-use.
+No text. `centinel.db` holds that, and a second copy goes out of date the first time the
+corpus changes. What the row does carry is the document and what the workspace decided
+about it, because that is what a search is narrowed to, and a filter that lives on the row
+is applied inside the vector query. The same passage on fifty pages is fifty rows with one
+vector; `embed` copies it rather than asking the model again. When a document's tags or
+exclusion change, the workspace queues it and a sync rewrites those two columns in place —
+Lance patches them inside the existing fragments and never touches a vector. A store from
+before this layout holds `vectors.lance/`, one row per chunk; `centinel embed --limit 0`
+fills `chunks.lance/` from it with nothing sent to a model, and the operator deletes the
+old directory when satisfied.
 
 **The model is a property of the table.** Its id lives in the schema metadata, and a
 query vector from any other model is refused at open, naming the fix. Vectors from two
@@ -346,20 +358,28 @@ centinel search "stormwater" --tag record_type:minutes --tag water_environment
 centinel search "permits" --not-tag record_type:data_table
 ```
 
-One filter, applied the same way by both arms. The BM25 arm applies it in SQL. The vector
-arm cannot: Lance carries no source or tag column, and a chunk has many placements across
-documents. So it **over-fetches 5×, then post-filters** in one query for the whole candidate
-set — the same query the keyword arm's `WHERE` is built from, so the two never disagree
-about which documents are in play. It can still under-fill on a corpus one source dominates
-— a known limit of the post-filter, not a bug in it.
+One filter, applied the same way by both arms, each inside its own query. The BM25 arm
+applies it in SQL against the workspace database the index attaches. The vector arm
+applies it in Lance: every row carries its document's source, tags and exclusion, so the
+query asks for `excluded = false`, the source, `array_has_all(tags, …)` and
+`NOT array_has_any(tags, …)` before distance is computed, and comes back with its full
+depth in distinct chunks however narrow the filter. The placements a hit cites are filtered
+by the same clauses on the way out, so a passage shared by two documents never names one
+the filter left out, and a hit the vector arm found cites the document it was admitted
+through first.
+
+What a filter costs: with an IVF index, Lance reads the probed partitions, masks the rows
+the filter rejects, and scores the rest. The masked rows cost no arithmetic, but their
+partitions are still read, so a search narrowed to one source of thirty reads about as many
+bytes as an unfiltered one. `examples/vector_bench.rs` measures the filtered case beside the
+plain one.
 
 A tag is what the classifier workspace's policy put on a document: a yes-or-no question's
 id, or `choice:option`. Repeated `--tag` is AND. A tag no saved question defines is an
 error, not an empty result. Every result carries the `tags` of the document it cites, so a
-reader sees why a filtered hit qualified and what else it is. Tags live in a projection the
-index refreshes from the workspace ledgers when it opens, so a threshold moved in the web
-page reaches the next `centinel search` without a re-score. See
-[CLASSIFIERS.md](CLASSIFIERS.md).
+reader sees why a filtered hit qualified and what else it is. Tags are live: a threshold
+moved in the web page re-decides the stored answers at once, and the next `centinel search`
+sees it without a re-score. See [CLASSIFIERS.md](CLASSIFIERS.md).
 
 ---
 
@@ -388,7 +408,7 @@ trusts to know what they are looking at, and a stale literal there is worse than
 
 ```
 stormwater drainage fee    2 results · bm25→rerank
-! keyword search only — no vectors at ~/.centinel/vectors.lance — run `centinel embed` first
+! keyword search only — no vectors at ~/.centinel/chunks.lance — run `centinel embed` first
 ```
 
 What the report does not say is how much of the corpus the vector arm could see. It used
