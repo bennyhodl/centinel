@@ -1,7 +1,6 @@
 import { useEffect, useMemo, type ReactNode } from 'react'
 import { Background, BackgroundVariant, Controls, Handle, Position, ReactFlow, useReactFlow, type Node, type BuiltInEdge, type NodeProps } from '@xyflow/react'
 import dagre from '@dagrejs/dagre'
-import '@xyflow/react/dist/style.css'
 import { Pencil, Plus, Trash2 } from 'lucide-react'
 import type { Question } from './api'
 import { useTheme } from './theme'
