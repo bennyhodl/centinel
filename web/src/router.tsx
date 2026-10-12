@@ -36,6 +36,8 @@ export function getRouter() {
     defaultViewTransition: {
       types: ({ fromLocation, toLocation }) => {
         if (!fromLocation || document.visibilityState !== 'visible') return false
+        // The documentation is text, not a place. It swaps without the slide.
+        if ([fromLocation, toLocation].some(location => /^(\/web)?\/docs(\/|$)/.test(location.pathname))) return false
         const from = (fromLocation.state as { __TSR_index?: number }).__TSR_index ?? 0
         const to = (toLocation.state as { __TSR_index?: number }).__TSR_index ?? 0
         return [to < from ? 'back' : 'forward']
