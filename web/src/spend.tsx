@@ -30,9 +30,6 @@ export const spendSearch = (search: Record<string, unknown>): SpendSearch => ({
 
 const windowLabels: Array<[string, string]> = [['1', 'Past 24h'], ['7', '7 days'], ['30', '30 days'], ['90', '90 days']]
 
-/** Mutes a figure while a new window is on its way. The delay keeps a quick answer from flashing. */
-const figureClass = (loading: boolean) => cn('transition-opacity', loading && 'opacity-40 delay-150')
-
 export function Spend() {
   const { metric, days } = useSearch({ from: '/spend' })
   const navigate = useNavigate({ from: '/spend' })
@@ -41,9 +38,9 @@ export function Spend() {
   const priceList = useQuery(queries.prices())
   const [breakdown, setBreakdown] = useState<'model' | 'time'>('model')
   const [open, setOpen] = useState('')
-  const set = (next: Partial<SpendSearch>) => navigate({ search: previous => ({ ...previous, ...next }), replace: true })
+  // A window or metric changes in place: the figures swap, and only the chart's lines move.
+  const set = (next: Partial<SpendSearch>) => navigate({ search: previous => ({ ...previous, ...next }), replace: true, viewTransition: false })
 
-  const loading = query.isPlaceholderData || query.isFetching
   const merged = merge(query.data?.buckets ?? [], span)
   const prices = priceList.data?.prices ?? []
   const models = sortModels(merged.models, metric)
@@ -54,7 +51,7 @@ export function Spend() {
   const unpriced = models.filter(m => m.unpriced > 0)
   const selected = models.find(m => m.model === open)
 
-  return <>
+  return <div className="mx-auto w-full max-w-5xl">
     <PageHeader title="Spend" detail="Every model call and what it cost. Local models are priced as the cloud.">
       <div className="flex flex-wrap items-center gap-2 lg:flex-nowrap">
         <Segmented small label="Metric" value={metric} onChange={value => set({ metric: value })} options={[['cost', 'Cost'], ['tokens', 'Tokens']]} />
@@ -62,38 +59,38 @@ export function Spend() {
         <Button size="icon-sm" variant="ghost" aria-label="Refresh" onClick={() => void query.refetch()}><RefreshCw className={cn(query.isFetching && 'animate-spin motion-reduce:animate-none')} /></Button>
       </div>
     </PageHeader>
-    {query.error ? <ErrorBox error={query.error} /> : !query.data ? <SpendSkeleton /> : <div className="flex max-w-5xl flex-col gap-8">
+    {query.error ? <ErrorBox error={query.error} /> : !query.data ? <SpendSkeleton /> : <div className="flex flex-col gap-8">
       <section className="grid gap-6 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
         <div className="flex min-w-0 flex-col gap-5">
           <div className="flex flex-col gap-1">
-            <span className={cn('text-4xl font-semibold tabular-nums', figureClass(loading))}>{metric === 'cost' ? formatUsd(merged.costUsd) : formatTokens(merged.tokens)}</span>
+            <span className="text-4xl font-semibold tabular-nums">{metric === 'cost' ? formatUsd(merged.costUsd) : formatTokens(merged.tokens)}</span>
             <span className="text-xs text-muted-foreground">
-              <span className={figureClass(loading)}>{formatCount(merged.requests)} {merged.requests === 1 ? 'call' : 'calls'}</span>
+              {formatCount(merged.requests)} {merged.requests === 1 ? 'call' : 'calls'}
               {metric === 'cost' && local.requests > 0 && ` · ${formatUsd(billed)} billed, ${formatUsd(local.costUsd)} local at cloud prices`}
             </span>
           </div>
-          {models.map(model => <ModelRow key={model.model} model={model} metric={metric} color={colors.get(model.model)!} price={priceOf(model.model, prices)} loading={loading} />)}
+          {models.map(model => <ModelRow key={model.model} model={model} metric={metric} color={colors.get(model.model)!} price={priceOf(model.model, prices)} />)}
           {!models.length && <p className="text-sm text-muted-foreground">No model calls in this window.</p>}
         </div>
         <div className="flex min-w-0 flex-col gap-3">
           <h2 className="text-sm font-medium">{span.resolution === 'hour' ? 'Hourly' : 'Daily'} {metric === 'tokens' ? 'tokens' : 'cost'}</h2>
           {/* A model with no price has no cost line: unknown is not zero. */}
-          <div className={figureClass(loading)}><SpendChart models={models.filter(m => metric === 'tokens' || !isUnpriced(m)).map(m => m.model)} colors={colors} periods={merged.periods} metric={metric} resolution={span.resolution} /></div>
+          <SpendChart models={models.filter(m => metric === 'tokens' || !isUnpriced(m)).map(m => m.model)} colors={colors} periods={merged.periods} metric={metric} resolution={span.resolution} />
         </div>
       </section>
 
       <section className="flex flex-col gap-2">
         <h2 className="text-sm font-medium">Totals</h2>
         <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-5">
-          <Metric loading={loading} label="Tokens" value={formatTokens(merged.tokens)} />
-          <Metric loading={loading} label="Calls" value={formatCount(merged.requests)} />
-          <Metric loading={loading} label="Billed" value={formatUsd(billed)} />
-          <Metric loading={loading} label="Local at cloud prices" value={formatUsd(local.costUsd)} />
-          <Metric loading={loading} label="Unpriced tokens" value={formatTokens(unpriced.reduce((sum, m) => sum + m.tokens, 0))} />
+          <Metric label="Tokens" value={formatTokens(merged.tokens)} />
+          <Metric label="Calls" value={formatCount(merged.requests)} />
+          <Metric label="Billed" value={formatUsd(billed)} />
+          <Metric label="Local at cloud prices" value={formatUsd(local.costUsd)} />
+          <Metric label="Unpriced tokens" value={formatTokens(unpriced.reduce((sum, m) => sum + m.tokens, 0))} />
         </div>
       </section>
 
-      {merged.tokens > 0 && <section className={cn('grid gap-x-12 gap-y-8 lg:grid-cols-2', figureClass(loading))}>
+      {merged.tokens > 0 && <section className="grid gap-x-12 gap-y-8 lg:grid-cols-2">
         <ShareBar label={`${metric === 'cost' ? 'Cost' : 'Tokens'} by provider`} metric={metric} segments={(Object.keys(PROVIDERS) as Array<keyof typeof PROVIDERS>).map(p => ({ label: PROVIDERS[p].label, figures: merged.byProvider[p], color: PROVIDERS[p].hue }))} />
         <ShareBar label={`${metric === 'cost' ? 'Cost' : 'Tokens'} by stage`} metric={metric} segments={stageSegments(merged.byStage)} />
       </section>}
@@ -104,12 +101,12 @@ export function Spend() {
           <Segmented small label="Breakdown" value={breakdown} onChange={setBreakdown} options={[['model', 'Model'], ['time', span.resolution === 'hour' ? 'Hour' : 'Day']]} />
         </div>
         {breakdown === 'model'
-          ? <ModelTable models={models} metric={metric} colors={colors} peak={peak} loading={loading} onOpen={setOpen} />
-          : <PeriodTable merged={merged} models={models} span={span} loading={loading} />}
+          ? <ModelTable models={models} metric={metric} colors={colors} peak={peak} onOpen={setOpen} />
+          : <PeriodTable merged={merged} models={models} span={span} />}
       </section>
     </div>}
     {selected && <ModelDialog model={selected} metric={metric} color={colors.get(selected.model)!} price={priceOf(selected.model, prices)} span={span} buckets={query.data?.buckets ?? []} onClose={() => setOpen('')} />}
-  </>
+  </div>
 }
 
 /** Which provider ran a model, and for a local one, whose price it takes. */
@@ -118,26 +115,26 @@ function providerLine(model: ModelTotals, price: SpendPrice | undefined) {
   return price?.priced_as ? `Local · priced as ${modelLabel(price.priced_as)}` : 'Local · no cloud price'
 }
 
-function ModelRow({ model, metric, color, price, loading }: { model: ModelTotals; metric: Metric; color: string; price?: SpendPrice; loading: boolean }) {
+function ModelRow({ model, metric, color, price }: { model: ModelTotals; metric: Metric; color: string; price?: SpendPrice }) {
   const unknown = isUnpriced(model)
   return <div className="flex flex-col gap-1">
     <div className="flex items-baseline justify-between gap-4">
       <span className="flex min-w-0 items-center gap-2 text-sm">
         <span aria-hidden className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-        <span className="flex min-w-0 items-baseline gap-1.5"><span className="truncate">{modelLabel(model.model)}</span><span className={cn('shrink-0 text-[11px] whitespace-nowrap text-muted-foreground tabular-nums', figureClass(loading))}>{formatCount(model.requests)} {model.requests === 1 ? 'call' : 'calls'}</span></span>
+        <span className="flex min-w-0 items-baseline gap-1.5"><span className="truncate">{modelLabel(model.model)}</span><span className="shrink-0 text-[11px] whitespace-nowrap text-muted-foreground tabular-nums">{formatCount(model.requests)} {model.requests === 1 ? 'call' : 'calls'}</span></span>
       </span>
-      <span className={cn('shrink-0 text-sm font-medium tabular-nums', figureClass(loading))}>{metric === 'tokens' ? formatTokens(model.tokens) : unknown ? 'Unpriced' : formatUsd(model.costUsd)}</span>
+      <span className="shrink-0 text-sm font-medium tabular-nums">{metric === 'tokens' ? formatTokens(model.tokens) : unknown ? 'Unpriced' : formatUsd(model.costUsd)}</span>
     </div>
-    <span className={cn('text-xs text-muted-foreground', figureClass(loading))}>
+    <span className="text-xs text-muted-foreground">
       {providerLine(model, price)} · {metric === 'cost' ? `${unknown ? '—' : formatPercent(model.costShare)} of cost · ${formatTokens(model.tokens)} tokens` : `${formatPercent(model.tokenShare)} of tokens · ${unknown ? 'unpriced' : formatUsd(model.costUsd)}`}
     </span>
   </div>
 }
 
-function Metric({ label, value, loading }: { label: string; value: string; loading: boolean }) {
+function Metric({ label, value }: { label: string; value: string }) {
   return <div className="flex min-w-0 flex-col gap-0.5">
     <span className="text-xs text-muted-foreground">{label}</span>
-    <span className={cn('text-base font-medium tabular-nums', figureClass(loading))}>{value}</span>
+    <span className="text-base font-medium tabular-nums">{value}</span>
   </div>
 }
 
@@ -172,7 +169,7 @@ function ShareBar({ label, segments, metric, aside }: { label: string; segments:
   </div>
 }
 
-function ModelTable({ models, metric, colors, peak, loading, onOpen }: { models: ModelTotals[]; metric: Metric; colors: Map<string, string>; peak: number; loading: boolean; onOpen: (model: string) => void }) {
+function ModelTable({ models, metric, colors, peak, onOpen }: { models: ModelTotals[]; metric: Metric; colors: Map<string, string>; peak: number; onOpen: (model: string) => void }) {
   return <table className="w-full text-sm">
     <thead><tr className="border-b border-border text-right text-xs text-muted-foreground">
       <th className="py-2 pr-3 text-left font-normal">#</th><th className="w-full py-2 text-left font-normal">Model</th>
@@ -184,7 +181,7 @@ function ModelTable({ models, metric, colors, peak, loading, onOpen }: { models:
           const value = metric === 'cost' ? model.costUsd : model.tokens
           const unknown = isUnpriced(model)
           const share = metric === 'tokens' ? model.tokenShare : unknown ? null : model.costShare
-          return <tr key={model.model} className={cn('relative border-b border-border/50 text-right whitespace-nowrap text-muted-foreground tabular-nums transition-colors hover:bg-hover has-focus-visible:bg-hover', figureClass(loading))}>
+          return <tr key={model.model} className="relative border-b border-border/50 text-right whitespace-nowrap text-muted-foreground tabular-nums hover:bg-hover has-focus-visible:bg-hover">
             <td className="py-2.5 pr-3 text-left text-xs">{i + 1}</td>
             <td className="py-2.5 text-left whitespace-normal">
               {/* The overlay makes the whole row open the model. */}
@@ -200,7 +197,7 @@ function ModelTable({ models, metric, colors, peak, loading, onOpen }: { models:
   </table>
 }
 
-function PeriodTable({ merged, models, span, loading }: { merged: Merged; models: ModelTotals[]; span: Window; loading: boolean }) {
+function PeriodTable({ merged, models, span }: { merged: Merged; models: ModelTotals[]; span: Window }) {
   const rows = merged.periods.filter(p => p.requests > 0).reverse()
   const width = `${60 / (models.length + 2)}%`
   return <table className="w-full table-fixed text-sm">
@@ -212,7 +209,7 @@ function PeriodTable({ merged, models, span, loading }: { merged: Merged; models
     </tr></thead>
     <tbody>
       {!rows.length ? <tr><td colSpan={models.length + 3} className="py-6 text-center text-muted-foreground">No activity in this window.</td></tr>
-        : rows.map(period => <tr key={period.period} className={cn('border-b border-border/50 transition-colors hover:bg-hover', figureClass(loading))}>
+        : rows.map(period => <tr key={period.period} className="border-b border-border/50 hover:bg-hover">
           <td className="py-2">{span.resolution === 'hour' ? new Date(period.period).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric' }) : new Date(`${period.period}T12:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', weekday: 'short' })}</td>
           {models.map(m => <td key={m.model} className="py-2 text-right text-muted-foreground tabular-nums">{formatUsd(period.byModel.get(m.model)?.costUsd ?? 0)}</td>)}
           <td className="py-2 text-right tabular-nums">{formatUsd(period.costUsd)}</td>
@@ -262,7 +259,7 @@ function ModelDialog({ model, metric, color, price, span, buckets, onClose }: {
 }
 
 export function SpendSkeleton() {
-  return <div className="flex max-w-5xl flex-col gap-8">
+  return <div className="mx-auto flex w-full max-w-5xl flex-col gap-8">
     <section className="grid gap-6 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
       <div className="flex flex-col gap-5">
         <span className="text-4xl font-semibold"><Skeleton mask="$12.34" /></span>

@@ -11,6 +11,8 @@ const VIEW_WIDTH = 960
 const VIEW_HEIGHT = 260
 const TICK_COUNT = 4
 const PLOT_TOP = 8
+/** Eases a path between shapes. A browser interpolates `d` only between paths with the same commands, so a new window, with more or fewer points, redraws at once. */
+const morph = 'transition-[d] duration-(--motion-progress) ease-out motion-reduce:transition-none'
 
 type Point = { x: number; y: number }
 
@@ -134,8 +136,9 @@ export function SpendChart({ models, colors, periods, metric, resolution }: {
         <svg className="h-full w-full" viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`} preserveAspectRatio="none" role="img" aria-label={`${resolution === 'hour' ? 'Hourly' : 'Daily'} ${metric === 'tokens' ? 'tokens' : 'cost'} by model`}>
           {scale.ticks.map(tick => <line key={tick} x1={0} x2={VIEW_WIDTH} y1={toY(tick, scale.max)} y2={toY(tick, scale.max)} stroke="currentColor" strokeWidth={1} className="text-border" vectorEffect="non-scaling-stroke" />)}
           {/* Fills first, then every stroke, so no series covers another's line. */}
-          {paths.map(({ model, area }) => <path key={model} d={area} fill={colors.get(model)} fillOpacity={0.12} />)}
-          {paths.map(({ model, line }) => <path key={model} d={line} fill="none" stroke={colors.get(model)} strokeWidth={2} vectorEffect="non-scaling-stroke" />)}
+          {/* The one motion on the page: a line eases to its new shape when the metric or the data changes. */}
+          {paths.map(({ model, area }) => <path key={model} d={area} fill={colors.get(model)} fillOpacity={0.12} className={morph} />)}
+          {paths.map(({ model, line }) => <path key={model} d={line} fill="none" stroke={colors.get(model)} strokeWidth={2} vectorEffect="non-scaling-stroke" className={morph} />)}
           {hover !== null && <line x1={hover * stepX} x2={hover * stepX} y1={PLOT_TOP} y2={VIEW_HEIGHT} stroke="currentColor" strokeWidth={1} className="text-muted-foreground" vectorEffect="non-scaling-stroke" />}
         </svg>
         {hovered && <div ref={tipRef} className="pointer-events-none absolute z-10 min-w-40 max-w-full rounded-xl border border-border/50 bg-popover/85 px-2.5 py-2 text-xs shadow-lg backdrop-blur-md" style={{ left: tip.x, top: tip.y }}>
