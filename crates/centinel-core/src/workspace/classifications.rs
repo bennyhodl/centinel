@@ -768,16 +768,6 @@ impl Classifications {
         reached(&self.conn, doc, chain)
     }
 
-    /// The tags on one document, the person's and the model's together.
-    pub(crate) fn tags_of(&self, doc: &DocumentId) -> anyhow::Result<Vec<String>> {
-        tags_of(&self.conn, doc)
-    }
-
-    /// Whether a document is excluded now.
-    pub(crate) fn is_excluded(&self, doc: &DocumentId) -> anyhow::Result<bool> {
-        is_excluded(&self.conn, doc)
-    }
-
     /// What a document's Lance rows should carry right now.
     pub(crate) fn state_of(&self, doc: &DocumentId) -> anyhow::Result<DocState> {
         Ok(DocState {
@@ -1587,9 +1577,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(cls.tags_of(&budget).unwrap(), ["laws"]);
-        assert!(!cls.is_excluded(&budget).unwrap());
-        assert!(cls.is_excluded(&menu).unwrap(), "the gate excludes live");
+        assert_eq!(cls.state_of(&budget).unwrap().tags, ["laws"]);
+        assert!(!cls.state_of(&budget).unwrap().excluded);
+        assert!(
+            cls.state_of(&menu).unwrap().excluded,
+            "the gate excludes live"
+        );
         assert_eq!(
             cls.stale_vectors(10)
                 .unwrap()
@@ -1610,7 +1603,7 @@ mod tests {
             .save_questions(stricter)
             .unwrap();
         assert_eq!(stricter[1].version, saved[1].version);
-        assert!(cls.tags_of(&budget).unwrap().is_empty());
+        assert!(cls.state_of(&budget).unwrap().tags.is_empty());
         let queued = cls.stale_vectors(10).unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].id, budget);
@@ -1667,7 +1660,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(cls.is_excluded(&menu).unwrap());
+        assert!(cls.state_of(&menu).unwrap().excluded);
 
         // A person calls it a record with a law in it.
         let review = |verdicts: Vec<(&str, Value)>| Review {
@@ -1701,8 +1694,8 @@ mod tests {
         // back to the model, which never answered it, so the tag goes.
         cls.record_review(&review(vec![("page_kind", json!("record"))]), Some(false))
             .unwrap();
-        assert!(cls.tags_of(&menu).unwrap().is_empty());
-        assert!(!cls.is_excluded(&menu).unwrap());
+        assert!(cls.state_of(&menu).unwrap().tags.is_empty());
+        assert!(!cls.state_of(&menu).unwrap().excluded);
 
         // The gate's threshold drops to where the menu would be junk again; the person's
         // word stands.
@@ -1712,7 +1705,7 @@ mod tests {
             .save_questions(looser)
             .unwrap();
         assert!(
-            !cls.is_excluded(&menu).unwrap(),
+            !cls.state_of(&menu).unwrap().excluded,
             "a restore survives policy"
         );
 
@@ -1819,26 +1812,26 @@ mod tests {
 
         let cls = Classifications::open(&store).unwrap();
         assert!(
-            cls.is_excluded(&menu).unwrap(),
+            cls.state_of(&menu).unwrap().excluded,
             "the gate's verdict excludes"
         );
         assert!(
-            cls.is_excluded(&committed).unwrap(),
+            cls.state_of(&committed).unwrap().excluded,
             "by policy, not by the dropped commit line"
         );
         assert!(
-            !cls.is_excluded(&restored).unwrap(),
+            !cls.state_of(&restored).unwrap().excluded,
             "the person's restore stands"
         );
         assert!(
-            !cls.is_excluded(&recommitted).unwrap(),
+            !cls.state_of(&recommitted).unwrap().excluded,
             "a commit after a restore does not undo the person"
         );
         assert!(
-            cls.tags_of(&budget).unwrap().is_empty(),
+            cls.state_of(&budget).unwrap().tags.is_empty(),
             "the person said no to `laws`"
         );
-        assert!(cls.tags_of(&moved).unwrap().is_empty());
+        assert!(cls.state_of(&moved).unwrap().tags.is_empty());
         let (answers, _) = cls.reached(&moved, &Policy::new(&saved).chain).unwrap();
         assert!(
             !answers.contains_key("laws@1"),
@@ -1889,7 +1882,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            cls.tags_of(&budget).unwrap().is_empty(),
+            cls.state_of(&budget).unwrap().tags.is_empty(),
             "0.85 does not clear the threshold saved after the run began"
         );
     }
@@ -1918,7 +1911,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(cls.tags_of(&budget).unwrap(), ["laws"]);
+        assert_eq!(cls.state_of(&budget).unwrap().tags, ["laws"]);
 
         let mut reworded = saved.clone();
         reworded[0].instructions = format!("{} Read the whole page.", saved[0].instructions);
@@ -1945,7 +1938,7 @@ mod tests {
             !answers.keys().any(|key| key.starts_with("laws")),
             "the old `laws` answer did not come back: {answers:?}"
         );
-        assert!(cls.tags_of(&budget).unwrap().is_empty());
+        assert!(cls.state_of(&budget).unwrap().tags.is_empty());
     }
 
     /// A questions file the live state was not decided under — here, edited by hand —
@@ -1971,7 +1964,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(cls.tags_of(&budget).unwrap(), ["laws"]);
+        assert_eq!(cls.state_of(&budget).unwrap().tags, ["laws"]);
         drop(cls);
 
         // The file changes under the database: a threshold `laws` no longer clears.
@@ -1984,7 +1977,7 @@ mod tests {
         std::fs::write(&path, lines).unwrap();
 
         let cls = Classifications::open(&store).unwrap();
-        assert!(cls.tags_of(&budget).unwrap().is_empty());
+        assert!(cls.state_of(&budget).unwrap().tags.is_empty());
         assert!(cls.meta("questions_fingerprint").unwrap().is_some());
     }
 }

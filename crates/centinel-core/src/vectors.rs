@@ -680,27 +680,16 @@ impl VectorTable {
             .collect();
         // A scalar index over nothing has nothing to say; the first append is soon.
         if rows > 0 {
-            let scalar: [(&str, fn() -> LanceIndex); 5] = [
-                (KEY_COLUMN, || {
-                    LanceIndex::BTree(BTreeIndexBuilder::default())
-                }),
-                (HASH_COLUMN, || {
-                    LanceIndex::BTree(BTreeIndexBuilder::default())
-                }),
-                (SOURCE_COLUMN, || {
-                    LanceIndex::Bitmap(BitmapIndexBuilder::default())
-                }),
-                (TAGS_COLUMN, || {
-                    LanceIndex::LabelList(LabelListIndexBuilder::default())
-                }),
-                (EXCLUDED_COLUMN, || {
-                    LanceIndex::Bitmap(BitmapIndexBuilder::default())
-                }),
-            ];
-            for (column, index) in scalar {
+            for column in [
+                KEY_COLUMN,
+                HASH_COLUMN,
+                SOURCE_COLUMN,
+                TAGS_COLUMN,
+                EXCLUDED_COLUMN,
+            ] {
                 if !existing.contains(column) {
                     self.table
-                        .create_index(&[column], index())
+                        .create_index(&[column], scalar_index(column))
                         .execute()
                         .await?;
                 }
@@ -1121,6 +1110,17 @@ fn metadata_columns<'a>(
 }
 
 /// The width of the vector column, or why there is no such thing.
+/// The scalar index a column is served from: a bitmap for the few values a filter narrows
+/// by, a label list for the tags a filter asks of a list, a B-tree for the keys a merge or
+/// a copy looks up one at a time.
+fn scalar_index(column: &str) -> LanceIndex {
+    match column {
+        SOURCE_COLUMN | EXCLUDED_COLUMN => LanceIndex::Bitmap(BitmapIndexBuilder::default()),
+        TAGS_COLUMN => LanceIndex::LabelList(LabelListIndexBuilder::default()),
+        _ => LanceIndex::BTree(BTreeIndexBuilder::default()),
+    }
+}
+
 fn vector_width(schema: &Schema) -> anyhow::Result<usize> {
     match schema
         .field_with_name(VECTOR_COLUMN)

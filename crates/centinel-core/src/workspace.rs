@@ -3940,7 +3940,8 @@ mod tests {
                 settings: RunSettings::default(),
                 record: true,
             })
-            .unwrap_err()
+            .err()
+            .expect("an empty scope is refused")
             .to_string();
         assert!(error.contains("no indexed document"), "{error}");
     }
@@ -4725,6 +4726,8 @@ mod tests {
             }],
             selection: None,
             repeat: None,
+            scope: None,
+            continue_from: None,
             model: "jev-test".into(),
             evaluation_date: "2026-09-17".into(),
             settings: RunSettings::default(),
@@ -5238,12 +5241,13 @@ mod tests {
         assert_eq!(
             Classifications::open(&store)
                 .unwrap()
-                .tags_of(&DocumentId {
+                .state_of(&DocumentId {
                     source: "city".into(),
                     resource: "https://example.gov/a-budget".into(),
                     derived_sha: detail.results[0].derived_sha.clone(),
                 })
                 .unwrap()
+                .tags
                 .len(),
             0,
             "the gate keeps records without a tag"
@@ -5302,7 +5306,8 @@ mod tests {
                 settings: RunSettings::default(),
                 record: true,
             })
-            .unwrap_err()
+            .err()
+            .expect("a finished chain is refused")
             .to_string();
         assert!(again.contains(&root.id), "{again}");
     }
@@ -5418,8 +5423,9 @@ mod tests {
         assert!(
             Classifications::open(&store)
                 .unwrap()
-                .is_excluded(&ids[1])
+                .state_of(&ids[1])
                 .unwrap()
+                .excluded
         );
         // The Test on the canvas is a preview of one document, down the same chain.
         let test = ws
