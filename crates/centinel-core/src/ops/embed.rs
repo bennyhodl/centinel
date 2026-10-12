@@ -1583,7 +1583,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(vectors[&shared.chunk_hash], vec![0.5; 2560]);
-        assert_eq!(table.len().await.unwrap(), 8);
+        // Read through a fresh handle: the one above was opened before the run wrote.
+        let reopened = VectorTable::open_existing(&ctx.store.vectors_db())
+            .await
+            .unwrap();
+        assert_eq!(reopened.len().await.unwrap(), 8);
     }
 
     /// The field failure end to end: a data file the storage never wrote blocks the
