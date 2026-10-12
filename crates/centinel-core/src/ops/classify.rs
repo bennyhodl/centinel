@@ -1,13 +1,12 @@
-//! `classify` — score indexed documents with Jev and act on the answers.
+//! `classify` — score indexed documents with Jev.
 //!
 //! The pipeline's labelling stage, and the CLI for running it by hand over the corpus, one
 //! source, or one document. It is the same run the web workspace starts from its Classify
 //! view: the saved questions go to Jev with each document's derived text, the answers land
-//! in `workspace/runs.jsonl`, and the current policy decides what they mean. What differs
-//! is what happens at the end — this op **commits**. A document whose junk probability
-//! clears the gate's threshold is excluded from search and embedding before `embed` ever
-//! sees it, and every tag that clears its threshold is on the record for search to filter
-//! by. The review band is left pending for a person, and `restore` undoes any exclusion.
+//! in the workspace, and the current policy decides what they mean — at once. A document
+//! whose junk probability clears the gate's threshold is out of search the moment its
+//! answer is written, every tag that clears its threshold is on the record for search to
+//! filter by, the review band is left for a person, and `restore` undoes any exclusion.
 //!
 //! ## The work list is a subtraction
 //!
@@ -32,8 +31,8 @@ use serde_json::json;
 
 use crate::prelude::*;
 use crate::workspace::{
-    self, MAX_RUN_DOCUMENTS, MAX_TEXT_BYTES, PendingDocument, Question, QuestionKind,
-    RunDetailQuery, RunRequest, RunResult, RunSettings, Workspace,
+    self, MAX_TEXT_BYTES, PendingDocument, Question, QuestionKind, RunDetailQuery, RunRequest,
+    RunResult, RunSettings, Workspace,
 };
 
 #[derive(Clone, Debug, Default, clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -104,7 +103,7 @@ pub struct ClassifyReport {
     pub questions: Vec<String>,
     /// Documents chosen for this run, after `--limit`.
     pub selected: usize,
-    /// Pending documents left behind by `--limit` or the run ceiling.
+    /// Pending documents left behind by `--limit`.
     pub remaining: usize,
     /// Documents Jev answered for.
     pub scored: usize,
@@ -138,8 +137,6 @@ pub struct ClassifyReport {
     /// The recorded run, so its detail can be read back in the Runs view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    /// Exclusions written to `workspace/decisions.jsonl` by this run.
-    pub committed: usize,
     pub dry_run: bool,
     pub preview: bool,
     /// The first few failures, with Jev's own words.
@@ -186,11 +183,9 @@ pub async fn classify(
         None => ws.pending_documents(&questions, args.source.as_deref(), args.rescore)?,
     };
     let outstanding = pending.len();
-    pending.truncate(
-        args.limit
-            .unwrap_or(MAX_RUN_DOCUMENTS)
-            .min(MAX_RUN_DOCUMENTS),
-    );
+    if let Some(limit) = args.limit {
+        pending.truncate(limit);
+    }
     let reach = ws.reach(&questions)?;
     let (estimated_tokens, estimated_cost_usd) = estimate(&pending, &questions, &reach, &model);
 
@@ -213,7 +208,6 @@ pub async fn classify(
         cost_usd: None,
         elapsed_secs: 0.0,
         run_id: None,
-        committed: 0,
         dry_run: args.dry_run,
         preview: args.preview,
         failures: Vec::new(),
@@ -247,14 +241,18 @@ pub async fn classify(
     let prepared = ws.prepare(request)?;
     let run = ws.execute_with(prepared, progress, cancel).await?;
 
-    // The same counting the Runs view does, under the policy the run was asked with.
-    let (view, _) = workspace::view_results(
-        &run.questions,
-        run.results.clone(),
-        &RunDetailQuery::default(),
-        false,
-    );
-    report.scored = run.results.len() - view.documents.errors - view.documents.not_asked;
+    // The same counting the Runs view does, under the policy the run was asked with. A
+    // recorded run's results are read back from the workspace; a preview's travel with it.
+    let detail = ws.run_detail(
+        &run.id,
+        RunDetailQuery {
+            outcome: "error".into(),
+            page_size: FAILURES_SHOWN,
+            ..RunDetailQuery::default()
+        },
+    )?;
+    let view = detail.view.unwrap_or_default();
+    report.scored = view.scored - view.documents.errors - view.documents.not_asked;
     report.failed = view.documents.errors;
     report.excluded = view.documents.excluded;
     report.review = view.documents.review;
@@ -265,12 +263,8 @@ pub async fn classify(
     report.input_tokens = run.input_tokens;
     report.cost_usd = run.cost_usd;
     report.elapsed_secs = run.duration_ms.unwrap_or_default() as f64 / 1000.0;
-    report.failures = failures(&run.results);
-
+    report.failures = failures(&detail.results);
     if !args.preview {
-        progress.say("committing exclusions");
-        let committed = ws.commit(&run.id)?;
-        report.committed = committed.committed;
         report.run_id = Some(run.id);
     }
     Ok(report)
@@ -360,6 +354,7 @@ fn tag_counts(
     out
 }
 
+/// The first page of a run's failed results, with Jev's own words.
 fn failures(results: &[RunResult]) -> Vec<ClassifyFailure> {
     results
         .iter()
@@ -433,10 +428,7 @@ impl Render for ClassifyReport {
                 if self.preview {
                     line.push_str(" · preview, nothing written");
                 } else if let Some(id) = &self.run_id {
-                    line.push_str(&format!(
-                        " · {} committed · run {id}",
-                        render::plural(self.committed, "exclusion", "exclusions")
-                    ));
+                    line.push_str(&format!(" · run {id}"));
                 }
                 p.line(p.paint(&line, Ink::Dim))?;
             }
@@ -578,9 +570,10 @@ mod tests {
     }
 
     /// The whole loop: a dry run prices and sends nothing, a preview scores and writes
-    /// nothing, a run scores, commits the gate's exclusion, and leaves nothing pending.
+    /// nothing, a run scores, the gate's exclusion is live at once, and nothing is left
+    /// pending.
     #[tokio::test]
-    async fn a_run_scores_what_is_pending_and_commits_the_gate() {
+    async fn a_run_scores_what_is_pending_and_the_gate_excludes_live() {
         let endpoint = fake_jev().await;
         // SAFETY: the only reader is a run that holds a key, and the only test with a key
         // is this one, in its own store.
@@ -603,8 +596,9 @@ mod tests {
         assert!(dry.estimated_tokens > 0);
         assert!(dry.estimated_cost_usd.unwrap() > 0.0);
         assert!(dry.run_id.is_none());
-        assert!(
-            !ctx.store.workspace_runs_path().exists(),
+        assert_eq!(
+            ws.runs(Default::default()).unwrap().total,
+            0,
             "a dry run writes nothing"
         );
         assert!(!ctx.store.spend_dir().exists(), "a dry run spends nothing");
@@ -623,11 +617,16 @@ mod tests {
         assert_eq!(preview.scored, 2);
         assert_eq!(preview.excluded, 1);
         assert!(preview.run_id.is_none());
-        assert!(
-            !ctx.store.workspace_runs_path().exists(),
+        assert_eq!(
+            ws.runs(Default::default()).unwrap().total,
+            0,
             "a preview writes nothing"
         );
-        assert!(!ctx.store.workspace_decisions_path().exists());
+        assert_eq!(
+            ws.documents(Default::default()).unwrap().facets.usage["excluded"],
+            0,
+            "and excludes nothing"
+        );
 
         let run = classify(
             &ctx,
@@ -641,7 +640,6 @@ mod tests {
         assert_eq!(run.scored, 2);
         assert_eq!(run.failed, 0);
         assert_eq!(run.excluded, 1, "the menu is junk");
-        assert_eq!(run.committed, 1);
         assert_eq!(
             run.tags.get("laws"),
             Some(&1),
@@ -674,18 +672,33 @@ mod tests {
         assert!((ledger_cost - run.cost_usd.unwrap()).abs() < 1e-12);
         assert_eq!(run.questions, ["page_kind", "laws"]);
 
-        let decisions = std::fs::read_to_string(ctx.store.workspace_decisions_path()).unwrap();
-        assert_eq!(decisions.lines().count(), 1);
-        assert!(decisions.contains("example.gov/menu"));
-
-        // Search and embed both read the exclusion: the menu's chunks are gone from the
-        // hash list `embed` builds its work list from.
+        // The exclusion is live: search no longer cites the menu, and the Corpus says why.
         let index = Index::open(ctx.store.index_path()).unwrap();
-        let hashes = index.chunk_hashes().unwrap();
-        let texts = index.chunk_texts(&hashes).unwrap();
-        assert!(texts.iter().any(|t| t.contains("Budget hearing")));
-        assert!(!texts.iter().any(|t| t.contains("Quick Links")));
+        assert!(
+            index
+                .search("Quick Links", 10, &crate::index::Filter::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !index
+                .search("Budget hearing", 10, &crate::index::Filter::default())
+                .unwrap()
+                .is_empty()
+        );
         drop(index);
+        let excluded = ws
+            .documents(crate::workspace::DocumentQuery {
+                usage: "excluded".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(excluded.total, 1);
+        assert_eq!(excluded.documents[0].resource, "https://example.gov/menu");
+        assert_eq!(
+            excluded.documents[0].exclusion_reason.as_deref(),
+            Some("page_kind")
+        );
 
         // Nothing pending: the record is answered, the menu is excluded.
         let questions = ws.questions().unwrap();
@@ -734,7 +747,6 @@ mod tests {
         .unwrap();
         assert_eq!(one.selected, 1);
         assert_eq!(one.scored, 1);
-        assert_eq!(one.committed, 0, "a tag is not a usage decision");
     }
 
     #[tokio::test]
@@ -750,7 +762,13 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("`nope`"), "{error}");
-        assert!(!ctx.store.workspace_runs_path().exists());
+        assert_eq!(
+            Workspace::new(&ctx.store)
+                .runs(Default::default())
+                .unwrap()
+                .total,
+            0
+        );
     }
 
     #[tokio::test]
@@ -892,7 +910,6 @@ mod tests {
             cost_usd: Some(0.02),
             elapsed_secs: 61.0,
             run_id: Some("run-1".into()),
-            committed: 40,
             dry_run: false,
             preview: false,
             failures: vec![ClassifyFailure {
@@ -907,7 +924,7 @@ mod tests {
         }
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("40") && out.contains("excluded"), "{out}");
-        assert!(out.contains("40 exclusions committed"), "{out}");
+        assert!(out.contains("run run-1"), "{out}");
         assert!(out.contains("30 more pending"), "{out}");
         assert!(out.contains("record_type:minutes"), "{out}");
         assert!(out.contains("too large"), "{out}");

@@ -1,8 +1,11 @@
-//! Durable classifier questions, runs, and usage decisions.
+//! Classifier questions, runs, reviews and usage: the workspace.
 //!
-//! Scores and the projection used by search are derived. Questions, run records, and
-//! operator decisions live under `workspace/`, outside the disposable search index.
-
+//! Questions live in `workspace/questions.jsonl`: small, append-only, last line wins.
+//! Everything a run or a person decides lives in `workspace/workspace.db`, owned by
+//! [`classifications`]; the search index attaches it and reads tags and exclusions from
+//! it as they stand. There is no commit step. What the current policy makes of the
+//! stored answers is what search sees, as soon as a result lands or a threshold moves,
+//! and a person's review or restore overrides it.
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -23,10 +26,13 @@ use crate::spend::{self, Ledger, Spend, Stage};
 use crate::store::Store;
 
 mod chain;
+pub(crate) mod classifications;
 mod defaults;
 #[cfg(test)]
 pub(crate) mod fake_jev;
 use chain::{Chain, Verdicts, question_of};
+pub use classifications::DocState;
+use classifications::{Classifications, Policy};
 pub use defaults::{Preset, default_questions, presets};
 
 static FILE_LOCK: Mutex<()> = Mutex::new(());
@@ -157,6 +163,8 @@ pub struct PreparedRun {
     /// The chain the run follows: its own questions, then the saved ones it does not ask,
     /// so a follow-up can hang off an answer a document already holds.
     tree: Vec<Question>,
+    /// The saved questions, which every recorded answer is decided under.
+    saved: Vec<Question>,
     /// What each document holds before the run asks anything.
     priors: HashMap<DocumentId, Prior>,
 }
@@ -358,9 +366,6 @@ pub const MAX_TEXT_BYTES: usize = 80_000;
 /// is recorded as failed rather than judged on a fragment.
 pub const MIN_TEXT_BYTES: usize = 8_000;
 
-/// The most documents one run can hold: every document in a corpus, with room to grow.
-pub const MAX_RUN_DOCUMENTS: usize = 50_000;
-
 /// The answer key of one option of a choice: `question:option`. Question and option ids
 /// hold only letters, numbers, and underscores, so the colon cannot be ambiguous.
 pub fn option_key(question: &str, option: &str) -> String {
@@ -482,7 +487,6 @@ pub struct Document {
     pub exclusion_reason: Option<String>,
     pub classifications: BTreeMap<String, f64>,
 }
-
 /// A document a classify run would send, with the size the estimate is priced from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingDocument {
@@ -623,8 +627,8 @@ pub struct RunRequest {
     #[serde(default)]
     pub settings: RunSettings,
     /// `false` makes a preview: the scores come back in the response and nothing is
-    /// written to `workspace/runs.jsonl`. A preview accepts unsaved questions because
-    /// it records no meaning.
+    /// written to the workspace. A preview accepts unsaved questions because it records
+    /// no meaning.
     #[serde(default = "default_true")]
     pub record: bool,
 }
@@ -660,6 +664,16 @@ pub struct RunResult {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub outcomes: BTreeMap<String, Outcome>,
 }
+impl RunResult {
+    /// The document this result is for.
+    pub fn id(&self) -> DocumentId {
+        DocumentId {
+            source: self.source.clone(),
+            resource: self.resource.clone(),
+            derived_sha: self.derived_sha.clone(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChoiceAnswer {
@@ -674,12 +688,15 @@ pub struct SampledText {
     pub total_chars: usize,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct CommitPreview {
-    pub affected_documents: usize,
-    pub affected_placements: usize,
-    pub affected_chunks: usize,
-    pub affected_chars: usize,
+/// What a run covers when it is not given explicit documents: every indexed document,
+/// in one source when named, or one document. Stored with the run, so a continuation
+/// can resolve the same scope as it stands later.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunScope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<DocumentId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -695,10 +712,21 @@ pub struct ClassifierRun {
     /// run keeps `questions` as the exact evaluation snapshot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effective_questions: Vec<Question>,
+    /// The first [`DETAIL_INPUTS`] explicit inputs. `document_count` is the whole run.
     pub inputs: Vec<DocumentId>,
     pub settings: RunSettings,
+    /// What the run covered, when it was given a scope rather than documents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<RunScope>,
+    /// The root of the chain this run continues, when it continues one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_from: Option<String>,
     pub document_count: usize,
     pub status: String,
+    /// Why the run stopped short: Jev's own words for an account it would not serve, or
+    /// the failure that ended it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     /// Summed over the results that reported usage — see `usage_documents`. A failed
     /// request has no usage to report; it must not turn a thousand known counts into
     /// "unknown".
@@ -715,8 +743,12 @@ pub struct ClassifierRun {
     pub duration_ms: Option<u64>,
     pub throughput_docs_sec: Option<f64>,
     pub errors: usize,
+    /// Documents answered so far, failures included.
+    #[serde(default)]
+    pub scored: usize,
+    /// A preview's results, in the order they arrived. A recorded run's live in the
+    /// database and a detail reads them from there; here it is one page of them.
     pub results: Vec<RunResult>,
-    pub preview: CommitPreview,
     /// Filled for a run detail only: the page of results it holds and the counts over
     /// every result. `results` and `inputs` in a detail are that page, not the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -758,7 +790,7 @@ fn result_page_size() -> usize {
 }
 
 /// How many inputs a run detail lists. A repeat copies the rest on the server.
-const DETAIL_INPUTS: usize = 200;
+pub(crate) const DETAIL_INPUTS: usize = 200;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RunView {
@@ -837,6 +869,8 @@ pub struct RunSummary {
     pub evaluation_date: String,
     pub document_count: usize,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cost_usd: Option<f64>,
@@ -856,6 +890,7 @@ impl From<&ClassifierRun> for RunSummary {
             evaluation_date: run.evaluation_date.clone(),
             document_count: run.document_count,
             status: run.status.clone(),
+            error: run.error.clone(),
             input_tokens: run.input_tokens,
             output_tokens: run.output_tokens,
             cost_usd: run.cost_usd,
@@ -875,35 +910,6 @@ pub struct RunPage {
     pub page_size: usize,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "record", rename_all = "snake_case")]
-enum RunRecord {
-    Start {
-        run: ClassifierRun,
-    },
-    Progress {
-        run_id: String,
-        result: RunResult,
-        model: String,
-        input_tokens: Option<u64>,
-        output_tokens: Option<u64>,
-        #[serde(default)]
-        usage_documents: usize,
-        duration_ms: u64,
-        errors: usize,
-    },
-    Complete {
-        run: ClassifierRun,
-    },
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct CommitReport {
-    pub run_id: String,
-    pub committed: usize,
-    pub preview: CommitPreview,
-}
-
 #[derive(Clone, Debug, Deserialize)]
 pub struct RestoreRequest {
     pub source: String,
@@ -914,18 +920,6 @@ pub struct RestoreRequest {
 #[derive(Clone, Debug, Serialize)]
 pub struct RestoreReport {
     pub restored: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct UsageDecision {
-    at: String,
-    source: String,
-    resource: String,
-    derived_sha: String,
-    excluded: bool,
-    reason: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    run_id: Option<String>,
 }
 
 /// What a person said about one question's answer for one document, beside what the
@@ -977,7 +971,7 @@ pub struct Review {
 }
 
 impl Review {
-    fn id(&self) -> DocumentId {
+    pub(crate) fn id(&self) -> DocumentId {
         DocumentId {
             source: self.source.clone(),
             resource: self.resource.clone(),
@@ -1143,15 +1137,18 @@ impl<'a> Workspace<'a> {
     }
 
     /// Save one ordered question set. The server owns versions so editing a text field in
-    /// a browser cannot create a version for every key stroke.
+    /// a browser cannot create a version for every key stroke. Every document holding an
+    /// answer to a question whose policy or meaning changed is re-decided at once; nothing
+    /// is sent to Jev.
     pub fn save_questions(&self, mut next: Vec<Question>) -> anyhow::Result<Vec<Question>> {
         validate_questions(&next)?;
         Chain::new(&next).validate()?;
-        let current: HashMap<String, Question> = self
-            .saved_questions()?
-            .into_iter()
-            .map(|q| (q.id.clone(), q))
-            .collect();
+        // Opened before the file changes, so the open sees a file it already matches and
+        // the one rewrite below is the targeted one.
+        let classifications = Classifications::open(self.store)?;
+        let previous = self.saved_questions()?;
+        let current: HashMap<String, &Question> =
+            previous.iter().map(|q| (q.id.clone(), q)).collect();
         let mut highest = HashMap::<String, u64>::new();
         for set in read_json_lines::<Vec<Question>>(&self.store.workspace_questions_path())? {
             for question in set {
@@ -1169,19 +1166,15 @@ impl<'a> Workspace<'a> {
             };
         }
         append_json(&self.store.workspace_questions_path(), &next)?;
+        classifications.questions_changed(self.store, &previous, &next)?;
         Ok(next)
     }
 
     pub fn documents(&self, mut query: DocumentQuery) -> anyhow::Result<CorpusPage> {
         query.page = query.page.max(1);
         query.page_size = query.page_size.clamp(1, 200);
-        let index_path = self.store.require_index()?;
-        let conn = open_index(index_path)?;
+        let conn = open_index(self.store)?;
         prepare_projection(&conn)?;
-
-        let current_questions = self.questions()?;
-        sync_search_projection(&conn, self.store.root())?;
-        sync_score_projection(&conn, self.store, &current_questions)?;
 
         let sources = string_column(
             &conn,
@@ -1220,11 +1213,6 @@ impl<'a> Workspace<'a> {
     /// current version — for a follow-up, only where the document's answers reach it. With
     /// `rescore`, every included document whether answered or not.
     ///
-    /// A subtraction, like every stage's work list: scoring a thousand documents and
-    /// stopping leaves the next run the rest, and saving a question with new wording puts
-    /// every document back in the queue for that question alone. Excluded documents are
-    /// not here — a document the gate already threw out is not sent again to be tagged.
-    ///
     /// Index order, so two runs over the same pending set take the same documents first.
     pub fn pending_documents(
         &self,
@@ -1232,11 +1220,8 @@ impl<'a> Workspace<'a> {
         source: Option<&str>,
         rescore: bool,
     ) -> anyhow::Result<Vec<PendingDocument>> {
-        let conn = open_index(self.store.require_index()?)?;
+        let conn = open_index(self.store)?;
         prepare_projection(&conn)?;
-        let current = self.questions()?;
-        sync_search_projection(&conn, self.store.root())?;
-        sync_score_projection(&conn, self.store, &current)?;
 
         let mut where_parts = vec!["x.source IS NULL".to_string()];
         let mut values: Vec<rusqlite::types::Value> = Vec::new();
@@ -1249,15 +1234,16 @@ impl<'a> Workspace<'a> {
                 return Ok(Vec::new());
             }
             // A root is owed by every document; a follow-up only by the documents whose
-            // answers reach it, which the projection lists.
+            // answers reach it, which the workspace lists. A score row exists only at a
+            // question's current version, so a reworded question is owed again.
             let missing: Vec<String> = questions
                 .iter()
                 .map(|q| {
-                    values.push(question_version(&q.id, q.version).into());
+                    values.push(q.id.clone().into());
                     match q.when {
-                        None => "NOT EXISTS (SELECT 1 FROM workspace_classification wc WHERE wc.source=d.source \
-                                 AND wc.resource=d.resource AND wc.derived_sha=d.derived_sha AND wc.question=?)",
-                        Some(_) => "EXISTS (SELECT 1 FROM workspace_open_follow_up o WHERE o.source=d.source \
+                        None => "NOT EXISTS (SELECT 1 FROM ws.score s WHERE s.source=d.source \
+                                 AND s.resource=d.resource AND s.derived_sha=d.derived_sha AND s.question=?)",
+                        Some(_) => "EXISTS (SELECT 1 FROM ws.open_follow_up o WHERE o.source=d.source \
                                     AND o.resource=d.resource AND o.derived_sha=d.derived_sha AND o.question=?)",
                     }
                     .to_string()
@@ -1267,7 +1253,7 @@ impl<'a> Workspace<'a> {
         }
         let sql = format!(
             "SELECT d.source,d.resource,d.derived_sha,d.chars FROM workspace_document d
-             LEFT JOIN workspace_exclusion x ON x.source=d.source AND x.resource=d.resource
+             LEFT JOIN ws.excluded x ON x.source=d.source AND x.resource=d.resource
                AND x.derived_sha=d.derived_sha
              WHERE {} ORDER BY d.source,d.resource",
             where_parts.join(" AND ")
@@ -1296,18 +1282,15 @@ impl<'a> Workspace<'a> {
     pub fn reach(&self, questions: &[Question]) -> anyhow::Result<HashMap<String, f64>> {
         let saved = self.questions()?;
         let chain = Chain::new(&saved);
-        let conn = open_index(self.store.require_index()?)?;
-        prepare_projection(&conn)?;
-        sync_search_projection(&conn, self.store.root())?;
-        sync_score_projection(&conn, self.store, &saved)?;
+        let conn = open_index(self.store)?;
         let mut shares = HashMap::new();
         for tag in saved.iter().filter_map(|q| q.when.as_deref()) {
-            let Some(parent) = chain.owner(tag) else {
+            if chain.owner(tag).is_none() {
                 continue;
-            };
+            }
             let (scored, landed): (i64, i64) = conn.query_row(
-                "SELECT COUNT(*),COALESCE(SUM(score>=0.5),0) FROM workspace_classification WHERE question=?1",
-                [question_version(tag, parent.version)],
+                "SELECT COUNT(*),COALESCE(SUM(value>=0.5),0) FROM ws.score WHERE question=?1",
+                [tag],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             if scored > 0 {
@@ -1344,7 +1327,7 @@ impl<'a> Workspace<'a> {
             resource: found.resource.natural_key.clone(),
             derived_sha: derivation.to_sha.to_string(),
         };
-        let conn = open_index(self.store.require_index()?)?;
+        let conn = open_index(self.store)?;
         let chars: Option<i64> = conn
             .query_row(
                 "SELECT MAX(char_end) FROM placement WHERE source=?1 AND resource=?2 AND derived_sha=?3",
@@ -1367,15 +1350,16 @@ impl<'a> Workspace<'a> {
 
     /// Records what a person said about one document, and acts on it at once.
     ///
-    /// The review is a ledger line first. Then its verdict on any question that can
-    /// exclude decides the document's usage — a `record` said of an excluded menu restores
-    /// it, a `navigation` said of a kept page excludes it — and its verdicts on the
-    /// questions that tag reach `workspace_tag` through the same projection the model's
-    /// answers take, marked `human`. So the review tool fixes search as it goes, and
-    /// `evaluate` reads the same line later to say how the model did.
+    /// The review is history first. Then its verdict on any question that can exclude
+    /// decides the document's usage — a `record` said of an excluded menu restores it, a
+    /// `navigation` said of a kept page excludes it — as an override that stands until a
+    /// person says otherwise, and its verdicts on the questions that tag land on the
+    /// document marked `human` through the same materialization the model's answers
+    /// take. So the review tool fixes search as it goes, and `evaluate` reads the same
+    /// review later to say how the model did.
     pub fn review(&self, mut review: Review) -> anyhow::Result<ReviewReport> {
         let questions = self.questions()?;
-        let conn = open_index(self.store.require_index()?)?;
+        let conn = open_index(self.store)?;
         let exists: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM placement WHERE source=?1 AND resource=?2 AND derived_sha=?3)",
             params![review.source, review.resource, review.derived_sha],
@@ -1412,7 +1396,6 @@ impl<'a> Workspace<'a> {
             .filter(|p| !p.is_empty())
             .collect();
         review.at = Timestamp::now().to_string();
-        append_json(&self.store.workspace_reviews_path(), &review)?;
 
         // Usage. Only a question that can exclude has a say; the last word is "exclude"
         // if any of them said so, else "include".
@@ -1442,43 +1425,12 @@ impl<'a> Workspace<'a> {
                 wants = Some(wants.unwrap_or(false) || says_exclude);
             }
         }
-        let id = review.id();
-        let decisions = self.store.workspace_decisions_path();
-        let excluded_now = latest_decisions(&decisions)?
-            .get(&id)
-            .is_some_and(|d| d.excluded);
-        let mut usage_changed = false;
-        let excluded = match wants {
-            Some(exclude) if exclude != excluded_now => {
-                append_json(
-                    &decisions,
-                    &UsageDecision {
-                        at: review.at.clone(),
-                        source: id.source.clone(),
-                        resource: id.resource.clone(),
-                        derived_sha: id.derived_sha.clone(),
-                        excluded: exclude,
-                        reason: "review".into(),
-                        run_id: None,
-                    },
-                )?;
-                usage_changed = true;
-                exclude
-            }
-            _ => excluded_now,
-        };
-
-        prepare_projection(&conn)?;
-        sync_search_projection(&conn, self.store.root())?;
-        sync_score_projection(&conn, self.store, &questions)?;
-        let tags = string_column(
-            &conn,
-            "SELECT DISTINCT tag FROM workspace_tag WHERE source=?1 AND resource=?2 AND derived_sha=?3 ORDER BY tag",
-            params![id.source, id.resource, id.derived_sha],
-        )?;
+        let policy = Policy::new(&questions);
+        let (before, after, tags) =
+            Classifications::open(self.store)?.record_review(&review, wants, &policy)?;
         Ok(ReviewReport {
-            excluded,
-            usage_changed,
+            excluded: after,
+            usage_changed: before != after,
             tags,
         })
     }
@@ -1489,10 +1441,8 @@ impl<'a> Workspace<'a> {
     /// never read into memory to pick twenty.
     pub fn review_queue(&self, query: ReviewQuery) -> anyhow::Result<ReviewQueue> {
         let questions = self.questions()?;
-        let conn = open_index(self.store.require_index()?)?;
+        let conn = open_index(self.store)?;
         prepare_projection(&conn)?;
-        sync_search_projection(&conn, self.store.root())?;
-        sync_score_projection(&conn, self.store, &questions)?;
 
         // The band, as rows the query joins rather than parameters it threads through:
         // one per answer key whose question holds a review floor.
@@ -1508,14 +1458,12 @@ impl<'a> Workspace<'a> {
             }
         }
         const ON_DOCUMENT: &str =
-            "wc.source=d.source AND wc.resource=d.resource AND wc.derived_sha=d.derived_sha";
-        let scored = format!(
-            "EXISTS (SELECT 1 FROM workspace_classification wc JOIN workspace_current_key ck ON ck.key=wc.question WHERE {ON_DOCUMENT})"
-        );
+            "s.source=d.source AND s.resource=d.resource AND s.derived_sha=d.derived_sha";
+        let scored = format!("EXISTS (SELECT 1 FROM ws.score s WHERE {ON_DOCUMENT})");
         let band = format!(
-            "EXISTS (SELECT 1 FROM workspace_classification wc JOIN review_band_key b ON b.key=wc.question WHERE {ON_DOCUMENT} AND wc.score>=b.floor AND wc.score<b.threshold)"
+            "EXISTS (SELECT 1 FROM ws.score s JOIN review_band_key b ON b.key=s.question WHERE {ON_DOCUMENT} AND s.value>=b.floor AND s.value<b.threshold)"
         );
-        let reviewed = "EXISTS (SELECT 1 FROM workspace_review r WHERE r.source=d.source AND r.resource=d.resource AND r.derived_sha=d.derived_sha)";
+        let reviewed = "EXISTS (SELECT 1 FROM ws.review r WHERE r.source=d.source AND r.resource=d.resource AND r.derived_sha=d.derived_sha)";
 
         let mut where_parts = vec![scored.clone()];
         let mut values: Vec<rusqlite::types::Value> = Vec::new();
@@ -1530,7 +1478,7 @@ impl<'a> Workspace<'a> {
             "SELECT d.source,d.resource,d.blob_sha,d.derived_sha,d.title,d.observed_at,d.tool,d.chars,d.chunks,
                     x.source IS NOT NULL,x.reason,({band}) AS band,({reviewed}) AS reviewed
              FROM workspace_document d
-             LEFT JOIN workspace_exclusion x ON x.source=d.source AND x.resource=d.resource AND x.derived_sha=d.derived_sha
+             LEFT JOIN ws.excluded x ON x.source=d.source AND x.resource=d.resource AND x.derived_sha=d.derived_sha
              WHERE {} ORDER BY band DESC, random() LIMIT ?",
             where_parts.join(" AND ")
         );
@@ -1578,7 +1526,7 @@ impl<'a> Workspace<'a> {
             in_review_band: count(&format!(
                 "SELECT COUNT(*) FROM workspace_document d WHERE {scored} AND {band} AND NOT {reviewed}"
             ))?,
-            reviewed: count("SELECT COUNT(*) FROM workspace_review")?,
+            reviewed: count("SELECT COUNT(*) FROM ws.review")?,
             scored: count(&format!(
                 "SELECT COUNT(*) FROM workspace_document d WHERE {scored}"
             ))?,
@@ -1587,17 +1535,18 @@ impl<'a> Workspace<'a> {
 
     /// The model against the people: per saved question, how often the current policy's
     /// decision matched a reviewer's verdict, and for a yes-or-no question the threshold
-    /// that would have matched most. Reads the ledgers only; nothing is sent anywhere.
+    /// that would have matched most. Reads the workspace only; nothing is sent anywhere.
     pub fn evaluation(&self) -> anyhow::Result<Evaluation> {
         let questions = self.questions()?;
-        let path = self.store.workspace_reviews_path();
-        let all = read_json_lines::<Review>(&path)?;
-        let latest = latest_reviews(&path)?;
-        let scores = latest_scores(
-            &self.store.workspace_runs_path(),
-            &path,
-            &Chain::new(&questions),
-        )?;
+        let classifications = Classifications::open(self.store)?;
+        let all = classifications.review_history()?;
+        let latest = classifications.latest_reviews()?;
+        let chain = Chain::new(&questions);
+        let mut scores = HashMap::new();
+        for id in latest.keys() {
+            let (stored, _) = classifications.reached(id, &chain)?;
+            scores.insert(id.clone(), stored);
+        }
         let mut proposed = BTreeMap::new();
         for review in &all {
             for name in &review.proposed {
@@ -1618,15 +1567,8 @@ impl<'a> Workspace<'a> {
     pub fn runs(&self, mut query: RunQuery) -> anyhow::Result<RunPage> {
         query.page = query.page.max(1);
         query.page_size = query.page_size.clamp(1, 100);
-        let mut runs = read_run_summaries(&self.store.workspace_runs_path())?;
-        runs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        let total = runs.len();
-        let offset = (query.page - 1).saturating_mul(query.page_size);
-        let runs = runs
-            .into_iter()
-            .skip(offset)
-            .take(query.page_size)
-            .collect();
+        let (runs, total) =
+            Classifications::open(self.store)?.runs(query.page, query.page_size, &active_runs())?;
         Ok(RunPage {
             runs,
             total,
@@ -1635,13 +1577,15 @@ impl<'a> Workspace<'a> {
         })
     }
 
-    /// One run with every result, live or from the ledger.
+    /// One run as it stands: the live snapshot while this process scores it, else the
+    /// stored summary.
     fn load_run(&self, id: &str) -> anyhow::Result<ClassifierRun> {
-        match live_run(id) {
-            Some(run) => Ok(run),
-            None => read_run(&self.store.workspace_runs_path(), id)?
-                .with_context(|| format!("unknown classifier run `{id}`")),
+        if let Some(run) = live_run(id) {
+            return Ok(run);
         }
+        Classifications::open(self.store)?
+            .run(id, &active_runs())?
+            .with_context(|| format!("unknown classifier run `{id}`"))
     }
 
     /// The run's evaluated questions under today's policy: a saved question with the same
@@ -1667,19 +1611,23 @@ impl<'a> Workspace<'a> {
         Ok(effective)
     }
 
-    /// A run with one page of its results, the counts over all of them under the current
-    /// policy, and a fresh commit preview once scoring has stopped.
+    /// A run with one page of its results and the counts over all of them under the
+    /// current policy.
     pub fn run_detail(&self, id: &str, query: RunDetailQuery) -> anyhow::Result<ClassifierRun> {
         let mut run = self.load_run(id)?;
         let effective = self.effective_questions(&run)?;
-        if matches!(run.status.as_str(), "completed" | "committed" | "preview") {
-            run.preview = preview(&effective, &run.results, self.store)?;
-        }
-        let results = std::mem::take(&mut run.results);
+        // A recorded run's results are in the database, in the order they arrived; a
+        // preview's are only in the live snapshot, which is empty for a recorded run.
+        let stored = Classifications::open(self.store)?.results(id)?;
+        let results = if stored.is_empty() {
+            std::mem::take(&mut run.results)
+        } else {
+            stored
+        };
         let live = run.status == "running";
         let (view, page) = view_results(&effective, results, &query, live);
         run.view = Some(RunView {
-            input_total: run.inputs.len(),
+            input_total: run.document_count,
             in_flight: if live { Flight::of(id) } else { Vec::new() },
             ..view
         });
@@ -1695,7 +1643,7 @@ impl<'a> Workspace<'a> {
             resource: query.resource,
             derived_sha: query.derived_sha,
         };
-        let conn = open_index(self.store.require_index()?)?;
+        let conn = open_index(self.store)?;
         let row: Option<(String, String, String, String)> = conn
             .query_row(
                 "SELECT blob_sha,observed_at,tool,derived_sha FROM placement
@@ -1720,9 +1668,11 @@ impl<'a> Workspace<'a> {
         } else {
             "unknown".into()
         };
-        let excluded = latest_decisions(&self.store.workspace_decisions_path())?
-            .get(&input)
-            .is_some_and(|d| d.excluded);
+        let excluded: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ws.excluded WHERE source=?1 AND resource=?2 AND derived_sha=?3)",
+            params![input.source, input.resource, input.derived_sha],
+            |r| r.get(0),
+        )?;
         Ok(ReadDocument {
             source: input.source,
             url: input.resource,
@@ -1760,8 +1710,10 @@ impl<'a> Workspace<'a> {
         if sources > 1 {
             bail!("give one of `documents`, `selection`, or `repeat`");
         }
+        let classifications = Classifications::open(self.store)?;
         if let Some(id) = request.repeat.take() {
-            request.documents = self.load_run(&id)?.inputs;
+            self.load_run(&id)?;
+            request.documents = classifications.inputs(&id, None)?;
             request
                 .settings
                 .values
@@ -1778,9 +1730,6 @@ impl<'a> Workspace<'a> {
         }
         if request.documents.is_empty() {
             bail!("select at least one document");
-        }
-        if request.documents.len() > MAX_RUN_DOCUMENTS {
-            bail!("a run can contain at most {MAX_RUN_DOCUMENTS} documents");
         }
         if request.model.trim().is_empty() {
             bail!("model is required");
@@ -1816,7 +1765,7 @@ impl<'a> Workspace<'a> {
 
         // The chain: the run's questions as sent — a preview may ask drafts — then the saved
         // ones it does not ask, whose answers a follow-up may hang off. The answers each
-        // document holds are the ledger's, folded the way the projection folds them.
+        // document holds are the workspace's, as the saved chain reaches them.
         let saved = self.saved_questions()?;
         let mut tree = request.questions.clone();
         tree.extend(
@@ -1825,31 +1774,21 @@ impl<'a> Workspace<'a> {
                 .filter(|q| !request.questions.iter().any(|asked| asked.id == q.id))
                 .cloned(),
         );
-        let reviews = latest_reviews(&self.store.workspace_reviews_path())?;
-        let mut scores = latest_scores(
-            &self.store.workspace_runs_path(),
-            &self.store.workspace_reviews_path(),
-            &Chain::new(&saved),
-        )?;
-        let priors: HashMap<DocumentId, Prior> = {
+        let priors = {
+            let saved_chain = Chain::new(&saved);
             let chain = Chain::new(&tree);
-            request
-                .documents
-                .iter()
-                .map(|id| {
-                    let prior = Prior {
-                        answers: scores
-                            .remove(id)
-                            .map(|stored| chain.current(&stored))
-                            .unwrap_or_default(),
-                        verdicts: reviews
-                            .get(id)
-                            .map(|review| review.verdicts.clone())
-                            .unwrap_or_default(),
-                    };
-                    (id.clone(), prior)
-                })
-                .collect()
+            let mut priors = HashMap::with_capacity(request.documents.len());
+            for id in &request.documents {
+                let (stored, verdicts) = classifications.reached(id, &saved_chain)?;
+                priors.insert(
+                    id.clone(),
+                    Prior {
+                        answers: chain.current(&stored),
+                        verdicts: verdicts.unwrap_or_default(),
+                    },
+                );
+            }
+            priors
         };
 
         let concurrency = request
@@ -1880,10 +1819,18 @@ impl<'a> Workspace<'a> {
             evaluation_date: request.evaluation_date.clone(),
             questions: request.questions.clone(),
             effective_questions: Vec::new(),
-            inputs: request.documents.clone(),
+            inputs: request
+                .documents
+                .iter()
+                .take(DETAIL_INPUTS)
+                .cloned()
+                .collect(),
             settings: request.settings.clone(),
+            scope: None,
+            continue_from: None,
             document_count: request.documents.len(),
             status: "running".into(),
+            error: None,
             input_tokens: Some(0),
             output_tokens: Some(0),
             cost_usd: None,
@@ -1892,8 +1839,8 @@ impl<'a> Workspace<'a> {
             duration_ms: None,
             throughput_docs_sec: None,
             errors: 0,
+            scored: 0,
             results: Vec::new(),
-            preview: CommitPreview::default(),
             view: None,
         };
         run.settings
@@ -1901,10 +1848,7 @@ impl<'a> Workspace<'a> {
             .entry("requested_model".into())
             .or_insert(json!(request.model));
         if request.record {
-            append_json(
-                &self.store.workspace_runs_path(),
-                &RunRecord::Start { run: run.clone() },
-            )?;
+            classifications.insert_run(&run, &request.documents)?;
         }
         ACTIVE_RUNS
             .lock()
@@ -1918,6 +1862,7 @@ impl<'a> Workspace<'a> {
             endpoint,
             concurrency,
             tree,
+            saved,
             priors,
         })
     }
@@ -1927,14 +1872,11 @@ impl<'a> Workspace<'a> {
         if selection.count == 0 {
             bail!("select at least one document");
         }
-        let conn = open_index(self.store.require_index()?)?;
+        let conn = open_index(self.store)?;
         prepare_projection(&conn)?;
-        let current_questions = self.questions()?;
-        sync_search_projection(&conn, self.store.root())?;
-        sync_score_projection(&conn, self.store, &current_questions)?;
         let query = DocumentQuery {
             page: 1,
-            page_size: selection.count.min(MAX_RUN_DOCUMENTS),
+            page_size: selection.count,
             search: selection.search.clone(),
             address: selection.address.clone(),
             source: selection.source.clone(),
@@ -1956,17 +1898,16 @@ impl<'a> Workspace<'a> {
     }
 
     /// Scores a prepared run: `concurrency` documents in flight to Jev at once, each
-    /// result recorded the moment it lands, the live snapshot updated with it. Results
-    /// are stored in input order however they arrive, so a repeated trial lines up.
+    /// result written the moment it lands, the live snapshot updated with it.
     pub async fn execute(&self, prepared: PreparedRun) -> anyhow::Result<ClassifierRun> {
         self.execute_with(prepared, &Progress::none(), &Cancel::none())
             .await
     }
 
     /// [`Workspace::execute`] for a caller with somewhere to put progress and a way to be
-    /// stopped: the CLI and the pipeline stage. A cancellation lands between results, so
-    /// every answer so far is in the ledger; the run is left `running` there and reads
-    /// back as `interrupted` once this process is gone, and the next run scores the rest.
+    /// stopped: the CLI and the web. A cancellation lands between results, so every
+    /// answer so far is in the workspace; the run is recorded `interrupted`, and a later
+    /// run scores the rest.
     pub async fn execute_with(
         &self,
         prepared: PreparedRun,
@@ -1982,16 +1923,22 @@ impl<'a> Workspace<'a> {
             endpoint,
             concurrency,
             tree,
+            saved,
             priors,
         } = prepared;
         let chain = Chain::new(&tree);
+        let policy = Policy::new(&saved);
+        // A preview records nothing, so it opens nothing.
+        let classifications = match request.record {
+            true => Some(Classifications::open(self.store)?),
+            false => None,
+        };
         let _active = ActiveRun(run.id.clone());
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
         let ledger = Ledger::new(self.store);
         let start = Instant::now();
-        let mut slots: Vec<Option<RunResult>> = vec![None; request.documents.len()];
 
         // Owned identities, and the futures built up front: a closure that takes
         // `&DocumentId` is higher-ranked over that lifetime, and `tokio::spawn` cannot
@@ -2017,21 +1964,18 @@ impl<'a> Workspace<'a> {
                         chain,
                         prior,
                     };
-                    (
-                        index,
-                        self.score(&client, api_key, endpoint, &asking, &input, run_id, index)
-                            .await,
-                    )
+                    self.score(&client, api_key, endpoint, &asking, &input, run_id, index)
+                        .await
                 }
             })
             .collect();
         let mut scored = futures::stream::iter(jobs).buffer_unordered(concurrency);
-        // The live snapshot is a copy of the whole run. Copying it for every result of a
-        // ten-thousand-document run is quadratic; a browser polls once a second anyway.
+        // The live snapshot is a copy of the run's counters; a browser polls once a
+        // second anyway.
         let mut published = Instant::now();
 
         let outcome: anyhow::Result<()> = async {
-            while let Some((index, scored)) = scored.next().await {
+            while let Some(scored) = scored.next().await {
                 if let Some((input, output)) = scored.usage {
                     // Previews too: a preview is a paid call like any other.
                     let model = scored.model.as_deref().unwrap_or(&request.model);
@@ -2046,24 +1990,19 @@ impl<'a> Workspace<'a> {
                 if scored.result.error.is_some() {
                     run.errors += 1;
                 }
-                slots[index] = Some(scored.result.clone());
-                run.results.push(scored.result.clone());
-                progress.item(answered(&scored.result));
+                run.scored += 1;
                 run.duration_ms = Some(start.elapsed().as_millis() as u64);
-                if request.record {
-                    append_json(
-                        &self.store.workspace_runs_path(),
-                        &RunRecord::Progress {
-                            run_id: run.id.clone(),
-                            result: scored.result,
-                            model: run.model.clone(),
-                            input_tokens: run.input_tokens,
-                            output_tokens: run.output_tokens,
-                            usage_documents: run.usage_documents,
-                            duration_ms: run.duration_ms.unwrap_or_default(),
-                            errors: run.errors,
-                        },
-                    )?;
+                progress.item(answered(&scored.result));
+                // Written as it lands, and kept nowhere else: the run's memory is its
+                // counters, however many documents it covers.
+                match &classifications {
+                    Some(classifications) => classifications.record_result(
+                        &run,
+                        &scored.result,
+                        scored.usage,
+                        &policy,
+                    )?,
+                    None => run.results.push(scored.result),
                 }
                 if published.elapsed() >= PUBLISH_EVERY {
                     publish(&run);
@@ -2073,11 +2012,9 @@ impl<'a> Workspace<'a> {
                     "classify",
                     format!(
                         "{} of {} scored · {} failed",
-                        run.results.len(),
-                        run.document_count,
-                        run.errors
+                        run.scored, run.document_count, run.errors
                     ),
-                    run.results.len() as u64,
+                    run.scored as u64,
                     run.document_count as u64,
                     crate::op::Unit::Count,
                 );
@@ -2092,15 +2029,19 @@ impl<'a> Workspace<'a> {
             run.status = if crate::op::is_cancelled(&error) {
                 "interrupted"
             } else {
+                run.error = Some(format!("{error:#}"));
                 "failed"
             }
             .into();
+            run.completed_at = Some(Timestamp::now().to_string());
+            if let Some(classifications) = &classifications {
+                classifications.finish_run(&run)?;
+            }
             publish(&run);
             return Err(error);
         }
 
         let duration_ms = start.elapsed().as_millis() as u64;
-        run.results = slots.into_iter().flatten().collect();
         run.completed_at = Some(Timestamp::now().to_string());
         run.status = (if request.record {
             "completed"
@@ -2110,18 +2051,14 @@ impl<'a> Workspace<'a> {
         .into();
         run.duration_ms = Some(duration_ms);
         run.throughput_docs_sec =
-            (duration_ms > 0).then(|| run.results.len() as f64 / (duration_ms as f64 / 1000.0));
-        run.preview = preview(&request.questions, &run.results, self.store)?;
+            (duration_ms > 0).then(|| run.scored as f64 / (duration_ms as f64 / 1000.0));
         run.cost_usd = match (run.input_tokens, run.output_tokens) {
             (Some(input), Some(output)) => spend::cost(&run.model, input, output),
             _ => None,
         };
         run.cost_estimated = run.cost_usd.is_some();
-        if request.record {
-            append_json(
-                &self.store.workspace_runs_path(),
-                &RunRecord::Complete { run: run.clone() },
-            )?;
+        if let Some(classifications) = &classifications {
+            classifications.finish_run(&run)?;
         }
         publish(&run);
         Ok(run)
@@ -2320,111 +2257,34 @@ impl<'a> Workspace<'a> {
         scored
     }
 
-    pub fn commit(&self, id: &str) -> anyhow::Result<CommitReport> {
-        // The whole run, never a detail page: the record appended below replaces it.
-        let mut run = self.load_run(id)?;
-        if run.status != "completed" && run.status != "committed" {
-            bail!(
-                "classifier run `{id}` is {} and cannot be committed",
-                run.status
-            );
-        }
-        let effective_questions = self.effective_questions(&run)?;
-        run.effective_questions.clear();
-        run.view = None;
-        run.preview = preview(&effective_questions, &run.results, self.store)?;
-        let conn = open_index(self.store.require_index()?)?;
-        prepare_projection(&conn)?;
-        sync_search_projection(&conn, self.store.root())?;
-        let affected: Vec<_> = affected(&effective_questions, &run.results)
-            .into_iter()
-            .filter(|input| {
-                conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM workspace_document d WHERE d.source=?1 AND d.resource=?2 AND d.derived_sha=?3
-                     AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x WHERE x.source=d.source AND x.resource=d.resource AND x.derived_sha=d.derived_sha))",
-                    params![input.source,input.resource,input.derived_sha], |r| r.get::<_,bool>(0)
-                ).unwrap_or(false)
-            }).collect();
-        let at = Timestamp::now().to_string();
-        let path = self.store.workspace_decisions_path();
-        let decisions: Vec<UsageDecision> = affected
-            .iter()
-            .map(|input| UsageDecision {
-                at: at.clone(),
-                source: input.source.clone(),
-                resource: input.resource.clone(),
-                derived_sha: input.derived_sha.clone(),
-                excluded: true,
-                reason: format!("classifier run {id}"),
-                run_id: Some(id.into()),
-            })
-            .collect();
-        append_json_lines(&path, &decisions)?;
-        let all = latest_decisions(&path)?
-            .into_values()
-            .filter(|d| d.excluded)
-            .map(|d| DocumentId {
-                source: d.source,
-                resource: d.resource,
-                derived_sha: d.derived_sha,
-            })
-            .collect::<Vec<_>>();
-        project_exclusions(&conn, &all)?;
-        run.status = "committed".into();
-        append_json(
-            &self.store.workspace_runs_path(),
-            &RunRecord::Complete { run: run.clone() },
-        )?;
-        Ok(CommitReport {
-            run_id: id.into(),
-            committed: affected.len(),
-            preview: run.preview,
-        })
-    }
-
+    /// Puts a document a person took out of search back, whatever the policy says, until
+    /// a person says otherwise.
     pub fn restore(&self, request: RestoreRequest) -> anyhow::Result<RestoreReport> {
-        let conn = open_index(self.store.require_index()?)?;
+        let conn = open_index(self.store)?;
         let exists: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM placement WHERE source=?1 AND resource=?2 AND derived_sha=?3)",
             params![request.source,request.resource,request.derived_sha], |r| r.get(0))?;
         if !exists {
             bail!("selected document identity is not in the index");
         }
-        let current = latest_decisions(&self.store.workspace_decisions_path())?;
+        let questions = self.questions()?;
+        let policy = Policy::new(&questions);
         let id = DocumentId {
-            source: request.source.clone(),
-            resource: request.resource.clone(),
-            derived_sha: request.derived_sha.clone(),
+            source: request.source,
+            resource: request.resource,
+            derived_sha: request.derived_sha,
         };
-        let restored = current.get(&id).is_some_and(|d| d.excluded);
-        append_json(
-            &self.store.workspace_decisions_path(),
-            &UsageDecision {
-                at: Timestamp::now().to_string(),
-                source: request.source,
-                resource: request.resource,
-                derived_sha: request.derived_sha,
-                excluded: false,
-                reason: "restored by operator".into(),
-                run_id: None,
-            },
+        let restored = Classifications::open(self.store)?.set_usage(
+            &id,
+            false,
+            "restored by operator",
+            &policy,
         )?;
-        prepare_projection(&conn)?;
-        let remaining = latest_decisions(&self.store.workspace_decisions_path())?
-            .into_values()
-            .filter(|d| d.excluded)
-            .map(|d| DocumentId {
-                source: d.source,
-                resource: d.resource,
-                derived_sha: d.derived_sha,
-            })
-            .collect::<Vec<_>>();
-        project_exclusions(&conn, &remaining)?;
         Ok(RestoreReport { restored })
     }
 
     async fn document_text(&self, input: &DocumentId) -> anyhow::Result<String> {
-        let conn = open_index(self.store.require_index()?)?;
+        let conn = open_index(self.store)?;
         let exists: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM placement WHERE source=?1 AND resource=?2 AND derived_sha=?3)",
             params![input.source, input.resource, input.derived_sha], |r| r.get(0))?;
@@ -2698,23 +2558,35 @@ fn validate_date(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Opens `centinel.db` and waits for a busy lock instead of failing on it.
+/// A snapshot of the runs this process is scoring, for telling a run left `running` by
+/// a process that is gone from one that is live.
+fn active_runs() -> std::collections::HashSet<String> {
+    ACTIVE_RUNS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Opens `centinel.db` with the workspace attached as `ws`, and waits for a busy lock
+/// instead of failing on it.
 ///
 /// A rebuild in another process holds the write lock for as long as it takes to clear
-/// and re-place a Source. Every workspace read that refreshes a projection is a write
-/// too, and without a busy timeout SQLite answers such a write with `SQLITE_BUSY` at
-/// once — "database is locked" in a browser that did nothing wrong. Five seconds covers
-/// the moments a rebuild is actually inside a transaction; a longer stall means the
-/// rebuild is the thing to watch, and the error then says so.
-pub(crate) fn open_index(path: impl AsRef<Path>) -> anyhow::Result<Connection> {
-    let conn = Connection::open(path)?;
+/// and re-place a Source, and without a busy timeout SQLite answers a write with
+/// `SQLITE_BUSY` at once — "database is locked" in a browser that did nothing wrong. Five
+/// seconds covers the moments a rebuild is actually inside a transaction; a longer stall
+/// means the rebuild is the thing to watch, and the error then says so.
+pub(crate) fn open_index(store: &Store) -> anyhow::Result<Connection> {
+    let conn = Connection::open(store.require_index()?)?;
     conn.busy_timeout(INDEX_BUSY_TIMEOUT)?;
+    Classifications::attach(&conn, store)?;
     Ok(conn)
 }
 
 /// How long a connection waits on a lock held by another process. See [`open_index`].
 pub const INDEX_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Keeps `workspace_document` — one row per address at its latest derivation — current
+/// with `placement`, rebuilding it when a placement changed since the last read.
 fn prepare_projection(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
         r#"
@@ -2736,43 +2608,8 @@ fn prepare_projection(conn: &Connection) -> anyhow::Result<()> {
         CREATE TRIGGER IF NOT EXISTS workspace_placement_update AFTER UPDATE ON placement BEGIN
           UPDATE workspace_meta SET value='1' WHERE key='documents_dirty';
         END;
-        CREATE TABLE IF NOT EXISTS workspace_exclusion (
-          source TEXT NOT NULL, resource TEXT NOT NULL, derived_sha TEXT NOT NULL,
-          reason TEXT,
-          PRIMARY KEY(source,resource,derived_sha)
-        );
-        CREATE TABLE IF NOT EXISTS workspace_classification (
-          source TEXT NOT NULL, resource TEXT NOT NULL, derived_sha TEXT NOT NULL,
-          question TEXT NOT NULL, score REAL NOT NULL,
-          PRIMARY KEY(source,resource,derived_sha,question)
-        );
-        CREATE TABLE IF NOT EXISTS workspace_required_question (
-          question TEXT PRIMARY KEY
-        );
-        CREATE TABLE IF NOT EXISTS workspace_open_follow_up (
-          source TEXT NOT NULL, resource TEXT NOT NULL, derived_sha TEXT NOT NULL,
-          question TEXT NOT NULL,
-          PRIMARY KEY(source,resource,derived_sha,question)
-        );
-        CREATE TABLE IF NOT EXISTS workspace_current_key (
-          key TEXT PRIMARY KEY
-        );
-        CREATE TABLE IF NOT EXISTS workspace_tag (
-          source TEXT NOT NULL, resource TEXT NOT NULL, derived_sha TEXT NOT NULL,
-          tag TEXT NOT NULL, by TEXT NOT NULL,
-          PRIMARY KEY(source,resource,derived_sha,tag,by)
-        );
-        CREATE INDEX IF NOT EXISTS workspace_tag_by_tag ON workspace_tag(tag);
-        CREATE TABLE IF NOT EXISTS workspace_review (
-          source TEXT NOT NULL, resource TEXT NOT NULL, derived_sha TEXT NOT NULL,
-          at TEXT NOT NULL, reviewer TEXT NOT NULL,
-          PRIMARY KEY(source,resource,derived_sha)
-        );
     "#,
     )?;
-    if !column_exists(conn, "workspace_exclusion", "reason")? {
-        conn.execute("ALTER TABLE workspace_exclusion ADD COLUMN reason TEXT", [])?;
-    }
     let dirty: String = conn.query_row(
         "SELECT value FROM workspace_meta WHERE key='documents_dirty'",
         [],
@@ -2805,7 +2642,6 @@ fn prepare_projection(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The matching documents' count, their summed characters, and the page asked for.
 /// One part of the corpus filter. A facet counts with every part but its own.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Filter {
@@ -2850,7 +2686,7 @@ fn filter_from(q: &DocumentQuery, except: Option<Filter>) -> (String, Vec<rusqli
         values.extend(sources.iter().map(|s| s.to_string().into()));
     }
     if except != Some(Filter::Classifier) && !q.classifier.trim().is_empty() {
-        where_parts.push("EXISTS (SELECT 1 FROM workspace_classification wc JOIN workspace_current_key ck ON ck.key=wc.question WHERE wc.source=d.source AND wc.resource=d.resource AND wc.derived_sha=d.derived_sha AND substr(ck.key,1,instr(ck.key,'@')-1)=? AND wc.score>=? AND wc.score<=?)".into());
+        where_parts.push("EXISTS (SELECT 1 FROM ws.score s WHERE s.source=d.source AND s.resource=d.resource AND s.derived_sha=d.derived_sha AND s.question=? AND s.value>=? AND s.value<=?)".into());
         values.push(q.classifier.clone().into());
         values.push(q.min_score.unwrap_or(0.5).clamp(0.0, 1.0).into());
         values.push(q.max_score.unwrap_or(1.0).clamp(0.0, 1.0).into());
@@ -2864,7 +2700,7 @@ fn filter_from(q: &DocumentQuery, except: Option<Filter>) -> (String, Vec<rusqli
         }
     }
     let from = format!(
-        " FROM workspace_document d LEFT JOIN workspace_exclusion x ON x.source=d.source AND x.resource=d.resource AND x.derived_sha=d.derived_sha WHERE {}",
+        " FROM workspace_document d LEFT JOIN ws.excluded x ON x.source=d.source AND x.resource=d.resource AND x.derived_sha=d.derived_sha WHERE {}",
         where_parts.join(" AND ")
     );
     (from, values)
@@ -2900,9 +2736,9 @@ fn facets(conn: &Connection, q: &DocumentQuery) -> anyhow::Result<CorpusFacets> 
 
     let (from, values) = filter_from(q, Some(Filter::Classifier));
     let mut stmt = conn.prepare(&format!(
-        "SELECT substr(ck.key,1,instr(ck.key,'@')-1),MIN(CAST(wc.score*10 AS INTEGER),9),COUNT(*)
-         FROM workspace_classification wc JOIN workspace_current_key ck ON ck.key=wc.question
-         WHERE (wc.source,wc.resource,wc.derived_sha) IN (SELECT d.source,d.resource,d.derived_sha {from})
+        "SELECT s.question,MIN(CAST(s.value*10 AS INTEGER),9),COUNT(*)
+         FROM ws.score s
+         WHERE (s.source,s.resource,s.derived_sha) IN (SELECT d.source,d.resource,d.derived_sha {from})
          GROUP BY 1,2"
     ))?;
     let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
@@ -2971,86 +2807,6 @@ fn select_identities(
         total_chars as usize,
         rows.collect::<Result<Vec<_>, _>>()?,
     ))
-}
-
-fn preview(
-    questions: &[Question],
-    results: &[RunResult],
-    store: &Store,
-) -> anyhow::Result<CommitPreview> {
-    let ids = affected(questions, results);
-    if ids.is_empty() {
-        return Ok(CommitPreview::default());
-    }
-    let conn = open_index(store.require_index()?)?;
-    prepare_projection(&conn)?;
-    let current = latest_decisions(&store.workspace_decisions_path())?;
-    let excluded = current
-        .into_values()
-        .filter(|d| d.excluded)
-        .map(|d| DocumentId {
-            source: d.source,
-            resource: d.resource,
-            derived_sha: d.derived_sha,
-        })
-        .collect::<Vec<_>>();
-    project_exclusions(&conn, &excluded)?;
-    conn.execute_batch("CREATE TEMP TABLE workspace_proposed(source TEXT,resource TEXT,derived_sha TEXT,PRIMARY KEY(source,resource,derived_sha));")?;
-    {
-        let mut stmt =
-            conn.prepare("INSERT OR IGNORE INTO workspace_proposed VALUES (?1,?2,?3)")?;
-        for id in ids {
-            let eligible: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM workspace_document d
-                 WHERE d.source=?1 AND d.resource=?2 AND d.derived_sha=?3
-                 AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x
-                   WHERE x.source=d.source AND x.resource=d.resource AND x.derived_sha=d.derived_sha))",
-                params![id.source,id.resource,id.derived_sha], |r| r.get(0))?;
-            if eligible {
-                stmt.execute(params![id.source, id.resource, id.derived_sha])?;
-            }
-        }
-    }
-    let affected_documents: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM workspace_proposed p WHERE NOT EXISTS (
-           SELECT 1 FROM workspace_exclusion x WHERE x.source=p.source AND x.resource=p.resource AND x.derived_sha=p.derived_sha)", [], |r| r.get(0))?;
-    let affected_placements: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM placement p JOIN workspace_proposed a
-         ON a.source=p.source AND a.resource=p.resource AND a.derived_sha=p.derived_sha
-         WHERE NOT EXISTS (SELECT 1 FROM workspace_exclusion x WHERE x.source=p.source AND x.resource=p.resource AND x.derived_sha=p.derived_sha)", [], |r| r.get(0))?;
-    let (affected_chunks, affected_chars): (i64,i64) = conn.query_row(
-        "SELECT COUNT(*),COALESCE(SUM(c.chars),0) FROM chunk c
-         WHERE EXISTS (SELECT 1 FROM placement p JOIN workspace_proposed a
-           ON a.source=p.source AND a.resource=p.resource AND a.derived_sha=p.derived_sha
-           WHERE p.chunk_hash=c.chunk_hash)
-         AND NOT EXISTS (SELECT 1 FROM placement p
-           WHERE p.chunk_hash=c.chunk_hash
-             AND NOT EXISTS (SELECT 1 FROM workspace_exclusion x WHERE x.source=p.source AND x.resource=p.resource AND x.derived_sha=p.derived_sha)
-             AND NOT EXISTS (SELECT 1 FROM workspace_proposed a WHERE a.source=p.source AND a.resource=p.resource AND a.derived_sha=p.derived_sha))",
-        [], |r| Ok((r.get(0)?,r.get(1)?)))?;
-    Ok(CommitPreview {
-        affected_documents: affected_documents as usize,
-        affected_placements: affected_placements as usize,
-        affected_chunks: affected_chunks as usize,
-        affected_chars: affected_chars as usize,
-    })
-}
-
-fn affected(questions: &[Question], results: &[RunResult]) -> Vec<DocumentId> {
-    results
-        .iter()
-        .filter(|r| {
-            r.error.is_none()
-                && questions
-                    .iter()
-                    .any(|q| decide(q, &r.answers).is_some_and(|o| o.excluded))
-        })
-        .map(|r| DocumentId {
-            source: r.source.clone(),
-            resource: r.resource.clone(),
-            derived_sha: r.derived_sha.clone(),
-        })
-        .collect()
 }
 
 fn failed_result(input: &DocumentId, error: String) -> RunResult {
@@ -3307,27 +3063,6 @@ fn run_id() -> String {
     format!("run-{nanos}-{}", std::process::id())
 }
 
-/// Many records in one append and one sync. A commit over a whole corpus writes
-/// thousands of decisions; a sync each is minutes of waiting for nothing.
-fn append_json_lines<T: Serialize>(path: &Path, values: &[T]) -> anyhow::Result<()> {
-    if values.is_empty() {
-        return Ok(());
-    }
-    let _lock = FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut buffer = Vec::new();
-    for value in values {
-        serde_json::to_writer(&mut buffer, value)?;
-        buffer.push(b'\n');
-    }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(&buffer)?;
-    file.sync_data()?;
-    Ok(())
-}
-
 fn append_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
     let _lock = FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(parent) = path.parent() {
@@ -3354,21 +3089,6 @@ fn read_json_lines<T: for<'de> Deserialize<'de>>(path: &Path) -> anyhow::Result<
                 .with_context(|| format!("malformed {} line {}", path.display(), i + 1))
         })
         .collect()
-}
-
-fn latest_decisions(path: &Path) -> anyhow::Result<HashMap<DocumentId, UsageDecision>> {
-    let mut out = HashMap::new();
-    for d in read_json_lines::<UsageDecision>(path)? {
-        out.insert(
-            DocumentId {
-                source: d.source.clone(),
-                resource: d.resource.clone(),
-                derived_sha: d.derived_sha.clone(),
-            },
-            d,
-        );
-    }
-    Ok(out)
 }
 
 /// The saved question set at `path`, as it is. No seeding: this is the read for a caller
@@ -3401,522 +3121,6 @@ pub fn known_tags(questions: &[Question]) -> Vec<String> {
         }
     }
     tags
-}
-
-/// Brings every projection search reads up to date: exclusions from the decisions
-/// ledger, scores and tags from the runs ledger under the saved questions. `Index` calls
-/// this on open, so the CLI's search and embed see what was committed without anyone
-/// opening `/web` first, and an index rebuild cannot restore excluded placements or lose
-/// tags by accident. The questions are read as saved — a store with none has no tags, and
-/// opening the index must not write a questions file.
-pub(crate) fn sync_for_search(conn: &Connection, root: &Path) -> anyhow::Result<()> {
-    prepare_projection(conn)?;
-    sync_search_projection(conn, root)?;
-    let store = Store::at(root);
-    let questions = saved_questions_at(&store.workspace_questions_path())?;
-    sync_score_projection(conn, &store, &questions)
-}
-
-/// Replays durable decisions into a disposable index when the ledger changed. Part of
-/// [`sync_for_search`], and called on its own by the paths that already know the
-/// questions.
-pub(crate) fn sync_search_projection(conn: &Connection, root: &Path) -> anyhow::Result<()> {
-    let path = Store::at(root).workspace_decisions_path();
-    let fingerprint = file_fingerprint(&path)?;
-    let recorded: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key='workspace_decisions_fingerprint'",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if recorded.as_deref() == Some(&fingerprint) {
-        return Ok(());
-    }
-    let decisions = latest_decisions(&path)?;
-    let tx = conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM workspace_exclusion", [])?;
-    {
-        let mut stmt = tx.prepare("INSERT INTO workspace_exclusion(source,resource,derived_sha,reason) VALUES (?1,?2,?3,?4)")?;
-        for decision in decisions.values().filter(|d| d.excluded) {
-            stmt.execute(params![
-                decision.source,
-                decision.resource,
-                decision.derived_sha,
-                decision.reason
-            ])?;
-        }
-    }
-    tx.execute(
-        "INSERT INTO meta(key,value) VALUES ('workspace_decisions_fingerprint',?1)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        [&fingerprint],
-    )?;
-    tx.commit()?;
-    Ok(())
-}
-
-/// Projects the runs, the saved questions and the reviews into the score, tag and review
-/// tables whenever any of the three ledgers changed.
-fn sync_score_projection(
-    conn: &Connection,
-    store: &Store,
-    current: &[Question],
-) -> anyhow::Result<()> {
-    let runs = store.workspace_runs_path();
-    let questions = store.workspace_questions_path();
-    let reviews = store.workspace_reviews_path();
-    // The leading version changes when the projection's shape does, so an index
-    // projected by an older build is projected again rather than read half-empty.
-    // `v3` added the tag projection; `v4` the reviews; `v5` the question chain.
-    let fingerprint = format!(
-        "v5:{}:{}:{}",
-        file_fingerprint(&runs)?,
-        file_fingerprint(&questions)?,
-        file_fingerprint(&reviews)?
-    );
-    let recorded: Option<String> = conn
-        .query_row(
-            "SELECT value FROM workspace_meta WHERE key='scores_fingerprint'",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if recorded.as_deref() == Some(&fingerprint) {
-        return Ok(());
-    }
-    let scores = latest_scores(&runs, &reviews, &Chain::new(current))?;
-    let reviews = latest_reviews(&reviews)?;
-    project_scores(conn, &scores, current, &reviews)?;
-    conn.execute(
-        "INSERT INTO workspace_meta(key,value) VALUES ('scores_fingerprint',?1)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        [&fingerprint],
-    )?;
-    Ok(())
-}
-
-fn file_fingerprint(path: &Path) -> anyhow::Result<String> {
-    match fs::metadata(path) {
-        Ok(meta) => {
-            let modified = meta
-                .modified()?
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            Ok(format!("{}:{modified}", meta.len()))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("missing".into()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn column_exists(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let names = stmt
-        .query_map([], |r| r.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(names.iter().any(|name| name == column))
-}
-
-/// Every document's answers as the ledgers leave them, keyed `key@version`.
-///
-/// The runs ledger and the reviews ledger are read as one history per document, in the
-/// order things happened: a run's results at the time the run started, a review at the
-/// time it was recorded, ledger order among equal times, and a record with no readable
-/// time as the oldest. After every step the chain is applied — see
-/// [`Chain::retain_reached`] — with the verdicts of the latest review so far. So any
-/// change of a parent's landed answer, by a run or by a person, drops the answers under
-/// it, and only answers recorded after the latest change count. Moving the parent back
-/// later revives nothing; the follow-up is owed and asked again.
-fn latest_scores(
-    runs: &Path,
-    reviews: &Path,
-    chain: &Chain,
-) -> anyhow::Result<HashMap<DocumentId, BTreeMap<String, f64>>> {
-    let recorded_at = |at: &str| at.parse::<Timestamp>().unwrap_or(Timestamp::MIN);
-    let mut history: HashMap<DocumentId, Vec<(Timestamp, Step)>> = HashMap::new();
-    for run in read_runs(runs)?.into_values() {
-        let at = recorded_at(&run.created_at);
-        let versions: HashMap<_, _> = run
-            .questions
-            .iter()
-            .map(|q| (q.id.as_str(), q.version))
-            .collect();
-        for result in run.results {
-            if result.error.is_some() {
-                continue;
-            }
-            // `question:option` carries the version of its question.
-            let answers = result
-                .answers
-                .into_iter()
-                .filter_map(|(key, score)| {
-                    let version = versions.get(question_of(&key))?;
-                    Some((question_version(&key, *version), score))
-                })
-                .collect();
-            let id = DocumentId {
-                source: result.source,
-                resource: result.resource,
-                derived_sha: result.derived_sha,
-            };
-            history
-                .entry(id)
-                .or_default()
-                .push((at, Step::Answers(answers)));
-        }
-    }
-    for review in read_json_lines::<Review>(reviews)? {
-        history
-            .entry(review.id())
-            .or_default()
-            .push((recorded_at(&review.at), Step::Review(review.verdicts)));
-    }
-    let mut out = HashMap::new();
-    for (id, mut steps) in history {
-        // Stable, so steps at one time keep their ledger order.
-        steps.sort_by_key(|(at, _)| *at);
-        let mut stored = BTreeMap::new();
-        let mut verdicts: Option<Verdicts> = None;
-        for (_, step) in steps {
-            match step {
-                Step::Answers(answers) => stored.extend(answers),
-                Step::Review(latest) => verdicts = Some(latest),
-            }
-            chain.retain_reached(&mut stored, verdicts.as_ref());
-        }
-        if !stored.is_empty() {
-            out.insert(id, stored);
-        }
-    }
-    Ok(out)
-}
-
-/// One thing that can move a document's answers: a run's answers, keyed `key@version`,
-/// or a person's review, whose verdicts stand until the next review replaces them.
-enum Step {
-    Answers(BTreeMap<String, f64>),
-    Review(Verdicts),
-}
-
-fn read_runs(path: &Path) -> anyhow::Result<BTreeMap<String, ClassifierRun>> {
-    let mut runs = BTreeMap::new();
-    for value in read_json_lines::<Value>(path)? {
-        if value.get("record").is_none() {
-            let run: ClassifierRun = serde_json::from_value(value)?;
-            runs.insert(run.id.clone(), run);
-            continue;
-        }
-        match serde_json::from_value::<RunRecord>(value)? {
-            RunRecord::Start { run } | RunRecord::Complete { run } => {
-                runs.insert(run.id.clone(), run);
-            }
-            RunRecord::Progress {
-                run_id,
-                result,
-                model,
-                input_tokens,
-                output_tokens,
-                usage_documents,
-                duration_ms,
-                errors,
-            } => {
-                if let Some(run) = runs.get_mut(&run_id) {
-                    run.results.push(result);
-                    run.model = model;
-                    run.input_tokens = input_tokens;
-                    run.output_tokens = output_tokens;
-                    run.usage_documents = usage_documents;
-                    run.duration_ms = Some(duration_ms);
-                    run.errors = errors;
-                }
-            }
-        }
-    }
-    let active = ACTIVE_RUNS.lock().unwrap_or_else(|e| e.into_inner());
-    for run in runs.values_mut() {
-        if run.status == "running" && !active.contains(&run.id) {
-            run.status = "interrupted".into();
-        }
-    }
-    Ok(runs)
-}
-
-fn read_run_summaries(path: &Path) -> anyhow::Result<Vec<RunSummary>> {
-    let mut runs = BTreeMap::<String, RunSummary>::new();
-    for_each_json_value(path, |value| {
-        if value.get("record").is_none() {
-            let run: ClassifierRun = serde_json::from_value(value)?;
-            runs.insert(run.id.clone(), RunSummary::from(&run));
-            return Ok(());
-        }
-        match serde_json::from_value::<RunRecord>(value)? {
-            RunRecord::Start { run } | RunRecord::Complete { run } => {
-                runs.insert(run.id.clone(), RunSummary::from(&run));
-            }
-            RunRecord::Progress {
-                run_id,
-                model,
-                input_tokens,
-                output_tokens,
-                duration_ms,
-                errors,
-                ..
-            } => {
-                if let Some(run) = runs.get_mut(&run_id) {
-                    run.model = model;
-                    run.input_tokens = input_tokens;
-                    run.output_tokens = output_tokens;
-                    run.duration_ms = Some(duration_ms);
-                    run.errors = errors;
-                }
-            }
-        }
-        Ok(())
-    })?;
-    let active = ACTIVE_RUNS.lock().unwrap_or_else(|e| e.into_inner());
-    for run in runs.values_mut() {
-        if run.status == "running" && !active.contains(&run.id) {
-            run.status = "interrupted".into();
-        }
-    }
-    Ok(runs.into_values().collect())
-}
-
-fn read_run(path: &Path, id: &str) -> anyhow::Result<Option<ClassifierRun>> {
-    let mut selected: Option<ClassifierRun> = None;
-    for_each_json_value(path, |value| {
-        if value.get("record").is_none() {
-            if value.get("id").and_then(Value::as_str) == Some(id) {
-                selected = Some(serde_json::from_value(value)?);
-            }
-            return Ok(());
-        }
-        match value.get("record").and_then(Value::as_str) {
-            Some("start" | "complete")
-                if value
-                    .get("run")
-                    .and_then(|run| run.get("id"))
-                    .and_then(Value::as_str)
-                    == Some(id) =>
-            {
-                match serde_json::from_value::<RunRecord>(value)? {
-                    RunRecord::Start { run } | RunRecord::Complete { run } => {
-                        selected = Some(run);
-                    }
-                    RunRecord::Progress { .. } => unreachable!(),
-                }
-            }
-            Some("progress") if value.get("run_id").and_then(Value::as_str) == Some(id) => {
-                if let (
-                    Some(run),
-                    RunRecord::Progress {
-                        result,
-                        model,
-                        input_tokens,
-                        output_tokens,
-                        usage_documents,
-                        duration_ms,
-                        errors,
-                        ..
-                    },
-                ) = (
-                    selected.as_mut(),
-                    serde_json::from_value::<RunRecord>(value)?,
-                ) {
-                    run.results.push(result);
-                    run.model = model;
-                    run.input_tokens = input_tokens;
-                    run.output_tokens = output_tokens;
-                    run.usage_documents = usage_documents;
-                    run.duration_ms = Some(duration_ms);
-                    run.errors = errors;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    })?;
-    if let Some(run) = &mut selected {
-        let active = ACTIVE_RUNS.lock().unwrap_or_else(|e| e.into_inner());
-        if run.status == "running" && !active.contains(&run.id) {
-            run.status = "interrupted".into();
-        }
-    }
-    Ok(selected)
-}
-
-fn for_each_json_value(
-    path: &Path,
-    mut visit: impl FnMut(Value) -> anyhow::Result<()>,
-) -> anyhow::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let file = fs::File::open(path)?;
-    for (index, line) in BufReader::new(file).lines().enumerate() {
-        let line = line?;
-        let value = serde_json::from_str(&line)
-            .with_context(|| format!("malformed {} line {}", path.display(), index + 1))?;
-        visit(value)?;
-    }
-    Ok(())
-}
-
-fn project_exclusions(conn: &Connection, excluded: &[DocumentId]) -> anyhow::Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM workspace_exclusion", [])?;
-    {
-        let mut stmt = tx.prepare(
-            "INSERT INTO workspace_exclusion(source,resource,derived_sha) VALUES (?1,?2,?3)",
-        )?;
-        for id in excluded {
-            stmt.execute(params![id.source, id.resource, id.derived_sha])?;
-        }
-    }
-    tx.commit()?;
-    Ok(())
-}
-
-/// The scores, and what the current policy makes of them, as tables search can join.
-///
-/// Scores are stored per answer key. Beside them, two things policy decides are written
-/// out so that nothing downstream re-applies a threshold: a choice's own row is the
-/// probability that the document is one of its exclude options, and `workspace_tag` holds
-/// every tag on a document — a yes-or-no question under its id, a choice option under
-/// `question:option`. A changed threshold reaches search by re-running this, never by
-/// re-asking Jev.
-///
-/// A person's verdict beats the model's for the question it answers: a `yes` is a tag
-/// marked `human`, a `no` or a different option takes the model's tag away, and the model's
-/// tags stand for every question nobody reviewed. `workspace_review` records which
-/// documents a person has looked at, so the review queue can skip them.
-///
-/// `scores` hold only what the chain reaches, so a follow-up a document was never asked
-/// has no row here: it is not a no, it scores in no facet, and it holds nothing in a review
-/// band. What a document still owes is written beside: `workspace_required_question` lists
-/// the roots every document owes, `workspace_open_follow_up` the follow-ups each document's
-/// answers reach and it has not answered.
-fn project_scores(
-    conn: &Connection,
-    scores: &HashMap<DocumentId, BTreeMap<String, f64>>,
-    questions: &[Question],
-    reviews: &HashMap<DocumentId, Review>,
-) -> anyhow::Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM workspace_classification", [])?;
-    tx.execute("DELETE FROM workspace_required_question", [])?;
-    tx.execute("DELETE FROM workspace_open_follow_up", [])?;
-    tx.execute("DELETE FROM workspace_current_key", [])?;
-    tx.execute("DELETE FROM workspace_tag", [])?;
-    tx.execute("DELETE FROM workspace_review", [])?;
-    {
-        let mut stmt = tx.prepare("INSERT OR REPLACE INTO workspace_classification(source,resource,derived_sha,question,score) VALUES (?1,?2,?3,?4,?5)")?;
-        let mut tag = tx.prepare(
-            "INSERT OR IGNORE INTO workspace_tag(source,resource,derived_sha,tag,by) VALUES (?1,?2,?3,?4,?5)",
-        )?;
-        let mut reviewed = tx.prepare(
-            "INSERT OR REPLACE INTO workspace_review(source,resource,derived_sha,at,reviewer) VALUES (?1,?2,?3,?4,?5)",
-        )?;
-        let mut open = tx.prepare(
-            "INSERT OR IGNORE INTO workspace_open_follow_up(source,resource,derived_sha,question) VALUES (?1,?2,?3,?4)",
-        )?;
-        let chain = Chain::new(questions);
-        let empty = BTreeMap::new();
-        let documents: std::collections::HashSet<&DocumentId> =
-            scores.keys().chain(reviews.keys()).collect();
-        for id in documents {
-            let answers = scores.get(id).unwrap_or(&empty);
-            let review = reviews.get(id);
-            for (question, score) in answers {
-                stmt.execute(params![
-                    id.source,
-                    id.resource,
-                    id.derived_sha,
-                    question,
-                    score
-                ])?;
-            }
-            if let Some(review) = review {
-                reviewed.execute(params![
-                    id.source,
-                    id.resource,
-                    id.derived_sha,
-                    review.at,
-                    review.reviewer
-                ])?;
-            }
-            for question in chain.open(answers, review.map(|r| &r.verdicts)) {
-                open.execute(params![
-                    id.source,
-                    id.resource,
-                    id.derived_sha,
-                    question_version(&question.id, question.version)
-                ])?;
-            }
-            for question in questions {
-                let verdict = review.and_then(|r| r.verdicts.get(&question.id));
-                let current = answers_for(question, answers);
-                let outcome = decide(question, &current);
-                // A choice's own score is the probability that the document is one of its
-                // exclude options under today's actions, so the Corpus can filter a junk
-                // gate like a noul and a changed action shows without re-scoring.
-                if question.kind == QuestionKind::Choice
-                    && let Some(outcome) = &outcome
-                {
-                    stmt.execute(params![
-                        id.source,
-                        id.resource,
-                        id.derived_sha,
-                        question_version(&question.id, question.version),
-                        outcome.exclusion.unwrap_or(0.0)
-                    ])?;
-                }
-                let (tags, by): (Vec<String>, &str) = match verdict {
-                    Some(verdict) => (human_tags(question, verdict), "human"),
-                    None => (
-                        outcome
-                            .map(|o| o.tags)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|tagged| match question.kind {
-                                QuestionKind::Noul => tagged,
-                                QuestionKind::Choice => option_key(&question.id, &tagged),
-                            })
-                            .collect(),
-                        "model",
-                    ),
-                };
-                for key in tags {
-                    tag.execute(params![id.source, id.resource, id.derived_sha, key, by])?;
-                }
-            }
-        }
-    }
-    {
-        let mut required =
-            tx.prepare("INSERT INTO workspace_required_question(question) VALUES (?1)")?;
-        let mut current =
-            tx.prepare("INSERT OR IGNORE INTO workspace_current_key(key) VALUES (?1)")?;
-        for question in questions {
-            let key = question_version(&question.id, question.version);
-            // Roots only: a follow-up is owed by the documents it reaches, which
-            // `workspace_open_follow_up` lists, and by no other.
-            if question.when.is_none() {
-                required.execute([&key])?;
-            }
-            current.execute([&key])?;
-            for option in &question.options {
-                current.execute([question_version(
-                    &option_key(&question.id, &option.id),
-                    question.version,
-                )])?;
-            }
-        }
-    }
-    tx.commit()?;
-    Ok(())
 }
 
 fn question_version(id: &str, version: u64) -> String {
@@ -3957,36 +3161,23 @@ fn human_tags(question: &Question, verdict: &Verdict) -> Vec<String> {
     }
 }
 
-/// A document's scores under the current questions, keyed without the version, as the
-/// Corpus and the review tool show them.
+/// A document's scores under the current questions, keyed the way the Corpus and the
+/// review tool show them.
 fn classifications_of(
     conn: &Connection,
     document: &Document,
 ) -> anyhow::Result<BTreeMap<String, f64>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT ck.key,wc.score FROM workspace_current_key ck
-         JOIN workspace_classification wc ON wc.question=ck.key
-         WHERE wc.source=?1 AND wc.resource=?2 AND wc.derived_sha=?3",
+        "SELECT question,value FROM ws.score WHERE source=?1 AND resource=?2 AND derived_sha=?3",
     )?;
     let rows = stmt.query_map(
         params![document.source, document.resource, document.derived_sha],
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)),
     )?;
-    Ok(rows
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|(key, score)| {
-            (
-                key.rsplit_once('@')
-                    .map_or(key.as_str(), |x| x.0)
-                    .to_owned(),
-                score,
-            )
-        })
-        .collect())
+    Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// Every answer key whose question holds a review floor, with the band it is held in:
+/// Every score key whose question holds a review floor, with the band it is held in:
 /// a yes-or-no question's own key; a choice's own key (its junk probability) when it can
 /// exclude, and each option that tags. Score rows in `[floor, threshold)` are the band.
 fn band_keys(questions: &[Question]) -> Vec<(String, f64, f64)> {
@@ -3996,11 +3187,10 @@ fn band_keys(questions: &[Question]) -> Vec<(String, f64, f64)> {
             continue;
         };
         let threshold = question.threshold;
-        let key = |id: &str| question_version(id, question.version);
         match question.kind {
             QuestionKind::Noul => {
                 if question.action != QuestionAction::Keep {
-                    keys.push((key(&question.id), floor, threshold));
+                    keys.push((question.id.clone(), floor, threshold));
                 }
             }
             QuestionKind::Choice => {
@@ -4009,11 +3199,11 @@ fn band_keys(questions: &[Question]) -> Vec<(String, f64, f64)> {
                     .iter()
                     .any(|o| o.action == QuestionAction::Exclude)
                 {
-                    keys.push((key(&question.id), floor, threshold));
+                    keys.push((question.id.clone(), floor, threshold));
                 }
                 for option in &question.options {
                     if option.action == QuestionAction::Tag {
-                        keys.push((key(&option_key(&question.id, &option.id)), floor, threshold));
+                        keys.push((option_key(&question.id, &option.id), floor, threshold));
                     }
                 }
             }
@@ -4152,27 +3342,21 @@ fn evaluate_question(
     out
 }
 
-fn latest_reviews(path: &Path) -> anyhow::Result<HashMap<DocumentId, Review>> {
-    let mut out = HashMap::new();
-    for review in read_json_lines::<Review>(path)? {
-        out.insert(review.id(), review);
-    }
-    Ok(out)
-}
-
 /// A document is pending while it lacks an answer to a root, or owes a follow-up its
 /// answers reach. A follow-up that does not reach it is not owed.
 fn pending_sql(document_alias: &str) -> String {
-    format!("((EXISTS (SELECT 1 FROM workspace_required_question) AND EXISTS (
-      SELECT 1 FROM workspace_required_question rq WHERE NOT EXISTS (
-        SELECT 1 FROM workspace_classification wc WHERE wc.source={document_alias}.source
-        AND wc.resource={document_alias}.resource AND wc.derived_sha={document_alias}.derived_sha
-        AND wc.question=rq.question))) OR
-      (NOT EXISTS (SELECT 1 FROM workspace_required_question) AND NOT EXISTS (
-        SELECT 1 FROM workspace_classification wc WHERE wc.source={document_alias}.source
-        AND wc.resource={document_alias}.resource AND wc.derived_sha={document_alias}.derived_sha)) OR
-      EXISTS (SELECT 1 FROM workspace_open_follow_up o WHERE o.source={document_alias}.source
-        AND o.resource={document_alias}.resource AND o.derived_sha={document_alias}.derived_sha))")
+    format!(
+        "((EXISTS (SELECT 1 FROM ws.required_question) AND EXISTS (
+      SELECT 1 FROM ws.required_question rq WHERE NOT EXISTS (
+        SELECT 1 FROM ws.score s WHERE s.source={document_alias}.source
+        AND s.resource={document_alias}.resource AND s.derived_sha={document_alias}.derived_sha
+        AND s.question=rq.question))) OR
+      (NOT EXISTS (SELECT 1 FROM ws.required_question) AND NOT EXISTS (
+        SELECT 1 FROM ws.score s WHERE s.source={document_alias}.source
+        AND s.resource={document_alias}.resource AND s.derived_sha={document_alias}.derived_sha)) OR
+      EXISTS (SELECT 1 FROM ws.open_follow_up o WHERE o.source={document_alias}.source
+        AND o.resource={document_alias}.resource AND o.derived_sha={document_alias}.derived_sha))"
+    )
 }
 
 fn string_column<P: rusqlite::Params>(
@@ -4206,35 +3390,53 @@ mod tests {
         }
     }
 
-    fn stored_run(id: &str, status: &str, question: Question, result: RunResult) -> ClassifierRun {
-        ClassifierRun {
+    /// A finished run with these results, written the way a live run writes one: the
+    /// start, one transaction per result under the saved policy, the end.
+    fn stored_run(store: &Store, id: &str, questions: &[Question], results: Vec<RunResult>) {
+        let saved = saved_questions_at(&store.workspace_questions_path()).unwrap();
+        let policy = Policy::new(&saved);
+        let classifications = Classifications::open(store).unwrap();
+        let inputs: Vec<DocumentId> = results.iter().map(RunResult::id).collect();
+        let mut run = ClassifierRun {
             id: id.into(),
             created_at: Timestamp::now().to_string(),
-            completed_at: (status != "running").then(|| Timestamp::now().to_string()),
+            completed_at: None,
             model: "jev-test".into(),
             evaluation_date: "2026-09-16".into(),
-            questions: vec![question],
+            questions: questions.to_vec(),
             effective_questions: Vec::new(),
-            inputs: vec![DocumentId {
-                source: result.source.clone(),
-                resource: result.resource.clone(),
-                derived_sha: result.derived_sha.clone(),
-            }],
+            inputs: inputs.clone(),
             settings: RunSettings::default(),
-            document_count: 1,
-            status: status.into(),
-            input_tokens: Some(10),
-            output_tokens: Some(1),
+            scope: None,
+            continue_from: None,
+            document_count: inputs.len(),
+            status: "running".into(),
+            error: None,
+            input_tokens: Some(0),
+            output_tokens: Some(0),
             cost_usd: None,
             cost_estimated: false,
-            usage_documents: 1,
+            usage_documents: 0,
             duration_ms: Some(2),
-            throughput_docs_sec: Some(500.0),
+            throughput_docs_sec: None,
             errors: 0,
-            results: vec![result],
-            preview: CommitPreview::default(),
+            scored: 0,
+            results: Vec::new(),
             view: None,
+        };
+        classifications.insert_run(&run, &inputs).unwrap();
+        for result in results {
+            run.scored += 1;
+            add_usage(&mut run.input_tokens, 10);
+            add_usage(&mut run.output_tokens, 1);
+            run.usage_documents += 1;
+            classifications
+                .record_result(&run, &result, Some((10, 1)), &policy)
+                .unwrap();
         }
+        run.status = "completed".into();
+        run.completed_at = Some(Timestamp::now().to_string());
+        classifications.finish_run(&run).unwrap();
     }
 
     #[tokio::test]
@@ -4307,8 +3509,8 @@ mod tests {
         assert!(ws.questions().unwrap().is_empty());
     }
 
-    /// The classify stage's work list: documents missing an answer for a question at its
-    /// current version, never excluded ones, and everything with `rescore`.
+    /// The classify work list: documents missing an answer for a question at its current
+    /// version, never excluded ones, and everything with `rescore`.
     #[tokio::test]
     async fn pending_documents_are_the_unanswered_included_ones() {
         let dir = tempfile::tempdir().unwrap();
@@ -4366,34 +3568,23 @@ mod tests {
             "no questions, nothing to answer"
         );
 
-        // `a` answered at the current version; `b` excluded by the operator.
-        let result = RunResult {
-            source: ids[0].source.clone(),
-            resource: ids[0].resource.clone(),
-            derived_sha: ids[0].derived_sha.clone(),
-            answers: BTreeMap::from([("noise".to_string(), 0.1)]),
-            ..RunResult::default()
-        };
-        append_json(
-            &store.workspace_runs_path(),
-            &RunRecord::Complete {
-                run: stored_run("run-a", "completed", noise[0].clone(), result),
-            },
-        )
-        .unwrap();
-        append_json(
-            &store.workspace_decisions_path(),
-            &UsageDecision {
-                at: "2026-10-07T12:00:00Z".into(),
-                source: ids[1].source.clone(),
-                resource: ids[1].resource.clone(),
-                derived_sha: ids[1].derived_sha.clone(),
-                excluded: true,
-                reason: "test".into(),
-                run_id: None,
-            },
-        )
-        .unwrap();
+        // `a` answered at the current version; `b` excluded by a person.
+        stored_run(
+            &store,
+            "run-a",
+            &noise,
+            vec![RunResult {
+                source: ids[0].source.clone(),
+                resource: ids[0].resource.clone(),
+                derived_sha: ids[0].derived_sha.clone(),
+                answers: BTreeMap::from([("noise".to_string(), 0.1)]),
+                ..RunResult::default()
+            }],
+        );
+        Classifications::open(&store)
+            .unwrap()
+            .set_usage(&ids[1], true, "review", &Policy::new(&noise))
+            .unwrap();
 
         let left = ws.pending_documents(&noise, None, false).unwrap();
         assert_eq!(
@@ -4421,12 +3612,11 @@ mod tests {
         );
     }
 
-    /// Tags reach search through a projection the index refreshes on open, from the runs
-    /// ledger under the saved policy: a yes-or-no question tags under its id, a choice
-    /// option under `question:option`, and a moved threshold changes the tags without a
-    /// new score.
+    /// Tags are live: a result lands as tags search can filter by the moment it is
+    /// written — a yes-or-no question tags under its id, a choice option under
+    /// `question:option` — and a moved threshold changes the tags without a new score.
     #[tokio::test]
-    async fn tags_are_projected_under_the_current_policy_when_the_index_opens() {
+    async fn tags_follow_the_current_policy_the_moment_it_changes() {
         use crate::index::Filter;
 
         let dir = tempfile::tempdir().unwrap();
@@ -4463,11 +3653,11 @@ mod tests {
             .save_questions(vec![pick("page_kind"), pick("record_type"), pick("budget")])
             .unwrap();
 
-        let mut run = stored_run(
+        stored_run(
+            &store,
             "run-tags",
-            "completed",
-            saved[0].clone(),
-            RunResult {
+            &saved,
+            vec![RunResult {
                 source: "city".into(),
                 resource: "https://example.gov/minutes".into(),
                 derived_sha: derived.clone(),
@@ -4479,10 +3669,8 @@ mod tests {
                     ("budget".to_string(), 0.83),
                 ]),
                 ..RunResult::default()
-            },
+            }],
         );
-        run.questions = saved.clone();
-        append_json(&store.workspace_runs_path(), &RunRecord::Complete { run }).unwrap();
 
         let index = Index::open(store.index_path()).unwrap();
         assert_eq!(
@@ -4515,15 +3703,13 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        drop(index);
 
         // Policy, not meaning: a higher threshold for `budget` is the same version, so no
-        // document is pending again — and the tag is gone the next time the index opens.
+        // document is pending again — and the tag is gone on the same index handle.
         let mut stricter = saved.clone();
         stricter[2].threshold = 0.9;
         let stricter = ws.save_questions(stricter).unwrap();
         assert_eq!(stricter[2].version, saved[2].version);
-        let index = Index::open(store.index_path()).unwrap();
         assert_eq!(
             index
                 .document_tags("city", "https://example.gov/minutes", &derived)
@@ -4538,9 +3724,10 @@ mod tests {
         );
     }
 
-    /// The review loop end to end: the queue offers the band first, a verdict restores a
-    /// document the gate excluded and tags it by hand, a `no` takes the model's tag away,
-    /// and the evaluation reads the same lines back as agreement.
+    /// The review loop end to end: the gate excludes live, the queue offers the band
+    /// first, a verdict restores a document the gate excluded and tags it by hand, a `no`
+    /// takes the model's tag away, and the evaluation reads the same reviews back as
+    /// agreement.
     #[tokio::test]
     async fn a_review_overrides_the_model_and_feeds_the_evaluation() {
         let dir = tempfile::tempdir().unwrap();
@@ -4608,22 +3795,21 @@ mod tests {
             ]),
             ..RunResult::default()
         };
-        let mut run = stored_run(
-            "run-review",
-            "completed",
-            saved[0].clone(),
+        let results = vec![
             answer(&ids[0], "navigation", 0.2),
-        );
-        run.questions = saved.clone();
-        run.results.push(answer(&ids[1], "record", 0.9));
-        run.results.push(answer(&ids[2], "record", 0.6));
-        run.inputs = ids.clone();
-        run.document_count = 3;
-        append_json(&store.workspace_runs_path(), &RunRecord::Complete { run }).unwrap();
+            answer(&ids[1], "record", 0.9),
+            answer(&ids[2], "record", 0.6),
+        ];
+        stored_run(&store, "run-review", &saved, results);
         assert_eq!(
-            ws.commit("run-review").unwrap().committed,
+            ws.documents(DocumentQuery {
+                usage: "excluded".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .total,
             1,
-            "the menu is excluded"
+            "the menu is excluded the moment its result lands"
         );
 
         // The band first: the notice's `laws` at 0.6 sits in [0.5, 0.8).
@@ -4683,14 +3869,17 @@ mod tests {
         assert!(report.usage_changed);
         assert_eq!(report.tags, ["laws"]);
         let index = Index::open(store.index_path()).unwrap();
-        let texts = index.chunk_texts(&index.chunk_hashes().unwrap()).unwrap();
         assert!(
-            texts.iter().any(|t| t.contains("Quick Links")),
+            index
+                .search("Quick Links", 10, &crate::index::Filter::default())
+                .unwrap()
+                .iter()
+                .any(|hit| hit.placements.iter().any(|p| p.resource.ends_with("/menu"))),
             "restored to search"
         );
         let by: Vec<String> = string_column(
-            &open_index(store.index_path()).unwrap(),
-            "SELECT by FROM workspace_tag WHERE resource='https://example.gov/menu'",
+            &open_index(&store).unwrap(),
+            "SELECT by FROM ws.tag WHERE resource='https://example.gov/menu'",
             [],
         )
         .unwrap();
@@ -4743,10 +3932,11 @@ mod tests {
 
         // A verdict that is not one of the question's answers is refused and recorded
         // nowhere.
-        let lines_before = fs::read_to_string(store.workspace_reviews_path())
+        let reviews_before = Classifications::open(&store)
             .unwrap()
-            .lines()
-            .count();
+            .review_history()
+            .unwrap()
+            .len();
         let error = ws
             .review(Review {
                 at: String::new(),
@@ -4768,11 +3958,12 @@ mod tests {
             .to_string();
         assert!(error.contains("`spreadsheet`"), "{error}");
         assert_eq!(
-            fs::read_to_string(store.workspace_reviews_path())
+            Classifications::open(&store)
                 .unwrap()
-                .lines()
-                .count(),
-            lines_before
+                .review_history()
+                .unwrap()
+                .len(),
+            reviews_before
         );
 
         // The evaluation: the model was wrong both times on `laws` and once on the gate.
@@ -5173,7 +4364,7 @@ mod tests {
 
         // A preview passes the saved-question guard. Without a key it stops at the
         // key check; with one it scores a missing document as an error. Either way
-        // nothing reaches the ledger.
+        // nothing reaches the workspace.
         match ws.run(request).await {
             Ok(run) => {
                 assert_eq!(run.status, "preview");
@@ -5181,47 +4372,69 @@ mod tests {
             }
             Err(error) => assert!(error.to_string().contains("TYPESAFE_API_KEY")),
         }
-        assert!(!store.workspace_runs_path().exists());
+        assert_eq!(ws.runs(RunQuery::default()).unwrap().total, 0);
     }
 
+    /// A run left `running` by a process that is gone reads back as interrupted, with
+    /// every result it wrote before it went.
     #[tokio::test]
     async fn unfinished_persisted_run_is_interrupted_after_restart() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
+        let ws = Workspace::new(&store);
+        let noise = ws.save_questions(vec![q("noise", "Noise?", 0)]).unwrap();
         let result = RunResult {
             source: "city".into(),
             resource: "https://example.gov/a".into(),
             derived_sha: "11".repeat(32),
             answers: BTreeMap::from([("noise".into(), 0.7)]),
-            error: None,
             ..RunResult::default()
         };
-        let mut run = stored_run(
-            "interrupted-test",
-            "running",
-            q("noise", "Noise?", 1),
-            result.clone(),
-        );
-        run.results.clear();
-        append_json(&store.workspace_runs_path(), &RunRecord::Start { run }).unwrap();
-        append_json(
-            &store.workspace_runs_path(),
-            &RunRecord::Progress {
-                run_id: "interrupted-test".into(),
-                result,
-                model: "jev-test".into(),
-                input_tokens: Some(10),
-                output_tokens: Some(1),
-                usage_documents: 1,
-                duration_ms: 2,
-                errors: 0,
-            },
-        )
-        .unwrap();
+        let classifications = Classifications::open(&store).unwrap();
+        let mut run = ClassifierRun {
+            id: "interrupted-test".into(),
+            created_at: Timestamp::now().to_string(),
+            completed_at: None,
+            model: "jev-test".into(),
+            evaluation_date: "2026-09-16".into(),
+            questions: noise.clone(),
+            effective_questions: Vec::new(),
+            inputs: vec![result.id()],
+            settings: RunSettings::default(),
+            scope: None,
+            continue_from: None,
+            document_count: 1,
+            status: "running".into(),
+            error: None,
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+            cost_usd: None,
+            cost_estimated: false,
+            usage_documents: 0,
+            duration_ms: None,
+            throughput_docs_sec: None,
+            errors: 0,
+            scored: 0,
+            results: Vec::new(),
+            view: None,
+        };
+        classifications.insert_run(&run, &[result.id()]).unwrap();
+        run.scored = 1;
+        classifications
+            .record_result(&run, &result, Some((10, 1)), &Policy::new(&noise))
+            .unwrap();
+        // No finish: the process that was scoring it is gone.
 
-        let saved = read_runs(&store.workspace_runs_path()).unwrap();
-        assert_eq!(saved["interrupted-test"].status, "interrupted");
-        assert_eq!(saved["interrupted-test"].results.len(), 1);
+        let read = ws
+            .run_detail("interrupted-test", RunDetailQuery::default())
+            .unwrap();
+        assert_eq!(read.status, "interrupted");
+        assert_eq!(read.scored, 1);
+        assert_eq!(read.results.len(), 1);
+        assert_eq!(
+            ws.runs(RunQuery::default()).unwrap().runs[0].status,
+            "interrupted"
+        );
     }
 
     #[test]
@@ -5230,23 +4443,6 @@ mod tests {
         add_usage(&mut total, 4);
         add_usage(&mut total, 3);
         assert_eq!(total, Some(7));
-    }
-
-    #[test]
-    fn only_exclusion_questions_make_commit_decisions() {
-        let mut tag = q("topic", "topic", 1);
-        tag.action = QuestionAction::Tag;
-        tag.threshold = 0.5;
-        let exclude = q("noise", "noise", 1);
-        let result = RunResult {
-            source: "s".into(),
-            resource: "r".into(),
-            derived_sha: "d".into(),
-            answers: BTreeMap::from([("topic".into(), 1.0), ("noise".into(), 0.89)]),
-            error: None,
-            ..RunResult::default()
-        };
-        assert!(affected(&[tag, exclude], &[result]).is_empty());
     }
 
     #[tokio::test]
@@ -5311,8 +4507,12 @@ mod tests {
         );
     }
 
+    /// Exclusion is live and durable: a lowered threshold takes a document out of search
+    /// the moment it is saved, a rebuilt index changes nothing because the decision never
+    /// lived in it, and a restore puts the document back whatever the policy says. A
+    /// shared passage keeps citing the document that stays included throughout.
     #[tokio::test]
-    async fn corpus_read_commit_and_restore_keep_shared_placements_separate() {
+    async fn corpus_read_exclusion_and_restore_keep_shared_placements_separate() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let text = b"# Budget hearing\n\nResidents may speak about the proposed budget.";
@@ -5388,24 +4588,18 @@ mod tests {
             .save_questions(vec![q("noise", "Is this noise?", 0)])
             .unwrap()
             .remove(0);
-        let result = RunResult {
-            source: "city".into(),
-            resource: "https://example.gov/a".into(),
-            derived_sha: derived.clone(),
-            answers: BTreeMap::from([("noise".into(), 0.89)]),
-            error: None,
-            ..RunResult::default()
-        };
-        let run = stored_run("run-test", "completed", question.clone(), result);
-        append_json(&store.workspace_runs_path(), &RunRecord::Complete { run }).unwrap();
-        assert_eq!(
-            ws.run_detail("run-test", RunDetailQuery::default())
-                .unwrap()
-                .preview
-                .affected_documents,
-            0
+        stored_run(
+            &store,
+            "run-test",
+            std::slice::from_ref(&question),
+            vec![RunResult {
+                source: "city".into(),
+                resource: "https://example.gov/a".into(),
+                derived_sha: derived.clone(),
+                answers: BTreeMap::from([("noise".into(), 0.89)]),
+                ..RunResult::default()
+            }],
         );
-        ws.commit("run-test").unwrap();
         assert_eq!(
             Index::open(store.index_path())
                 .unwrap()
@@ -5413,23 +4607,21 @@ mod tests {
                 .unwrap()[0]
                 .placements
                 .len(),
-            2
+            2,
+            "0.89 is under the threshold"
         );
         let mut lower_threshold = question;
         lower_threshold.threshold = 0.8;
         ws.save_questions(vec![lower_threshold]).unwrap();
-        let new_preview = ws
-            .run_detail("run-test", RunDetailQuery::default())
-            .unwrap()
-            .preview;
-        assert_eq!(new_preview.affected_documents, 1);
-        assert_eq!(new_preview.affected_chunks, 0);
-        assert_eq!(ws.commit("run-test").unwrap().committed, 1);
         let index = Index::open(store.index_path()).unwrap();
         let hits = index
             .search("budget", 10, &crate::index::Filter::default())
             .unwrap();
-        assert_eq!(hits[0].placements.len(), 1);
+        assert_eq!(
+            hits[0].placements.len(),
+            1,
+            "excluded as soon as the policy says so"
+        );
         assert_eq!(hits[0].placements[0].resource, "https://example.gov/b");
         drop(index);
         std::fs::remove_file(store.index_path()).unwrap();
@@ -5462,7 +4654,7 @@ mod tests {
         assert_eq!(
             replayed[0].placements.len(),
             1,
-            "the rebuilt index replayed the durable exclusion"
+            "the exclusion never lived in the index, so rebuilding it changes nothing"
         );
         assert_eq!(replayed[0].placements[0].resource, "https://example.gov/b");
         drop(rebuilt);
@@ -5631,7 +4823,20 @@ mod tests {
             .run(chain_run(&saved, &ids, &endpoint, true))
             .await
             .unwrap();
-        let (budget, menu) = (&run.results[0], &run.results[1]);
+        assert_eq!(run.input_tokens, Some(300), "three requests, not four");
+        // A recorded run's results are in the workspace, in arrival order.
+        let detail = ws.run_detail(&run.id, RunDetailQuery::default()).unwrap();
+        let find = |resource: &str| {
+            detail
+                .results
+                .iter()
+                .find(|r| r.resource == resource)
+                .unwrap()
+        };
+        let (budget, menu) = (
+            find("https://example.gov/budget"),
+            find("https://example.gov/menu"),
+        );
         assert_eq!(
             budget.answers["laws"], 0.95,
             "the record is asked its follow-up"
@@ -5642,17 +4847,17 @@ mod tests {
             (Some(2), Some(1)),
             "one request for each level a document reaches"
         );
-        assert_eq!(run.input_tokens, Some(300), "three requests, not four");
-        let (view, _) = view_results(
-            &saved,
-            run.results.clone(),
-            &RunDetailQuery::default(),
-            false,
-        );
+        let view = detail.view.as_ref().unwrap();
         assert_eq!(view.questions["laws"].not_asked, 1);
         assert_eq!(view.questions["laws"].tagged, 1);
         assert_eq!(view.documents.not_asked, 0, "the menu was asked the gate");
-
+        assert_eq!(view.documents.excluded, 1, "and the gate excluded it, live");
+        assert!(
+            Classifications::open(&store)
+                .unwrap()
+                .is_excluded(&ids[1])
+                .unwrap()
+        );
         // The Test on the canvas is a preview of one document, down the same chain.
         let test = ws
             .run(chain_run(&saved, &ids[1..], &endpoint, false))
@@ -5707,14 +4912,7 @@ mod tests {
             if let Some(score) = follow_up {
                 answers.insert("laws".into(), score);
             }
-            let mut run = stored_run(
-                id,
-                "completed",
-                saved[0].clone(),
-                answered(&ids[0], answers),
-            );
-            run.questions = saved.clone();
-            append_json(&store.workspace_runs_path(), &RunRecord::Complete { run }).unwrap();
+            stored_run(&store, id, &saved, vec![answered(&ids[0], answers)]);
         };
         let scores = || {
             ws.documents(DocumentQuery::default()).unwrap().documents[0]
@@ -5812,24 +5010,22 @@ mod tests {
             answers.insert("laws".into(), laws);
             answers
         };
-        let mut run = stored_run(
+        stored_run(
+            &store,
             "run-everything",
-            "completed",
-            saved[0].clone(),
-            answered(
-                &ids[0],
-                with_laws(&[("record", 0.95), ("navigation", 0.05)], 0.9),
-            ),
+            &saved,
+            vec![
+                answered(
+                    &ids[0],
+                    with_laws(&[("record", 0.95), ("navigation", 0.05)], 0.9),
+                ),
+                // The menu's `laws` sits in [0.5, 0.8): the band, were it counted.
+                answered(
+                    &ids[1],
+                    with_laws(&[("record", 0.05), ("navigation", 0.95)], 0.6),
+                ),
+            ],
         );
-        // The menu's `laws` sits in [0.5, 0.8): the band, were it counted.
-        run.results.push(answered(
-            &ids[1],
-            with_laws(&[("record", 0.05), ("navigation", 0.95)], 0.6),
-        ));
-        run.questions = saved.clone();
-        run.inputs = ids.clone();
-        run.document_count = 2;
-        append_json(&store.workspace_runs_path(), &RunRecord::Complete { run }).unwrap();
 
         let page = ws
             .documents(DocumentQuery {

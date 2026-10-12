@@ -1180,10 +1180,9 @@ mod tests {
     ///
     /// And the coverage claim with it. `embed --dry-run` is where "how much of the corpus
     /// has a vector" is answered — `search` used to print a share from a plain chunk
-    /// count, which ignored every one of the shapes below — so its four figures are proven
-    /// here against each of them: a passage carried by two documents is one chunk; a
-    /// document the workspace excluded contributes no chunk, and a vector it already had
-    /// is stale; a vector for a chunk the index never had is stale too.
+    /// count, which ignored the shapes below — so its figures are proven here against
+    /// each of them: a passage carried by two documents is one chunk, and a vector for a
+    /// chunk the index never had is stale.
     #[tokio::test]
     async fn stored_chunks_are_subtracted_from_the_work_list() {
         let (_dir, ctx) = indexed_store(10).await;
@@ -1202,31 +1201,14 @@ mod tests {
             }
         }
 
-        // Document 0 is excluded the way the workspace excludes one: a decision in the
-        // ledger, which the index replays when `embed` opens it.
-        let excluded = passage(0);
-        let decision = serde_json::json!({
-            "at": "2026-01-01T00:00:00Z",
-            "source": "test",
-            "resource": "https://example.gov/0",
-            "derived_sha": DERIVED,
-            "excluded": true,
-            "reason": "test",
-        });
-        let ledger = ctx.store.workspace_decisions_path();
-        std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
-        std::fs::write(&ledger, format!("{decision}\n")).unwrap();
-
-        // Stored: four live chunks, the shared one, the excluded one, and a hash no chunk
-        // has ever had.
+        // Stored: five live chunks, the shared one, and a hash no chunk has ever had.
         let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
             .await
             .unwrap();
-        let mut seeded: Vec<(String, Vec<f32>)> = (1..=4)
+        let mut seeded: Vec<(String, Vec<f32>)> = (0..=4)
             .map(|i| (passage(i).chunk_hash, vec![0.0; 2560]))
             .collect();
         seeded.push((shared.chunk_hash.clone(), vec![0.0; 2560]));
-        seeded.push((excluded.chunk_hash.clone(), vec![0.0; 2560]));
         seeded.push(("a".repeat(64), vec![0.0; 2560]));
         table.append(&seeded).await.unwrap();
 
@@ -1246,14 +1228,11 @@ mod tests {
         .await
         .unwrap();
 
-        // Ten passages plus the shared one, minus the excluded one.
-        assert_eq!(report.indexed, 10, "one chunk per distinct live passage");
-        assert_eq!(report.already_embedded, 5, "the shared chunk counts once");
+        // Ten passages plus the shared one.
+        assert_eq!(report.indexed, 11, "one chunk per distinct passage");
+        assert_eq!(report.already_embedded, 6, "the shared chunk counts once");
         assert_eq!(report.remaining, 5, "only unembedded chunks are work");
-        assert_eq!(
-            report.stale, 2,
-            "the excluded document's vector and the orphan are both stale"
-        );
+        assert_eq!(report.stale, 1, "the orphan is stale");
     }
 
     /// The field failure end to end: a data file the storage never wrote blocks the

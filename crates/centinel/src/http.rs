@@ -241,7 +241,6 @@ fn router(ctx: Arc<Ctx>) -> Router {
         .route("/workspace/presets", get(workspace_presets))
         .route("/workspace/runs", get(workspace_runs).post(workspace_run))
         .route("/workspace/runs/{id}", get(workspace_run_detail))
-        .route("/workspace/runs/{id}/commit", post(workspace_commit))
         .route("/workspace/restore", post(workspace_restore))
         .route("/workspace/review/queue", get(workspace_review_queue))
         .route("/workspace/review", post(workspace_review))
@@ -542,7 +541,7 @@ async fn workspace_run(
         match &result {
             Ok(run) => tracing::info!(
                 run = %run.id,
-                documents = run.results.len(),
+                documents = run.scored,
                 errors = run.errors,
                 duration_ms = run.duration_ms.unwrap_or_default(),
                 "classifier run finished"
@@ -613,17 +612,6 @@ async fn workspace_job_events(
         axum::http::HeaderValue::from_static("no"),
     );
     response
-}
-
-async fn workspace_commit(
-    State(ctx): State<Arc<Ctx>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    if !same_origin(&headers) {
-        return forbidden_origin();
-    }
-    workspace_response(Workspace::new(&ctx.store).commit(&id))
 }
 
 async fn workspace_restore(

@@ -7,8 +7,8 @@
 //!   runs/YYYY-MM.jsonl         TRUTH    what this machine attempted
 //!   decisions.jsonl            TRUTH    what the operator decided
 //!   workspace/questions.jsonl  TRUTH    saved classifier question sets
-//!   workspace/runs.jsonl       TRUTH    classifier attempts and scores
-//!   workspace/decisions.jsonl  TRUTH    reversible corpus usage decisions
+//!   workspace/workspace.db     TRUTH    classifier runs, answers, reviews, usage overrides
+//!   workspace/vectors.lock     RUNTIME  the one writer of vectors.lance at a time
 //!   spend/YYYY-MM.jsonl        TRUTH    every model call, its tokens and its cost
 //!   crumbs/<source>.jsonl      DERIVED  the off-host links each page dropped
 //!   current/<source>/…         DERIVED  URL-mirroring tree. Regenerable.
@@ -267,8 +267,8 @@ impl Store {
         self.root.join("decisions.jsonl")
     }
 
-    /// `workspace/` — durable classifier state. None of its files belong in the
-    /// disposable SQLite projection.
+    /// `workspace/` — durable classifier state. None of it belongs in the disposable
+    /// search index: an index rebuild must lose no answer and no verdict.
     pub fn workspace_dir(&self) -> PathBuf {
         self.root.join("workspace")
     }
@@ -278,19 +278,33 @@ impl Store {
         self.workspace_dir().join("questions.jsonl")
     }
 
-    /// `workspace/runs.jsonl` — classifier attempts, progress, scores, and metrics.
+    /// `workspace/workspace.db` — every classifier run and its results, the latest answer
+    /// per question, every review, a person's usage overrides, and what the current
+    /// policy makes of them. See [`crate::workspace`].
+    pub fn workspace_db_path(&self) -> PathBuf {
+        self.workspace_dir().join("workspace.db")
+    }
+
+    /// `workspace/vectors.lock` — held by whoever writes `vectors.lance` at the moment:
+    /// `embed` appending rows, a classifier run or a review syncing tags onto them.
+    pub fn vectors_lock_path(&self) -> PathBuf {
+        self.workspace_dir().join("vectors.lock")
+    }
+
+    /// `workspace/runs.jsonl` — the ledger classifier runs were written to before
+    /// `workspace.db`. Read once into it, never written again.
     pub fn workspace_runs_path(&self) -> PathBuf {
         self.workspace_dir().join("runs.jsonl")
     }
 
-    /// `workspace/decisions.jsonl` — reversible document usage decisions.
+    /// `workspace/decisions.jsonl` — the ledger usage decisions were written to before
+    /// `workspace.db`. Read once into it, never written again.
     pub fn workspace_decisions_path(&self) -> PathBuf {
         self.workspace_dir().join("decisions.jsonl")
     }
 
-    /// `workspace/reviews.jsonl` — what a person said about the classifier's answers,
-    /// document by document. The labelled set every evaluation and threshold is tuned
-    /// against, so it is truth: no replay of the runs can recover a human's verdict.
+    /// `workspace/reviews.jsonl` — the ledger reviews were written to before
+    /// `workspace.db`. Read once into it, never written again.
     pub fn workspace_reviews_path(&self) -> PathBuf {
         self.workspace_dir().join("reviews.jsonl")
     }
@@ -1175,6 +1189,8 @@ mod tests {
             s.workspace_questions_path()
                 .ends_with("workspace/questions.jsonl")
         );
+        assert!(s.workspace_db_path().ends_with("workspace/workspace.db"));
+        assert!(s.vectors_lock_path().ends_with("workspace/vectors.lock"));
         assert!(s.workspace_runs_path().ends_with("workspace/runs.jsonl"));
         assert!(
             s.workspace_decisions_path()

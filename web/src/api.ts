@@ -195,11 +195,10 @@ export type Run = {
   duration_ms?: number | null
   throughput_docs_sec?: number | null
   errors: number
-  preview: {
-    affected_documents: number
-    affected_chunks: number
-    affected_chars: number
-  }
+  /** Documents answered so far, failures included. */
+  scored?: number
+  /** Why the run stopped short: Jev's own words, or the failure that ended it. */
+  error?: string
   /** In a run detail: one page of results, filtered and sorted as asked. */
   results: RunResult[]
   view?: RunView
@@ -207,7 +206,7 @@ export type Run = {
 
 export type RunSummary = Pick<Run,
   'id' | 'created_at' | 'completed_at' | 'model' | 'evaluation_date' | 'document_count' |
-  'status' | 'input_tokens' | 'output_tokens' | 'cost_usd' | 'cost_estimated' | 'duration_ms' |
+  'status' | 'error' | 'input_tokens' | 'output_tokens' | 'cost_usd' | 'cost_estimated' | 'duration_ms' |
   'throughput_docs_sec' | 'errors'
 >
 
@@ -449,7 +448,6 @@ export const api = {
     /** `false` returns the scores without writing a run record. */
     record?: boolean
   }) => request<Run>('/workspace/runs', { method: 'POST', body: JSON.stringify(body) }),
-  commit: (id: string) => request<Run>(`/workspace/runs/${encodeURIComponent(id)}/commit`, { method: 'POST' }),
   restore: (identity: DocumentIdentity) => request<unknown>('/workspace/restore', {
     method: 'POST',
     body: JSON.stringify(identity),

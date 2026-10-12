@@ -394,7 +394,7 @@ fn retrieve(
     vector.truncate(ARM_DEPTH);
 
     let depth = RERANK_DEPTH.max(args.limit);
-    let mut hits = fuse(&index, keyword, &vector, depth)?;
+    let mut hits = fuse(&index, keyword, &vector, depth, &filter)?;
     // The tags ride with the hit, read off the document its first placement cites — the
     // one the result will name — so a reader sees why a filtered hit qualified and what
     // else it is.
@@ -571,12 +571,14 @@ async fn vector_arm(ctx: &Ctx, args: &SearchArgs) -> Result<Vec<(String, f32)>, 
 ///
 /// Keyword hits arrive already carrying their text and placements, so only the
 /// vector-only survivors are looked up — which is why the lookup is here, after the
-/// cut, rather than when the vector arm returned.
+/// cut, rather than when the vector arm returned — under the same filter, so a shared
+/// chunk never cites a document the filter left out.
 fn fuse(
     index: &Index,
     keyword: Vec<Hit>,
     vector: &[(String, f32)],
     limit: usize,
+    filter: &crate::index::Filter<'_>,
 ) -> anyhow::Result<Vec<Hit>> {
     let mut scores: HashMap<&str, f64> = HashMap::new();
     for (rank, hit) in keyword.iter().enumerate() {
@@ -609,7 +611,7 @@ fn fuse(
                 // one stale vector must not fail a whole query — and it is the same rule
                 // the keyword path applies to a hit with no placement, for the same
                 // reason: a result nothing can cite is worse than no result.
-                let placements = index.placements_of(hash)?;
+                let placements = index.placements_of(hash, filter)?;
                 if placements.is_empty() {
                     tracing::debug!(chunk = %hash, "a vector has no chunk in the index");
                     continue;
@@ -931,7 +933,7 @@ mod tests {
         let keyword = vec![hit("kw", 9.0), hit("both", 8.0)];
         let vector = vec![(sha("vec"), 0.99), (sha("both"), 0.98)];
 
-        let fused = fuse(&index, keyword, &vector, 3).unwrap();
+        let fused = fuse(&index, keyword, &vector, 3, &Default::default()).unwrap();
         assert_eq!(fused[0].chunk_hash, sha("both"), "{fused:?}");
         assert!(fused[0].score > fused[1].score);
     }
@@ -943,7 +945,14 @@ mod tests {
         let index = indexed(&[("a", "the budget for fiscal year 2026")]);
         let hash = index.chunk_hashes().unwrap().remove(0);
 
-        let fused = fuse(&index, Vec::new(), &[(hash.clone(), 0.9)], 5).unwrap();
+        let fused = fuse(
+            &index,
+            Vec::new(),
+            &[(hash.clone(), 0.9)],
+            5,
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(fused.len(), 1);
         assert_eq!(fused[0].chunk_hash, hash);
         assert_eq!(fused[0].text, "the budget for fiscal year 2026");
@@ -957,7 +966,7 @@ mod tests {
         let index = Index::in_memory().unwrap();
         let keyword = vec![hit("a", 9.0), hit("b", 8.0), hit("c", 7.0)];
 
-        let fused = fuse(&index, keyword, &[], 10).unwrap();
+        let fused = fuse(&index, keyword, &[], 10, &Default::default()).unwrap();
         let order: Vec<&str> = fused.iter().map(|h| h.chunk_hash.as_str()).collect();
         assert_eq!(order, vec![sha("a"), sha("b"), sha("c")]);
     }
@@ -972,6 +981,7 @@ mod tests {
             vec![hit("b", 1.0), hit("a", 1.0), hit("c", 1.0)],
             &[(sha("a"), 0.5), (sha("c"), 0.5), (sha("b"), 0.5)],
             3,
+            &Default::default(),
         )
         .unwrap();
         for _ in 0..8 {
@@ -980,6 +990,7 @@ mod tests {
                 vec![hit("b", 1.0), hit("a", 1.0), hit("c", 1.0)],
                 &[(sha("a"), 0.5), (sha("c"), 0.5), (sha("b"), 0.5)],
                 3,
+                &Default::default(),
             )
             .unwrap();
             let a: Vec<&String> = first.iter().map(|h| &h.chunk_hash).collect();

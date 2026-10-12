@@ -267,7 +267,7 @@ export function Classify() {
           <Button className="w-full h-11" disabled={blocked} onClick={() => run.mutate()}>{run.isPending ? <Spinner /> : <Play />}{label}</Button>
           {busy && <p className="text-xs leading-relaxed text-muted-foreground">A run is going. It shows above.</p>}
           {available.error && <ErrorBox error={available.error} />}{run.error && <ErrorBox error={run.error} />}
-          <p className="text-xs leading-relaxed text-muted-foreground">{recording ? 'A saved run does not change what search returns until you commit it.' : 'A preview is not saved and cannot be committed.'}</p>
+          <p className="text-xs leading-relaxed text-muted-foreground">{recording ? 'A saved run changes what search returns as each answer lands.' : 'A preview is not saved and changes nothing.'}</p>
         </div>
       </DialogContent>
     </Dialog>

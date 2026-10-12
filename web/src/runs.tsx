@@ -35,7 +35,7 @@ export function Runs() {
   const thisWeek = runs.filter(run => Date.parse(run.created_at) >= weekAgo)
   const spent = thisWeek.reduce((sum, run) => sum + (run.cost_usd || 0), 0)
   return <>
-    <PageHeader title="Runs" detail="Each run asks Jev your questions about a set of documents. Nothing changes in the corpus until you commit it.">
+    <PageHeader title="Runs" detail="Each run asks Jev your questions about a set of documents. What it decides is live in search as each answer lands.">
       <div className="flex shrink-0 items-end gap-9">
         <Stat value={spent ? money(spent) : '$0'} label={`this week · ${plural(thisWeek.length, 'run')}`} />
         <Stat value={running.length ? `${running.length} live` : 'None live'} label={running.length ? 'scoring now' : 'nothing scoring'} flame={running.length > 0} />
@@ -63,36 +63,28 @@ function HistoryRow({ summary, onOpen }: { summary: RunSummary; onOpen: (outcome
   const detail = useRunDetail(summary.id, { page: 1, page_size: 1 })
   const run = detail.data
   const totals = run?.view?.documents
-  const failed = summary.status === 'failed' || summary.status === 'interrupted'
-  const outcome = !totals ? '' : summary.status === 'committed'
-    ? `Committed · ${number(totals.excluded)} excluded`
-    : failed ? `Stopped · ${plural(totals.errors, 'error')}`
+  const failed = summary.status === 'failed' || summary.status === 'interrupted' || summary.status === 'stopped'
+  const outcome = !totals ? ''
+    : failed ? `Stopped · ${summary.error ? summary.error : plural(totals.errors, 'error')}`
       : [totals.kept && `${number(totals.kept)} keep`, totals.tagged && `${number(totals.tagged)} tagged`, totals.excluded && `${number(totals.excluded)} exclude`, totals.not_asked && `${number(totals.not_asked)} not asked`, totals.errors && `${number(totals.errors)} errors`].filter(Boolean).join(' · ') || 'Nothing decided'
   return <div role="button" tabIndex={0} onClick={() => onOpen('')} onKeyDown={event => event.key === 'Enter' && onOpen('')} className="flex cursor-pointer items-center gap-6 border-b py-4 hover:bg-hover">
     <span className="grid w-36 shrink-0 gap-0.5"><b className="text-sm font-semibold">{summary.created_at.slice(0, 16).replace('T', ' ')}</b><span className="text-xs text-muted-foreground">{seconds(summary.duration_ms)}{summary.cost_usd != null ? ` · ${money(summary.cost_usd)}` : ''}</span></span>
     <span className="grid min-w-0 flex-1 gap-0.5"><span className="truncate text-sm">{run ? `${asked(run)} · ${plural(summary.document_count, 'document')}` : plural(summary.document_count, 'document')}</span><span className="truncate font-mono text-xs text-muted-foreground">{summary.id} · {summary.model}</span></span>
-    <span className={`hidden w-56 shrink-0 text-[13px] md:block ${failed ? 'text-destructive' : summary.status === 'committed' ? 'text-muted-foreground' : ''}`}>{outcome}</span>
+    <span className={`hidden w-56 shrink-0 truncate text-[13px] md:block ${failed ? 'text-destructive' : ''}`} title={outcome}>{outcome}</span>
     <span className="flex w-52 shrink-0 justify-end" onClick={event => event.stopPropagation()}>{run && <NextStep run={run} onOpen={onOpen} />}</span>
   </div>
 }
 
-/** The one thing to do with a run next: commit its exclusions, review what it was unsure of, or run it again. */
+/** The one thing to do with a run next: review what it was unsure of, or run it again. */
 function NextStep({ run, onOpen }: { run: Run; onOpen: (outcome: ResultOutcome) => void }) {
   const client = useQueryClient()
-  const [armed, setArmed] = useState(false)
-  const commit = useMutation({
-    mutationFn: () => api.commit(run.id),
-    onSuccess: () => Promise.all([client.invalidateQueries({ queryKey: ['run'] }), client.invalidateQueries({ queryKey: ['runs'] }), client.invalidateQueries({ queryKey: ['corpus'] })]),
-  })
   const repeat = useMutation({
     mutationFn: () => api.run({ repeat: run.id, questions: run.questions, model: run.model, evaluation_date: run.evaluation_date, settings: { concurrency: run.settings.concurrency ?? 8 } }),
     onSuccess: () => client.invalidateQueries({ queryKey: ['runs'] }),
   })
-  const toExclude = run.preview?.affected_documents || 0
   const review = run.view?.documents.review || 0
-  if (run.status === 'completed' && toExclude) return <Button size="sm" disabled={commit.isPending} onClick={() => armed ? commit.mutate() : setArmed(true)} onBlur={() => setArmed(false)}>{commit.isPending ? <Spinner /> : null}{armed ? 'Click again to commit' : `Commit ${plural(toExclude, 'exclusion')}`}</Button>
   if (review) return <button type="button" onClick={() => onOpen('review')} className="h-8 rounded-md bg-flame-soft px-3 text-[13px] font-semibold text-flame-ink shadow-[inset_0_0_0_1px_var(--flame-line)]">Review {number(review)} →</button>
-  if (run.status === 'failed' || run.status === 'interrupted') return <Button size="sm" variant="outline" disabled={repeat.isPending} onClick={() => repeat.mutate()}>{repeat.isPending ? <Spinner /> : <RotateCcw />}Run again</Button>
+  if (run.status === 'failed' || run.status === 'interrupted' || run.status === 'stopped') return <Button size="sm" variant="outline" disabled={repeat.isPending} onClick={() => repeat.mutate()}>{repeat.isPending ? <Spinner /> : <RotateCcw />}Run again</Button>
   return <Button size="sm" variant="outline" onClick={() => onOpen('')}>Open</Button>
 }
 
@@ -122,7 +114,7 @@ function RunDetail({ run, view, setView, loading }: { run: Run; view: RunDetailQ
 /** The ledger before it arrives: the real header and columns, each row masked. */
 export function RunsSkeleton() {
   return <div aria-busy>
-    <PageHeader title="Runs" detail="Each run asks Jev your questions about a set of documents. Nothing changes in the corpus until you commit it." />
+    <PageHeader title="Runs" detail="Each run asks Jev your questions about a set of documents. What it decides is live in search as each answer lands." />
     <section className="mt-6">
       <div className="flex h-8 items-center gap-6 border-b border-foreground text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
         <span className="w-36 shrink-0">Started</span><span className="flex-1">Asked</span><span className="hidden w-56 shrink-0 md:block">Outcome</span><span className="w-52 shrink-0 text-right">Next</span>

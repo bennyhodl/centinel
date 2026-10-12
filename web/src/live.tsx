@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { ArrowRight, CircleAlert, CircleCheck, ShieldCheck, X } from 'lucide-react'
+import { ArrowRight, CircleAlert, CircleCheck, X } from 'lucide-react'
 import { api, type Question, type ResultOutcome, type Run, type RunDetailQuery, type RunResult } from './api'
 import { queries } from './queries'
 import { Button } from '@/components/ui/button'
@@ -90,15 +90,6 @@ export function LiveRun({ id, embedded, preview, actions, onDismiss, onOutcome }
     queryFn: () => api.runDetail(id, { outcome: 'error', page_size: 200 }),
     enabled: Boolean(run && !running && errors),
   })
-  const commit = useMutation({
-    mutationFn: () => api.commit(id),
-    onSuccess: () => Promise.all([
-      client.invalidateQueries({ queryKey: ['run'] }),
-      client.invalidateQueries({ queryKey: ['runs'] }),
-      client.invalidateQueries({ queryKey: ['corpus'] }),
-    ]),
-  })
-
   if (live.error) return <section className="mb-6 grid gap-3 rounded-xl border border-destructive p-6"><b className="inline-flex items-center gap-2 text-destructive"><CircleAlert className="size-4" />The run could not be read</b><ErrorBox error={live.error} /></section>
   if (!run) return <section className="mb-6 flex items-center gap-2 rounded-xl border border-flame-line bg-flame-wash p-6 text-sm text-flame-ink"><Spinner />Starting the run. Centinel is fixing the selection.</section>
 
@@ -110,16 +101,13 @@ export function LiveRun({ id, embedded, preview, actions, onDismiss, onOutcome }
   const rate = scored && elapsed > 0 ? scored / elapsed : null
   const left = rate ? (total - scored) / rate : null
   const questions = run.effective_questions?.length ? run.effective_questions : run.questions
-  const toExclude = run.preview?.affected_documents || 0
-  const failed = run.status === 'failed' || run.status === 'interrupted'
-  const canCommit = !preview && run.status === 'completed' && toExclude > 0
+  const failed = run.status === 'failed' || run.status === 'interrupted' || run.status === 'stopped'
   const go = (outcome: ResultOutcome) => onOutcome ? onOutcome(outcome) : !preview && navigate({ to: '/runs', search: { run: id, page: 1, outcome } })
   const failureGroups = groupErrors(failures.data?.results || [])
   const state = running
     ? { text: 'Scoring now', tone: 'text-flame-ink', mark: <span className="size-2 rounded-full bg-flame shadow-[0_0_0_4px_var(--flame-halo)]" /> }
     : failed ? { text: 'Stopped', tone: 'text-destructive', mark: <CircleAlert className="size-3.5" /> }
-      : run.status === 'committed' ? { text: 'Committed', tone: 'text-moss', mark: <ShieldCheck className="size-3.5" /> }
-        : { text: preview ? 'Preview finished' : 'Finished', tone: 'text-moss', mark: <CircleCheck className="size-3.5" /> }
+      : { text: preview ? 'Preview finished' : 'Finished', tone: 'text-moss', mark: <CircleCheck className="size-3.5" /> }
   const facts = [seconds(elapsed), run.cost_usd != null && money(run.cost_usd), run.input_tokens && `${compact(run.input_tokens)} tokens`].filter(Boolean).join(' · ')
 
   return <section aria-live="polite" className={`mb-6 grid gap-5 rounded-xl border p-6 ${running ? 'border-flame-line bg-flame-wash' : failed ? 'border-destructive-line bg-background' : 'bg-background'}`}>
@@ -132,7 +120,6 @@ export function LiveRun({ id, embedded, preview, actions, onDismiss, onOutcome }
       </div>
       <div className="flex shrink-0 items-center gap-2">
         {actions}
-        {canCommit && <Button onClick={() => commit.mutate()} disabled={commit.isPending}>{commit.isPending ? <Spinner /> : <ShieldCheck />}Commit {plural(toExclude, 'exclusion')}</Button>}
         {!embedded && !preview && <Button variant="outline" className="bg-background" onClick={() => navigate({ to: '/runs', search: { run: id, page: 1, outcome: '' } })}>{running ? 'Open' : 'Every result'}<ArrowRight /></Button>}
         {!embedded && onDismiss && !running && <Button variant="ghost" size="icon" aria-label="Dismiss" onClick={onDismiss}><X /></Button>}
       </div>
@@ -168,14 +155,11 @@ export function LiveRun({ id, embedded, preview, actions, onDismiss, onOutcome }
       </Ledger>
     </div>}
 
-    {!running && <p className="text-sm text-muted-foreground">
-      {preview ? 'A preview: the scores are below. Nothing was saved, so it cannot be committed.'
-        : run.status === 'committed' ? `Its exclusions are committed.${toExclude ? ` A policy change since then would exclude ${plural(toExclude, 'more document')}.` : ''}`
-          : toExclude ? `Committing takes ${plural(toExclude, 'document')} out of search and future embedding. The archive does not change, and any document can be restored.`
-            : 'No document reaches an exclude threshold. Nothing needs committing.'}
-      {commit.isSuccess && ' Committed.'}
+    {!running && <p className={`text-sm ${run.error ? 'text-destructive' : 'text-muted-foreground'}`}>
+      {preview ? 'A preview: the scores are below. Nothing was saved.'
+        : run.error ? run.error
+          : 'Its answers are live: what it excluded is out of search and what it tagged can be filtered on, and any document can be restored.'}
     </p>}
-    {commit.error && <ErrorBox error={commit.error} />}
 
     {!running && errors > 0 && <div className="grid gap-1.5 border-t pt-4 text-destructive">
       <b className="text-[13px]">{plural(errors, 'document')} failed</b>
