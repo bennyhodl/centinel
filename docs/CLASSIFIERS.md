@@ -125,25 +125,24 @@ makes no new version.
   until nothing is left that applies. A document is never sent a question its parent did
   not lead to, so it costs nothing. Each level is a request of its own and carries the
   text again. A follow-up whose parent the run does not ask hangs off the answer the
-  document already holds. A failure at any level fails the document whole; it stays
-  pending and the next run asks it from the top. Every path follows the same rule: a saved
-  run, a preview, the CLI and the pipeline stage, and the Test on the Classify canvas.
+  document already holds. A failure at any level fails the document whole; the next run
+  asks it from the top. Every path follows the same rule: a saved run, a preview, the CLI,
+  and the Test on the Classify canvas.
 - **Not asked is not no.** A follow-up that did not reach a document has no answer at all.
   It does not count as a no, holds no score in Search's facets, sits in no review band, and
   leaves nothing pending. A run counts it apart: per question as `not_asked`, and a
   document that no question of the run reached as `not_asked` in the run's totals, with a
   filter of its own.
-- **When a parent's answer moves, its follow-ups' answers go.** The scores are a fold over
-  `workspace/runs.jsonl` and `workspace/reviews.jsonl` together, per document, in the order
-  things happened: a run's results at the time the run started, a review at the time it
-  was recorded. After every step the fold drops the answers to every follow-up the chain no
-  longer reaches, recursively, with the latest verdicts so far standing for the parent. A
-  later run that moves the parent elsewhere, a person's verdict that does, an edit to
-  `when`, or a reworded parent that has no answer at its new version yet all remove the
-  follow-ups' answers from Search, the review queue and the evaluation. They are never
-  revived, whether a run or a person moves the parent back: the follow-up is owed again
-  and asked again, and only answers recorded after the latest change count. The ledgers
-  themselves are never edited.
+- **When a parent's answer moves, its follow-ups' answers go.** Every result and every
+  review is written in one transaction that also deletes the document's answers to every
+  follow-up the chain no longer reaches, with the latest verdicts standing for the parent.
+  A later run that moves the parent elsewhere, or a person's verdict that does, removes the
+  follow-ups' answers from Search, the review queue and the evaluation for good: they are
+  never revived, whether a run or a person moves the parent back, because the rows are
+  gone. The follow-up is owed again and asked again, and only an answer recorded after the
+  move counts. An edit to `when`, or a reworded parent with no answer at its new version
+  yet, changes what the stored answers reach without deleting any; the run history is
+  never edited.
 - **Saving checks the chain.** A `when` that names no answer of a question in the set, and
   a chain that leads back to its own answers, are refused with the question's id.
 - **The estimate follows the chain too.** Before a run, a follow-up is priced for the share
@@ -180,16 +179,17 @@ Only the gate excludes. Every other default tags, because a tag is not a usage d
 of rows: the gate keeps them as records, the type names them, and search can ask for them
 or leave them out.
 
-Run the junk gate alone over every document first. Commit its exclusions. Then run the
-topics over the documents that stay included. A run can use any subset of the saved
-questions, so the gate does not have to wait for the topics.
+Run the junk gate alone over every document first; its exclusions are live the moment each
+answer lands. Then run the topics. A run can use any subset of the saved questions, so the
+gate does not have to wait for the topics, and a run scores every document in its scope
+whether or not the gate excluded it — the policy decides afterwards, and can change.
 
 ### What is sent
 
 - Every question starts with a fixed line that says the `text` is untrusted content and
   not instructions. The run's settings record the line.
 - A document whose derived text is empty is not sent. Its result is an error that says it
-  is not scorable, and the document stays pending. It is not scored low.
+  is not scorable. It is not scored low.
 - A text above 80 kB is sent as its head, middle, and tail, with the gaps marked. The
   result records how many characters were sent and how many the document has. A run
   shows how many documents were sampled.
@@ -205,46 +205,51 @@ First, a choice with described options and an escape option works better than a 
 independent nouls for "what kind of thing is this". Second, a wide review band catches
 more than a narrow band round 0.5: DocJev's one real error scored 0.76.
 
-## `centinel classify` and the pipeline stage
+## `centinel classify`
 
 ```
-centinel classify                                # every pending document, every saved question
+centinel classify                                # every indexed document, every saved question
 centinel classify --source tampa
 centinel classify --document a5923354            # a URL, part of one, or a blob hash
 centinel classify --question page_kind --question record_type
-centinel classify --rescore                      # answered documents too
-centinel classify --limit 500                    # the rest stay pending
+centinel classify --continue run-…               # carry on a run that stopped
 centinel classify --dry-run                      # documents, tokens, estimated cost; nothing sent
 centinel classify --preview                      # scores shown, nothing written
 centinel questions                               # the saved set, versions, policy
 centinel questions --add-defaults                # append any shipped question the set lacks
 ```
 
-A document is **pending** when it is included and has no answer for some saved root at
-that question's current version, or for a follow-up its answers reach. A follow-up its
-parent did not lead to is not owed. That is the work list, and it is a subtraction like
-every other stage's: a run that stops leaves the rest for the next one, rewording a
-question queues every document for that question alone, and a document the gate excluded
-is not sent again to be tagged.
+A run scores **everything in its scope** — the corpus, one source, or one document —
+excluded documents included, with no cap, as often as wanted. Rerunning the corpus, moving
+a threshold, rewording a question and retagging are the normal uses; a document is sent
+again whether or not it has an answer. The scope is resolved on the server a page at a time
+as the run goes, so a run over the whole corpus never holds the corpus. The Corpus page
+still says which documents are **pending** — lacking an answer to some root, or owing a
+follow-up their answers reach — as a reading of the state, not a work list.
 
-Unlike a run started from the Classify view, this op **commits**: a document whose junk
-probability clears the gate's threshold is excluded at once, and the report says how many.
-Tags are on the record the moment the run is; the review band is left for a person.
-`restore` undoes an exclusion. `--preview` scores and shows but writes nothing, so a
-reworded question can be tried on a hundred documents before it is saved.
+Every answer is live the moment it is written: a document whose junk probability clears the
+gate's threshold is out of search at once, every tag that clears its threshold can be
+filtered on, the review band is left for a person, and `restore` undoes an exclusion.
+`--preview` scores and shows but writes nothing, so a reworded question can be tried on a
+hundred documents before it is saved.
 
-`centinel run` has the same op as a stage, between `index` and `embed`, so junk is out of
-the embed work list before `embed` builds it. The stage runs only where `centinel.toml`
-says so:
+**A `401`, `402` or `403` from Jev stops the run.** No key, no credit and no permission are
+facts about the account, not the document, so nothing more is sent: the run is recorded
+`stopped` with Jev's own words, every answer already written stays, and the document in
+flight keeps the levels of its chain it was answered. `--continue <run>` carries it on —
+the same scope, question snapshot and settings as the run that started the chain, over the
+documents in scope now that no run in the chain has answered without error. Any other
+per-document error is recorded on the document and the run goes on.
+
+Classifying is **not a pipeline stage**. `centinel run` extracts, indexes and embeds;
+`embed` embeds everything indexed. Text leaves the machine only when a person starts a run,
+from this command or the web's Classify button. The `[classify]` block in `centinel.toml`
+names the model the command uses when none is given:
 
 ```toml
 [classify]
 model = "jev-1.13.0"
 ```
-
-No block, no text leaves the machine on a scheduled run; the stage is skipped with that
-reason. A missing `TYPESAFE_API_KEY` is a skip too, not a failure. `--skip classify`
-works like `--skip embed`.
 
 ### Tags in search
 
@@ -258,13 +263,15 @@ A tag is spelled the way the answers are stored: a yes-or-no question's id, or
 apply the filter, and every result carries the `tags` of the document it cites. The HTTP
 op and the MCP tool take `tags` and `not_tags` arrays.
 
-Tags reach search through `workspace_tag`, a projection in `centinel.db` beside the
-exclusions: one row per document and tag the current policy puts on it, marked `model`,
-with room for a person's rows beside them. The index rebuilds it from the runs ledger and
-the saved questions whenever either changes, on open — so moving a threshold in the
-Classify view changes what the next `centinel search --tag` returns, and sends nothing to
-Jev. A tag no saved question defines is refused with the list to check, so a typo is an
-error rather than an empty result. See [RETRIEVAL.md](RETRIEVAL.md).
+Tags and exclusions live in `workspace/workspace.db`, which the search index attaches and
+reads: one `tag` row per document and tag the current policy puts on it, marked `model` or
+`human`, and one `excluded` row per document the policy or a person took out. Both are
+rewritten the moment a result lands, a review is recorded, or a threshold moves — so moving
+a threshold in the Classify view changes what the next `centinel search --tag` returns, and
+sends nothing to Jev. The vector rows carry the same tags and exclusion and are brought up
+to date after every run, review and save, so both arms of a search filter on one fact. A
+tag no saved question defines is refused with the list to check, so a typo is an error
+rather than an empty result. See [RETRIEVAL.md](RETRIEVAL.md).
 
 ## Review, and the loop that tunes the questions
 
@@ -275,7 +282,8 @@ answers with the keyboard. Right arrow says the document is a record, left arrow
 junk; the chips and options can be changed first; Enter records the card as it stands;
 `s` skips. A box takes tag names that do not exist yet, and a note.
 
-Every card writes one line to `workspace/reviews.jsonl`:
+Every card is one review in `workspace/workspace.db`, kept whole in its history and as the
+document's latest word:
 
 ```json
 {"at":"2026-10-07T21:10:00Z","source":"tampa","resource":"https://…","derived_sha":"a59…",
@@ -285,13 +293,16 @@ Every card writes one line to `workspace/reviews.jsonl`:
 ```
 
 A verdict is not only a label for later. It acts at once: a `record` said of an excluded
-menu restores it to search and embedding, a junk option said of a kept page excludes it,
-a `yes` to a question that tags puts the tag on the document marked `human`, and a `no`
-takes the model's tag away. The queue offers the review band first — documents with some
-answer between a question's review floor and its threshold — then a random sample of the
-decided ones, and skips documents already reviewed unless asked.
+menu restores it to search, a junk option said of a kept page excludes it, a `yes` to a
+question that tags puts the tag on the document marked `human`, and a `no` takes the
+model's tag away. A review's say on usage is a **usage override**, like a restore: a
+person's word on a document stands through every later run and threshold change until a
+person says otherwise. The latest review of a document replaces the one before it whole; a
+question it leaves out falls back to the model. The queue offers the review band first —
+documents with some answer between a question's review floor and its threshold — then a
+random sample of the decided ones, and skips documents already reviewed unless asked.
 
-`centinel evaluate` reads the same lines back beside the runs ledger. Per question: how
+`centinel evaluate` reads the same reviews back beside the stored answers. Per question: how
 many reviews had a model score to compare with, how often the policy's decision matched
 the person's, precision and recall at the current threshold, and for a yes-or-no question
 the threshold that would have matched most (judged by F1, so "no to everything" cannot
@@ -346,8 +357,10 @@ is what a `centinel web` left running from an older build looks like.
 
 While a run scores, the page shows it live: progress by decision, the documents out to
 Jev with how long each has waited and which request it is on, and the latest answers as
-they land. When scoring stops, the same panel gives the counts by decision and the
-commit. The sidebar marks a running run from every page.
+they land; the Corpus refreshes every few seconds meanwhile, because every answer is
+already in it. When scoring stops, the same panel gives the counts by decision, and for a
+run Jev refused, Jev's message and **Continue**. The sidebar marks a running run from every
+page.
 
 ### Jobs, live
 
@@ -397,7 +410,12 @@ The workspace has six views, in a sidebar grouped Archive, Classifiers, and Agen
   viewer, a CSV as a table, HTML as the page and as its source. `GET
   /workspace/original` serves those bytes, and Download saves them. Collected HTML is
   served with a sandbox policy, so a page never runs on the workspace's origin.
-- **Classify** draws one chain at a time on a canvas you can pan and zoom: a source
+- **Classify** opens with **Run classifiers**: a source (all, or one), the checked
+  questions, the server's count and price of what would be sent, and one button —
+  *Classify N documents* — that scores every indexed document in that scope, excluded ones
+  too, with no cap. A document's own page has a **Classify** button for that document, and
+  the Corpus page, narrowed to one source, offers **Classify this source**. Below it the
+  canvas draws one chain at a time, panned and zoomed: a source
   question on top, its answers along its foot, and each follow-up below the answer it
   is asked after. Deleting a question moves its follow-ups up to the answer it followed. A question's
   `when` names that answer as a tag (`page_kind:record`, or `spending` for a noul's yes);
@@ -412,48 +430,50 @@ The workspace has six views, in a sidebar grouped Archive, Classifiers, and Agen
   stores the exact identities with the run, so the browser never pages the corpus back
   and forth. The start request is answered at once with the run as started. Scoring
   continues on the server with a bounded number of documents in flight to Jev at a time
-  (eight unless the trial says otherwise, at most thirty-two), each result recorded the
-  moment it lands, and the page polls the run detail once a second until the status
-  leaves `running`. A run holds up to 50,000 documents, so "all matching documents" covers
-  the corpus. The run card estimates the input tokens and the cost from the characters of
-  the selection before the run starts. Only the checked questions go into the run.
-  Results are stored in input order however they arrive, so a repeated
-  trial lines up row for row. A request that Jev refuses with `429`, answers with a
-  `5xx`, or drops is retried up to four times with a growing pause before its failure
-  is recorded. Token counts and the cost estimate sum over the documents whose answer
-  reported usage, and the run says how many that covers when it is not all of them.
-  Score columns sort by a click on their header, high to low first. The Output selector
-  chooses between a saved run and a preview. A saved run accepts only the current saved
-  question set, so a stale browser tab cannot change its meaning. A preview scores the
-  same selection, shows the scores on the page, and writes nothing to the run ledger
-  (its calls are paid for, so they still land in `spend/`, like every Jev answer);
-  it accepts draft questions because it records no meaning, and it cannot be committed
-  or repeated. Saving a question versions model-evaluated meaning; changing an action
-  threshold re-decides stored scores without sending the text again.
-- **Runs** keeps the question versions, selected input identities, model, evaluation
-  date, settings, tokens, duration, throughput, errors, and cost when the model has a
-  price. Prices live in one table, `spend::PRICES`; the Spend page shows every call.
+  (eight unless the trial says otherwise, at most thirty-two), each result written to the
+  workspace the moment it lands and kept nowhere else, and the page polls the run detail
+  once a second until the status leaves `running`. The run card estimates the input
+  tokens and the cost from the characters of the selection before the run starts. Only
+  the checked questions go into the run. A request that Jev refuses with `429`, answers
+  with a `5xx`, or drops is retried up to four times with a growing pause before its
+  failure is recorded; a `401`, `402` or `403` stops the run. Token counts and the cost
+  estimate sum over the documents whose answer reported usage, and the run says how many
+  that covers when it is not all of them. Score columns sort by a click on their header,
+  high to low first. The Output selector chooses between a saved run and a preview. A
+  saved run accepts only the current saved question set, so a stale browser tab cannot
+  change its meaning. A preview scores the same selection, shows the scores on the page,
+  and writes nothing to the workspace (its calls are paid for, so they still land in
+  `spend/`, like every Jev answer); it accepts draft questions because it records no
+  meaning, and it cannot be repeated. Saving a question versions model-evaluated meaning;
+  changing an action threshold re-decides stored scores without sending the text again.
+- **Runs** keeps the question versions, the scope or the selected input identities, model,
+  evaluation date, settings, tokens, duration, throughput, errors, and cost when the model
+  has a price. Prices live in one table, `spend::PRICES`; the Spend page shows every call.
   The paged list returns small summaries. One run detail returns its exact evaluated
-  questions, the current effective policy, a fresh commit preview, the counts of excluded,
-  review, kept, tagged, not asked, and failed documents, and one page of results. The server filters
-  and sorts the results, so a run over the whole corpus never goes to the browser at once.
-  A repeat names the run it repeats, and the server copies its inputs.
-  An exact selection can be repeated for a comparable benchmark. A run with durable
-  progress but no completion record is shown as interrupted after a server restart.
+  questions, the current effective policy, the counts of excluded, review, kept, tagged,
+  not asked, and failed documents, and one page of results. The server filters and sorts
+  the results, so a run over the whole corpus never goes to the browser at once. A repeat
+  names the run it repeats, and the server copies its inputs or resolves its scope again.
+  A run Jev refused reads `stopped` with Jev's words and offers **Continue**; a run with
+  durable progress but no completion record is shown as interrupted after a server
+  restart. A run from before exclusions were live reads as completed.
 - **Review** puts one document beside every answer Jev gave it, for a person's verdict.
 - **Connect** shows how to add Centinel's MCP server to an agent over HTTP, and lists
   the tools the registry offers it. The address is `CENTINEL_PUBLIC_URL` when the server
   sits behind another address, and the page's own host otherwise. **Skills** shows `npx skills add bennyhodl/centinel` and what
   each skill in `contrib/skills/` does.
 
-Run and Commit are separate operations. A run stores scores and previews the documents,
-placements, characters, and unique chunks affected by its exclusion rules. Commit writes
-reversible usage decisions. Restore reverses one. Neither operation changes `blobs/` or
-`log/`.
+There is no commit. What the current policy makes of the stored answers is what search
+sees, as soon as a result lands or a threshold moves; a review or a restore overrides it
+for one document. Nothing changes `blobs/` or `log/`.
 
-Classifier truth is stored in `workspace/questions.jsonl`, `workspace/runs.jsonl`, and
-`workspace/decisions.jsonl`. SQLite holds only the search, score, and exclusion
-projections. Deleting and rebuilding `centinel.db` replays durable usage decisions.
+Classifier truth is stored in `workspace/questions.jsonl` and `workspace/workspace.db`:
+every run and its results, the latest answer per question and version, every review, a
+person's usage overrides, and the tags, exclusions and scores materialized from them. The
+search index attaches the database and reads it; deleting and rebuilding `centinel.db`
+loses no answer and no verdict. A store that still has `runs.jsonl`, `decisions.jsonl` and
+`reviews.jsonl` from before is imported once, on first open, and the files are left where
+they are.
 
 Corpus text leaves the machine only after the operator starts a run, and only for the
 selected documents. The server reads `TYPESAFE_API_KEY` from the process environment,
@@ -468,8 +488,10 @@ Classification changes **usage**, never the archive:
 - Presets (civic engagement, real estate, …) name the questions and thresholds.
 - Scores are stored beside the index, versioned, and one document can match several
   presets.
-- Committed exclusion rules control which chunks need embeddings and which placements
-  search returns. A shared chunk stays eligible while any included placement uses it.
+- Exclusion controls which placements search returns, in both arms. A shared chunk stays
+  citable while any included document carries it. `embed` embeds everything indexed;
+  an excluded document's rows are there, marked excluded, and come back the moment a
+  threshold or a person restores it.
 - Junk/poor-extraction stays a separate axis from outside-my-preset, and unclassified
   content stays visible as pending rather than counting as irrelevant.
 - Blobs and the log are untouched. Every decision is reversible by construction.

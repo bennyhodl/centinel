@@ -30,11 +30,11 @@ Every index is derived and rebuildable:
   log/<source>/YYYY-MM.jsonl     TRUTH    append-only observations, discovery runs, status, derivations
   current/<source>/…             DERIVED  URL-mirroring tree
   centinel.db                    DERIVED  SQLite metadata + FTS5      — the BM25 arm
-  vectors.lance/                 DERIVED  LanceDB chunk vectors        — the vector arm
+  chunks.lance/                  DERIVED  LanceDB chunk vectors        — the vector arm
 ```
 
 Delete everything derived and you lose no evidence — but not everything derived is cheap.
-`centinel.db` rebuilds in minutes; `vectors.lance/` is inference over the whole corpus, so
+`centinel.db` rebuilds in minutes; `chunks.lance/` is inference over the whole corpus, so
 on 400,000 chunks it is a day. Backing it up is `cp -R`. The corpus is `rsync`-able and complete on its own.
 
 Blobs are **pooled across sources** — the same PDF on two `.gov` sites stores once. Logs and trees are **per-source**, so a single city's corpus stays separable for handoff.
@@ -466,12 +466,14 @@ centinel embed                    # the rest; re-run to resume
 ```
 
 ```
-vectors.lance/          LanceDB, one table: chunk_hash (Utf8) → vector (FixedSizeList<f32, dims>)
+chunks.lance/           LanceDB, one table: one row per chunk placed in a document —
+                        key, chunk_hash, source, resource, derived_sha, tags, excluded, vector
 ```
 
-Two columns and no more. Text and placements stay in `centinel.db`; a second copy goes out
-of date the first time the corpus changes, and `chunk_hash` is the join both stores already
-use. The model id lives in the table's schema metadata, and a query vector from any other
+No text: that stays in `centinel.db`, and a second copy goes out of date the first time
+the corpus changes. The row carries its document and what the workspace decided about it,
+so a search's filter runs inside the vector query; `embed` copies a chunk's vector to each
+document that holds it rather than embedding it again. The model id lives in the table's schema metadata, and a query vector from any other
 model is **refused at open** — vectors from two models are in different spaces and still
 return a confident ranked list.
 

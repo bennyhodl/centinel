@@ -136,27 +136,33 @@ and edits no renderer.
 `blobs/` and `log/` are what the world served, `runs/` is what this machine attempted (a
 quiet run writes nothing to `log/`, so "the schedule fired and everything was current"
 lives only here), `decisions.jsonl` holds corpus-wide crumb rulings, and `workspace/`
-holds saved classifier questions, classifier attempts and scores, and reversible usage
-decisions. `spend/` holds every model call — Jev, OpenRouter and local — with its tokens and
-what it cost on the day. `current/`, `centinel.db` and `vectors.lance/` are derived and can be rebuilt
-from them. *Why it matters:* it is what makes the index disposable and the corpus
+holds saved classifier questions and, in `workspace.db`, every classifier run and answer,
+every review, and a person's usage overrides. `spend/` holds every model call — Jev,
+OpenRouter and local — with its tokens and what it cost on the day. `current/`,
+`centinel.db` and `chunks.lance/` are derived and can be rebuilt from them. *Why it matters:* it is what makes the index disposable and the corpus
 something you can hand to somebody with `rsync`.
 
-**Classifier workspace** — `workspace/questions.jsonl` holds versioned atomic questions,
-`workspace/runs.jsonl` holds selected input identities, progress, scores and benchmark
-metrics, `workspace/decisions.jsonl` holds the operator's reversible rulings about document
-usage, and `workspace/reviews.jsonl` holds what a person said about the model's answers,
-one line per document read. The projection tables with `workspace_` names inside
-`centinel.db` are derived caches of these ledgers, rebuilt when the index opens and any
-ledger changed. *Why it matters:* deleting or rebuilding the search index must not restore
-excluded material to search or embedding, and changing a threshold must not require
-sending document text to Jev again.
+**Classifier workspace** — `workspace/questions.jsonl` holds versioned atomic questions.
+`workspace/workspace.db` holds every run with its results, the latest answer per question
+and version, every review, a person's usage overrides, and — materialized from those under
+the current questions, one transaction per scored document — each document's tags,
+exclusion, scores and open follow-ups. `centinel.db` attaches it as `ws` and reads it;
+nothing is cached in the index and there is no commit step. The JSONL ledgers a store
+wrote before (`runs.jsonl`, `decisions.jsonl`, `reviews.jsonl`) are imported once on first
+open and never written again. *Why it matters:* an answer is live in search the moment it
+lands, a moved threshold re-decides every stored answer without sending text to Jev
+again, and deleting or rebuilding the search index loses no answer and no verdict.
+
+**Usage override** — a person's include or exclude of one document, from a review or a
+restore, standing until a person says otherwise. Without one, the current policy decides
+exclusion from the stored answers. *Why it matters:* the operator's word outranks the
+model's and survives every rerun and every threshold change.
 
 **Tag** — what the policy says a document is, spelled the way `search --tag` takes it: a
 yes-or-no question's id, or `choice:option`. A person's verdict beats the model's for the
 question it answers; the model's stands for the rest. *Why it matters:* one spelling joins
-the review tool, the projection, the CLI and the MCP tool, so a tag seen on a result is the
-filter for the next search.
+the review tool, the workspace, the vector rows, the CLI and the MCP tool, so a tag seen
+on a result is the filter for the next search.
 
 **Meaning vs policy** — a question's meaning is what Jev is asked: the wording, the kind
 (noul or choice), and each option's id and description. Its policy is what the program
@@ -173,7 +179,7 @@ excludes from search and embedding and never from the archive.
 document in it is held for a person to look at. It is neither excluded nor tagged.
 
 **Derived is not the same as cheap.** Everything derived is rebuildable; only some of it
-is rebuildable over a coffee. `centinel.db` is minutes. `vectors.lance/` is **a day** on a
+is rebuildable over a coffee. `centinel.db` is minutes. `chunks.lance/` is **a day** on a
 400,000-chunk corpus, because rebuilding it means inference over the whole thing. Both are
 safe to delete in the sense that nothing evidentiary is lost, and one of them is a very
 expensive thing to delete by accident — a distinction worth keeping, because SPEC §5.2
@@ -217,7 +223,7 @@ work that was never done.
 | extract | blobs with a Derivation **of bytes**, or an Underivable, from the latest Observations | the log |
 | transcribe | blobs derived by the transcriber from the audio blobs | the log |
 | index | **placements** already written, per address | `centinel.db` |
-| embed | stored chunk hashes from indexed chunk hashes | `vectors.lance/` |
+| embed | stored rows, one per chunk placed in a document, from the index's placements; a vector is copied from another document's row or the legacy `vectors` table before a model is asked | `chunks.lance/` |
 
 **Underivable** — a derivation that was attempted and produced nothing. The peer of
 `ResourceStatus` on the derivation side, and it exists for the same reason: a `Derivation`
@@ -338,7 +344,7 @@ second in place of the first shows one source's error as though it were the whol
 ## Retrieval
 
 **Arm** — one retriever feeding the fusion. There are two: BM25 over FTS5 in
-`centinel.db`, and cosine over `vectors.lance/`. They are deliberately independent stores
+`centinel.db`, and cosine over `chunks.lance/`. They are deliberately independent stores
 — either rebuilds without touching the other — which is why the BM25 arm stays on FTS5
 rather than moving to LanceDB's own Tantivy, and why Lance's built-in RRF reranker goes
 unused: it can only fuse arms Lance owns.

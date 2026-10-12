@@ -225,7 +225,7 @@ it at all.
 ### 3.2 Why the config file and not a table in the store
 
 The store has two categories and a schedule fits neither. `blobs/` and `log/` are truth;
-`current/`, `centinel.db` and `vectors.lance/` are derived and rebuildable — which is what
+`current/`, `centinel.db` and `chunks.lance/` are derived and rebuildable — which is what
 makes the index disposable and the corpus `rsync`-able (SPEC §5.4, CONTEXT.md).
 
 A crontab in `centinel.db` would be a third category: mutable state that is neither
@@ -529,7 +529,7 @@ fire subtracts what was already done.
   log/<source>/YYYY-MM.jsonl TRUTH    append-only, per Source
   runs/YYYY-MM.jsonl         TRUTH    append-only, one record per attempt   ← new
   run.lock                            the in-flight run, if any             ← new
-  current/, centinel.db, vectors.lance/   DERIVED
+  current/, centinel.db, chunks.lance/    DERIVED
 ```
 
 `runs/` is truth, and it is the third thing that is. It is a record of **what this machine

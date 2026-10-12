@@ -109,20 +109,28 @@ commit rather than let a stale id drop a fragment the audit never saw. And it do
 compact or prune — `embed` does that afterwards in its own maintenance, as it always has.
 
 The Lance side of this lives in `VectorTable::audit` and `VectorTable::repair`, beside
-`append`, `retain` and `maintain`. The op is thin, and `embed` itself does no auditing:
+`append`, `remove`, `set_metadata` and `maintain`. The op is thin, and `embed` itself does no auditing:
 when its scan fails it says what to run and stops.
 
 ## The table
 
 ```
-vectors.lance/    one table, two columns
-                    chunk_hash  Utf8
-                    vector      FixedSizeList<Float32, dims>
+chunks.lance/     one table, one row per chunk placed in a document
+                    key          Utf8      chunk_hash ␟ source ␟ resource ␟ derived_sha
+                    chunk_hash   Utf8
+                    source, resource, derived_sha   Utf8
+                    tags         List<Utf8>
+                    excluded     Boolean
+                    vector       FixedSizeList<Float32, dims>
 ```
 
-No text, no placements, no source. `centinel.db` holds those, and a second copy goes out
-of date the first time the corpus changes. `chunk_hash` is the join both stores already
-use.
+No text: `centinel.db` holds that. The row carries its document and what the classifier
+workspace decided about it, so a search's filter runs inside the vector query. The work
+list is placements, not chunks, and a placement's vector comes from the cheapest place that
+has it — another document's row for the same chunk, the `vectors.lance/` table a store from
+before this layout still holds, and only then the model. `centinel embed --limit 0` on such
+a store fills `chunks.lance/` with nothing sent to a model. When the workspace changes a
+document's tags or exclusion, a sync rewrites those two columns on its rows in place.
 
 **The model is a property of the table.** Its id lives in the schema metadata, and a query
 vector from any other model is refused at open, naming the fix. Vectors from two models
