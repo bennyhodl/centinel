@@ -2172,6 +2172,10 @@ impl<'a> Workspace<'a> {
         let mut pages = InputPages::new(&inputs);
         // Jev's words when it refused the account, which end the run between results.
         let mut stopped: Option<String> = None;
+        // Documents handed out so far, which numbers each one in the order it was asked.
+        let mut sent = 0usize;
+        // The order of each result a preview holds, so it can be kept in the order asked.
+        let mut preview_order: Vec<usize> = Vec::new();
 
         let outcome: anyhow::Result<()> = async {
             'pages: loop {
@@ -2180,6 +2184,8 @@ impl<'a> Workspace<'a> {
                     break;
                 }
                 let priors = priors_for(&db(), &saved_chain, &chain, &page)?;
+                let first = sent;
+                sent += page.len();
                 // Owned identities, and the futures built up front: a closure that takes
                 // `&DocumentId` is higher-ranked over that lifetime, and `tokio::spawn`
                 // cannot prove it for the future this all sits inside. Building the
@@ -2201,13 +2207,15 @@ impl<'a> Workspace<'a> {
                                 chain,
                                 prior,
                             };
-                            self.score(&client, api_key, endpoint, &asking, &input, run_id, index)
-                                .await
+                            let scored = self
+                                .score(&client, api_key, endpoint, &asking, &input, run_id, index)
+                                .await;
+                            (first + index, scored)
                         }
                     })
                     .collect();
                 let mut scored = futures::stream::iter(jobs).buffer_unordered(concurrency);
-                while let Some(mut scored) = scored.next().await {
+                while let Some((ordinal, mut scored)) = scored.next().await {
                     let stop = scored.stopped.take();
                     if let Some((input, output)) = scored.usage {
                         // Previews too: a preview is a paid call like any other.
@@ -2229,14 +2237,17 @@ impl<'a> Workspace<'a> {
                     progress.item(answered(&scored.result));
                     // Written as it lands, and kept nowhere else: the run's memory is its
                     // counters, however many documents it covers. A preview records
-                    // nothing, and keeps what it was answered for the page to show.
+                    // nothing, and keeps what it was answered for the page to show, in the
+                    // order it was asked so a repeated trial lines up.
                     if request.record {
                         db().record_result(&run, &scored.result, scored.usage)?;
                         if run.scored % VECTOR_SYNC_EVERY == 0 {
                             self.sync_vectors().await?;
                         }
                     } else {
-                        run.results.push(scored.result);
+                        let at = preview_order.partition_point(|&earlier| earlier < ordinal);
+                        preview_order.insert(at, ordinal);
+                        run.results.insert(at, scored.result);
                     }
                     // Jev refused the account. What this document was answered is kept;
                     // the documents still in flight are dropped unasked, and a

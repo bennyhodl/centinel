@@ -1557,7 +1557,8 @@ mod tests {
         assert_eq!(report.filled, 0, "a plan copies nothing");
 
         // A run that may embed nothing still fills what it can copy: the shared chunk's
-        // second placement gets the first's vector, and the stale row goes.
+        // second placement gets the first's vector, passage 9 gets the vector the stale
+        // row holds for the same chunk, and then the stale row goes.
         let report = embed(
             &ctx,
             EmbedArgs {
@@ -1570,11 +1571,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(report.filled, 1);
+        assert_eq!(report.filled, 2);
         assert_eq!(report.embedded, 0);
         assert_eq!(
-            report.remaining, 5,
-            "the five unembedded passages wait for a model"
+            report.remaining, 4,
+            "the four passages no row holds wait for a model"
         );
         assert_eq!(report.pruned, 1);
         let vectors = table
@@ -1582,7 +1583,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(vectors[&shared.chunk_hash], vec![0.5; 2560]);
-        assert_eq!(table.len().await.unwrap(), 7);
+        assert_eq!(table.len().await.unwrap(), 8);
     }
 
     /// The field failure end to end: a data file the storage never wrote blocks the

@@ -895,7 +895,11 @@ mod tests {
 
         let placements = idx.placements_by_length().unwrap();
         let hashes: Vec<String> = placements.pairs.iter().map(|(h, _)| h.clone()).collect();
-        let texts = idx.chunk_texts(&hashes).unwrap();
+        // `chunk_texts` takes each chunk once, as `embed` asks; a chunk's placements are
+        // adjacent, so dropping the repeats keeps the order being checked.
+        let mut chunks = hashes.clone();
+        chunks.dedup();
+        let texts = idx.chunk_texts(&chunks).unwrap();
         let lengths: Vec<usize> = texts.iter().map(String::len).collect();
         let mut sorted = lengths.clone();
         sorted.sort_unstable();
