@@ -3,7 +3,7 @@ import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useLoca
 import { QueryClientProvider, useQuery, type QueryClient } from '@tanstack/react-query'
 import { CircleDollarSign, Eye, FlaskConical, History, Moon, Plug, Search, ShieldCheck, Sparkles, Sun } from 'lucide-react'
 import { queries } from '../queries'
-import { JobDrawer, WorkingNow, useJobEvents } from '../jobs'
+import { JobDrawerProvider, WorkingNow, useJobEvents } from '../jobs'
 import { ActivityBar } from '../feedback'
 import { quotes } from '../quotes'
 import { number } from '../format'
@@ -55,10 +55,9 @@ function Shell() {
   useJobEvents()
   const serverVersion = system.data?.version
   const stale = Boolean(serverVersion && serverVersion !== __CENTINEL_VERSION__)
-  const [job, setJob] = useState('')
   const at = (path: string) => pathname === `/web${path}` || (path === '/' && pathname === '/web')
 
-  return <SidebarProvider defaultOpen={false} className="bg-ground">
+  return <JobDrawerProvider><SidebarProvider defaultOpen={false} className="bg-ground">
     <ActivityBar />
     <Sidebar variant="floating" collapsible="icon">
       <SidebarHeader className="px-3 pt-4 pb-2">
@@ -101,7 +100,7 @@ function Shell() {
         </NavGroup>
       </SidebarContent>
       <SidebarFooter className="gap-3 px-3 pb-3">
-        <WorkingNow onOpen={setJob} />
+        <WorkingNow />
         <Quote />
         <ThemeToggle />
       </SidebarFooter>
@@ -113,8 +112,7 @@ function Shell() {
         <Outlet />
       </div>
     </SidebarInset>
-    {job && <JobDrawer id={job} onClose={() => setJob('')} />}
-  </SidebarProvider>
+  </SidebarProvider></JobDrawerProvider>
 }
 
 function NavGroup({ label, children }: { label: string; children: ReactNode }) {

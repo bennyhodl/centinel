@@ -14,6 +14,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { compact, money, number, plural, seconds, tail } from './format'
 import { LiveRun, useRunDetail } from './live'
+import { useOpenJob } from './jobs'
 import { decisionLabels, decisionOf, estimateRun, isChoice, missingOther, outcomesOf, questionProblem, questionSnapshot, reachOf, tagsOf } from './policy'
 import { ResultsSection } from './results'
 import { priceOf } from './spend-logic'
@@ -46,6 +47,7 @@ const blankChoice = (count: number): Question => ({
 
 export function Classify() {
   const client = useQueryClient()
+  const openJob = useOpenJob()
   const saved = useQuery(queries.questions())
   // The shipped defaults come from the server, which is also what seeded the saved set,
   // so the page never carries a second copy of the questions.
@@ -117,7 +119,7 @@ export function Classify() {
       }
       return api.run({ scope: { source: classifySource || undefined }, questions: asked, model, evaluation_date: date, settings: { concurrency } })
     },
-    onSuccess: response => setActive({ id: response.id, preview: false }),
+    onSuccess: response => { setActive({ id: response.id, preview: false }); openJob(response.id) },
   })
   const run = useMutation({
     mutationFn: async () => {
@@ -141,9 +143,13 @@ export function Classify() {
         settings: { concurrency },
       })
     },
-    onSuccess: response => setActive({ id: response.id, preview: !recording }),
+    onSuccess: response => {
+      setActive({ id: response.id, preview: !recording })
+      // A saved run is watched in the job drawer; a preview stays here, beside its scores.
+      if (recording) { setDialog(''); openJob(response.id) }
+    },
   })
-  // The same query the live panel polls, so the button knows when the run ends.
+  // So the buttons know when the run ends.
   const activeRun = useRunDetail(active?.id || '', { page: 1, page_size: 1 }, 700)
   const busy = Boolean(active) && (!activeRun.data || activeRun.data.status === 'running')
 
@@ -223,9 +229,6 @@ export function Classify() {
             {(plan.error || classifyAll.error) && <ErrorBox error={(plan.error || classifyAll.error) as Error} />}
           </div>
         </Panel>
-        {active && !active.preview && dialog !== 'run' && <Panel position="bottom-left" className="!m-4 w-[600px] max-w-[calc(100vw-2rem)] [&>section]:mb-0">
-          <LiveRun key={active.id} id={active.id} onDismiss={() => setActive(null)} />
-        </Panel>}
         <Panel position="top-right" className="!m-4 flex items-center gap-2">
           <button type="button" onClick={() => setDialog('test')} className="inline-flex h-9 max-w-80 items-center gap-2.5 rounded-full bg-foreground pr-3 pl-3 text-[13px] text-parchment shadow-[0_4px_14px_rgba(26,23,18,0.18)]">
             <span className={`size-2 shrink-0 rounded-full ${test.doc ? 'bg-flame shadow-[0_0_0_3px_rgba(200,118,30,0.35)]' : 'bg-muted-foreground'}`} />
@@ -268,7 +271,7 @@ export function Classify() {
     <Dialog open={dialog === 'run'} onOpenChange={open => !open && setDialog('')}>
       <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader><DialogTitle className="font-serif text-2xl font-normal">Run</DialogTitle><DialogDescription>Ask Jev the checked questions about a set of documents. A follow-up is asked only of the documents whose answer leads to it.</DialogDescription></DialogHeader>
-        {active && <LiveRun key={active.id} id={active.id} preview={active.preview} onDismiss={() => setActive(null)} />}
+        {active?.preview && <LiveRun key={active.id} id={active.id} preview onDismiss={() => setActive(null)} />}
         {active?.preview && <PreviewResults id={active.id} />}
         <div className="grid gap-3">
         <div className="grid min-w-0 gap-2 text-xs font-medium [&_[data-slot=select-trigger]]:w-full"><span>Documents</span><Segmented label="Run scope" value={scope} onChange={setScope} options={[['sample', 'A sample'], ['all', 'All matching']]} /></div>
@@ -304,7 +307,7 @@ export function Classify() {
           {problems.length > 0 && <p className="rounded-md border bg-muted p-3 text-xs">Fix {problems[0][0]}: {problems[0][1]}</p>}
           {!checked.length && <p className="rounded-md border bg-muted p-3 text-xs">Check at least one question.</p>}
           <Button className="w-full h-11" disabled={blocked} onClick={() => run.mutate()}>{run.isPending ? <Spinner /> : <Play />}{label}</Button>
-          {busy && <p className="text-xs leading-relaxed text-muted-foreground">A run is going. It shows above.</p>}
+          {busy && active && <p className="text-xs leading-relaxed text-muted-foreground">A run is going. {active.preview ? 'It shows above.' : <button type="button" className="underline" onClick={() => { setDialog(''); openJob(active.id) }}>Watch it</button>}</p>}
           {available.error && <ErrorBox error={available.error} />}{run.error && <ErrorBox error={run.error} />}
           <p className="text-xs leading-relaxed text-muted-foreground">{recording ? 'A saved run changes what search returns as each answer lands.' : 'A preview is not saved and changes nothing.'}</p>
         </div>
