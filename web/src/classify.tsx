@@ -200,26 +200,28 @@ export function Classify() {
   return <div className="relative -mx-5 -my-6 h-[calc(100svh-3rem)] overflow-hidden md:-mx-10 md:-my-8 md:h-[calc(100svh-1.25rem-2px)] md:rounded-2xl">
     <ReactFlowProvider>
       <QuestionFlow chain={chain} isDirty={isDirty} answers={test.answers} onEdit={setEditKey} onDelete={remove} onFollow={follow} onToggle={toggle}>
-        <Panel position="top-left" className="!m-4 flex flex-wrap items-center gap-3 rounded-xl bg-background/95 px-4 py-2.5 shadow-[0_0_0_1px_var(--rule),0_4px_14px_rgba(26,23,18,0.06)]">
-          <span className="font-serif text-[28px] leading-none">Classify</span>
-          <span className="h-6 w-px bg-rule" />
-          <span className="text-xs text-muted-foreground">Source</span>
-          <Select value={source?.localKey || ''} onValueChange={setSourceKey}>
-            <SelectTrigger className="h-8 w-80 text-[13px]"><SelectValue placeholder="No source yet" /></SelectTrigger>
-            <SelectContent>{sources.map(question => <SelectItem key={question.localKey} value={question.localKey}><span className="font-mono">{question.id}</span><span className="text-muted-foreground"> · {plural(chainOf(question, questions).length, 'question')}</span></SelectItem>)}</SelectContent>
-          </Select>
-          <AddMenu onAdd={addSource} count={questions.length} existing={questions.map(question => question.id)} presets={shipped.data?.presets || []} />
-        </Panel>
-        <Panel position="top-center" className="!m-4 flex flex-wrap items-center gap-3 rounded-xl bg-background/95 px-4 py-2.5 shadow-[0_0_0_1px_var(--rule),0_4px_14px_rgba(26,23,18,0.06)]">
-          <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Run classifiers</span>
-          <Select value={classifySource || 'all'} onValueChange={value => setClassifySource(value === 'all' ? '' : value)}>
-            <SelectTrigger className="h-8 w-44 text-[13px]"><SelectValue /></SelectTrigger>
-            <SelectContent><SelectItem value="all">All sources</SelectItem>{(available.data?.sources || []).map(source => <SelectItem value={source} key={source}>{source}</SelectItem>)}</SelectContent>
-          </Select>
-          <span className="text-[13px] text-muted-foreground">{everyQuestion ? 'All questions' : plural(checked.length, 'question')}{dirty ? ' · saves the tree first' : ''}</span>
-          <span className="text-[13px]">{plan.data ? <>{plural(plan.data.documents, 'document')} · ~{compact(plan.data.estimated_tokens)} tokens{plan.data.estimated_cost_usd != null ? ` · ${money(plan.data.estimated_cost_usd)}` : ''}</> : plan.isLoading ? 'Pricing…' : ''}</span>
-          <Button disabled={classifyBlocked} onClick={() => classifyAll.mutate()}>{classifyAll.isPending || busy ? <Spinner /> : <Play />}{plan.data ? `Classify ${plural(plan.data.documents, 'document')}` : 'Classify'}</Button>
-          {(plan.error || classifyAll.error) && <ErrorBox error={(plan.error || classifyAll.error) as Error} />}
+        <Panel position="top-left" className="!m-4 grid justify-items-start gap-3">
+          <div className="flex flex-wrap items-center gap-3 rounded-xl bg-background/95 px-4 py-2.5 shadow-[0_0_0_1px_var(--rule),0_4px_14px_rgba(26,23,18,0.06)]">
+            <span className="font-serif text-[28px] leading-none">Classify</span>
+            <span className="h-6 w-px bg-rule" />
+            <span className="text-xs text-muted-foreground">Source</span>
+            <Select value={source?.localKey || ''} onValueChange={setSourceKey}>
+              <SelectTrigger className="h-8 w-80 text-[13px]"><SelectValue placeholder="No source yet" /></SelectTrigger>
+              <SelectContent>{sources.map(question => <SelectItem key={question.localKey} value={question.localKey}><span className="font-mono">{question.id}</span><span className="text-muted-foreground"> · {plural(chainOf(question, questions).length, 'question')}</span></SelectItem>)}</SelectContent>
+            </Select>
+            <AddMenu onAdd={addSource} count={questions.length} existing={questions.map(question => question.id)} presets={shipped.data?.presets || []} />
+          </div>
+          <div className="flex flex-wrap items-center gap-3 rounded-xl bg-background/95 px-4 py-2.5 shadow-[0_0_0_1px_var(--rule),0_4px_14px_rgba(26,23,18,0.06)]">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Run classifiers</span>
+            <Select value={classifySource || 'all'} onValueChange={value => setClassifySource(value === 'all' ? '' : value)}>
+              <SelectTrigger className="h-8 w-44 text-[13px]"><SelectValue /></SelectTrigger>
+              <SelectContent><SelectItem value="all">All sources</SelectItem>{(available.data?.sources || []).map(source => <SelectItem value={source} key={source}>{source}</SelectItem>)}</SelectContent>
+            </Select>
+            <span className="text-[13px] text-muted-foreground">{everyQuestion ? 'All questions' : plural(checked.length, 'question')}{dirty ? ' · saves the tree first' : ''}</span>
+            <span className="text-[13px]">{plan.data ? <>{plural(plan.data.documents, 'document')} · ~{compact(plan.data.estimated_tokens)} tokens{plan.data.estimated_cost_usd != null ? ` · ${money(plan.data.estimated_cost_usd)}` : ''}</> : plan.isLoading ? 'Pricing…' : ''}</span>
+            <Button disabled={classifyBlocked} onClick={() => classifyAll.mutate()}>{classifyAll.isPending || busy ? <Spinner /> : <Play />}{plan.data ? `Classify ${plural(plan.data.documents, 'document')}` : 'Classify'}</Button>
+            {(plan.error || classifyAll.error) && <ErrorBox error={(plan.error || classifyAll.error) as Error} />}
+          </div>
         </Panel>
         {active && !active.preview && dialog !== 'run' && <Panel position="bottom-left" className="!m-4 w-[600px] max-w-[calc(100vw-2rem)] [&>section]:mb-0">
           <LiveRun key={active.id} id={active.id} onDismiss={() => setActive(null)} />
