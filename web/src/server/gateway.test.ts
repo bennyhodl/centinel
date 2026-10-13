@@ -109,7 +109,7 @@ test('signup approval, OAuth MCP access, and revocation share current account pe
   // An agent's token is not a browser session. It never reaches /workspace, where an
   // administrator can start collection — only the browser carries that authority.
   expect((await request('/workspace/sources', undefined, undefined, { authorization: `Bearer ${token.access_token}` })).status).toBe(401)
-  expect((await request('/workspace/sources/try', { url: 'https://example.gov/' }, undefined, { authorization: `Bearer ${token.access_token}` })).status).toBe(401)
+  expect((await request('/workspace/investigations', { url: 'https://example.gov/' }, undefined, { authorization: `Bearer ${token.access_token}` })).status).toBe(401)
   expect(forwarded).toBe(4)
   expect((await request('/api/admin/users', { id: first.account.id, access: 'revoked' }, admin.cookie)).status).toBe(200)
   expect((await request('/workspace/documents', undefined, first.cookie)).status).toBe(403)

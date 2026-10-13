@@ -4,6 +4,7 @@
 <root>/
   blobs/ab/cd/abcd1234…          TRUTH    immutable, content-addressed, pooled across sources
   log/<source>/YYYY-MM.jsonl     TRUTH    append-only: observations, discovery runs, status, derivations
+  investigations/<id>/           RUNTIME  one web investigation: report.json, its request log, and the bytes `check` saved
   crumbs/<source>.jsonl          DERIVED  the off-host links each page dropped, written as it was stored
   summaries/<source>.json        DERIVED  what the log adds up to, keyed by the log's size
   icons/<host>.<ext>, .json      DERIVED  the favicon a host serves, fetched once when the web first asks
@@ -19,6 +20,10 @@ the classifiers and the people reviewing them decided, which no replay of the lo
 recover; and `spend/` is what each paid call cost on the day it was made, which a later price
 table would get wrong. That is what makes the index disposable and the corpus something you
 can hand to somebody with `rsync`.
+
+`investigations/` is neither: it holds what an administrator's *Investigate an address* found,
+filed so the report can be read again or handed to an agent. It sits outside the log, holds
+no source or observation, and deleting it loses nothing the corpus has.
 
 Blobs are **pooled across sources** — the same PDF on two `.gov` sites stores once. Logs
 and trees are **per source**, so a single city's corpus stays separable for handoff.

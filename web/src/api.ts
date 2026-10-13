@@ -518,15 +518,36 @@ export type CrumbsList = { action: 'list'; sources: string[]; documents: number;
 export type Note = { label: string; detail: string; mark?: 'ok' | 'warn' | 'bad' }
 export type ReadQuality = { chars: number; bytes: number; chars_per_kb: number; links: number; link_share: number; findings?: string[] }
 
+/** Which part of an op made a request. */
+export type RequestStep = { kind: 'robots' | 'seed' | 'page' | 'enclosure' } | { kind: 'probe'; strategy: string }
+
+/** One request an investigation made, and what came back. `status` is absent when no answer arrived at all. */
+export type RequestRecord = {
+  step: RequestStep
+  method: string
+  url: string
+  status?: number
+  content_type?: string
+  bytes: number
+  elapsed_ms: number
+  /** When it was sent, in Unix milliseconds. */
+  at_ms: number
+  redirected_to?: string
+  error?: string
+}
+
 export type InvestigateReport = {
   address: string
   seed: { http_status?: string; bytes: number; kind: string; final_url?: string; robots_declared: boolean }
   recognised?: Array<{ strategy: string; keyed_on: string; kind: string; best: boolean; evidence: Note[]; warnings?: Note[] }>
+  /** Strategies that were asked and did not recognise it. The registry records no reason. */
+  declined?: string[]
   probe?: { addresses: number; complete: boolean; strategy: string; by_fallback: boolean; requests_allowed: number; sample?: string[]; declared_total?: number }
   lead?: { read: ReadQuality; anchors: number; script_bytes: number; sitemap_declared: boolean; findings?: string[] }
   crumbs?: Crumb[]
   promote?: { id: string; site: string; strategy?: string }
   warnings?: string[]
+  requests?: RequestRecord[]
   elapsed_secs: number
 }
 
@@ -554,12 +575,13 @@ export type CheckReport = {
   documents: CheckedDocument[]
   not_fetched?: string[]
   enumeration?: { strategy: string; recognised: boolean; truncated: boolean; addresses: number; sample?: string[]; notes?: Note[]; warnings?: string[] }
+  requests?: RequestRecord[]
   elapsed_secs: number
 }
 
-/** Each half of a try, kept whatever became of the other. */
+/** Each half of an investigation, kept whatever became of the other. */
 export type Half<T> = { report: T; error?: undefined } | { report?: undefined; error: string }
-export type TryReport = { address: string; started_at: string; finished_at: string; investigate: Half<InvestigateReport>; check: Half<CheckReport> }
+export type InvestigationReport = { address: string; started_at: string; finished_at: string; investigate: Half<InvestigateReport>; check: Half<CheckReport> }
 
 export type NewSource = { id: string; site?: string; channel?: string; strategy?: string; disabled?: boolean }
 
@@ -653,8 +675,9 @@ export const api = {
   setSourceEnabled: (id: string, enabled: boolean) => request<unknown>(`/workspace/sources/${encodeURIComponent(id)}/enabled`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   /** Starts a run in the store's one lane. `run_id` is the journal's handle and the job's id, so the page opens the drawer on it. */
   runSource: (id: string, body: { skip?: string[]; limit?: number; refresh?: boolean } = {}) => request<{ run_id: string }>(`/workspace/sources/${encodeURIComponent(id)}/run`, { method: 'POST', body: JSON.stringify(body) }),
-  tryAddress: (url: string) => request<{ id: string }>('/workspace/sources/try', { method: 'POST', body: JSON.stringify({ url }) }),
-  tried: (id: string) => request<TryReport>(`/workspace/sources/tries/${encodeURIComponent(id)}`),
+  /** Starts an investigation of an address, as a job. The answer is the job's id, which is also the report's. */
+  investigate: (url: string) => request<{ id: string }>('/workspace/investigations', { method: 'POST', body: JSON.stringify({ url }) }),
+  investigation: (id: string) => request<InvestigationReport>(`/workspace/investigations/${encodeURIComponent(id)}`),
 }
 
 /** Who ran a model: TypeSafe's Jev, OpenRouter, or weights on this machine. */
