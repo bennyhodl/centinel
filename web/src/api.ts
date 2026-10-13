@@ -585,6 +585,47 @@ export type InvestigationReport = { address: string; started_at: string; finishe
 
 export type NewSource = { id: string; site?: string; channel?: string; strategy?: string; disabled?: boolean }
 
+// ── Graph ───────────────────────────────────────────────────────────────────
+
+/**
+ * A node of the graph: a source the store defines, or a host its pages link to that no
+ * source claims. `id` is `source:<id>` or `host:<host>`, which is what an edge names. A
+ * host some source claims is not a node: the edge lands on that source.
+ */
+export type GraphNode =
+  | { kind: 'source'; id: string; source: string; acquisition: SourceKind; target: string; host?: string; enabled: boolean; addresses: number }
+  | { kind: 'host'; id: string; host: string; pages: number; links: number; sources: number; standing: CrumbStanding }
+
+/** One source's pages pointing at one node. `pages` is the weight; `links` is how many times. */
+export type GraphEdge = { from: string; to: string; pages: number; links: number }
+
+/** The whole graph's numbers, before the filter, so a view can say what it leaves out. */
+export type GraphTotals = { sources: number; hosts: number; edges: number; links: number; open: number; refused: number }
+
+export type GraphView = { nodes: GraphNode[]; edges: GraphEdge[]; totals: GraphTotals; truncated: boolean }
+
+/** Edges carried by fewer pages are left out, and so is a host no edge reaches. */
+export type GraphFilter = { min_pages: number; hide_refused: boolean }
+
+/** One host's card: who links there, where on the host, and from which pages. */
+export type HostDetail = {
+  host: string
+  standing: CrumbStanding
+  note?: string
+  pages: number
+  links: number
+  example?: string
+  sources: Array<{ source: string; pages: number; links: number; example: string }>
+  paths: Array<{ path: string; pages: number }>
+  paths_more: number
+  /** `blob` is the page as collected, which `originalUrl` opens. */
+  referrers: Array<{ source: string; address: string; blob?: string; at?: string }>
+  referrers_more: number
+}
+
+/** What a refusal or an allow answers with: the ruling as `crumbs ignore` reports it. */
+export type Ruled = { action: 'ruled'; host: string; ruling: 'ignore' | 'allow'; at: string; note?: string; previous?: string }
+
 export const api = {
   /** The signed-in account, or null when nobody is. */
   account: () => request<{ account: Account | null }>('/api/account').then(value => value.account),
@@ -678,6 +719,15 @@ export const api = {
   /** Starts an investigation of an address, as a job. The answer is the job's id, which is also the report's. */
   investigate: (url: string) => request<{ id: string }>('/workspace/investigations', { method: 'POST', body: JSON.stringify({ url }) }),
   investigation: (id: string) => request<InvestigationReport>(`/workspace/investigations/${encodeURIComponent(id)}`),
+  /** The graph as a filter asks for it. Sources always come back; a host does while an edge reaches it. */
+  graph: (filter: GraphFilter) => {
+    const path = `/workspace/graph?${new URLSearchParams({ min_pages: String(filter.min_pages), hide_refused: String(filter.hide_refused) })}`
+    return request<GraphView>(path).then(value => withArray(withArray(value, 'nodes', path), 'edges', path))
+  },
+  graphHost: (host: string) => request<HostDetail>(`/workspace/graph/host/${encodeURIComponent(host)}`),
+  /** The same corpus-wide ruling `centinel crumbs ignore` writes. */
+  refuseHost: (host: string, note?: string) => request<Ruled>(`/workspace/graph/host/${encodeURIComponent(host)}/refuse`, { method: 'POST', body: JSON.stringify({ note }) }),
+  allowHost: (host: string) => request<Ruled>(`/workspace/graph/host/${encodeURIComponent(host)}/allow`, { method: 'POST', body: JSON.stringify({}) }),
 }
 
 /** Who ran a model: TypeSafe's Jev, OpenRouter, or weights on this machine. */

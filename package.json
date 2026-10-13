@@ -25,6 +25,7 @@
     "@radix-ui/react-slot": "^1.2.3",
     "@radix-ui/react-tabs": "^1.1.13",
     "@radix-ui/react-tooltip": "^1.2.8",
+    "@sigma/node-border": "^3.0.0",
     "@tanstack/react-query": "^5.87.1",
     "@tanstack/react-router": "^1.170.41",
     "@tanstack/react-start": "^1.168.60",
@@ -33,6 +34,8 @@
     "better-auth-nostr": "^0.3.0",
     "class-variance-authority": "^0.7.1",
     "cn": "^0.4.0",
+    "graphology": "^0.26.0",
+    "graphology-layout-forceatlas2": "^0.10.1",
     "hono": "^4.13.13",
     "lucide-react": "^0.544.0",
     "nostr-tools": "^2.25.2",
@@ -41,7 +44,8 @@
     "react-dom": "^19.1.1",
     "react-markdown": "^10.1.0",
     "rehype-slug": "^6.0.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "sigma": "^3.0.3"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
@@ -52,6 +56,7 @@
     "@vitejs/plugin-react": "^5.0.3",
     "babel-plugin-react-compiler": "^1.0.0",
     "esbuild": "^0.28.2",
+    "graphology-types": "^0.24.8",
     "shadcn": "^4.21.4",
     "tailwindcss": "^4.3.3",
     "tw-animate-css": "^1.4.0",
