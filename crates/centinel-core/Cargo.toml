@@ -17,7 +17,9 @@ serde_json.workspace = true
 schemars.workspace = true
 clap.workspace = true
 inventory.workspace = true
-tokio.workspace = true
+# `net` for `inference`'s reachability check — a TCP connect, before a stage commits to an
+# hour of work against a server that is not there.
+tokio = { workspace = true, features = ["net"] }
 futures.workspace = true
 sha2.workspace = true
 hex.workspace = true
@@ -59,9 +61,6 @@ toml = "1.1.4"
 # that is removed with it, so nothing outlives the conversion.
 tempfile = "3"
 
-# Local inference. Compiles llama.cpp from source, which is what puts a C++ build in
-# `cargo build` — the distribution question ticket #11 already tracks for whisper-rs.
-llama-cpp-2 = { version = "0.1.153", default-features = false, features = ["openmp"] }
 # ANN over the embedding cache (SPEC §5.1). Its default features are the S3, GCS, Azure
 # and OSS object stores — every one of them a network path out of a machine that §2.1
 # says nothing leaves. Local tables need none of them.
@@ -73,19 +72,6 @@ lancedb = { version = "0.33.0", default-features = false }
 # above: the defaults are the object stores this machine never talks to.
 lance = { version = "=9.0.0", default-features = false }
 
-[features]
-default = []
-# GPU backends. Metal is enabled automatically on macOS below; the rest are opt-in
-# because they need a toolchain (nvcc, ROCm) that a plain `cargo build` cannot assume.
-cuda = ["llama-cpp-2/cuda"]
-vulkan = ["llama-cpp-2/vulkan"]
-rocm = ["llama-cpp-2/rocm"]
-
-# Metal needs no external toolchain on macOS and is the difference between a corpus that
-# embeds overnight and one that embeds over a lunch break, so it is not opt-in there.
-[target.'cfg(target_os = "macos")'.dependencies]
-llama-cpp-2 = { version = "0.1.153", default-features = false, features = ["openmp", "metal"] }
-
 [dev-dependencies]
 tempfile = "3"
 # A capturing subscriber for the tests of `op::log_event`, which is where a progress
@@ -95,10 +81,6 @@ tracing-subscriber.workspace = true
 # the rest of this crate tests: the input is readable beside the assertion. Already in the
 # tree through anydoc, so it costs no build time.
 zip = "8"
-# The download tests speak HTTP/1.1 over a raw socket. Resume correctness is a property
-# of the conversation — Range headers, 206 vs 200, a connection dropped mid-body — and a
-# server framework will not let a test write a deliberately truncated response.
-tokio = { workspace = true, features = ["net"] }
 
 # The pid-liveness check behind `run.lock`'s stale-lock recovery, and nothing else.
 # Already in the tree under tokio, so this costs no new download.

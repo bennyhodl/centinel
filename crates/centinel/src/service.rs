@@ -37,12 +37,12 @@ const UNIT: &str = "centinel.service";
 
 /// What the unit carries from the shell that ran `start`. A service inherits nothing
 /// from it: without `PATH` it cannot find `tailscale`, `ffmpeg` or `yt-dlp`, and without
-/// the keys it cannot embed or classify. The unit file is written `0600` for the keys'
-/// sake. `TYPESAFE_API_KEY` can live in `<root>/.env` instead, which the service reads
-/// because it runs in the store root.
-const FORWARDED_ENV: [&str; 6] = [
+/// the keys it cannot classify — or embed, through a server that wants one, whose
+/// variable `[inference]` names and [`start`] forwards beside these. The unit file is
+/// written `0600` for the keys' sake. `TYPESAFE_API_KEY` can live in `<root>/.env`
+/// instead, which the service reads because it runs in the store root.
+const FORWARDED_ENV: [&str; 5] = [
     "PATH",
-    "OPENROUTER_API_KEY",
     "TYPESAFE_API_KEY",
     "CENTINEL_PUBLIC_URL",
     "CENTINEL_CONFIG",
@@ -152,9 +152,17 @@ pub async fn start(root: &Path, serve_args: Vec<String>) -> Result<()> {
     let mut program = vec![exe.display().to_string(), "serve".to_string()];
     program.extend(serve_args);
     let mut env = vec![("CENTINEL_ROOT".to_string(), root.display().to_string())];
-    env.extend(FORWARDED_ENV.iter().filter_map(|name| {
-        let value = std::env::var(name).ok().filter(|v| !v.is_empty())?;
-        Some((name.to_string(), value))
+    // A config that does not load forwards no key; the server it starts says why.
+    let keys = centinel_core::config::Config::load()
+        .map(|config| config.inference.key_vars())
+        .unwrap_or_default();
+    let names = FORWARDED_ENV.iter().map(|name| name.to_string()).chain(
+        keys.into_iter()
+            .filter(|key| !FORWARDED_ENV.contains(&key.as_str())),
+    );
+    env.extend(names.filter_map(|name| {
+        let value = std::env::var(&name).ok().filter(|v| !v.is_empty())?;
+        Some((name, value))
     }));
     let spec = Spec {
         program,

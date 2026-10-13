@@ -6,7 +6,7 @@
 # multi-gigabyte blob pools do not belong in git.
 /.centinel/
 
-# Local model weights, pulled by `centinel models pull`.
+# Local model weights, from before inference moved to servers.
 /models/
 
 # env / secrets

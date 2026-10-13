@@ -2,13 +2,15 @@
 
 How a question becomes a cited passage.
 
-Everything here runs on the machine in front of you. No embedding API, no reranking API,
-no text leaving the process (SPEC §2.1). Two model files and two files on disk.
+Centinel runs no model itself. Embedding and reranking are each a request to a server
+the operator names in `[inference]` — by default llama-server on `127.0.0.1:8080`, so
+with the default nothing leaves the machine (SPEC §2.1 as amended). Two servers and two
+files on disk.
 
-One named exception (SPEC §2.1, reopened 2026-08): set `embed_model` to an
-`openrouter/…` model and the embed stage — and the query embedding of any search
-against that corpus — calls openrouter.ai instead. See §3 below. Everything else on
-this page stays local either way.
+A `base_url` elsewhere — OpenRouter, a GPU box across the room — sends chunk text, and
+at search time the query, there instead. The config file is the one place that says so,
+and nothing falls back to a server the operator did not name. See §3 below. Everything
+else on this page — blobs, logs, provenance, the index — stays local either way.
 
 ```
                         centinel index
@@ -19,9 +21,9 @@ this page stays local either way.
 
   query
     ├─ BM25   (SQLite FTS5)          → top 100    instant, no model
-    └─ vector (Qwen3-Embedding-4B)   → top 100    one embed call
+    └─ vector (embed server)         → top 100    one request
           └─ RRF fuse (k=60)         → top 40
-                └─ Qwen3-Reranker    → top n      always on
+                └─ rerank server     → top n      always on
 ```
 
 ---
@@ -99,19 +101,44 @@ So `embed` writes vectors where `search` reads them.
 ## 3. `centinel embed` — the expensive stage
 
 ```bash
-centinel embed --dry-run          # what would be embedded, without loading a model
+centinel embed --dry-run          # what would be embedded, without asking the server
 centinel embed --limit 100        # sample before committing hours
 centinel embed                    # the rest; re-run to resume
 ```
 
+### The server
+
+```toml
+[inference]
+base_url = "http://127.0.0.1:8080/v1"   # the default; llama-server's default port
+[inference.embed]
+model = "qwen3-embedding-4b"
+query_prefix = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
+batch = 64          # chunks per request
+concurrency = 4     # requests in flight
+```
+
+```bash
+llama-server -hf Qwen/Qwen3-Embedding-4B-GGUF:Q8_0 --embedding --pooling last
+```
+
+The request is OpenAI's `POST {base_url}/embeddings`, which llama-server (`--embedding`),
+Ollama, vLLM, LM Studio and OpenRouter all answer. What the server does to produce a
+vector — quantization, pooling, how the work is packed onto a GPU — is its tuning, set
+once for its machine. What comes back is held to one contract whichever server sent it:
+one vector per input, ordered by each row's `index` rather than by arrival, every one the
+same width and finite. A server that answers at another width is serving another model,
+and the run ends there rather than skipping the corpus a batch at a time.
+
 ### The model
 
-**`Qwen3-Embedding-4B`**, Q8_0 GGUF, **2,560 dimensions**, 32K context, Apache-2.0 and
-published by Qwen themselves. Run in-process through `llama-cpp-2` — no server, no
-sidecar, no second language runtime.
+The default is **`Qwen3-Embedding-4B`**, Q8_0 GGUF, **2,560 dimensions**, 32K context,
+Apache-2.0 and published by Qwen themselves.
 
-Licence decided the family: Centinel auto-downloads weights and forks redistribute them,
-which rules out EmbeddingGemma (Gemma licence) and Jina's reranker (CC-BY-NC).
+Licence decided the family when Centinel downloaded weights itself and forks
+redistributed them, which ruled out EmbeddingGemma (Gemma licence) and Jina's reranker
+(CC-BY-NC). The default has not moved since; a server can now run either, and that is
+the operator's licence to read.
 
 Size is decided by **where the cost lands**. The embedder is paid once per corpus in
 hours; the reranker is paid per query in milliseconds. On MTEB English Retrieval,
@@ -120,74 +147,81 @@ hours; the reranker is paid per query in milliseconds. On MTEB English Retrieval
 into the embedder once and into the reranker freely (SPEC §6.2).
 
 Q8_0 over Q4_K_M for the same reason: quantization here is amortised over hours of work
-rather than paid per query.
+rather than paid per query. It is chosen on the server's command line now, and the
+reason still holds.
 
 ### The recipe, and why it is written down
 
-Three things that a generic embedding wrapper would get wrong, and none of them errors:
+Three things a generic embedding setup gets wrong, and none of them errors:
 
-1. **Last-token pooling**, not mean pooling.
+1. **Last-token pooling**, not mean pooling. The server's to apply — llama-server's
+   `--pooling last`.
 2. **An instruction prefix on queries only.** A query is wrapped as
    `Instruct: {task}\nQuery:{q}`; a document is embedded bare. The asymmetry is the
-   model's — it was trained to treat the relationship as directional.
-3. **L2 normalization**, so cosine similarity is a dot product.
+   model's — it was trained to treat the relationship as directional. The server cannot
+   know a model wants this, so `[inference.embed] query_prefix` states it, and a written
+   `[inference.embed]` table must state it, even as `""` for a symmetric model.
+3. **L2 normalization**, so cosine similarity is a dot product. Done in `embed.rs` rather
+   than trusted: normalizing a unit vector is a no-op, and `search` relies on the dot
+   product.
 
 Each produces *plausible* vectors when wrong: slightly worse retrieval, no error
-anywhere. `embed.rs` therefore carries a test that asserts on semantics rather than on
-shapes.
+anywhere. `embed.rs` therefore carries tests that assert the prefix lands on queries only
+and that every vector leaves at unit length, whatever the server sent.
 
-### Batching is not optional
+### Batching, and requests in flight
 
-A batch is **one forward pass over many chunks**: one context, one `decode`, every chunk
-as its own `seq_id`. Two costs collapse into it. First, a `llama.cpp` context and its KV
-cache are built per **call**, not per text:
+A request carries `batch` chunks (64 by default, `--batch N` for one run), and
+`concurrency` requests are in flight at once: a reader thread keeps chunk text coming off
+SQLite, the requests hide the round trip, and a writer task appends what comes back — so
+the server waits on neither SQLite nor Lance. How the server packs a request onto its
+GPU is its own tuning, not this binary's flags.
+
+When models ran in-process the batch was one `llama.cpp` forward pass, and batching was
+measured as the whole game:
 
 | | chunks/sec (M1 Max, Metal) |
 |---|---|
 | one chunk per call | 6.1 |
 | batches of 32 | **18.5** (0.6B) / **3.8** (4B) |
 
-Second, one ~300-token chunk leaves a GPU almost entirely idle. The table measures only
-the first — it predates the packed decode and has not been re-run against it.
+The same holds behind a server, which is why requests are wide rather than one chunk
+each.
 
-So the batch is the unit of work, not the chunk. A batch that fails as a unit — an
-over-long chunk, or a group the machine cannot hold — is retried individually, so one bad
-chunk cannot cost the other 31. How wide is a property of the machine: `[defaults]
-embed_batch`, `--batch N`, or `auto`.
+A batch that fails is **bisected**, so healthy chunks still go in groups: a window of 64
+with one chunk the server will not take costs a dozen requests, not 64, and the one chunk
+is reported as skipped. A failure that will refuse every half the same way — nothing
+listening, a key refused, a model the server does not have — is not bisected; the run
+ends on it.
 
-An over-long text is **refused, not truncated**. A silently shortened chunk would be
-stored under a `chunk_hash` covering text that was never embedded, which makes the record
-lie about what it holds.
+Nothing is truncated here. A silently shortened chunk would be stored under a
+`chunk_hash` covering text that was never embedded, which makes the record lie about
+what it holds.
 
-### Remote: the same stage through OpenRouter
+### A server elsewhere
 
-```bash
-export OPENROUTER_API_KEY=sk-or-…
-centinel embed --model openrouter/qwen/qwen3-embedding-8b --dry-run
-centinel embed --model openrouter/qwen/qwen3-embedding-8b
-centinel search "lobbying expenditures"    # the query embeds remotely too — the table says so
+```toml
+[inference.embed]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"   # the variable's name, never the key
+model = "qwen/qwen3-embedding-8b"
+query_prefix = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
 ```
 
-An `openrouter/` model id routes the stage through `remote.rs` instead of local weights.
-Chunk text is sent to openrouter.ai — the run says so before the first byte moves — and
-nothing else leaves: blobs, logs, provenance and the index stay put. The work list, the
-resume subtraction and the skip accounting are unchanged; the batch becomes a request
-body (default 128 chunks, a few requests in flight) instead of a KV-cache reservation.
-The instruction-prefix and normalization recipe still applies, client-side, per model.
+Each capability may name its own `base_url` and `api_key_env`. Chunk text, and at search
+time the query, go to that server; nothing else leaves — blobs, logs, provenance and the
+index stay put. The work list, the resume subtraction and the skip accounting are the
+same whichever server answers. The reason to reach for one: `qwen/qwen3-embedding-8b` —
+too big for most laptops — costs about $0.01 per million tokens on OpenRouter, so a
+400,000-chunk corpus embeds for a few dollars in well under a day, GPU or no GPU.
 
-The remote id keys **its own vector table**. Even `openrouter/qwen/qwen3-embedding-4b`
-— the local default's weights — is a separate space: quantization and serving differ,
-and parity between them is a measurement nobody has made. Switching between local and
-remote is therefore a full re-embed, exactly like switching models.
+A different server is a different **vector space**, even for the same model name (§4):
+quantization and pooling differ, and the difference shows up only as worse rankings.
+Moving a table there is either a full re-embed or `centinel embed --adopt`, which
+measures that the new server reproduces what is stored.
 
-The curated list and the pinned dimensions live in `remote.rs` (`REMOTE_REGISTRY`);
-adding a model OpenRouter serves is one entry. The reason to reach for it at all:
-`qwen/qwen3-embedding-8b` — too big for most laptops locally — costs about $0.01 per
-million tokens, so a 400,000-chunk corpus embeds for a few dollars in well under a day,
-GPU or no GPU.
-
-The whole run goes into a single `spawn_blocking`. Inference would otherwise stall the
-async runtime, which matters here because an HTTP caller's connection has to survive a
+The run never blocks the async runtime: the requests are awaited, and SQLite reads sit
+on their own thread. That matters because an HTTP caller's connection has to survive a
 multi-hour run.
 
 ### Resumability is a consequence, not a feature
@@ -214,8 +248,9 @@ per batch ever appended (one store reached 20,000 fragments and 16 GiB of manife
 
 ### What it costs
 
-On a 400,000-chunk corpus at the measured 3.8 chunks/sec: **about a day**, once. A
-monthly recrawl re-embeds only what changed.
+On a 400,000-chunk corpus at the 3.8 chunks/sec measured in-process on an M1 Max: **about
+a day**, once. Behind a server the speed is that machine's, and it has not been
+re-measured. A monthly recrawl re-embeds only what changed.
 
 ---
 
@@ -238,21 +273,41 @@ is applied inside the vector query. The same passage on fifty pages is fifty row
 vector; `embed` copies it rather than asking the model again. When a document's tags or
 exclusion change, the workspace queues it and a sync rewrites those two columns in place —
 Lance patches them inside the existing fragments and never touches a vector. A store from
-before this layout holds `vectors.lance/`, one row per chunk; `centinel embed --limit 0`
-fills `chunks.lance/` from it with nothing sent to a model, and the operator deletes the
-old directory when satisfied.
+before this layout holds `vectors.lance/`, one row per chunk. This release no longer reads
+it — a copy matched on a model name alone would skip the measurement `--adopt` makes — and
+refuses with the way forward: upgrade it with the release before this one, whose `centinel
+embed --limit 0` fills `chunks.lance/` with nothing sent to a model, or delete it and embed
+again.
 
-**The model is a property of the table.** Its id lives in the schema metadata, and a
-query vector from any other model is refused at open, naming the fix. Vectors from two
-models are in different spaces and still return a confident ranked list — there is no
-symptom but a worse ordering. Width is guarded by the schema itself: the column is a
-fixed-size list of exactly `dims` floats, so a wrong width cannot be written at all.
+**The space is a property of the table.** The schema metadata records the model and the
+server that ran it — `centinel.model_id` and `centinel.endpoint`, the second absent on a
+table written before `[inference]` existed — and rows or a query vector from any other
+space are refused, naming the fix. The server is part of the space because a model is
+only ever a model *as served*: the same weights at two quantizations, or behind two
+servers' pooling, are close and not identical. Vectors from two spaces still return a
+confident ranked list — there is no symptom but a worse ordering. Width is guarded by the
+schema itself: the column is a fixed-size list of exactly `dims` floats, so a wrong width
+cannot be written at all. A new table takes its width from one probe request to the
+server.
 
-This also means `search` is never *told* which embedder to use. It asks the table. A
-reader configured differently would otherwise have its query refused and quietly fall
-back to one arm.
+`search` reads the table's space and checks the configured embed server against it. When
+they differ the vector arm does not run, and `no_vectors` says so and points at
+`centinel embed --adopt`, rather than ranking the corpus in a space it was never written
+in.
 
-**One table, not one per model.** SPEC §6.2 already makes changing the embedder a full
+**Moving a table to another server.** `centinel embed --adopt` samples up to 32 stored
+vectors whose chunks the index still has, embeds those chunks on the configured server,
+and adopts the server — rewriting the metadata in one manifest commit, no row touched —
+only if every pair agrees at cosine ≥ 0.99. The same weights behind a new server land at
+0.999 and above; a different model, or the same one at a coarser quantization, lands
+well under on most chunks. Otherwise it refuses with the minimum and mean it measured and
+what to run instead: the old server again; for an `openrouter/…` id, the OpenRouter
+config; for a table embedded in-process as `qwen3-embedding-4b` or `0.6b`, the
+`llama-server` command that runs the same Q8_0 weights with last-token pooling; or delete
+`chunks.lance/` and re-embed. `--adopt --dry-run`
+measures without writing.
+
+**One table, not one per space.** SPEC §6.2 already makes changing the embedder a full
 re-embed rather than a config edit, so a second model is a rebuild.
 
 **ANN indexing is not built yet.** With no index, Lance scans flat — exact, and the right
@@ -285,7 +340,8 @@ against BGE-large's 13.8. Vector-only search fails hardest on precisely these.
 water sampling results"` returns **nothing** from FTS5, because the water report says
 `PWSName`, `Analyte` and `UCMR 5`, and the only chunk containing "drinking" is a tax table
 about *Drinking Places (Alcoholic Beverages)*. BM25 is behaving correctly and is still
-useless. That case is asserted as a test, not described.
+useless. That case is asserted as a test, not described — against real servers, so it is
+opt-in (`CENTINEL_TEST_INFERENCE=1`).
 
 ### RRF
 
@@ -307,9 +363,14 @@ the corpus having changed.
 
 ### Reranking, always on
 
-**`Qwen3-Reranker-0.6B`**, Q8_0 GGUF, 32K context, Apache-2.0. The weights are a
-community conversion by `ggml-org` — the llama.cpp organisation — because Qwen publish
-GGUF for the embedder only. Digests pin exactly what is fetched.
+```toml
+[inference.rerank]
+model = "qwen3-reranker-0.6b"
+```
+
+The default is **`Qwen3-Reranker-0.6B`**, 32K context, Apache-2.0. Qwen publish GGUF for
+the embedder only, so the GGUF a llama-server runs for it is a community conversion by
+`ggml-org`, the llama.cpp organisation.
 
 One command, one answer, and **no fast path that silently returns worse results**. The
 measured gap is why: BM25 goes from **14.8 to 33.4** nDCG@10 when reranked, and reranked
@@ -320,35 +381,37 @@ The architectural consequence is the reason the first stage can be cheap: **a ch
 that over-fetches plus a good reranker beats an expensive retriever alone.** The first
 stage only has to get the right passage into the top 40. It does not have to rank it.
 
-**It is not an embedding model, and that is the whole difficulty.** `Qwen3-Reranker` is a
-causal language model. It emits no vector. It is asked a yes/no question and the answer is
-read from the logits at the final position:
+**The request has no OpenAI spec.** OpenAI publishes no rerank endpoint, so this speaks
+the shape Cohere and Jina published and everyone else copied — llama-server under
+`--reranking`, vLLM, TEI, Infinity, LocalAI:
+
+```
+POST {base_url}/rerank   {"model", "query", "documents": [...], "top_n"}
+→                        {"results": [{"index", "relevance_score"}, ...]}
+```
+
+Scores are read by each row's `index`, because a server answers best first. Every
+document must come back scored, once, with a finite score, or the response is refused
+rather than paired up arbitrarily. The scores are in whatever range the server uses; only
+their order is relied on.
+
+**It is not an embedding model, and that is the server's difficulty now.**
+`Qwen3-Reranker` is a causal language model. It emits no vector. It is asked a yes/no
+question and the answer is read from the logits at the final position:
 
 ```
 score = softmax([logit(no), logit(yes)])[1]     →  P(yes), in [0, 1]
 ```
 
-So it runs pooling `None` and reads logits, where the embedder runs pooling `Last` and
-reads embeddings. They share a runtime and nothing else.
+When it ran in-process, three things had to be exactly right, and none of them errored
+when wrong: the chat template verbatim, system line included; `yes` and `no` as single
+tokens, checked at load; and a softmax over exactly those two logits, written as
+`1 / (1 + exp(no - yes))` so a large raw logit could not overflow to `NaN`. They are what a
+rerank server applies for this model, and they are the first thing to check when a
+server's ordering looks wrong.
 
-Three things must be exactly right, and none of them errors when wrong:
-
-1. **The chat template, verbatim** — the system line included. A hand-rolled prompt gets a
-   fluent answer to a different question.
-2. **`yes` and `no` as single tokens.** More than one piece and the logit being read
-   belongs to a fragment. Checked at load, because a model that fails this cannot be
-   scored at all.
-3. **Softmax over exactly those two logits**, not over the vocabulary. The absolute logits
-   drift with document length; their difference does not.
-
-The softmax is written as a difference, `1 / (1 + exp(no - yes))`, rather than two `exp`
-calls over a shared denominator: raw logits can be large enough to overflow to infinity,
-which yields `NaN` and an order that depends on the sort's tie-breaking.
-
-Unlike `embed`, an over-long document here is **truncated, not refused**. A passage is one
-candidate among many and a shortened judgement is still a judgement, where refusing would
-drop a result the first stage chose. Nothing here is stored, so nothing can lie about what
-it covers.
+Nothing a reranker sees is stored, so however a server handles an over-long passage —
+truncating it or refusing it — nothing can lie about what it covers.
 
 ### `--source`, `--tag`, `--not-tag`
 
@@ -420,10 +483,12 @@ vectors — and `centinel embed --dry-run` computes exactly that: `indexed`,
 `already_embedded`, `remaining`, `stale`.
 
 **Always on is not the same as always available.** §6.3 forbids a *flag* that silently
-returns worse results. It does not promise that a machine with no reranker weights refuses
-to search. Missing weights degrade the answer and say so; they never turn a query into an
-error a reader cannot act on. The same holds for an unbuilt vector table: a corpus is
-keyword-searchable long before it is embedded.
+returns worse results. It does not promise that a machine whose rerank server is down
+refuses to search. A server that is not answering degrades the answer and says so, in
+`no_rerank` or `no_vectors`; it never turns a query into an error a reader cannot act on.
+Whether the rerank server is there is asked before the hits are looked at, so a search
+that found nothing still says the reranker is missing. The same holds for an unbuilt
+vector table: a corpus is keyword-searchable long before it is embedded.
 
 Every result leads its provenance line with a **handle** — the short blob hash — because
 anything Centinel prints, Centinel takes back. `centinel read <hash>` and
@@ -435,17 +500,22 @@ anything Centinel prints, Centinel takes back. `centinel read <hash>` and
 
 | | |
 |---|---|
-| **embedder** | `Qwen3-Embedding-4B` Q8_0 GGUF · 2,560-dim · Apache-2.0 · first-party |
-| **reranker** | `Qwen3-Reranker-0.6B` Q8_0 GGUF · Apache-2.0 · `ggml-org` conversion |
-| **runtime** | `llama-cpp-2` in-process · Metal on macOS, CUDA/Vulkan/ROCm opt-in |
+| **embedder** | default `Qwen3-Embedding-4B` · 2,560-dim · Apache-2.0 · first-party |
+| **reranker** | default `Qwen3-Reranker-0.6B` · Apache-2.0 · `ggml-org` GGUF conversion |
+| **runtime** | a server the operator runs — llama-server by default — over HTTP |
 | **vectors** | `lancedb` 0.33, no default features |
 | **keywords** | SQLite FTS5, `bundled` |
 | **fusion** | ours — a few dozen lines |
 
-GGUF and not ONNX because the `onnx-community` exports are decoder graphs carrying a KV
-cache, and CoreML refuses tensors with zero elements — which is exactly what an empty
-cache is. That makes ONNX permanently CPU-only on Apple Silicon. Measured on the same
-model both ways: ONNX on CPU gives 5.5 chunks/sec, `llama.cpp` on Metal gives 18.5
+No model runtime is linked into the binary. The tuning that makes a model fast on one
+machine — GPU layers, physical batch, flash attention, threads — belongs to the server,
+set once for that machine, so a release is one plain CPU binary per platform.
+
+When models ran in-process, the runtime was chosen by measurement: GGUF through
+`llama.cpp` and not ONNX, because the `onnx-community` exports are decoder graphs
+carrying a KV cache, and CoreML refuses tensors with zero elements — which is exactly what
+an empty cache is. That made ONNX permanently CPU-only on Apple Silicon. Measured on the
+same model both ways: ONNX on CPU gave 5.5 chunks/sec, `llama.cpp` on Metal gave 18.5
 (SPEC §6.2.1).
 
 ---
@@ -458,13 +528,13 @@ model both ways: ONNX on CPU gives 5.5 chunks/sec, `llama.cpp` on Metal gives 18
 | re-embed after a monthly recrawl | ~5% of that |
 | rebuild `centinel.db` | minutes |
 | disk, vectors at 2,560-dim | 3.79 GiB per 400k chunks |
-| a query, warm process | ~1 second (the reranker) |
-| a query, cold CLI | **11 s measured** with the reranker alone; the embedder adds its own load on top |
+| a query | one embed request and one rerank request, at the servers' speed |
 
-The last row is worth knowing, and the measurement is honest about what it covers: 11.35 s
-on the Tampa corpus with no vector table, so only the 0.6B reranker was loaded. A query
-that also builds the 4B embedder pays more. `centinel serve` and `centinel mcp` load both
-once; a short CLI invocation pays on every query.
+When models ran in-process a warm query took ~1 second, most of it the reranker, and a
+cold CLI invocation **11.35 s measured** — on the Tampa corpus with no vector table, so
+only the 0.6B reranker was loaded, and the 4B embedder added its own load on top. A
+server loads its model once, so a short CLI invocation no longer pays that; what a query
+costs now is the server's time on the rerank, which has not been re-measured.
 
 ---
 

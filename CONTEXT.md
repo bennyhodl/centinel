@@ -221,9 +221,9 @@ work that was never done.
 |---|---|---|
 | collect | observed markers from the latest DiscoveryRun | the log |
 | extract | blobs with a Derivation **of bytes**, or an Underivable, from the latest Observations | the log |
-| transcribe | blobs derived by the transcriber from the audio blobs | the log |
+| transcribe | blobs derived by the transcriber — tool `transcription`, or `whisper.cpp` before the server took over — from the audio blobs | the log |
 | index | **placements** already written, per address | `centinel.db` |
-| embed | stored rows, one per chunk placed in a document, from the index's placements; a vector is copied from another document's row or the legacy `vectors` table before a model is asked | `chunks.lance/` |
+| embed | stored rows, one per chunk placed in a document, from the index's placements; a vector is copied from another document's row before a model is asked | `chunks.lance/` |
 
 **Underivable** — a derivation that was attempted and produced nothing. The peer of
 `ResourceStatus` on the derivation side, and it exists for the same reason: a `Derivation`
@@ -282,33 +282,36 @@ text. Changing it produces a wholly different set of hashes, so the old chunks s
 index and every vector in the cache is orphaned. The index records the geometry its hashes
 were built with, and refuses a change that is not a rebuild.
 
-**Embedding batch** — the chunks `embed` puts through **one `decode` call**: one
-`llama.cpp` context, each chunk its own `seq_id`. Not the same thing as the **physical
-pass** (`n_ubatch`), the ≤2,048-token slice of the call the graph actually runs — the
-pass sizes the attention buffers (the mask is `n_ubatch²` half-floats), and an uncapped
-pass is a shape no backend's kernels are exercised at: NaN vectors at ~12,000 tokens, a
-Metal segfault at ~38,000, measured. Passes queue back to back inside the call, so the
-cap costs no idle time. Nor the same word as the row below: a write batch is chosen by
-what must commit together, an embedding batch by what the machine can hold at once.
-Wider is faster — a lone ~300-token chunk leaves a GPU idle — until the KV cache stops
-fitting, and each sequence reserves its own. So the width is a property of the
-**machine** rather than of the corpus, which is why it is stated in `[defaults]
-embed_batch` and why `auto` reads the backend's free memory instead of shipping one
-number for laptops and 128 GB boxes alike. The context **stands** for the whole run
-(`EmbedSession`), cleared between batches — metadata, never the buffers — and a chunk
-longer than the standing reservation sends its group through a bespoke context, which is
-why the work list arrives shortest-first.
+**Embedding batch** — the chunks `embed` sends in **one request** to the embedding
+server: `[inference.embed] batch`, 64 by default, `--batch N` for one run. Not the same
+thing as **requests in flight** (`concurrency`), which hides the round trip, and not the
+same word as the row below: a write batch is chosen by what must commit together, an
+embedding batch by what one request should carry. How the server packs a request onto its
+hardware — the physical pass, the KV cache, the GPU — is the server's tuning, set once for
+its machine. When embedding ran in-process those were this binary's problem, and measured:
+an uncapped physical pass (`n_ubatch`) gave NaN vectors at ~12,000 tokens and a Metal
+segfault at ~38,000, which is why the llama-server command the `--adopt` refusal prints
+still passes `--ubatch-size 2048`. A batch the server fails is **bisected**, so one chunk it
+will not take costs a dozen requests rather than the whole batch.
 
-**Remote embedder** — the one inference allowed off the machine, and only by name: an
-`openrouter/…` model id sends chunk text (and, at search time, the query) to
-openrouter.ai instead of through local weights. The id is the routing — recorded in the
-vector table as any model id is, so a corpus embedded remotely is searched remotely, and
-nothing decides by falling back. *Why it matters:* §2.1 says no inference leaves the
-machine, and a quiet exception would make that promise a lie; the prefix keeps the
-exception in the one place an operator states a model. Local `qwen3-embedding-4b` and
-`openrouter/qwen/qwen3-embedding-4b` are the same weights and still **two spaces** —
-quantization and serving differ, and parity between them is a measurement nobody has
-made — so they share no table until it is.
+**Endpoint** — one capability's server: embed, rerank or transcribe, each a `base_url`, a
+model and, for a server that wants one, the name of the environment variable holding its
+key, from `[inference]`. The default is llama-server on `127.0.0.1:8080`. *Why it matters:*
+§2.1 as amended is a statement about where the operator pointed it — a server on this
+machine keeps the promise that nothing leaves; a `base_url` elsewhere sends chunk text,
+queries or audio there, and the config file is the one place that says so. Nothing falls
+back to a server the operator did not name. Before `[inference]` the one exception was an
+`openrouter/…` model id, which routed embedding to openrouter.ai; it is now an endpoint
+like any other.
+
+**Space** — what a stored vector is comparable with: the model **and** the server that ran
+it, recorded in the vector table's schema (`centinel.model_id`, `centinel.endpoint`). The
+same weights at two quantizations, or behind two servers' pooling, are close and not
+identical, and the difference shows up only as worse rankings — so two spaces share no
+table until `centinel embed --adopt` has measured that they agree: every one of up to 32
+sampled chunks at cosine ≥ 0.99. A table written before `[inference]` has no endpoint;
+its model id alone says where it came from — `qwen3-embedding-4b` meant weights in this
+process, `openrouter/…` meant OpenRouter.
 
 **Write batch** — the rows `index` commits as a unit, and it is **one document**, because
 that is the unit the row above subtracts. A batch is chosen by the skip predicate, not by
@@ -371,8 +374,9 @@ different answer, not a slower one, and neither is left to be inferred.
 
 **Always on vs always available** — §6.3 makes reranking always on, which is a rule about
 there being no flag that silently returns worse results. It is not a promise that a
-machine with no reranker weights refuses to search. Missing weights degrade the ordering
-and say so; they never turn a query into an error the reader cannot act on.
+machine whose rerank server is down refuses to search. A server that is not answering
+degrades the ordering and says so; it never turns a query into an error the reader cannot
+act on.
 
 **Handle** — a hash that identifies one blob *and* that the tool will accept back. The
 rule is that anything Centinel prints, Centinel takes back, by prefix, git-style. A
@@ -419,14 +423,16 @@ reported as required with zero call sites between them, so a correctly installed
 was told it was not ready. A readiness check that is wrong pessimistically is the kind
 people learn to ignore.
 
-**Gate** — a pipeline stage that a set of weights blocks: search, or transcription. Rolled
-up per *role*, not per model, because the registry carries alternates and any one
-installed model fills its role.
+**Gate** — a pipeline stage that a set of servers blocks: search, which needs the embed
+and rerank servers, or transcription, which needs the transcribe server. Rolled up per
+*stage*, not per server: search is blocked when either of its two is down, and `doctor`
+says which stage a closed port costs.
 
-**The fix** — the command that resolves a missing dependency. `centinel models pull` is
-spelled in exactly one place, `models::resolve`'s error. It was written out at seven call
-sites, so renaming the command would have left six of them telling people to run something
-that does not exist.
+**The fix** — what resolves a missing dependency. For a server it is spelled in exactly one
+place, `Endpoint::reachable`'s error: nothing is answering at this `base_url` — start a
+server for this model there, or point `[inference]` at one. The command that once fixed a
+missing model was written out at seven call sites before it had one place, so renaming it
+would have left six of them telling people to run something that did not exist.
 
 **Stale** — a binary that is present and working but old enough that breakage is expected
 rather than surprising. Only `yt-dlp` answers, because it is the one dependency whose
@@ -459,28 +465,29 @@ both leave `newer: false`, and only one of them means *up to date*. The report s
 `nothing answered` rather than assuring somebody of something nobody said.
 
 **The installer is the installer, at both ends.** `update` decides *which* sources and
-*where*, and `install.sh` decides everything else — the GPU backend, `target-cpu`, and both
-binaries into one directory. Reproducing any of that in Rust would be a second copy of the
-installer, wrong the first time the real one changed, and its failure is the quiet kind:
-`transcribe` silently mute, or `embed` measured in days instead of hours.
+*where*, and `install.sh` decides everything else — a release binary or a build, which
+target's binary, `target-cpu`, and where it goes. Reproducing any of that in Rust would be
+a second copy of the installer, wrong the first time the real one changed, and its failure
+is the quiet kind: a binary built for the wrong CPU, or one put where an older copy
+shadows it on `PATH`.
 
 ## External programs
 
-**Tool** — one invocation of an external program: `yt-dlp`, `ffmpeg`, the whisper worker,
-whichever application opens a PDF. The only way this codebase starts a child process.
+**Tool** — one invocation of an external program: `yt-dlp`, `ffmpeg`, whichever
+application opens a PDF. The only way this codebase starts a child process.
 *Why it matters:* every child it starts dies with its caller, carries a deadline, and
 never reads our stdin. Seven call sites used to make those choices separately, and all
 seven made none of them.
 
-**Deadline vs stall timeout** — a deadline bounds *total* time and suits a call with a
-known shape: a version probe, a metadata fetch. A stall timeout bounds *silence*, and is
-the only workable guard on a job whose honest duration is hours. A transcription still
-reporting progress after four hours is working; one that has said nothing for ten minutes
-is wedged.
-
-**Heartbeat** — output that proves a child is alive. The whisper worker's stderr is both
-its diagnostics and its heartbeat, which is why the stall timer resets on *any* line
-rather than only on a progress report.
+**Deadline** — the bound on a call's *total* time. Every child process has one, sized for
+what it is doing: seconds for a version probe, half an hour for ffmpeg to decode a
+meeting. A transcription request has one too, sized by its audio — ten minutes plus three
+times the recording — because a server answers nothing until it has transcribed the whole
+thing, and a deadline that fits a three-hour meeting would guard nothing for a
+thirty-second clip. Before transcription moved to a server it ran in a child process
+whose honest duration was hours, so it was guarded by a **stall timeout** instead — a
+bound on silence, reset by each line of the worker's stderr, its **heartbeat**. Nothing
+streams now, and both went with the worker.
 
 **Refusal vs transport fault** — `yt-dlp` reporting "video unavailable" is evidence about
 the video. A missing binary, or a hang that had to be killed, is evidence about this

@@ -90,13 +90,15 @@ carrying the pipeline version that reached it. Bumping that version is how a bet
 extractor gets another go at what an older one gave up on. `--refresh` re-derives
 everything, which is expensive and deliberate.
 
-## Embedding fails on `nul byte found in provided data`
+## Chunks holding NUL characters
 
 The text of a chunk holds a NUL character. Some PDFs keep their strings as UTF-16 and
-were read a byte at a time, so `form` arrived as `\0f\0o\0r\0m`; llama.cpp refuses any
-text with a zero in it, and `embed` fails the whole batch the chunk was in. Extraction
-now removes NULs before text is stored, so new derivations are clean. Derivations made
-before that fix still carry them, and so do the chunks built from them.
+were read a byte at a time, so `form` arrived as `\0f\0o\0r\0m`. The in-process embedder
+refused any text with a zero in it — `nul byte found in provided data` — and failed the
+whole batch the chunk was in; an embedding server may refuse it or embed it as noise, and
+`embed` reports such chunks as skipped. Extraction now removes NULs before text is stored,
+so new derivations are clean. Derivations made before that fix still carry them, and so do
+the chunks built from them.
 
 Re-derive, rebuild the index, then embed:
 
@@ -187,7 +189,7 @@ rebuilds it. Everything else rebuilds.
 | `current/` | minutes |
 | `centinel.db` | minutes |
 | `chunks.lance/` | **about a day** on a 400,000-chunk corpus |
-| `vectors.lance/` | nothing — the table from before `chunks.lance/`, kept after the upgrade as a copy source; delete it once `centinel embed --limit 0` has filled `chunks.lance/` |
+| `vectors.lance/` | nothing — the table from before `chunks.lance/`, which this release no longer reads; delete it once `chunks.lance/` is filled, or upgrade it with the release before this one |
 
 Derived is not the same as cheap. Backing up the vectors is `cp -R`; a `.lance` dataset is
 an ordinary directory and the copy opens and queries.

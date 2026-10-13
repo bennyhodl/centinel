@@ -413,9 +413,11 @@ node — is open and deliberately **deferred**.
 
 ## Working here
 
-Two binaries, and you need both — `centinel` links `llama.cpp`, `centinel-whisper` links
-`whisper.cpp`, and they meet over a pipe because linking both into one process silently
-breaks transcription. See [Install](start/install.md).
+One binary, and no model in it: embedding, reranking and transcription are requests to the
+servers `[inference]` names. The test suite fakes those servers on a loopback port, so it
+needs none running. The one test that asks a real model a question —
+`a_query_reaches_the_passage_that_answers_it` — runs only under `CENTINEL_TEST_INFERENCE=1`,
+against the servers your config names. See [Inference servers](reference/inference.md).
 
 ```bash
 cargo fmt --all --check
@@ -430,13 +432,12 @@ Those first three are CI, exactly as written. Warnings are errors.
 conventional commits, bumps the workspace version, writes the changelog with `git cliff`,
 tags, and publishes. There is nothing to do by hand.
 
-Prebuilt binaries are a second workflow, `Binaries`, and it is **off**. It builds two GPU
-assets — Metal for Apple Silicon, CUDA 12 for x86_64 Linux — and uploads them to the tag,
-which is what turns an install from half an hour of C++ into a download. It is off because
-a macOS runner bills at 10x while this repository is private, so one release is about 400
-minutes of the monthly allowance. Set the repository variable `RELEASE_BINARIES` to `true`
-to turn it on, or start it by hand against any existing tag from the Actions tab. A release
-without assets is not broken: `install.sh` asks, does not find, and builds.
+Prebuilt binaries are a second workflow, `Binaries`, which `Release` calls at the end of
+every release. It builds one CPU binary per platform — Apple Silicon, x86_64 Linux at
+`x86-64-v3`, arm64 Linux — and uploads them to the tag, which is what turns an install from
+a twenty-minute build into a download. Start it by hand against any existing tag from the
+Actions tab to backfill a release. A release without assets is not broken: `install.sh`
+asks, does not find, and builds.
 
 **Commits are conventional**, because the changelog is read off them by `git cliff` — the
 commit subject *is* the release note, and anything without a prefix is dropped rather than

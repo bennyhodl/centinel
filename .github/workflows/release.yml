@@ -173,7 +173,7 @@ jobs:
           git push origin "$TAG"
           gh release create "$TAG" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
 
-  # Both assets. The macOS job was gated while this repository was private — that
+  # Every asset. The macOS job was gated while this repository was private — that
   # runner billed at 10x — but a public repository gets the standard runners free, so
   # the gate went with the bill. If these jobs fail, the release above already shipped —
   # it just shipped without binaries, and every install builds from source.

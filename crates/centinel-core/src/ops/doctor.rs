@@ -1,14 +1,14 @@
 //! `doctor` — is this machine able to run Centinel?
 //!
 //! SPEC §3 accepts a real install bar: Rust shells out to poppler, tesseract and yt-dlp
-//! rather than running a second language runtime, and downloads model weights. That
-//! trade is only honest if the missing-dependency case is *loud*, which is what this op
-//! is for.
+//! rather than running a second language runtime, and models run on servers the operator
+//! starts. That trade is only honest if the missing-dependency case is *loud*, which is
+//! what this op is for.
 //!
-//! Weights are reported here **beside the binaries**, because SPEC §3.2 says missing
-//! weights are fatal "exactly like a missing binary". They are also the reason this op
-//! matters remotely: [`crate::ops::models`] is host-local, so `doctor` is the only way an
-//! agent or an HTTP caller can learn that search is about to fail for want of a model.
+//! The inference servers are reported here **beside the binaries**, because a server that
+//! is not answering stops a stage exactly like a missing binary does. They are also the
+//! reason this op matters remotely: `doctor` is the way an agent or an HTTP caller learns
+//! that search is about to fall back to keywords for want of an embedding server.
 //!
 //! ## Nothing here walks the corpus
 //!
@@ -20,19 +20,22 @@
 //!
 //! Counting the pool used to happen here, and it is the one thing on this report that grows
 //! with the corpus — a second of directory walking, every time, to print a number nobody
-//! ran `doctor` to see. `models verify` is the op that reads every byte, and
-//! [`crate::ops::status`] is the one that counts what is stored.
+//! ran `doctor` to see. [`crate::ops::status`] is the one that counts what is stored. A
+//! server is asked whether it is listening — one TCP connect each, all at once — and never
+//! sent a request, which would cost a model call.
 
 use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::models::{self, Gate, ModelRole};
 use std::time::Duration;
 
+use crate::config::InferenceConfig;
+use crate::inference::{Capability, Endpoint};
 use crate::prelude::*;
 use crate::tool::Tool;
+use crate::vectors::{Space, VectorTable};
 
 /// What a missing binary actually costs.
 /// Ordered so `Required` sorts first: the rows that can stop a run lead the table.
@@ -71,15 +74,6 @@ pub struct Binary {
     /// than surprising.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale: Option<String>,
-    /// The command that installs this binary, when it is one Centinel ships.
-    ///
-    /// `None` for the external tools, and deliberately so: `ffmpeg` and `yt-dlp` come
-    /// from whichever package manager the host uses, and a guessed `brew install` is
-    /// wrong on most machines. A wrong fix is worse than none — it is the kind of line
-    /// somebody pastes. Only `centinel-whisper` can be named with certainty, because
-    /// this workspace builds it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fix: Option<String>,
 }
 
 impl Binary {
@@ -93,40 +87,79 @@ impl Binary {
     }
 }
 
-/// A model's weights, as a host dependency.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-pub struct Weights {
-    pub id: String,
-    pub role: ModelRole,
-    /// Which pipeline stage stops without it. Weights are fatal like a missing binary
-    /// (§3.2), but not to the same things — a crawl-only machine needs no Whisper.
-    pub gates: Gate,
-    /// What this model is needed for — so a missing one is actionable, not just red.
-    pub purpose: String,
-    /// True when the gate needs this model's **role** filled (§3.2) — which every role in
-    /// the registry is. It does not mean *this* model: the registry carries alternates
-    /// (`whisper-tiny`, `qwen3-embedding-0.6b`), and any one installed model satisfies
-    /// its role. [`GateStatus`] is where that rollup happens.
-    pub required: bool,
-    pub installed: bool,
-    /// The variant that would be loaded. `None` when nothing is installed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub variant: Option<String>,
-    pub bytes_present: u64,
-    /// Size of the installed variant, or of the one a plain `pull` would fetch.
-    pub bytes_total: u64,
-    /// An interrupted download is waiting to resume — re-running `pull` continues it.
-    pub resumable: bool,
-    /// The command that fixes this.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fix: Option<String>,
+/// A pipeline stage that a set of servers gates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Gate {
+    /// Hybrid search: the embedder and the reranker.
+    Search,
+    /// Turning audio into a transcript.
+    Transcription,
 }
 
-/// Whether one pipeline stage's weights are all present.
+impl Gate {
+    fn of(capability: Capability) -> Self {
+        match capability {
+            Capability::Embed | Capability::Rerank => Self::Search,
+            Capability::Transcribe => Self::Transcription,
+        }
+    }
+}
+
+impl std::fmt::Display for Gate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(match self {
+            Self::Search => "search",
+            Self::Transcription => "transcription",
+        })
+    }
+}
+
+/// One `[inference]` capability, as a host dependency.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Service {
+    /// `embed`, `rerank` or `transcribe` — the `[inference.…]` table that configures it.
+    pub capability: String,
+    /// Which pipeline stage stops without it. A crawl-only machine needs no transcription
+    /// server, and reporting it unready for want of one would be crying wolf.
+    pub gates: Gate,
+    /// What it is needed for — so a missing one is actionable, not just red.
+    pub purpose: String,
+    pub base_url: String,
+    pub model: String,
+    pub ready: bool,
+    /// Why it is not: nothing listening, or a named key not set. Says what to do about it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
+/// The stored vectors, and whether the configured embedding server is the one that wrote
+/// them.
+///
+/// A server can be up and still be the wrong one: a table written by another model, or by
+/// the in-process embedder of an earlier release, refuses its queries, and search answers on
+/// keywords alone. That is the state an upgrade leaves a store in, and nothing else on this
+/// report would show it. One manifest read, so it costs `doctor` milliseconds.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct VectorsStatus {
+    pub path: PathBuf,
+    /// What the table records. Absent when it could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written_by: Option<Space>,
+    /// What `[inference.embed]` names. Absent when the config did not load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configured: Option<Space>,
+    pub ready: bool,
+    /// Why not, and what to run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
+/// Whether one pipeline stage's servers are all answering.
 ///
 /// Reported per gate rather than as a single flag because the two stages fail
 /// independently and for different people: a machine crawling `.gov` sitemaps never
-/// touches Whisper, and one transcribing a backlog offline may not have embedded yet.
+/// transcribes, and one transcribing a backlog may not have an embedding server yet.
 /// Collapsing them would make `doctor` say "not ready" to someone whose pipeline works.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GateStatus {
@@ -134,12 +167,9 @@ pub struct GateStatus {
     pub ready: bool,
     /// What is unavailable while this gate is shut.
     pub blocks: String,
-    /// Model ids still to pull.
+    /// Capabilities not answering.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<String>,
-    /// The command that opens it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fix: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -156,31 +186,40 @@ pub struct DoctorReport {
     /// Where a config file is looked for, nearest first. Shown only when none was found.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_searched: Vec<PathBuf>,
+    /// Why the config file did not load. Reported rather than raised: `doctor` is what
+    /// somebody runs *because* something is wrong, and a config that no longer parses is
+    /// the most common reason after an upgrade. Reaches the report over HTTP and MCP, and
+    /// on the CLI under `--root`; without it, the CLI reads the config to find the store
+    /// first and stops there with the same message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_error: Option<String>,
     /// The Sources the store holds a log for — one `readdir`, and the cheapest evidence
     /// that the root above is the one being collected into. **How much** is in it is
     /// [`crate::ops::status`]'s question, and answering it here cost a walk of the pool.
     pub sources: Vec<String>,
     pub binaries: Vec<Binary>,
-    /// Where weights live. Outside the store, because they are neither corpus nor
-    /// provenance and an `rsync`-able store should not carry 1.7 GB of ONNX.
-    pub models_dir: PathBuf,
-    pub models: Vec<Weights>,
+    /// The `[inference]` servers, one per capability. Empty when the config did not load.
+    pub services: Vec<Service>,
+    /// The vector table, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vectors: Option<VectorsStatus>,
     /// Per-stage readiness. The field to look at when `ready` is false — it says which
     /// half of the pipeline still works.
     pub gates: Vec<GateStatus>,
     /// True when every *required* binary is present.
     pub binaries_ready: bool,
-    /// True when every *required* model is installed.
-    pub models_ready: bool,
-    /// True when both are. Reported separately as well, because a machine can crawl and
-    /// extract with no weights at all — it simply cannot search or transcribe.
+    /// True when every server is answering.
+    pub services_ready: bool,
+    /// True when the config loads and both of the above hold. Reported separately as well,
+    /// because a machine can crawl and extract with no server at all — it simply cannot
+    /// search semantically or transcribe.
     pub ready: bool,
 }
 
 #[derive(Clone, Debug, Default, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct DoctorArgs {}
 
-/// Report host readiness: required binaries, model weights, store location.
+/// Report host readiness: required binaries, inference servers, store location.
 #[op(group = "host")]
 pub async fn doctor(ctx: &Ctx, _args: DoctorArgs) -> anyhow::Result<DoctorReport> {
     // At once, not in turn. Every probe is a process spawn and they wait on nothing but
@@ -213,22 +252,25 @@ pub async fn doctor(ctx: &Ctx, _args: DoctorArgs) -> anyhow::Result<DoctorReport
         probe(
             "ffmpeg",
             Need::Required,
-            "decodes audio to 16kHz mono PCM for transcription",
+            "decodes audio to 16 kHz WAV for the transcription server",
         ),
     ])
     .await;
-    binaries.push(worker_probe());
     binaries.sort_by(|a, b| a.need.cmp(&b.need).then(a.name.cmp(&b.name)));
 
-    let models_dir = models::models_dir()?;
-    let models: Vec<Weights> = models::REGISTRY
-        .iter()
-        .map(|spec| weights(spec, &models_dir))
-        .collect();
-    let gates = gate_statuses(&models);
+    let (services, configured, config_error) = match crate::config::Config::load() {
+        Ok(config) => (
+            survey(&config.inference).await,
+            Some(Space::of(&config.inference.endpoint(Capability::Embed))),
+            None,
+        ),
+        Err(e) => (Vec::new(), None, Some(format!("{e:#}"))),
+    };
+    let vectors = vectors_status(&ctx.store, configured).await;
+    let gates = gate_statuses(&services, vectors.as_ref());
 
     let binaries_ready = binaries.iter().all(|b| !b.gates_readiness() || b.found());
-    let models_ready = gates.iter().all(|g| g.ready);
+    let services_ready = config_error.is_none() && gates.iter().all(|g| g.ready);
 
     let sources = ctx
         .store
@@ -248,136 +290,108 @@ pub async fn doctor(ctx: &Ctx, _args: DoctorArgs) -> anyhow::Result<DoctorReport
         store_root: ctx.store.root().to_path_buf(),
         config,
         config_searched,
+        config_error,
         sources,
         binaries,
-        models_dir,
-        models,
+        services,
+        vectors,
         gates,
         binaries_ready,
-        models_ready,
-        ready: binaries_ready && models_ready,
+        services_ready,
+        ready: binaries_ready && services_ready,
     })
 }
 
-/// Rolls the per-model view up into per-stage readiness.
-///
-/// A gate opens when every **role** behind it has *some* installed model — not when
-/// every model is installed. The registry deliberately carries alternates (`whisper-tiny`
-/// beside `whisper-large-v3-turbo`, `qwen3-embedding-0.6b` beside the 4B), and demanding
-/// all of them would report a working machine as broken.
-fn gate_statuses(models: &[Weights]) -> Vec<GateStatus> {
+/// Every capability's server, asked at once whether it is there.
+pub(crate) async fn survey(inference: &InferenceConfig) -> Vec<Service> {
+    futures::future::join_all(
+        Capability::ALL
+            .into_iter()
+            .map(|capability| service(inference.endpoint(capability))),
+    )
+    .await
+}
+
+/// One server, as a host dependency: a key it is owed, and something listening.
+async fn service(endpoint: Endpoint) -> Service {
+    let problem = match endpoint.key() {
+        Err(e) => Some(format!("{e:#}")),
+        Ok(_) => endpoint.reachable().await.err(),
+    };
+    Service {
+        capability: endpoint.capability.name().to_string(),
+        gates: Gate::of(endpoint.capability),
+        purpose: match endpoint.capability {
+            Capability::Embed => "the vector half of hybrid search",
+            Capability::Rerank => "reranks retrieved passages; always on",
+            Capability::Transcribe => "turns meeting audio into a timestamped transcript",
+        }
+        .to_string(),
+        base_url: endpoint.base_url,
+        model: endpoint.model,
+        ready: problem.is_none(),
+        problem,
+    }
+}
+
+/// The vector table's space against the configured one, or `None` when there is no table.
+async fn vectors_status(store: &Store, configured: Option<Space>) -> Option<VectorsStatus> {
+    let path = store.vectors_path();
+    if !path.exists() {
+        return None;
+    }
+    let (written_by, problem) = match VectorTable::open_existing(&store.vectors_db()).await {
+        Err(e) => (None, Some(format!("{e:#}"))),
+        Ok(table) => {
+            let written_by = table.space().clone();
+            let problem = match &configured {
+                Some(configured) if *configured != written_by => Some(format!(
+                    "[inference.embed] names {configured}, so search cannot use these \
+                     vectors. If it serves the same model, `centinel embed --adopt --dry-run` \
+                     measures whether it reproduces them"
+                )),
+                _ => None,
+            };
+            (Some(written_by), problem)
+        }
+    };
+    Some(VectorsStatus {
+        path,
+        ready: problem.is_none() && configured.is_some(),
+        written_by,
+        configured,
+        problem,
+    })
+}
+
+/// Rolls the per-server view up into per-stage readiness. Search also needs the vector table
+/// to be in the configured server's space, when there is a table.
+fn gate_statuses(services: &[Service], vectors: Option<&VectorsStatus>) -> Vec<GateStatus> {
     [Gate::Search, Gate::Transcription]
         .into_iter()
         .map(|gate| {
-            // For each unfilled role, name the model a user should actually pull: the
-            // first the registry lists, which is the preferred one.
-            let missing: Vec<String> = ModelRole::ALL
-                .into_iter()
-                .filter(|role| role.gates() == gate)
-                .filter(|role| {
-                    !models
-                        .iter()
-                        .any(|m| m.role == *role && m.required && m.installed)
-                })
-                .filter_map(|role| {
-                    models
-                        .iter()
-                        .find(|m| m.role == role && m.required)
-                        .map(|m| m.id.clone())
-                })
+            let mut missing: Vec<String> = services
+                .iter()
+                .filter(|s| s.gates == gate && !s.ready)
+                .map(|s| s.capability.clone())
                 .collect();
-
+            if gate == Gate::Search && vectors.is_some_and(|v| !v.ready) {
+                missing.push("vectors".to_string());
+            }
             GateStatus {
                 gate,
-                ready: missing.is_empty(),
+                // No services at all is a config that did not load: nothing is known to
+                // answer, so nothing is ready.
+                ready: !services.is_empty() && missing.is_empty(),
                 blocks: match gate {
                     Gate::Search => "`centinel embed` and the vector half of `centinel search`",
                     Gate::Transcription => "`centinel transcribe`",
                 }
                 .to_string(),
-                // `models pull` takes one model, so a two-model gap is two commands.
-                // Chained rather than listed, because the point is to be pasted. Each
-                // command comes from the model's own `fix`, which `models::resolve`
-                // wrote — so this cannot drift from what the loader would have said.
-                fix: (!missing.is_empty()).then(|| {
-                    missing
-                        .iter()
-                        .filter_map(|id| {
-                            models
-                                .iter()
-                                .find(|m| &m.id == id)
-                                .and_then(|m| m.fix.clone())
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" && ")
-                }),
                 missing,
             }
         })
         .collect()
-}
-
-/// Reports one model's weights as a host dependency.
-fn weights(spec: &'static models::ModelSpec, root: &std::path::Path) -> Weights {
-    let status = models::status(spec, root);
-    // The variant on disk if there is one, else the one a plain `pull` would fetch —
-    // so `bytes_total` answers "how big is this" both before and after installing.
-    let variant = status.active().unwrap_or_else(|| status.default_variant());
-
-    Weights {
-        id: status.id.clone(),
-        role: status.role,
-        gates: status.role.gates(),
-        purpose: match status.role {
-            ModelRole::Embedding => "the vector half of hybrid search",
-            ModelRole::Reranker => "reranks retrieved passages; always on",
-            ModelRole::Transcription => "turns meeting audio into a timestamped transcript",
-            ModelRole::VoiceActivity => {
-                "finds the speech, so the transcriber never decodes dead air"
-            }
-        }
-        .to_string(),
-        // Missing weights are fatal exactly like a missing binary (§3.2) — but only to
-        // their own gate, which is why readiness is reported per stage rather than once.
-        required: true,
-        installed: status.installed,
-        variant: status.active().map(|v| v.variant.clone()),
-        bytes_present: variant.bytes_present,
-        bytes_total: variant.bytes_total,
-        resumable: status.resumable(),
-        // Not formatted here. `models::resolve` owns the one spelling of the
-        // instruction, and asking it is how this stays the same string the loader
-        // would have printed.
-        fix: models::resolve(&status.id, status.role, None, root)
-            .err()
-            .and_then(|e| e.fix().map(str::to_string)),
-    }
-}
-
-/// Locates the transcription worker.
-///
-/// Unlike the others this one is *ours* — this workspace builds it. It is reported here
-/// anyway because it can genuinely be absent: it is a **separate package**, so neither
-/// `cargo build -p centinel` nor `cargo install --path crates/centinel` produces it, and
-/// the machine that results looks correctly installed and transcribes nothing. Probed by
-/// path rather than by `command -v`, since it is normally a sibling of the running
-/// executable and not on `PATH` at all.
-fn worker_probe() -> Binary {
-    let path = crate::transcribe::worker_path().ok();
-    Binary {
-        name: crate::transcribe::WORKER.to_string(),
-        need: Need::Required,
-        purpose: "runs whisper.cpp in its own process, out of llama.cpp's ggml".to_string(),
-        // Not run for a version: it loads no model to answer, but it is still a process
-        // spawn on an op that must stay instant.
-        version: None,
-        stale: None,
-        // The one binary whose fix this workspace can state rather than guess.
-        fix: path
-            .is_none()
-            .then(|| crate::transcribe::WORKER_FIX.to_string()),
-        path: path.map(|p| p.display().to_string()),
-    }
 }
 
 /// Locates a binary and asks it for its version.
@@ -400,8 +414,6 @@ async fn probe(name: &str, need: Need, purpose: &str) -> Binary {
         path,
         version,
         stale,
-        // An external tool. See `Binary::fix` for why this is not a guessed `brew install`.
-        fix: None,
     }
 }
 
@@ -474,16 +486,16 @@ async fn version_of(name: &str) -> Option<String> {
 
 /// The install bar, made loud.
 ///
-/// SPEC §3 accepts that this project shells out to four binaries and downloads gigabytes
-/// of weights, on the condition that the missing-dependency case is *loud*. A wall of
-/// JSON is not loud — it is a wall, and a person scanning it for `"path": null` is doing
-/// the work the report was supposed to do for them. So the verdict comes first, every row
-/// carries a glyph, and the fix command sits directly under the thing it fixes.
+/// SPEC §3 accepts that this project shells out to four binaries and sends its models'
+/// work to servers, on the condition that the missing-dependency case is *loud*. A wall
+/// of JSON is not loud — it is a wall, and a person scanning it for `"path": null` is
+/// doing the work the report was supposed to do for them. So the verdict comes first,
+/// every row carries a glyph, and what to do sits directly under the thing it fixes.
 impl Render for DoctorReport {
     fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
         let verdict = if self.ready {
             p.paint("ready", Ink::Green)
-        } else if self.binaries_ready || self.models_ready {
+        } else if self.binaries_ready || self.services_ready {
             p.paint("partly ready", Ink::Yellow)
         } else {
             p.paint("not ready", Ink::Red)
@@ -511,6 +523,9 @@ impl Render for DoctorReport {
             ),
         };
         p.line(p.paint(&provenance, Ink::Dim))?;
+        if let Some(error) = &self.config_error {
+            p.marked(Mark::Bad, p.paint(&render::one_line(error), Ink::Red))?;
+        }
 
         p.section("binaries")?;
         p.nest(|p| {
@@ -529,7 +544,7 @@ impl Render for DoctorReport {
                 };
                 // A binary that answered but reports no version is *present*. Saying
                 // "missing" next to a green tick is the one thing this column must never
-                // do — `centinel-whisper` has no `--version` and is found by path alone.
+                // do.
                 let version = match (&bin.version, found) {
                     (Some(raw), _) => short_version(raw),
                     (None, true) => String::new(),
@@ -558,60 +573,55 @@ impl Render for DoctorReport {
                 let note = format!("{} {}", bin.name, bin.stale.as_deref().unwrap_or_default());
                 p.marked(Mark::Warn, p.paint(&note, Ink::Dim))?;
             }
+            Ok(())
+        })?;
 
-            // Painted like the gates' fix, because it is the same thing: a command to
-            // paste. A red row that names no remedy is where somebody stops and guesses.
-            //
-            // It repeats the binary's name because it cannot sit directly under the row
-            // it fixes — a table renders as one unit, and the row above may be four lines
-            // up. A bare command under a five-row table belongs to no visible row.
-            for bin in self.binaries.iter().filter(|b| !b.found()) {
-                if let Some(fix) = &bin.fix {
-                    let note = format!("{}  {}", bin.name, p.paint(fix, Ink::Cyan));
+        p.section("inference")?;
+        p.nest(|p| {
+            let mut table = Table::bare(&[
+                Align::Left,
+                Align::Left,
+                Align::Left,
+                Align::Left,
+                Align::Left,
+            ]);
+            for s in &self.services {
+                table.push(vec![
+                    Cell::mark(Mark::from_ok(s.ready)),
+                    Cell::plain(&s.capability),
+                    Cell::new(&s.model, if s.ready { Ink::Cyan } else { Ink::Red }),
+                    Cell::dim(&s.base_url),
+                    Cell::dim(s.gates.to_string()),
+                ]);
+            }
+            p.table(&table)?;
+            // Below the table rather than in it: the sentence that says what to do is worth
+            // the width. It repeats the capability's name because a table renders as one
+            // unit, and the row it belongs to may be three lines up.
+            for s in self.services.iter().filter(|s| !s.ready) {
+                if let Some(problem) = &s.problem {
+                    let note = format!("{}  {}", s.capability, p.paint(problem, Ink::Dim));
                     p.marked(Mark::Bad, note)?;
                 }
             }
             Ok(())
         })?;
 
-        p.section("models")?;
-        p.nest(|p| {
-            let mut table = Table::bare(&[
-                Align::Left,
-                Align::Left,
-                Align::Left,
-                Align::Right,
-                Align::Left,
-            ]);
-            for m in &self.models {
-                // A partially-downloaded model is neither present nor absent, and saying
-                // "missing" would hide the fact that re-running `pull` resumes it.
-                let mark = if m.installed {
-                    Mark::Ok
-                } else if m.resumable {
-                    Mark::Warn
-                } else {
-                    Mark::Bad
+        if let Some(v) = &self.vectors {
+            p.section("vectors")?;
+            p.nest(|p| {
+                let written_by = match &v.written_by {
+                    Some(space) => space.to_string(),
+                    None => "unreadable".to_string(),
                 };
-                let size = if m.installed || !m.resumable {
-                    render::bytes(m.bytes_total)
-                } else {
-                    format!(
-                        "{} / {}",
-                        render::bytes(m.bytes_present),
-                        render::bytes(m.bytes_total)
-                    )
-                };
-                table.push(vec![
-                    Cell::mark(mark),
-                    Cell::plain(&m.id),
-                    Cell::dim(m.variant.clone().unwrap_or_default()),
-                    Cell::new(size, if m.installed { Ink::Plain } else { Ink::Dim }),
-                    Cell::dim(m.gates.to_string()),
-                ]);
-            }
-            p.table(&table)
-        })?;
+                let line = format!("chunks.lance  {}", p.paint(&written_by, Ink::Dim));
+                p.marked(Mark::from_ok(v.ready), line)?;
+                if let Some(problem) = &v.problem {
+                    p.nest(|p| p.wrapped(&render::one_line(problem), Ink::Dim))?;
+                }
+                Ok(())
+            })?;
+        }
 
         p.section("gates")?;
         p.nest(|p| {
@@ -627,12 +637,6 @@ impl Render for DoctorReport {
                     )
                 };
                 p.marked(mark, head)?;
-                if let Some(fix) = &gate.fix {
-                    p.nest(|p| {
-                        let painted = p.paint(fix, Ink::Cyan);
-                        p.line(format!("  {painted}"))
-                    })?;
-                }
             }
             Ok(())
         })
@@ -666,7 +670,6 @@ mod tests {
             path: found.then(|| format!("/usr/bin/{name}")),
             version: version.map(str::to_string),
             stale: None,
-            fix: None,
         }
     }
 
@@ -702,33 +705,6 @@ mod tests {
         ];
         binaries.sort_by(|a, b| a.need.cmp(&b.need).then(a.name.cmp(&b.name)));
         assert_eq!(binaries[0].name, "yt-dlp");
-    }
-
-    /// The defect this closes. `centinel-whisper` is a separate package, so the obvious
-    /// install — `cargo install --path crates/centinel` — leaves it out, and `doctor`
-    /// then printed a red row with no command on it. The gap it reported was the one
-    /// gap it could not tell anybody how to close.
-    #[test]
-    fn a_missing_whisper_worker_carries_the_command_that_installs_it() {
-        // Built rather than probed: `worker_probe` reads `$CENTINEL_WHISPER_BIN` and the
-        // real filesystem, and this test is about what the row carries, not about lookup.
-        let absent = Binary {
-            fix: Some(crate::transcribe::WORKER_FIX.to_string()),
-            ..binary(crate::transcribe::WORKER, Need::Required, false, None)
-        };
-        assert!(!absent.found());
-        assert_eq!(
-            absent.fix.as_deref(),
-            Some("cargo install --path crates/centinel-whisper"),
-        );
-    }
-
-    /// A fix is a line somebody pastes, so an absent one beats a guessed one. `ffmpeg`
-    /// arrives by a different route on every host and this workspace cannot name it.
-    #[test]
-    fn an_external_binary_offers_no_guessed_fix() {
-        let probed = binary("ffmpeg", Need::Required, false, None);
-        assert_eq!(probed.fix, None);
     }
 
     /// `STALE_AFTER_DAYS` was written down with a comment saying `doctor` would surface
@@ -769,12 +745,13 @@ mod tests {
             config: Some("/tmp/centinel.toml".into()),
             config_searched: vec![],
             sources: vec![],
+            config_error: None,
             binaries: vec![bin],
-            models_dir: "/tmp/models".into(),
-            models: vec![],
+            services: vec![],
+            vectors: None,
             gates: vec![],
             binaries_ready: true,
-            models_ready: true,
+            services_ready: true,
             ready: true,
         };
         let mut buf: Vec<u8> = Vec::new();
@@ -801,12 +778,13 @@ mod tests {
                 "/home/x/.centinel/centinel.toml".into(),
             ],
             sources: vec![],
+            config_error: None,
             binaries: vec![],
-            models_dir: "/tmp/models".into(),
-            models: vec![],
+            services: vec![],
+            vectors: None,
             gates: vec![],
             binaries_ready: true,
-            models_ready: true,
+            services_ready: true,
             ready: true,
         };
         let mut buf: Vec<u8> = Vec::new();
@@ -818,204 +796,135 @@ mod tests {
         assert!(out.contains("no config file"), "{out}");
         assert!(out.contains("/home/x/.centinel/centinel.toml"), "{out}");
     }
-    use crate::models::ModelSpec;
-
-    fn embedder() -> &'static ModelSpec {
-        models::require("qwen3-embedding-4b").unwrap()
+    /// An `[inference]` with embed and rerank at a port nothing listens on and
+    /// transcription at `transcribe`.
+    fn split(transcribe: &str) -> InferenceConfig {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        crate::config::Config::parse(&format!(
+            "[inference]\nbase_url = \"http://127.0.0.1:{port}/v1\"\n\
+             [inference.transcribe]\nmodel = \"whisper-1\"\nbase_url = \"{transcribe}\"\n"
+        ))
+        .unwrap()
+        .inference
     }
 
-    /// The whole registry as `doctor` would see it against `root`.
-    fn survey(root: &std::path::Path) -> Vec<Weights> {
-        models::REGISTRY.iter().map(|s| weights(s, root)).collect()
+    /// The gates shut independently: no search server shuts search and leaves a
+    /// transcription server that answers open — and the shut one says where it looked.
+    #[tokio::test]
+    async fn the_gates_open_independently() {
+        let server = crate::inference::fake::serve().await;
+        let config = split(&server.base_url);
+        let services = survey(&config).await;
+        let gates = gate_statuses(&services, None);
+
+        let search = gates.iter().find(|g| g.gate == Gate::Search).unwrap();
+        assert!(!search.ready);
+        assert_eq!(search.missing, vec!["embed", "rerank"]);
+        let transcription = gates
+            .iter()
+            .find(|g| g.gate == Gate::Transcription)
+            .unwrap();
+        assert!(transcription.ready, "{transcription:?}");
+
+        let embed = services.iter().find(|s| s.capability == "embed").unwrap();
+        let problem = embed.problem.as_deref().unwrap();
+        assert!(problem.contains(&config.base_url), "{problem}");
     }
 
-    fn gate(root: &std::path::Path, want: Gate) -> GateStatus {
-        gate_statuses(&survey(root))
-            .into_iter()
-            .find(|g| g.gate == want)
-            .expect("every gate is reported")
-    }
-
-    /// Fakes an installed variant: every file at its pinned length.
-    ///
-    /// `set_len` rather than writing bytes — these are 600 MB files, and the filesystem
-    /// gives us a sparse one for free. That works precisely *because* `doctor` judges
-    /// presence by size; `models verify` is the op that would read the bytes and reject
-    /// these, which is the division of labour being relied on here.
-    fn install(spec: &'static ModelSpec, variant: &str, root: &std::path::Path) {
-        let v = spec.variant(Some(variant)).unwrap();
-        for file in spec.files_for(v) {
-            let path = spec.dir(root).join(file.path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::File::create(&path)
+    /// A key the config names and the environment lacks is the problem reported — not a
+    /// connection that would have been refused for want of it.
+    #[tokio::test]
+    async fn an_unset_key_is_the_problem_named() {
+        let server = crate::inference::fake::serve().await;
+        let mut config = server.config();
+        config.api_key_env = Some("CENTINEL_TEST_KEY_THAT_IS_NEVER_SET".into());
+        let services = survey(&config).await;
+        assert!(services.iter().all(|s| !s.ready));
+        assert!(
+            services[0]
+                .problem
+                .as_deref()
                 .unwrap()
-                .set_len(file.size)
-                .unwrap();
-        }
+                .contains("$CENTINEL_TEST_KEY_THAT_IS_NEVER_SET")
+        );
     }
 
+    /// A config that does not load shuts every gate: nothing is known to answer.
     #[test]
-    fn an_empty_cache_reports_a_missing_model_with_the_command_that_fixes_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let w = weights(embedder(), dir.path());
+    fn no_services_is_no_gate_open() {
+        assert!(gate_statuses(&[], None).iter().all(|g| !g.ready));
+    }
 
-        assert!(!w.installed);
+    /// The upgrade case: a table the in-process embedder wrote, a server that answers, and
+    /// search on keywords alone. The server row is green; this row is what says why, and
+    /// what to run.
+    #[tokio::test]
+    async fn a_table_in_another_space_shuts_search_and_names_adopt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).await.unwrap();
+        let in_process = Space {
+            model: "qwen3-embedding-4b".into(),
+            endpoint: None,
+        };
+        VectorTable::open(&store.vectors_db(), &in_process, 4)
+            .await
+            .unwrap();
+        let server = crate::inference::fake::serve().await;
+        let configured = Space::of(&server.endpoint(Capability::Embed));
+
+        let status = vectors_status(&store, Some(configured.clone()))
+            .await
+            .unwrap();
+        assert!(!status.ready);
+        assert_eq!(status.written_by, Some(in_process));
+        let problem = status.problem.as_deref().unwrap();
         assert!(
-            w.required,
-            "§3.2: missing weights are fatal like a missing binary"
+            problem.contains("centinel embed --adopt --dry-run"),
+            "{problem}"
         );
-        assert_eq!(w.variant, None);
-        assert_eq!(w.bytes_present, 0);
+
+        let services = survey(&server.config()).await;
+        let search = gate_statuses(&services, Some(&status))
+            .into_iter()
+            .find(|g| g.gate == Gate::Search)
+            .unwrap();
+        assert!(!search.ready);
+        assert_eq!(search.missing, vec!["vectors"]);
+
+        // The configured server's own table is ready, and no table at all says nothing.
+        let ours = tempfile::tempdir().unwrap();
+        let ours = crate::store::Store::open(ours.path()).await.unwrap();
         assert!(
-            w.bytes_total > 0,
-            "the size must be known before installing"
+            vectors_status(&ours, Some(configured.clone()))
+                .await
+                .is_none()
         );
-        assert_eq!(
-            w.fix.as_deref(),
-            Some("centinel models pull qwen3-embedding-4b")
-        );
-    }
-
-    #[test]
-    fn an_installed_model_reports_its_variant_and_no_fix() {
-        let dir = tempfile::tempdir().unwrap();
-        let spec = embedder();
-        install(spec, "q8_0", dir.path());
-
-        let w = weights(spec, dir.path());
-        assert!(w.installed);
-        assert_eq!(w.variant.as_deref(), Some("q8_0"));
-        assert_eq!(w.bytes_present, w.bytes_total);
-        assert_eq!(w.fix, None, "nothing to fix");
-        assert!(!w.resumable);
-    }
-
-    /// Pulling `q4f16` instead of the default is a working install. A readiness check
-    /// that only looked at the default variant would call this machine broken.
-    #[test]
-    fn a_non_default_variant_still_counts_as_installed() {
-        let dir = tempfile::tempdir().unwrap();
-        let spec = embedder();
-        install(spec, "q4_k_m", dir.path());
-
-        let w = weights(spec, dir.path());
-        assert!(w.installed);
-        assert_eq!(w.variant.as_deref(), Some("q4_k_m"));
-        // The reported size is the installed variant's, not the default's.
-        assert_eq!(
-            w.bytes_total,
-            spec.total_size(spec.variant(Some("q4_k_m")).unwrap())
-        );
-    }
-
-    /// The interrupted-download case: `doctor` should say the pull will resume, not
-    /// silently show it as absent.
-    #[test]
-    fn a_partial_download_is_reported_as_resumable() {
-        let dir = tempfile::tempdir().unwrap();
-        let spec = embedder();
-        let variant = spec.variant(None).unwrap();
-
-        let target = spec.dir(dir.path()).join(variant.files[0].path);
-        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        std::fs::write(crate::models::download::part_path(&target), vec![0u8; 8192]).unwrap();
-
-        let w = weights(spec, dir.path());
-        assert!(!w.installed);
-        assert!(w.resumable);
-        assert_eq!(w.bytes_present, 8192, "partial bytes count toward progress");
-        assert!(
-            w.fix.as_deref().unwrap().contains("resumes"),
-            "the hint should say re-running continues rather than restarts: {:?}",
-            w.fix
-        );
-    }
-
-    /// The two stages fail for different people and must fail independently: a machine
-    /// crawling `.gov` sitemaps never loads Whisper, and one transcribing a backlog
-    /// offline may not have embedded anything yet. One flag would tell both of them
-    /// they are broken.
-    #[test]
-    fn the_gates_open_independently() {
-        let dir = tempfile::tempdir().unwrap();
-
-        assert!(!gate(dir.path(), Gate::Search).ready);
-        assert!(!gate(dir.path(), Gate::Transcription).ready);
-
-        install(
-            models::require("qwen3-embedding-4b").unwrap(),
-            "q8_0",
-            dir.path(),
-        );
-        install(
-            models::require("qwen3-reranker-0.6b").unwrap(),
-            "q8_0",
-            dir.path(),
-        );
-
-        let search = gate(dir.path(), Gate::Search);
-        assert!(search.ready, "still missing: {:?}", search.missing);
-        assert_eq!(search.fix, None);
-
-        let transcription = gate(dir.path(), Gate::Transcription);
-        assert!(!transcription.ready, "no whisper weights were installed");
-        assert!(transcription.blocks.contains("transcribe"));
-    }
-
-    /// The registry carries alternates on purpose — `whisper-tiny` for a smoke test,
-    /// `qwen3-embedding-0.6b` as an escape hatch. A gate that demanded every model would
-    /// call a working machine broken.
-    #[test]
-    fn any_one_model_of_a_role_opens_its_gate() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // The 39M smoke-test model, not the 874 MB default.
-        install(models::require("whisper-tiny").unwrap(), "q5_1", dir.path());
-        install(models::require("silero-vad").unwrap(), "v5.1.2", dir.path());
-
-        let g = gate(dir.path(), Gate::Transcription);
-        assert!(
-            g.ready,
-            "an alternate must satisfy its role: {:?}",
-            g.missing
-        );
-    }
-
-    /// A gap has to be fixable by pasting, not by reading a list and reassembling it.
-    /// `models pull` takes one model, so two missing roles are two commands.
-    #[test]
-    fn a_shut_gate_names_the_preferred_model_and_a_runnable_command() {
-        let dir = tempfile::tempdir().unwrap();
-        let g = gate(dir.path(), Gate::Transcription);
-
-        assert_eq!(g.missing, vec!["whisper-large-v3-turbo", "silero-vad"]);
-        assert_eq!(
-            g.fix.as_deref(),
-            Some("centinel models pull whisper-large-v3-turbo && centinel models pull silero-vad")
-        );
+        VectorTable::open(&ours.vectors_db(), &configured, 4)
+            .await
+            .unwrap();
+        assert!(vectors_status(&ours, Some(configured)).await.unwrap().ready);
     }
 
     #[tokio::test]
-    async fn the_report_separates_binary_readiness_from_model_readiness() {
+    async fn the_report_separates_binary_readiness_from_server_readiness() {
         let store = tempfile::tempdir().unwrap();
         let ctx = Ctx::new(crate::store::Store::open(store.path()).await.unwrap());
         let report = doctor(&ctx, DoctorArgs {}).await.unwrap();
 
-        // Both models are in the registry and both are required.
-        assert_eq!(report.models.len(), models::REGISTRY.len());
-        assert!(report.models.iter().all(|m| m.required));
-
-        // A machine can crawl and extract with no weights; it just cannot search. The
-        // two flags exist so that distinction survives into the report.
+        // A machine can crawl and extract with no server; it just cannot search
+        // semantically. The two flags exist so that distinction survives into the report.
         assert_eq!(
             report.ready,
-            report.binaries_ready && report.models_ready,
+            report.binaries_ready && report.services_ready,
             "`ready` must be the conjunction, not an independent judgement"
         );
-        assert!(
-            report.models.iter().any(|m| m.role == ModelRole::Embedding)
-                && report.models.iter().any(|m| m.role == ModelRole::Reranker),
-            "search needs one of each"
+        // One row per capability when the config loads, none when it does not — and
+        // then the reason is on the report instead.
+        assert_eq!(
+            report.services.len(),
+            if report.config_error.is_none() { 3 } else { 0 }
         );
     }
 }

@@ -33,8 +33,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ops::BatchSize;
-
 /// The sentinel meaning "let the operating system decide".
 pub const SYSTEM_DEFAULT: &str = "system";
 
@@ -119,6 +117,11 @@ pub struct Config {
     #[serde(default)]
     pub defaults: Defaults,
 
+    /// `[inference]` — the servers that embed, rerank and transcribe. See
+    /// [`crate::inference`].
+    #[serde(default)]
+    pub inference: InferenceConfig,
+
     /// `[classify]` — the Jev model `centinel classify` sends documents to when the
     /// command names none.
     ///
@@ -194,34 +197,6 @@ pub struct Defaults {
     #[serde(default = "default_rps")]
     pub rps: f64,
 
-    /// The embedding model — for `run`'s single corpus-wide pass and for a bare
-    /// `centinel embed` alike. `--model` overrides it for one run.
-    ///
-    /// Local by default. An `openrouter/…` id embeds through OpenRouter instead —
-    /// chunk text leaves the machine, and `$OPENROUTER_API_KEY` must be set. See
-    /// [`crate::remote`].
-    #[serde(default = "default_embed_model")]
-    pub embed_model: String,
-
-    /// Chunks per forward pass when embedding — a count, or `"auto"`.
-    ///
-    /// Here because the right number is a property of the machine rather than of the
-    /// corpus: the same store embedded on a laptop and on a box with 128 GB of unified
-    /// memory wants two different widths, and neither operator should have to type theirs
-    /// on every invocation. `--batch` overrides it for one run.
-    ///
-    /// `"auto"` reads the backend's free memory when the model loads. It is the default
-    /// because the alternative is one fixed number that fits the smallest machine anyone
-    /// might run this on and leaves every larger one idle — which is the whole complaint
-    /// [`crate::ops::embed`] exists to answer.
-    #[serde(default = "default_embed_batch")]
-    pub embed_batch: BatchSize,
-
-    /// The Whisper model for sources that produce audio — `run`'s and a bare
-    /// `centinel transcribe`'s alike. `--model` overrides it for one run.
-    #[serde(default = "default_transcribe_model")]
-    pub transcribe_model: String,
-
     /// Caption and transcription language.
     #[serde(default = "default_lang")]
     pub lang: String,
@@ -229,15 +204,6 @@ pub struct Defaults {
 
 fn default_rps() -> f64 {
     1.0
-}
-fn default_embed_model() -> String {
-    "qwen3-embedding-4b".to_string()
-}
-fn default_embed_batch() -> BatchSize {
-    BatchSize::Auto
-}
-fn default_transcribe_model() -> String {
-    "whisper-large-v3-turbo".to_string()
 }
 fn default_lang() -> String {
     "en".to_string()
@@ -247,12 +213,247 @@ impl Default for Defaults {
     fn default() -> Self {
         Self {
             rps: default_rps(),
-            embed_model: default_embed_model(),
-            embed_batch: default_embed_batch(),
-            transcribe_model: default_transcribe_model(),
             lang: default_lang(),
         }
     }
+}
+
+/// The `[inference]` block: where models run. Every capability uses `base_url` unless its
+/// own table names another, and the same for `api_key_env`.
+///
+/// Absent, it points at a server on this machine on llama-server's default port — the
+/// setup the install docs walk through — so a machine with nothing configured fails with
+/// "nothing is answering at http://127.0.0.1:8080/v1" rather than with a missing key.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceConfig {
+    #[serde(default = "default_base_url")]
+    pub base_url: String,
+
+    /// The environment variable holding the API key, for a server that wants one.
+    ///
+    /// The variable's name, never the key: this file is committed, pasted into issues and
+    /// printed by `doctor`, and a secret that lives here eventually does all three.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+
+    #[serde(default)]
+    pub embed: EmbedConfig,
+
+    #[serde(default = "default_rerank")]
+    pub rerank: ModelConfig,
+
+    #[serde(default = "default_transcribe")]
+    pub transcribe: ModelConfig,
+}
+
+/// `[inference.embed]`.
+///
+/// A written table must name `model` and `query_prefix` both: the prefix is a property of
+/// the model, and a default carried over from another model is retrieval made quietly
+/// worse — see [`crate::embed`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbedConfig {
+    /// The model the server is asked for. Changing it is a new vector space: `embed`
+    /// refuses to mix it into the stored one until `--adopt` has measured they agree.
+    pub model: String,
+
+    /// What a search query is prefixed with. `""` for a symmetric model.
+    pub query_prefix: String,
+
+    /// Chunks per request. `--batch` overrides it for one run.
+    #[serde(default = "default_embed_batch")]
+    pub batch: usize,
+
+    /// Requests in flight at once. What hides the round trip; more mostly exercises the
+    /// server's queue.
+    #[serde(default = "default_embed_concurrency")]
+    pub concurrency: usize,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+}
+
+/// `[inference.rerank]` and `[inference.transcribe]`: a model, and optionally its own
+/// server.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelConfig {
+    pub model: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+}
+
+/// Where a server started with no port flag listens: llama-server's default.
+pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8080/v1";
+
+/// Requests in flight are capped here, past which a run is load-testing the server.
+pub const MAX_EMBED_CONCURRENCY: usize = 32;
+
+fn default_base_url() -> String {
+    DEFAULT_BASE_URL.to_string()
+}
+fn default_embed_batch() -> usize {
+    64
+}
+fn default_embed_concurrency() -> usize {
+    4
+}
+fn default_rerank() -> ModelConfig {
+    ModelConfig {
+        model: "qwen3-reranker-0.6b".to_string(),
+        base_url: None,
+        api_key_env: None,
+    }
+}
+fn default_transcribe() -> ModelConfig {
+    ModelConfig {
+        model: "whisper-large-v3-turbo".to_string(),
+        base_url: None,
+        api_key_env: None,
+    }
+}
+
+impl Default for EmbedConfig {
+    fn default() -> Self {
+        Self {
+            model: "qwen3-embedding-4b".to_string(),
+            query_prefix: crate::embed::QWEN3_QUERY_PREFIX.to_string(),
+            batch: default_embed_batch(),
+            concurrency: default_embed_concurrency(),
+            base_url: None,
+            api_key_env: None,
+        }
+    }
+}
+
+impl Default for InferenceConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_base_url(),
+            api_key_env: None,
+            embed: EmbedConfig::default(),
+            rerank: default_rerank(),
+            transcribe: default_transcribe(),
+        }
+    }
+}
+
+impl InferenceConfig {
+    /// Every URL parses and every count is in range — checked when the file is read, not
+    /// an hour into a run at the first request.
+    fn validate(&self) -> anyhow::Result<()> {
+        let urls = [
+            Some(&self.base_url),
+            self.embed.base_url.as_ref(),
+            self.rerank.base_url.as_ref(),
+            self.transcribe.base_url.as_ref(),
+        ];
+        for url in urls.into_iter().flatten() {
+            let parsed = url::Url::parse(url)
+                .map_err(|e| anyhow::anyhow!("[inference] base_url `{url}` is not a URL: {e}"))?;
+            anyhow::ensure!(
+                matches!(parsed.scheme(), "http" | "https"),
+                "[inference] base_url `{url}` is not http or https"
+            );
+        }
+        anyhow::ensure!(
+            self.embed.batch > 0,
+            "[inference.embed] batch = 0 embeds nothing"
+        );
+        anyhow::ensure!(
+            (1..=MAX_EMBED_CONCURRENCY).contains(&self.embed.concurrency),
+            "[inference.embed] concurrency must be 1 to {MAX_EMBED_CONCURRENCY}"
+        );
+        Ok(())
+    }
+}
+
+/// The `[defaults]` keys that moved to `[inference]`, each with what to write instead.
+///
+/// Read off the raw table before the typed parse, because `deny_unknown_fields` would
+/// otherwise answer a config that worked yesterday with "unknown field `embed_model`" —
+/// true, and no help to the person who has to rewrite it.
+fn retired_keys(text: &str) -> anyhow::Result<()> {
+    let Ok(table) = toml::from_str::<toml::Table>(text) else {
+        // The typed parse reports a malformed file better than this would.
+        return Ok(());
+    };
+    let Some(defaults) = table.get("defaults").and_then(|d| d.as_table()) else {
+        return Ok(());
+    };
+    let mut fixes = Vec::new();
+    if let Some(model) = defaults.get("embed_model").and_then(|m| m.as_str()) {
+        let replacement = match model.strip_prefix("openrouter/") {
+            Some(slug) => embed_table(Some(OPENROUTER_BASE_URL), Some(OPENROUTER_KEY), slug),
+            None => embed_table(None, None, model),
+        };
+        fixes.push(format!(
+            "`embed_model` moved to [inference.embed]; the model now runs on a server:\n{replacement}"
+        ));
+    }
+    if defaults.contains_key("embed_batch") {
+        fixes.push(
+            "`embed_batch` is gone: the server sizes its own batches. [inference.embed] \
+             batch is chunks per request, 64 unless set"
+                .to_string(),
+        );
+    }
+    if let Some(model) = defaults.get("transcribe_model").and_then(|m| m.as_str()) {
+        fixes.push(format!(
+            "`transcribe_model` moved:\n[inference.transcribe]\nmodel = \"{model}\""
+        ));
+    }
+    anyhow::ensure!(
+        fixes.is_empty(),
+        "[defaults] holds settings that moved to [inference] — remove them and write:\n\n{}",
+        fixes.join("\n\n")
+    );
+    Ok(())
+}
+
+/// OpenRouter's API root and the variable its key conventionally lives in — what a store
+/// embedded through an `openrouter/…` id is pointed back at.
+pub(crate) const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+pub(crate) const OPENROUTER_KEY: &str = "OPENROUTER_API_KEY";
+
+/// An `[inference.embed]` table to print for pasting — complete, so it parses.
+///
+/// The one writer of such a table, for the two messages that hand one over: a retired
+/// `[defaults] embed_model`, and an `embed --adopt` refusal naming the server that wrote a
+/// table. The query prefix is guessed from the model's name, which is the one thing a
+/// message can do that the config file must not: the operator reads it before using it.
+pub(crate) fn embed_table(
+    base_url: Option<&str>,
+    api_key_env: Option<&str>,
+    model: &str,
+) -> String {
+    let mut out = String::from("[inference.embed]\n");
+    if let Some(base_url) = base_url {
+        out.push_str(&format!("base_url = {}\n", quote(base_url)));
+    }
+    if let Some(var) = api_key_env {
+        out.push_str(&format!("api_key_env = {}\n", quote(var)));
+    }
+    let prefix = if model.contains("qwen3-embedding") {
+        crate::embed::QWEN3_QUERY_PREFIX
+    } else {
+        ""
+    };
+    out.push_str(&format!(
+        "model = {}\nquery_prefix = {}",
+        quote(model),
+        quote(prefix)
+    ));
+    out
 }
 
 /// One `[[source]]` block.
@@ -681,6 +882,7 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> anyhow::Result<Self> {
+        retired_keys(text)?;
         let config: Self = toml::from_str(text)?;
         config.validate()?;
         Ok(config)
@@ -715,6 +917,7 @@ impl Config {
             self.defaults.rps > 0.0,
             "defaults.rps must be greater than zero"
         );
+        self.inference.validate()?;
         self.validate_schedules()?;
         Ok(())
     }
@@ -886,15 +1089,31 @@ pub const EXAMPLE: &str = r#"# Centinel configuration.
 [defaults]
 # Requests per second, per host. Deliberately slow.
 rps = 1.0
-# Local by default. An `openrouter/` model embeds through openrouter.ai instead —
-# chunk text leaves this machine, and $OPENROUTER_API_KEY must be set:
-#   embed_model = "openrouter/qwen/qwen3-embedding-8b"
-embed_model = "qwen3-embedding-4b"
-# Chunks per forward pass. "auto" sizes it to this machine's free memory; a number
-# fixes it. Bigger is faster until the memory runs out. `--batch` overrides it.
-embed_batch = "auto"
-transcribe_model = "whisper-large-v3-turbo"
 lang = "en"
+
+# The servers that embed, rerank and transcribe. Centinel runs no model itself: each is
+# a request to the server named here, which holds the weights and its own tuning. Every
+# capability uses `base_url` unless its own table names another. A server on this machine
+# keeps everything here; one elsewhere receives chunk text, queries and audio.
+[inference]
+base_url = "http://127.0.0.1:8080/v1"
+# For a server that wants a key: the name of the variable holding it, never the key.
+#   api_key_env = "OPENROUTER_API_KEY"
+
+[inference.embed]
+model = "qwen3-embedding-4b"
+# Qwen3-Embedding wants queries wrapped like this and documents bare. A symmetric model
+# (OpenAI's) wants "". Changing the model is a new vector space.
+query_prefix = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
+# Chunks per request, and requests in flight.
+batch = 64
+concurrency = 4
+
+[inference.rerank]
+model = "qwen3-reranker-0.6b"
+
+[inference.transcribe]
+model = "whisper-large-v3-turbo"
 
 # The Jev model `centinel classify` scores documents with when no --model is given.
 # Classifying is never part of `centinel run`: document text leaves this machine for
@@ -1267,6 +1486,14 @@ mod tests {
         // And so is `root`: a starter file must not pin the store somewhere the default
         // would not have put it.
         assert!(c.root.is_none());
+        // The starter file spells out exactly what an absent `[inference]` means, so
+        // writing it changes nothing — the query prefix included, newline and all.
+        let absent = InferenceConfig::default();
+        assert_eq!(c.inference.base_url, absent.base_url);
+        assert_eq!(c.inference.embed.model, absent.embed.model);
+        assert_eq!(c.inference.embed.query_prefix, absent.embed.query_prefix);
+        assert_eq!(c.inference.rerank.model, absent.rerank.model);
+        assert_eq!(c.inference.transcribe.model, absent.transcribe.model);
     }
 
     #[test]
@@ -1370,7 +1597,7 @@ mod tests {
     fn an_open_only_config_still_loads() {
         let c = parse("[open]\npdf = \"Preview\"\n");
         assert!(c.sources.is_empty());
-        assert_eq!(c.defaults.embed_model, "qwen3-embedding-4b");
+        assert_eq!(c.inference.embed.model, "qwen3-embedding-4b");
     }
 
     #[test]
@@ -1726,28 +1953,67 @@ mod tests {
         let c = parse("[defaults]\nrps = 0.5\n");
         assert_eq!(c.defaults.rps, 0.5);
         assert_eq!(c.defaults.lang, "en");
-        assert_eq!(
-            c.defaults.embed_batch,
-            BatchSize::Auto,
-            "a machine that has said nothing gets one sized to it"
-        );
     }
 
-    /// A count and the word, both written the way TOML would have them written.
+    /// A written `[inference.embed]` must say what it prefixes queries with. Carrying the
+    /// Qwen3 default onto another model would degrade retrieval with no error anywhere.
     #[test]
-    fn the_embed_batch_takes_a_number_or_auto() {
-        let batch = |text: &str| parse(text).defaults.embed_batch;
-        assert_eq!(
-            batch("[defaults]\nembed_batch = 64\n"),
-            BatchSize::Fixed(64)
+    fn an_embed_table_must_state_its_query_prefix() {
+        let err = Config::parse("[inference.embed]\nmodel = \"text-embedding-3-small\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("query_prefix"), "{err}");
+        let c =
+            parse("[inference.embed]\nmodel = \"text-embedding-3-small\"\nquery_prefix = \"\"\n");
+        assert_eq!(c.inference.embed.query_prefix, "");
+        assert_eq!(c.inference.embed.batch, 64, "the rest still default");
+    }
+
+    /// Refused at the file, not an hour into a run at the first request.
+    #[test]
+    fn inference_settings_are_checked_when_the_file_is_read() {
+        assert!(Config::parse("[inference]\nbase_url = \"localhost:8080\"\n").is_err());
+        assert!(Config::parse("[inference]\nbase_url = \"ftp://gpu/v1\"\n").is_err());
+        let embed = |extra: &str| {
+            Config::parse(&format!(
+                "[inference.embed]\nmodel = \"m\"\nquery_prefix = \"\"\n{extra}"
+            ))
+        };
+        assert!(embed("batch = 0\n").is_err());
+        assert!(embed("concurrency = 0\n").is_err());
+        assert!(embed("concurrency = 33\n").is_err());
+        assert!(embed("batch = 16\nconcurrency = 8\n").is_ok());
+    }
+
+    /// A config that worked yesterday is told what to write today, in the words to paste —
+    /// not "unknown field `embed_model`".
+    #[test]
+    fn retired_defaults_name_their_replacement() {
+        let err = Config::parse(
+            "[defaults]\nembed_model = \"openrouter/qwen/qwen3-embedding-8b\"\n\
+             embed_batch = \"auto\"\ntranscribe_model = \"whisper-tiny\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("base_url = \"https://openrouter.ai/api/v1\""),
+            "{err}"
         );
-        assert_eq!(
-            batch("[defaults]\nembed_batch = \"auto\"\n"),
-            BatchSize::Auto
+        assert!(err.contains("model = \"qwen/qwen3-embedding-8b\""), "{err}");
+        assert!(
+            err.contains("api_key_env = \"OPENROUTER_API_KEY\""),
+            "{err}"
         );
-        // Refused at the file, not hours later at the first empty pass.
-        assert!(Config::parse("[defaults]\nembed_batch = 0\n").is_err());
-        assert!(Config::parse("[defaults]\nembed_batch = \"most\"\n").is_err());
+        assert!(err.contains("embed_batch"), "{err}");
+        assert!(
+            err.contains("[inference.transcribe]\nmodel = \"whisper-tiny\""),
+            "{err}"
+        );
+
+        // The suggestion parses, which is the whole point of printing it.
+        let suggested = err.split("\n\n").nth(1).unwrap();
+        let suggested = suggested.split_once('\n').unwrap().1;
+        assert!(Config::parse(suggested).is_ok(), "{suggested}");
     }
 
     #[test]

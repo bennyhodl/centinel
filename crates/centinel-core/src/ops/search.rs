@@ -4,10 +4,10 @@
 //!
 //! ```text
 //!   query
-//!     ├─ BM25   (SQLite FTS5)          → top 100
-//!     └─ vector (the embedder + Lance) → top 100
-//!           └─ RRF fuse (k=60)         → top 40
-//!                 └─ Qwen3-Reranker    → top n
+//!     ├─ BM25   (SQLite FTS5)                 → top 100
+//!     └─ vector ([inference.embed] + Lance)   → top 100
+//!           └─ RRF fuse (k=60)                → top 40
+//!                 └─ [inference.rerank]       → top n
 //! ```
 //!
 //! Neither arm is a warm-up. On the BRIGHT benchmark BM25 scores 13.7 against BGE-large's
@@ -45,9 +45,11 @@ use std::collections::HashMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::config::InferenceConfig;
 use crate::index::{Filter, Hit, Index, Placement};
+use crate::inference::Capability;
 use crate::prelude::*;
-use crate::vectors::{Nearest, VectorTable};
+use crate::vectors::{Nearest, Space, VectorTable};
 use crate::workspace::DocumentId;
 
 /// How deep each arm reaches before fusion (SPEC §6).
@@ -67,10 +69,6 @@ const RRF_K: f64 = 60.0;
 /// expensive retriever alone, and why the window is wider than any `--limit` anyone
 /// types.
 const RERANK_DEPTH: usize = 40;
-
-/// The cross-encoder. One model, because the registry's alternates fill the same role
-/// and picking between them is `models`' business, not a search flag's.
-const RERANKER: &str = "qwen3-reranker-0.6b";
 
 #[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct SearchArgs {
@@ -206,6 +204,16 @@ pub struct SearchReport {
 /// Search the corpus for a passage.
 #[op(group = "corpus")]
 pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport> {
+    let inference = crate::config::Config::load()?.inference;
+    search_with(ctx, args, &inference).await
+}
+
+/// [`search`], against the servers `inference` names.
+pub(crate) async fn search_with(
+    ctx: &Ctx,
+    args: SearchArgs,
+    inference: &InferenceConfig,
+) -> anyhow::Result<SearchReport> {
     // A tag nobody defined is a typo, and a typo that returned nothing would read as a
     // corpus with nothing in it. Checked against the saved questions as they are, before
     // anything is opened or loaded.
@@ -222,19 +230,19 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
     }
 
     // Checked before the vector arm so a missing index fails immediately rather than
-    // after a multi-gigabyte model load. This is a path, not a connection.
+    // after a round trip to the embedding server. This is a path, not a connection.
     let index_path = ctx.store.require_index()?;
     let started = std::time::Instant::now();
 
-    // A missing model or an unbuilt table is a normal state, not a failure: the corpus
-    // is keyword-searchable long before it is embedded. It degrades to one arm and says
-    // so, rather than returning an error a reader cannot act on.
+    // A server that is down or an unbuilt table is a normal state, not a failure: the
+    // corpus is keyword-searchable long before it is embedded. It degrades to one arm and
+    // says so, rather than returning an error a reader cannot act on.
     let filter = Filter {
         source: args.source.as_deref(),
         tags: &args.tags,
         not_tags: &args.not_tags,
     };
-    let (vector, no_vectors) = match vector_arm(ctx, &args, &filter).await {
+    let (vector, no_vectors) = match vector_arm(ctx, inference, &args, &filter).await {
         Ok(hits) => (hits, None),
         Err(reason) => (Vec::new(), Some(reason)),
     };
@@ -261,10 +269,7 @@ pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport>
         "retrieved"
     );
 
-    let no_rerank = match crate::models::models_dir() {
-        Ok(models) => rerank_arm(ctx, &models, &args.query, &mut hits).await.err(),
-        Err(e) => Some(format!("{e:#}")),
-    };
+    let no_rerank = rerank_arm(inference, &args.query, &mut hits).await.err();
     if let Some(reason) = &no_rerank {
         tracing::debug!(reason, "not reranked");
     }
@@ -394,62 +399,41 @@ fn retrieve(
 
 /// Reorders `hits` in place with the cross-encoder, best first.
 ///
-/// `Err(String)` is an ordinary absence — no weights installed — reported the same way
-/// the vector arm's is. Reranking is always on (§6.3), but "always on" is a rule about
-/// there being no flag to turn it off, not a promise that a machine with no reranker
-/// weights should refuse to search at all.
+/// `Err(String)` is an ordinary absence — no rerank server answering — reported the same
+/// way the vector arm's is. Reranking is always on (§6.3), but "always on" is a rule about
+/// there being no flag to turn it off, not a promise that a machine whose rerank server
+/// is down should refuse to search at all.
 ///
 /// The RRF order is left untouched on failure, which is the honest fallback: it is the
 /// best ordering available without the model, and [`SearchReport::method`] will not
 /// claim it was reranked.
-///
-/// `models` is where the weights live — passed in so a test can point it at an empty
-/// directory, or at files of the right size and nothing else.
 async fn rerank_arm(
-    ctx: &Ctx,
-    models: &std::path::Path,
+    inference: &InferenceConfig,
     query: &str,
     hits: &mut [Hit],
 ) -> Result<(), String> {
-    // Asked before the empty check, and asked of the disk rather than the cache.
-    // Whether the reranker is installed is a fact about the machine, not about this
-    // query's hits: a search that found nothing has to say the reranker is missing too,
-    // or the next search finds something and is worse for it without a word. Presence
-    // only — the load itself waits for a hit to score.
-    crate::models::resolve(RERANKER, crate::models::ModelRole::Reranker, None, models)
-        .map_err(|e| e.to_string())?;
+    let endpoint = inference.endpoint(Capability::Rerank);
+    // Asked before the empty check. Whether the reranker is there is a fact about the
+    // setup, not about this query's hits: a search that found nothing has to say the
+    // reranker is missing too, or the next search finds something and is worse for it
+    // without a word. Presence only — nothing is scored until there are hits.
+    endpoint.reachable().await?;
     if hits.is_empty() {
         return Ok(());
     }
-
-    let query = query.to_string();
     let documents: Vec<String> = hits.iter().map(|h| h.text.clone()).collect();
-    let root = models.to_path_buf();
-    // Weights load and inference are both blocking, and both are seconds.
-    let cache = ctx.query_reranker.clone();
-    let scores = tokio::task::spawn_blocking(move || {
-        let mut cached = cache
-            .lock()
-            .map_err(|_| anyhow::anyhow!("reranker lock poisoned"))?;
-        if cached.is_none() {
-            *cached = Some(crate::rerank::Reranker::load(&root, RERANKER, None)?);
-        }
-        cached
-            .as_ref()
-            .expect("model loaded above")
-            .score(&query, &documents)
-    })
-    .await
-    .map_err(|e| format!("{e}"))?
-    .map_err(|e| format!("{e:#}"))?;
-
+    let scores = crate::rerank::Reranker::new(endpoint)
+        .map_err(|e| format!("{e:#}"))?
+        .score(query, &documents)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
     apply_scores(hits, &scores)
 }
 
 /// Puts the reranker's scores onto the hits and sorts by them.
 ///
 /// Separate from [`rerank_arm`] because this is the part with a decision in it, and a
-/// test of it should not have to load two gigabytes of weights to reach the decision.
+/// test of it should not need a server to reach the decision.
 fn apply_scores(hits: &mut [Hit], scores: &[f32]) -> Result<(), String> {
     if scores.len() != hits.len() {
         return Err(format!(
@@ -477,17 +461,16 @@ fn apply_scores(hits: &mut [Hit], scores: &[f32]) -> Result<(), String> {
 /// The vector arm's hits, or the reason there wasn't one.
 ///
 /// Returns `Err(String)` for an ordinary absence — no table yet, a table in the older
-/// layout, no weights installed — because to the caller those are the same fact: this
-/// query ran on one arm, and here is what to do about it. A real fault is logged and
-/// reported the same way, since a search that fails outright is worse than one that
-/// answers with BM25 and says it did.
+/// layout, a table in another space, no server answering — because to the caller those
+/// are the same fact: this query ran on one arm, and here is what to do about it. A real
+/// fault is reported the same way, since a search that fails outright is worse than one
+/// that answers with BM25 and says it did.
 async fn vector_arm(
     ctx: &Ctx,
+    inference: &InferenceConfig,
     args: &SearchArgs,
     filter: &Filter<'_>,
 ) -> Result<Vec<Nearest>, String> {
-    // The model is a property of the table, not of this caller — see
-    // `VectorTable::open_existing`.
     let table = VectorTable::open_existing(&ctx.store.vectors_db())
         .await
         .map_err(|e| format!("{e:#}"))?;
@@ -495,51 +478,24 @@ async fn vector_arm(
         return Err("the vector table is empty — run `centinel embed`".into());
     }
 
-    let query = args.query.clone();
-    let model = table.model_id().to_string();
-    // The table's model id says where the query must be embedded — a corpus embedded
-    // through OpenRouter can only be searched through OpenRouter, because its vectors
-    // live in that model's space and no local weights produce them.
-    let vector = match crate::remote::backend_for(&model).map_err(|e| format!("{e:#}"))? {
-        crate::remote::EmbeddingBackend::Remote(spec) => {
-            // The query is the one piece of text this sends off the machine, and it is
-            // sent because the operator embedded the corpus remotely — the same consent,
-            // read back off the table.
-            crate::remote::RemoteEmbedder::new(spec, crate::spend::Ledger::new(&ctx.store))
-                .map_err(|e| format!("{e:#}"))?
-                .embed_query(&query)
-                .await
-                .map_err(|e| format!("{e:#}"))?
-        }
-        crate::remote::EmbeddingBackend::Local(_) => {
-            // Loading weights and running inference are both blocking, and the model is
-            // gigabytes — a short CLI run pays this per query; `serve` and `mcp` pay it
-            // once.
-            let cache = ctx.query_embedder.clone();
-            let ledger = crate::spend::Ledger::new(&ctx.store);
-            tokio::task::spawn_blocking(move || {
-                let mut cached = cache
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("query model lock poisoned"))?;
-                if cached
-                    .as_ref()
-                    .is_none_or(|loaded| loaded.model_id() != model)
-                {
-                    // Release the old weights before loading a different model.
-                    *cached = None;
-                    let root = crate::models::models_dir()?;
-                    *cached = Some(crate::embed::Embedder::load(&root, &model, None, ledger)?);
-                }
-                cached
-                    .as_ref()
-                    .expect("model loaded above")
-                    .embed_query(&query)
-            })
-            .await
-            .map_err(|e| format!("{e}"))?
-            .map_err(|e| format!("{e:#}"))?
-        }
-    };
+    // A query is only comparable to the table if it is embedded in the table's space. A
+    // configured server that is not the one the table records is named, not queried: its
+    // vectors would rank the corpus in a space it was never written in.
+    let endpoint = inference.endpoint(Capability::Embed);
+    let space = Space::of(&endpoint);
+    if table.space() != &space {
+        return Err(crate::vectors::mismatch(Some(table.space()), &space));
+    }
+    let vector = crate::embed::Embedder::new(
+        endpoint,
+        &inference.embed.query_prefix,
+        crate::spend::Ledger::new(&ctx.store),
+    )
+    .map_err(|e| format!("{e:#}"))?
+    .with_dims(table.dims())
+    .embed_query(&args.query)
+    .await
+    .map_err(|e| format!("{e:#}"))?;
 
     // The filter rides inside the query, so the arm asks for exactly its depth in
     // distinct chunks and gets them, however narrow the filter.
@@ -1116,78 +1072,39 @@ mod tests {
         assert_eq!(hits[0].score, 0.9);
     }
 
-    /// Whether the reranker exists is a fact about the machine, not about the hits. A
-    /// search that found nothing used to answer `→rerank` on a machine with no reranker,
-    /// because the empty check came before the weights were looked for.
+    /// Whether the reranker is there is a fact about the setup, not about the hits. A
+    /// search that found nothing used to answer `→rerank` with no reranker anywhere,
+    /// because the empty check came before the reranker was looked for.
     #[tokio::test]
     async fn an_empty_result_still_says_the_reranker_is_missing() {
-        let store = tempfile::tempdir().unwrap();
-        let models = tempfile::tempdir().unwrap();
-        let ctx = Ctx::new(crate::store::Store::open(store.path()).await.unwrap());
+        let config = crate::inference::fake::nothing_listening();
         let mut none: Vec<Hit> = Vec::new();
-
-        let err = rerank_arm(&ctx, models.path(), "anything", &mut none)
+        let err = rerank_arm(&config, "anything", &mut none)
             .await
             .unwrap_err();
-        assert!(err.contains(RERANKER), "{err}");
-        assert!(err.contains("centinel models pull"), "names the fix: {err}");
-    }
-
-    /// Nothing to reorder is not a failure, and it must not cost a load either. The
-    /// weights here are files of the pinned size and nothing else, so loading them would
-    /// fail — an `Ok` proves the empty case looked for them and went no further.
-    #[tokio::test]
-    async fn reranking_nothing_wants_the_weights_present_and_never_loads_them() {
-        let store = tempfile::tempdir().unwrap();
-        let models = tempfile::tempdir().unwrap();
-        let spec = crate::models::find(RERANKER).unwrap();
-        let dir = spec.dir(models.path());
-        std::fs::create_dir_all(&dir).unwrap();
-        for file in spec.files_for(spec.variant(None).unwrap()) {
-            std::fs::File::create(dir.join(file.path))
-                .unwrap()
-                .set_len(file.size)
-                .unwrap();
-        }
-        let ctx = Ctx::new(crate::store::Store::open(store.path()).await.unwrap());
-        let mut none: Vec<Hit> = Vec::new();
-
         assert!(
-            rerank_arm(&ctx, models.path(), "anything", &mut none)
-                .await
-                .is_ok()
+            err.contains(&config.base_url),
+            "names where it looked: {err}"
         );
     }
 
-    // ── the whole pipeline, on real weights ───────────────────────────────────────
-
-    /// Both arms, fusion and the reranker against the actual models. Opt-in, because it
-    /// loads several gigabytes: `CENTINEL_TEST_MODELS=1 cargo test`.
-    ///
-    /// This is the seam the unit tests above cannot reach. `fuse` is tested on
-    /// hand-built ranks and `VectorTable` on hand-built vectors, but nothing else checks
-    /// that a *query string* reaches the embedder, the table and SQLite and comes back
-    /// as the passage a person would have picked — which is the only claim `search`
-    /// actually makes.
+    /// Nothing to reorder is not a failure, and it must not cost a request either.
     #[tokio::test]
-    async fn a_query_reaches_the_passage_that_answers_it() {
-        if std::env::var("CENTINEL_TEST_MODELS").is_err() {
-            return;
-        }
+    async fn reranking_nothing_asks_the_server_nothing() {
+        let server = crate::inference::fake::serve().await;
+        let mut none: Vec<Hit> = Vec::new();
+        assert!(
+            rerank_arm(&server.config(), "anything", &mut none)
+                .await
+                .is_ok()
+        );
+        assert_eq!(server.hits("rerank"), 0);
+    }
 
+    /// A store with `passages` indexed under `tampa`, one document each.
+    async fn corpus(passages: &[&str]) -> (tempfile::TempDir, Ctx) {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path()).await.unwrap();
-
-        // The vocabulary-gap case the vector arm exists for: the passage that answers
-        // the query shares no content word with it.
-        let passages = [
-            "PWSName: Tampa Water Department. Analyte results for UCMR 5 monitoring, \
-             fourth quarter, all sample points within the maximum contaminant level.",
-            "Chapter 12 — standards for the keeping of bees within residential zones, \
-             including hive setbacks and swarm control.",
-            "Notice of public hearing on the proposed vacation of a platted alley south \
-             of Columbus Drive.",
-        ];
         {
             let mut index = Index::open(store.index_path()).unwrap();
             for (i, text) in passages.iter().enumerate() {
@@ -1212,17 +1129,107 @@ mod tests {
                     .unwrap();
             }
         }
+        (dir, Ctx::new(store))
+    }
 
-        let ctx = Ctx::new(store.clone());
-        super::super::embed(
+    fn ask(query: &str) -> SearchArgs {
+        SearchArgs {
+            query: query.into(),
+            limit: 3,
+            source: None,
+            tags: Vec::new(),
+            not_tags: Vec::new(),
+            snippet_chars: 0,
+            exact: false,
+        }
+    }
+
+    const PASSAGES: [&str; 3] = [
+        "PWSName: Tampa Water Department. Analyte results for UCMR 5 monitoring, \
+         fourth quarter, all sample points within the maximum contaminant level.",
+        "Chapter 12 — standards for the keeping of bees within residential zones, \
+         including hive setbacks and swarm control.",
+        "Notice of public hearing on the proposed vacation of a platted alley south \
+         of Columbus Drive.",
+    ];
+
+    // ── the whole pipeline ────────────────────────────────────────────────────────
+
+    /// Both arms, fusion and the reranker, end to end against a server: the query is
+    /// embedded there, the table answers, the server reorders, and the report says all
+    /// three ran. `fuse` is tested on hand-built ranks and `VectorTable` on hand-built
+    /// vectors; this is the seam neither reaches.
+    #[tokio::test]
+    async fn a_query_reaches_both_servers_and_comes_back_reranked() {
+        let server = crate::inference::fake::serve().await;
+        let (_dir, ctx) = corpus(&PASSAGES).await;
+        super::super::embed::embed_with(
             &ctx,
-            super::super::EmbedArgs {
-                // Pinned: an unset model reads the config file of whatever machine runs
-                // the tests, and an `openrouter/…` preference there would put this
-                // passage on the wire.
-                model: Some("qwen3-embedding-4b".into()),
-                ..Default::default()
-            },
+            Default::default(),
+            &server.config(),
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+
+        let report = search_with(&ctx, ask("bees hive swarm"), &server.config())
+            .await
+            .unwrap();
+        assert!(report.no_vectors.is_none(), "{:?}", report.no_vectors);
+        assert!(report.no_rerank.is_none(), "{:?}", report.no_rerank);
+        assert_eq!(report.method, "bm25+vector→rrf→rerank");
+        assert!(
+            report.results[0].text.contains("bees"),
+            "{:#?}",
+            report.results
+        );
+        assert_eq!(server.hits("rerank"), 1);
+    }
+
+    /// A table in one space and a server in another: the vector arm says so and stays
+    /// out, rather than ranking the corpus with vectors it was never written in.
+    #[tokio::test]
+    async fn a_server_in_another_space_is_named_not_queried() {
+        let wrote = crate::inference::fake::serve().await;
+        let (_dir, ctx) = corpus(&PASSAGES).await;
+        super::super::embed::embed_with(
+            &ctx,
+            Default::default(),
+            &wrote.config(),
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+
+        let other = crate::inference::fake::serve().await;
+        let report = search_with(&ctx, ask("bees"), &other.config())
+            .await
+            .unwrap();
+        let reason = report.no_vectors.expect("the vector arm stayed out");
+        assert!(reason.contains("--adopt"), "{reason}");
+        assert_eq!(other.hits("embeddings"), 0, "the query was not sent");
+        assert!(
+            report.results[0].text.contains("bees"),
+            "BM25 still answers"
+        );
+    }
+
+    /// The claim the vector arm exists for, against real models: the passage that answers
+    /// shares no content word with the query. Opt-in, because it needs the servers
+    /// `[inference]` names to be running: `CENTINEL_TEST_INFERENCE=1 cargo test`.
+    #[tokio::test]
+    async fn a_query_reaches_the_passage_that_answers_it() {
+        if std::env::var("CENTINEL_TEST_INFERENCE").is_err() {
+            return;
+        }
+        let inference = crate::config::Config::load().unwrap().inference;
+        let (_dir, ctx) = corpus(&PASSAGES).await;
+        super::super::embed::embed_with(
+            &ctx,
+            Default::default(),
+            &inference,
             &Progress::none(),
             &Cancel::none(),
         )
@@ -1231,21 +1238,9 @@ mod tests {
 
         // No shared content word with the water passage — "drinking" and "sampling"
         // appear nowhere in it. BM25 alone cannot reach it.
-        let report = search(
-            &ctx,
-            SearchArgs {
-                query: "drinking water sampling results".into(),
-                limit: 3,
-                source: None,
-                tags: Vec::new(),
-                not_tags: Vec::new(),
-                snippet_chars: 0,
-                exact: false,
-            },
-        )
-        .await
-        .unwrap();
-
+        let report = search_with(&ctx, ask("drinking water sampling results"), &inference)
+            .await
+            .unwrap();
         assert!(report.no_vectors.is_none(), "{:?}", report.no_vectors);
         assert!(report.method.contains("vector"), "{}", report.method);
         assert!(
@@ -1278,17 +1273,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path()).await.unwrap();
         let ctx = Ctx::new(store);
-        let error = search(
+        let error = search_with(
             &ctx,
             SearchArgs {
-                query: "budget".into(),
-                limit: 3,
-                source: None,
                 tags: vec!["nope".into()],
-                not_tags: Vec::new(),
-                snippet_chars: 0,
-                exact: false,
+                ..ask("budget")
             },
+            &InferenceConfig::default(),
         )
         .await
         .unwrap_err()

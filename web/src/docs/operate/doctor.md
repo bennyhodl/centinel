@@ -11,20 +11,16 @@ ready  /data/agartha · 3 sources
 config /Users/you/.centinel/centinel.toml
 
 binaries
-  ✓  centinel-whisper                    runs whisper.cpp in its own process, out of llama.c…
-  ✓  ffmpeg            7.1.1             decodes audio to 16kHz mono PCM for transcription
+  ✓  ffmpeg            7.1.1             decodes audio to 16 kHz WAV for the transcription…
   ✓  yt-dlp            2026.07.04        YouTube acquisition
   ✓  pdftotext         26.08.0           second reader for PDFs the primary makes nothing of
   ✓  pdftoppm          26.08.0           will rasterise PDF pages for OCR — ticket #12
   ✓  tesseract         5.5.0             will OCR scanned documents — ticket #12
 
-models
-  ✓  qwen3-embedding-4b      q8_0     4.0 GiB  search
-  ✓  qwen3-embedding-0.6b    q8_0     610 MiB  search
-  ✓  qwen3-reranker-0.6b     q8_0     610 MiB  search
-  ✓  whisper-large-v3-turbo  q8_0     834 MiB  transcription
-  ✓  whisper-tiny            q5_1    30.7 MiB  transcription
-  ✓  silero-vad              v5.1.2   864 KiB  transcription
+inference
+  ✓  embed       qwen3-embedding-4b      http://127.0.0.1:8080/v1  search
+  ✓  rerank      qwen3-reranker-0.6b     http://127.0.0.1:8081/v1  search
+  ✓  transcribe  whisper-large-v3-turbo  http://127.0.0.1:8178/v1  transcription
 
 gates
   ✓ search
@@ -90,18 +86,46 @@ stale `yt-dlp` does not degrade — it stops.
 
 ---
 
-## `models` — installed weights, by role
+## `inference` — which servers are answering
 
-Everything runs locally, so the weights are a host fact and `doctor` reports them as one.
-The size column is real disk. See [Models](../internals/models.md) for what each role does
-and [Models in the registry](../reference/models.md) for every entry and quantization.
+Centinel runs no model itself; each capability is a server the `[inference]` block names.
+`doctor` opens a TCP connection to each — all at once, a few seconds at most — and sends no
+request, because a request would cost a model call. A row that is not answering says where
+it looked and what to do:
 
-```bash
-centinel models pull      # fetch what the pipeline needs
+```
+  ✗  embed       qwen3-embedding-4b      http://127.0.0.1:8080/v1  search
+  ✗  embed  nothing is answering at http://127.0.0.1:8080/v1 (Connection refused) — start a
+            server for qwen3-embedding-4b there, or point [inference] at one
 ```
 
-That is the fix named by every error that reports a missing weight, and it is spelled in
-exactly one place in the code.
+A key the config names and the environment lacks is reported instead of the connection —
+it would have been refused anyway. A config file that does not load at all — which is what
+an upgrade over a config with `embed_model` in it looks like — stops every CLI command
+before it starts, `doctor` included, with what to write instead: the CLI reads the config to
+find the store. Under `--root`, or over HTTP and MCP, `doctor` runs and reports it under the
+config line, with every gate shut. See [Inference
+servers](../reference/inference.md) for the commands that start each server.
+
+---
+
+## `vectors` — whether search can use what is stored
+
+A server can answer and still be the wrong one. The vector table records the model and the
+server that wrote it, and a search refuses query vectors from any other — falling back to
+keywords alone. That is the state an upgrade leaves a store in, so `doctor` reads the table's
+record (one manifest read, no scan) and compares it with `[inference.embed]`:
+
+```
+vectors
+  ✗  chunks.lance  qwen3-embedding-4b (run in-process, before [inference])
+       [inference.embed] names qwen3-embedding-4b at http://127.0.0.1:8080/v1, so search
+       cannot use these vectors. If it serves the same model, `centinel embed --adopt
+       --dry-run` measures whether it reproduces them
+```
+
+A mismatch shuts the *search* gate. The section is absent on a store with no vectors yet.
+See [Inference servers](../reference/inference.md#coming-from-the-in-process-models).
 
 ---
 
@@ -113,15 +137,14 @@ gates
   ✓ transcription
 ```
 
-A gate is a **role**, not a model. The registry carries alternates — `qwen3-embedding-4b`
-and `qwen3-embedding-0.6b` both fill *embedding* — so any one installed model opens the
-gate. This is why readiness is rolled up per role: reporting per model would show a machine
-with a working embedder as incomplete because it lacked the other one.
+A gate is a **stage**: *search* needs the embed and rerank servers, *transcription* the
+transcription server. Reporting them apart is what lets a crawl-only machine with no
+transcription server read as able to search.
 
 **A closed gate does not fail a run. It skips a stage.** An hour of crawling must never be
-thrown away over a download that was never started, so a run on a machine with no embedder
-collects, extracts and indexes, reports `embed` as skipped, and picks it up on the next run
-once the weights are there. The corpus is keyword-searchable long before it is embedded.
+thrown away over a server that was not started, so `run` checks each stage's server before
+the stage, and a run with no embedding server collects, extracts and indexes, reports
+`embed` as skipped, and picks it up on the next run once the server is answering. The corpus is keyword-searchable long before it is embedded.
 
 The one thing that closed gate *does* change is what a search can see — a corpus with
 chunks and no vectors answers on the keyword arm alone and says so in every result. See

@@ -39,13 +39,15 @@ Centinel v1 was built on *"an agent runs everything"* — a pi-coding-agent runt
 
 These bind every decision below and every decision still open.
 
-### 2.1 Everything runs locally
+### 2.1 Inference runs where the operator points it
 
-**No inference leaves the machine.** No OCR API, no transcription API, no embedding API, no reranking API.
-
-Centinel profiles the host and downloads a model tier that fits it. A consequence the whole system carries: **output quality varies by machine**, so the model tier that produced an artifact is part of its provenance.
+*As first written:* **no inference leaves the machine.** No OCR API, no transcription API, no embedding API, no reranking API. Centinel profiles the host and downloads a model tier that fits it. A consequence the whole system carries: **output quality varies by model**, so the model tier that produced an artifact is part of its provenance — and that consequence stands under both reopenings below.
 
 **Reopened for embedding (2026-08), explicitly, per §2.3's own rule.** An operator may name an `openrouter/…` embedding model, and that one stage then calls openrouter.ai: chunk text goes out during `embed`, and the query goes out during `search` against a corpus embedded that way. Nothing else does — blobs, logs, provenance and the index never leave. The default stays local, nothing falls back to the network silently (missing weights still fail loudly with the pull command), and the remote model id keys its own vector table, so the two spaces never mix. Provenance holds: the id in the table names the model *and* where it ran.
+
+**Reopened for every model (2026-10), explicitly.** Centinel no longer runs a model in-process. Embedding, reranking and transcription are requests to the servers the config file's `[inference]` block names — OpenAI's `/embeddings` and `/audio/transcriptions`, and the Cohere/Jina `/rerank` — and what comes back is stored. In-process inference made every machine's tuning a flag or a build feature: a batch width that fits its memory, a backend for its GPU, three GPU release builds and two C++ libraries for every other host to compile. A server already owns that tuning, once, for its machine.
+
+The rule this section states survives in the form that matters: **text goes where the operator pointed it, and nowhere else.** The default `base_url` is `127.0.0.1`, so a default install still sends nothing off the machine; a `base_url` elsewhere is the operator saying, in the one place a server is ever named, that chunk text, queries and audio may go there. Nothing falls back to a server the config does not name. Provenance holds as it did for OpenRouter: the vector table records the model *and* the server that ran it (§6.2), and a transcript's derivation records both.
 
 ### 2.2 Static files are the only truth
 
@@ -58,6 +60,8 @@ This is the strongest form of the corpus premise, and it forces the append-only 
 Rust plus one-shot subprocess binaries for corpus work. **Reopened for authentication (2026-10):** `centinel serve` and `centinel web` supervise a TanStack Start Node.js process. Start is the public HTTP entry point and owns Better Auth with SQLite; the Rust HTTP listener is private and requires a per-launch credential. CLI and stdio MCP continue to run locally. This exception does not add another corpus-processing runtime.
 
 Not foreclosed: **the file tree is the contract**, so a sidecar could later read and write the same store without an API being designed for it now. Any decision that requires a Python service is *reopening* this — say so explicitly rather than assuming it.
+
+The inference servers of §2.1 are not a second runtime in this sense. Centinel neither starts nor supervises them, and speaks to them over published HTTP APIs; which server answers — `llama-server`, `whisper.cpp`'s, faster-whisper, vLLM — is the operator's choice, and none of them is built from this workspace.
 
 ### 2.4 Provenance is not optional
 
@@ -74,7 +78,7 @@ A search result must be citable back to a specific page of a specific document f
 | Binary | For | Contract | Called today |
 |---|---|---|---|
 | `yt-dlp` | YouTube acquisition | pinned minimum version | **yes** |
-| `ffmpeg` | decoding audio to 16 kHz mono PCM | pinned minimum version | **yes** |
+| `ffmpeg` | decoding audio to the 16 kHz mono WAV a transcription server is sent | pinned minimum version | **yes** |
 | `poppler` (`pdftoppm`) | rasterising scanned pages | pinned minimum version | no — ticket #12 |
 | `tesseract` | OCR | pinned minimum version | no — ticket #12 |
 
@@ -82,23 +86,21 @@ These are **one-shot subprocesses, not services**.
 
 The last column is load-bearing for `doctor`. `extract` counts the pages that would need OCR and stops there; neither poppler nor tesseract has a call site. Reporting them as *required* meant a machine able to do everything this code does was told it was **not ready** — and a readiness check that is wrong in the pessimistic direction is not the safe kind of wrong, it is the kind people learn to ignore. They are reported as `planned` until the pipeline that needs them exists.
 
-A fifth subprocess, `centinel-whisper`, is **ours** — built from this workspace, not installed. See §3.6.
-
 Every one of them is started through `centinel_core::tool`, which is the only place in the codebase that runs an external program. Three properties hold for all of them, and none held before that module existed:
 
-- **A child dies with its caller.** `kill_on_drop`, so a cancelled run — Ctrl-C, a lost `select!` race — takes its children with it instead of orphaning an `ffmpeg` and a whisper worker holding a multi-gigabyte model.
+- **A child dies with its caller.** `kill_on_drop`, so a cancelled run — Ctrl-C, a lost `select!` race — takes its children with it instead of orphaning a `yt-dlp` mid-download.
 - **A child has a deadline**, per call rather than global: a `--version` probe gets seconds, a 63 MB audio download gets half an hour. Exceeding it kills the child.
 - **A child never reads our stdin.** An inherited terminal lets a subprocess swallow keystrokes or block on a prompt nobody can see.
-
-For a *stream* the guard is **inactivity**, not total time: a transcription still reporting progress after four hours is working, not stuck. The whisper worker's stderr is therefore both its diagnostics and its heartbeat, and silence past `STALL_TIMEOUT` is what identifies a wedged worker. Model downloads already draw the same distinction — they set a read timeout and deliberately no total-request timeout, because a slow gigabyte is not a stalled one.
 
 The one exception is the application `open` launches, which inherits the terminal and gets no deadline — it may be a person's editor. The interface says so.
 
 `centinel doctor` verifies presence **and pinned minimum version**, and runs before any command. A too-old `tesseract` fails at boot naming the required version — not on page 200 of a crawl. This matters most for `yt-dlp`, which warns at 90 days stale and shipped 26 releases in 2025 in emergency clusters.
 
-### 3.2 Model weights
+### 3.2 Inference servers
 
-Fetched by explicit `centinel models pull` into a cache directory. **Missing weights are fatal, exactly like a missing binary** — no multi-GB download ambushes a scheduled 3am run.
+Named by `[inference]` (§2.1), one per capability — embed, rerank, transcribe — or one for all three. Centinel downloads no weights. **A server that is not answering stops its stage exactly like a missing binary**, and `run` checks with a TCP connect before the stage starts, so an hour of crawling is never thrown away over a server that was not started: the stage is skipped, says why, and resumes on the next run. `doctor` reports each server beside the binaries.
+
+Superseded (2026-10): weights fetched by `centinel models pull` into a cache directory and loaded in-process.
 
 ### 3.3 Why Rust, given the survey initially said otherwise
 
@@ -110,7 +112,7 @@ Fetched by explicit `centinel models pull` into a cache directory. **Missing wei
 
 ### 3.4 Accepted costs
 
-1. **Highest install bar of the options considered.** Every install, including a fork, needs three binaries at pinned versions plus an explicit model pull.
+1. **Highest install bar of the options considered.** Every install, including a fork, needs two binaries at pinned versions plus inference servers for search's vector arm, the reranker and transcription. The servers are someone else's software, tuned by the operator.
 2. **OCR quality caps around 50/100 on degraded scans** (olmOCR-Bench). 1990s scanned records will not come out clean.
 3. **Diarization is unavailable** while there is no sidecar. Speaker attribution stays out of scope.
 4. **Docling's chunker is unavailable** (Python-only).
@@ -129,32 +131,24 @@ Fetched by explicit `centinel models pull` into a cache directory. **Missing wei
 
 **Safe:** Qwen3 embed + rerank (Apache-2.0), `pdf-inspector` (MIT), `anydoc` (MIT), LanceDB (Apache-2.0), `sqlite-vec` (Apache-2.0/MIT), whisper.cpp GGML weights (MIT), Silero VAD (MIT). Shelling out to GPL poppler is **licence-safe across the process boundary**.
 
-### 3.6 Transcription runs in a separate process, and it is not optional
+### 3.6 Transcription runs on a server, and VAD is the server's
 
-`whisper.cpp` and `llama.cpp` each vendor their own copy of **`ggml`**, and both static archives export the same ~534 `ggml_*` symbols. Linked into one binary the linker keeps one copy and silently resolves the other library's calls to it. The two vendored versions are not the same (`ggml.h` is 2,724 lines in whisper.cpp 1.8.3 against 2,845 in llama.cpp via `llama-cpp-2` 0.1.153).
+```
+blob (m4a/webm) --ffmpeg--> 16 kHz mono WAV --POST /audio/transcriptions--> verbose_json segments
+```
 
-**Measured, identical model and audio, the linked crates the only variable:**
+ffmpeg stays: a server decodes what it was built to decode — `whisper.cpp`'s reads WAV unless built with ffmpeg — and YouTube serves m4a and webm. The WAV is a scratch file rather than a stream, because a request that fails is sent again and a pipe can be read once. A response without timed segments is refused: an untimed transcript makes every citation into it `00:00:00`, which is §6.4's whole claim.
+
+**VAD is still not optional — it is now the server's to run.** Koenecke et al. measured hallucination tracking *non-vocal duration*; a gavel-to-gavel recording is mostly non-vocal. `whisper.cpp`'s server runs Silero VAD under `--vad`, faster-whisper under `vad_filter`. Centinel can no longer verify that VAD ran, so the install documentation starts every transcription server with it, and the derivation records the model and the server that produced each transcript.
+
+*History, and why it moved.* Transcription used to run in-process, in a second binary, `centinel-whisper`, because `whisper.cpp` and `llama.cpp` each vendor a copy of **`ggml`**, both static archives export the same ~534 `ggml_*` symbols, and linked into one binary the linker silently resolves one library's calls into the other's copy. Measured, identical model and audio:
 
 | binary | result |
 |---|---|
 | `whisper-rs` alone | 2 segments — *"The council meeting will come to order."* |
 | `whisper-rs` + `llama-cpp-2` | **0 segments**, every decoded token id 0 at `p=0.000` |
 
-It links without a warning, runs without a crash, and transcribes nothing. There is no error to catch.
-
-**Therefore `centinel` links `llama.cpp` and `centinel-whisper` links `whisper.cpp`, and they meet over a pipe:**
-
-```
-blob (m4a/webm) --ffmpeg--> f32le 16 kHz mono --pipe--> centinel-whisper --> JSON segments
-```
-
-Both hops stream; a 3-hour meeting is ~691 MB of PCM and is never materialised.
-
-*Rejected:* aligning the two `ggml` versions. It might work today, and the failure mode when it stops working is a silently empty transcript — the one class of bug a transparency tool cannot ship.
-
-*Consistent with §2.3:* a one-shot subprocess, not a long-lived second-language service. The worker is built from this workspace, so it adds no install step beyond what already exists — but it does add a **second C++ build**, which is now the confirmed shape of ticket [#11](https://github.com/bennyhodl/centinel/issues/11) rather than a risk it was tracking.
-
-**VAD is mandatory by default, and this is a §2 decision, not a tuning knob.** Koenecke et al. measured hallucination tracking *non-vocal duration*; a gavel-to-gavel recording is mostly non-vocal. `transcribe` therefore refuses to run without Silero VAD unless `--allow-no-vad` is passed, and records `vad` on every transcript. whisper.cpp **accepts a corrupt or empty VAD model silently**, transcribes without it and exits 0 — verified with `/dev/null` and with 885 KB of `/dev/urandom` — so the worker loads the VAD itself first and refuses rather than let provenance claim a mitigation that never ran.
+That made the install two C++ builds producing two executables that had to share a directory, plus a CUDA runtime on Linux for the worker. With no model in the binary, the conflict and the second executable are both gone. The worker also loaded the VAD model itself before transcribing, because `whisper.cpp` accepts a corrupt or empty VAD model silently and transcribes without it — a property of `whisper.cpp` that a server inherits, and a reason to check its VAD file once, by hand, when it is set up.
 
 ---
 
@@ -217,7 +211,7 @@ Truth is `obs[n-1].fingerprint != obs[n].fingerprint`. The materialized table ex
 
 ### 4.6 Phantom diffs are solvable because the model carries what is needed
 
-`Derivation` records tool, version, **and model tier**. So *"the source changed"* is mechanically distinguishable from *"tesseract was upgraded"* or *"this ran on a weaker machine with a smaller whisper tier."*
+`Derivation` records tool, version, **and model tier**. So *"the source changed"* is mechanically distinguishable from *"tesseract was upgraded"* or *"this ran through a smaller whisper model, on another server."*
 
 The **policy** — re-extract, extract lazily, or accept a mixed corpus — belongs to change detection (§8).
 
@@ -351,9 +345,15 @@ So: **4B for the embedder, and the reranker scales freely with the host.** A rer
 
 *If the deployment ever becomes many-install* — corpora published and merged between operators, which §5.2 explicitly contemplates for the embedding cache — this decision must be reopened, because the incompatibility it used to prevent returns.
 
-### 6.2.1 Runtime — GGUF via `llama.cpp`, not ONNX
+### 6.2.1 Runtime — a server, and the weights it loads
 
-Model **weights** are GGUF; inference is `llama-cpp-2` in-process. No server, no sidecar.
+**Superseded 2026-10 (§2.1).** The embedder and the reranker are requests to the servers `[inference]` names. The recommended server is `llama-server`, loading the same Q8_0 GGUF this section chose, with last-token pooling for the embedder and `--reranking` for the reranker; anything that speaks OpenAI's `/embeddings` and the Cohere/Jina `/rerank` will do. The query instruction Qwen3-Embedding wants is `[inference.embed] query_prefix`, stated by the operator because no server can say which models want one.
+
+**The vector table records its space** — the model and the server that ran it — and refuses rows and queries from any other, because the same weights behind two servers, or at two quantizations, are close and not identical. `centinel embed --adopt` is the one way to move a table to another server without re-embedding: it re-embeds a sample of stored chunks there and adopts the table only if every pair agrees past a cosine of 0.99. That is how a table written in-process moves to `llama-server`.
+
+What follows is the measurement that chose GGUF over ONNX, kept because it still chooses the format a server should load.
+
+Model **weights** were GGUF; inference was `llama-cpp-2` in-process.
 
 **ONNX was measured and rejected.** The `onnx-community` exports are decoder graphs carrying a KV cache (28 layers × key/value, plus `position_ids`), and CoreML refuses them:
 
@@ -373,11 +373,11 @@ Measured on an M1 Max, 1,200-character chunks, **same model on both sides** so t
 
 **3.4×, and only with batching.** Unbatched the same path gives 6.1 chunks/sec — barely better than CPU — because a context and its KV cache are built per *call*, not per text. Embedding one chunk at a time measures allocation, not inference. Any consumer of [`crate::embed`] that loops one text at a time is leaving two thirds of the throughput on the floor.
 
-*Headroom, since taken:* the batched path used to decode sequences one at a time inside a shared context, so a batch amortised context creation and nothing else — which is what the 18.5 above measures. It now packs the group into one `LlamaBatch`, one `seq_id` per chunk, one `decode`, with `n_ctx`/`n_batch`/`n_ubatch` sized to the group rather than to a fixed 4,096. How wide the group is became a property of the machine at the same time: `[defaults] embed_batch`, `--batch`, or `auto` from the backend's free memory. **Not re-measured** — the table above is the old mechanism's.
+Batching — how many chunks one call carries — is now `[inference.embed] batch` and `concurrency` on the client and the server's own `--batch-size`/`--ubatch-size`; the server, not Centinel, decides how a request becomes passes on its GPU.
 
-*Accepted cost:* a C++ build enters `cargo build`. Ticket [#11](https://github.com/bennyhodl/centinel/issues/11) already tracked this for `whisper-rs`; both are now present, and §3.6 explains why they cannot share a binary — so #11 decides packaging for **two** C++ builds producing **two** executables.
+*Accepted cost, gone with the in-process runtime:* a C++ build in `cargo build` — two of them, ticket [#11](https://github.com/bennyhodl/centinel/issues/11), producing two executables (§3.6).
 
-*Accepted cost:* the reranker has **no first-party GGUF** — Qwen publishes GGUF for the embedder only. Reranker weights come from a community conversion (`ggml-org`, the llama.cpp organisation). This is not a change in provenance: the ONNX weights were community conversions too. Digests pin exactly what is fetched either way; what is weaker is the chain of custody, and it should be recorded in the registry rather than glossed.
+*Still true of the recommended weights:* the reranker has **no first-party GGUF** — Qwen publishes GGUF for the embedder only. Reranker weights come from a community conversion (`ggml-org`, the llama.cpp organisation). This is not a change in provenance: the ONNX weights were community conversions too. What is weaker is the chain of custody, and it should be stated wherever the weights are recommended rather than glossed.
 
 ### 6.3 Reranking is always on
 
@@ -462,10 +462,10 @@ Multiple hits from one document appear separately. Every hit is **independently 
 |---|---|---|
 | [#4](https://github.com/bennyhodl/centinel/issues/4) | Crawl scope, boundary & politeness | Build-vs-buy on Firecrawl · site boundary · the per-host UA/rate/contact policy table · robots stance · what is captured vs merely mapped |
 | [#7](https://github.com/bennyhodl/centinel/issues/7) | Change detection & scheduling | **The `fingerprint` normalization rules** · trusting vendor `LastModifiedUtc` · when `Live` becomes `Gone` · cadence · idempotency and resumability · the phantom-diff *policy* |
-| [#8](https://github.com/bennyhodl/centinel/issues/8) | YouTube as a Source | ~~Whisper tier~~ (§3.6, registry) · ~~VAD~~ (§3.6, mandatory) · audio retention · metadata change semantics · whether Granicus/Swagit demotes YouTube to a fallback · **the bot wall** — measured to persist across yt-dlp 2026.03.17 → 2026.07.04, so it is the IP and not a stale extractor: whether cookies or a PO-token provider are in scope, or a blocked day is simply a blocked day |
-| [#11](https://github.com/bennyhodl/centinel/issues/11) | Distribution & packaging | Install channel · whether `cargo install` survives **two** C++ builds · platform matrix · where the version-pin table lives · that Centinel now ships as two executables (§3.6) |
+| [#8](https://github.com/bennyhodl/centinel/issues/8) | YouTube as a Source | ~~Whisper tier~~ (`[inference.transcribe] model`) · ~~VAD~~ (§3.6, the server's) · audio retention · metadata change semantics · whether Granicus/Swagit demotes YouTube to a fallback · **the bot wall** — measured to persist across yt-dlp 2026.03.17 → 2026.07.04, so it is the IP and not a stale extractor: whether cookies or a PO-token provider are in scope, or a blocked day is simply a blocked day |
+| [#11](https://github.com/bennyhodl/centinel/issues/11) | Distribution & packaging | Install channel · platform matrix · where the version-pin table lives. ~~Two C++ builds, two executables~~ — gone with the in-process models (§3.6) |
 | [#12](https://github.com/bennyhodl/centinel/issues/12) | Document extraction pipeline | Routing thresholds · per-page OCR (**never executed** — `pdftoppm` absent) · broken-encoding fallback · table representation · ~~DOCX/PPTX~~ — answered by `anydoc` (MIT, pure Rust, wraps `pdf-inspector` for PDFs and is **not** used for them; see the correction in `research/pdf-and-ocr.md`) |
-| [#13](https://github.com/bennyhodl/centinel/issues/13) | Hardware profiling & model tiers | What is profiled · the floor machine · whether better hardware replaces or versions an artifact. ~~Model registry integrity~~ — pinned by repo + revision, checksum-verified, licence recorded |
+| [#13](https://github.com/bennyhodl/centinel/issues/13) | Hardware profiling & model tiers | What is profiled · the floor machine · whether better hardware replaces or versions an artifact. ~~Model registry integrity~~ — there is no registry; the inference server loads the weights (§3.2) |
 
 [#9](https://github.com/bennyhodl/centinel/issues/9) — the single-definition mechanism — is **closed**. Its decision is recorded in `crates/centinel-core/src/op.rs` rather than here, since the module doc sits beside the code it constrains: a `#[op]` macro with link-time registration via `inventory`, one args struct deriving both `clap::Args` and `JsonSchema`, presence uniform across surfaces while prose is not, and `local_only` enforced on call rather than merely omitted from `tools/list`.
 

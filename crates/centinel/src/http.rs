@@ -904,9 +904,9 @@ mod tests {
         assert!(ops.iter().any(|o| o["name"] == "doctor"));
     }
 
-    /// `Host` ops act on the machine they run on: `open` launches a configured command,
-    /// `models` pulls gigabytes into a local cache. Over HTTP — which has no
-    /// local operator authority — those are remote command execution and remote disk exhaustion.
+    /// `Host` ops act on the machine they run on: `open` launches a configured command.
+    /// Over HTTP — which has no local operator authority — that is remote command
+    /// execution.
     /// `Operator` ops *cause collection*, which over the same surface is an unbounded
     /// crawl against a city's web server, attributed to whoever runs this store.
     ///

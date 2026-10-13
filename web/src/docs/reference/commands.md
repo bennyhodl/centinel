@@ -23,7 +23,7 @@ Each is what `run` does for you, available on its own.
 | `discover` | Enumerate every address a source declares. |
 | `collect` | Acquire every address the latest discovery run found, skipping what is already stored. |
 | `extract` | Derive searchable text from collected documents. |
-| `transcribe` | Transcribe collected audio with a local Whisper model. |
+| `transcribe` | Transcribe collected audio on the configured transcription server. |
 | `index` | Chunk extracted text into the search index. |
 | `embed` | Embed indexed chunks into the vector table. |
 | `ingest` | Fetch one or more URLs into the content-addressed store. |
@@ -62,8 +62,7 @@ never calls it: text leaves the machine only when a person starts a classifier r
 
 | Command | What it does |
 |---|---|
-| `doctor` | Report host readiness: required binaries, model weights, store location. |
-| `models` | Inspect, fetch, verify and remove model weights. |
+| `doctor` | Report host readiness: required binaries, inference servers, store location. |
 | `update` | Check the repo and GitHub for a newer Centinel, and install it. *(host)* |
 
 ## Servers
@@ -115,8 +114,10 @@ centinel history --run 8f3c
 `--limit` on `run` and `collect` bounds **collection**, never discovery — a truncated
 snapshot of a source's address set would look exactly like a source that shrank.
 
-`--batch` takes a count or `auto`, and overrides `[defaults] embed_batch` for one run.
-Unset, the config decides; unset there too, `auto` sizes the batch to this machine.
+`--batch` is chunks per request to the embedding server, and overrides
+`[inference.embed] batch` for one run. `embed --adopt` moves the stored vectors to the
+configured server once it has measured that the server reproduces them — see [Inference
+servers](inference.md).
 
 `--user-agent` and `--timeout-secs` are available on the ops that fetch on your behalf
 (`check`, `investigate`). A descriptive User-Agent measurably reduces WAF 403s.

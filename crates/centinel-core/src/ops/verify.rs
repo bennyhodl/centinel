@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use crate::prelude::*;
 use crate::vectors::{UnreadableFragment, VectorLock, VectorRepair, VectorTable};
 
-// `VerifyTableArgs` rather than `VerifyArgs`, which `centinel models verify` already owns.
+// `VerifyTableArgs` rather than `VerifyArgs`: the name the `models verify` op once owned,
+// kept so the type `verify` takes did not change.
 #[derive(Clone, Debug, Default, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct VerifyTableArgs {
     /// Drop the unreadable fragments from the table and commit a new version.
@@ -209,9 +210,13 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let ctx = Ctx::new(store);
-        let table = VectorTable::open(&ctx.store.vectors_db(), "test-model", DIMS)
-            .await
-            .unwrap();
+        let table = VectorTable::open(
+            &ctx.store.vectors_db(),
+            &crate::vectors::tests::space("test-model"),
+            DIMS,
+        )
+        .await
+        .unwrap();
         let lock = VectorLock::take(&ctx.store).await.unwrap();
         table
             .append(&lock, &[row(1, vec![1.0, 0.0, 0.0, 0.0])])

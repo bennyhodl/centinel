@@ -1,21 +1,17 @@
-# Prebuilt binaries for a released tag, so that installing is a download rather than half
-# an hour of C++. Three assets, and all of them are GPU builds:
+# Prebuilt binaries for a released tag, so that installing is a download rather than a
+# twenty-minute build. Three assets, one binary in each:
 #
-#   centinel-aarch64-apple-darwin.tar.gz           Metal, built into any macOS build
-#   centinel-x86_64-unknown-linux-gnu-cuda.tar.gz  CUDA 12.4, wants an NVIDIA driver
-#   centinel-aarch64-unknown-linux-gnu-cuda.tar.gz CUDA 13.0, the DGX Spark and its kin
+#   centinel-aarch64-apple-darwin.tar.gz       Apple Silicon
+#   centinel-x86_64-unknown-linux-gnu.tar.gz   x86-64-v3 — AVX2, any x86_64 since ~2013
+#   centinel-aarch64-unknown-linux-gnu.tar.gz  arm64 Linux, the DGX Spark included
 #
-# There is no CPU-only asset on purpose. Embedding is the stage measured in days and it is
-# what the tool is for, so a CPU download would hand somebody the slow half of Centinel and
-# call it an install. Those hosts keep building from source, tuned for their own CPU, which
-# is the better answer for them anyway.
+# None of them carries a GPU backend, because none of them runs a model: embedding,
+# reranking and transcription are requests to the servers `[inference]` names, and the
+# GPU is theirs. So one asset per platform serves every host on it.
 #
 # ALL ARE ON. `release.yml` calls this on every release and every asset builds each
-# time. The macOS job kept an opt-in guard while this repository was private — that
-# runner billed at 10x, about 400 of a 2,000-3,000 minute monthly allowance per release
-# — but a public repository gets the standard runners free, and this was always one
-# default away from on. The `macos` input remains as the skip switch: untick it on a
-# hand-started run and only the Linux assets build.
+# time. The `macos` input is the skip switch: untick it on a hand-started run and only
+# the Linux assets build.
 #
 # `workflow_dispatch` takes the same inputs. A hand-started run builds and uploads against
 # any tag that already exists, which is how to backfill a release that shipped without
@@ -55,35 +51,26 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Determinism, not tuning. ggml defaults GGML_NATIVE to ON, which compiles for whatever
-  # CPU GitHub handed this run — and an asset has to run on machines that are not it. A
-  # runner with AVX-512 would otherwise produce a binary that dies on an illegal
-  # instruction on somebody's older host, with nothing in the message to say why.
-  #
-  # It is set here because whisper-rs-sys forwards every GGML_* variable to cmake and
-  # decides nothing itself. llama-cpp-sys-2 ignores this and reads `target-cpu` out of
-  # RUSTFLAGS instead, which each job sets to match.
-  GGML_NATIVE: "OFF"
 
 jobs:
+  # Its own job rather than a row of the Linux matrix, because the `macos` switch has to
+  # skip it and a job's `if` cannot see the matrix.
   macos:
-    name: aarch64-apple-darwin (metal)
-    # On by default; the input is the skip switch — see the header.
+    name: aarch64-apple-darwin
     if: ${{ inputs.macos }}
-    # Pinned, because the image decides the oldest macOS the asset will start on. Moving
-    # to a newer one moves that floor under everybody who downloads, and `macos-latest`
-    # would move it without anybody choosing to. A host below the floor is not stranded:
-    # the installer runs the binary before it keeps it, and builds when it will not start.
+    # Pinned, because the image decides the oldest macOS the asset will start on, and
+    # `macos-latest` would move that floor under everybody who downloads without anybody
+    # choosing to. A host below the floor is not stranded: the installer runs the binary
+    # before it keeps it, and builds when it will not start.
     runs-on: macos-14
-    timeout-minutes: 180
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.tag }}
 
-      # protoc is lance's, through prost-build, and no crate in the tree vendors it. The
-      # macOS image does not carry one. Homebrew's protobuf is the compiler and the
-      # well-known types together, so this is one package rather than Debian's two.
+      # protoc is lance's, through prost-build, and no crate in the tree vendors it.
+      # Homebrew's protobuf is the compiler and the well-known types together.
       - name: install protoc
         run: brew install protobuf
 
@@ -98,15 +85,10 @@ jobs:
           npm ci
           npm run build
 
-      # No target-cpu. rustc's default for aarch64-apple-darwin is already apple-m1, and
-      # so is Apple clang's, so the asset runs on every Apple Silicon Mac as built.
-      # `native` would only pin it to whichever chip this runner has.
-      #
-      # Metal needs no flag: centinel-core enables it per-target on macOS, and the shader
-      # library is compiled into the binary (GGML_METAL_EMBED_LIBRARY defaults to on with
-      # GGML_METAL), so the asset carries its own GPU kernels and needs nothing beside it.
-      - name: build both binaries
-        run: cargo build --release --locked -p centinel -p centinel-whisper
+      # No target-cpu. rustc's default for aarch64-apple-darwin is already apple-m1, so
+      # the asset runs on every Apple Silicon Mac as built.
+      - name: build centinel
+        run: cargo build --release --locked -p centinel
 
       - name: package and upload
         env:
@@ -116,62 +98,40 @@ jobs:
           ASSET: centinel-aarch64-apple-darwin.tar.gz
         run: |
           set -euo pipefail
-          # Flat, both binaries at the top of the archive: the installer unpacks into one
-          # directory and moves them across together, which is the arrangement transcription
-          # does not work without.
-          tar -czf "$ASSET" -C target/release centinel centinel-whisper
+          tar -czf "$ASSET" -C target/release centinel
           shasum -a 256 "$ASSET" > "$ASSET.sha256"
           gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
 
-  # One job per package rather than one job for both. Each compiles its own vendored copy
-  # of ggml-cuda across eight GPU architectures, and the two of them in series is close
-  # enough to the 6-hour job ceiling to be a bad bet. They are also independent: separate
-  # packages, separate C++ libraries, and almost no shared Rust to build twice.
-  linux-cuda:
-    name: x86_64 cuda (${{ matrix.package }})
-    runs-on: ubuntu-22.04
-    timeout-minutes: 360
+  linux:
+    name: ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
-        package: [centinel, centinel-whisper]
+        include:
+          # Pinned for the same reason as the macOS image: it decides the oldest glibc the
+          # asset will start on.
+          #
+          # x86-64-v3 is AVX2, FMA, F16C and BMI2 — every x86_64 since about 2013 — and the
+          # installer refuses this asset on a CPU without AVX2 rather than letting it fault.
+          # arm64 builds for armv8-a, the baseline of the architecture.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            rustflags: "-C target-cpu=x86-64-v3"
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            rustflags: ""
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.tag }}
 
-      # CUDA is about 6 GB installed and the fat CUDA objects are larger again. The image
-      # ships with runtimes nothing here uses, and removing them buys about 25 GB.
-      - name: free disk
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
-          df -h /
-
-      - name: install build tools
+      # Debian splits protoc from the well-known types, and lance imports the types.
+      - name: install protoc
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake clang libclang-dev protobuf-compiler libprotobuf-dev
-
-      # 12.4 rather than the newest. cudart and cuBLAS are linked statically into
-      # `centinel`, but `centinel-whisper` resolves libcudart.so.12 and libcublas.so.12 at
-      # run time, and a 12.x binary runs against any 12.x runtime — so the older the build,
-      # the wider the set of hosts that already have what it needs. CUDA 13 would demand a
-      # 580-series driver of everybody.
-      #
-      # The whole toolkit, not a hand-picked list of components: ggml-cuda reaches for
-      # cccl, the cuBLAS static archives and the driver stub, and a missing piece surfaces
-      # as a link error two hours in.
-      - name: install CUDA 12.4
-        run: |
-          set -euo pipefail
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cuda-toolkit-12-4
-          echo "/usr/local/cuda-12.4/bin" >> "$GITHUB_PATH"
-          echo "CUDA_PATH=/usr/local/cuda-12.4" >> "$GITHUB_ENV"
+          sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -184,162 +144,19 @@ jobs:
           npm ci
           npm run build
 
-      # x86-64-v3 is AVX2, FMA, F16C and BMI2 — every x86_64 since about 2013. It is also
-      # what makes llama-cpp-sys-2 set GGML_NATIVE=OFF and pass -march to ggml, which is
-      # what stops it compiling the CPU kernels for the baseline `fxsr,sse,sse2,x87`
-      # instead. The installer refuses this asset on a CPU without AVX2 rather than letting
-      # it fault.
-      #
-      # This runner has no GPU, and that is fine: GGML_NATIVE=OFF also means ggml-cuda
-      # compiles its published architecture list (50 through 90 as PTX, 86 and 89 as
-      # device code) rather than asking a driver that is not here what to target.
-      - name: build ${{ matrix.package }}
+      - name: build centinel
         env:
-          RUSTFLAGS: "-C target-cpu=x86-64-v3"
-        run: cargo build --release --locked --features cuda -p ${{ matrix.package }}
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-cuda-${{ matrix.package }}
-          path: target/release/${{ matrix.package }}
-          # Long enough for the packaging job, and no longer. Release assets are free
-          # storage; artifacts are not, and these are a few hundred MB each.
-          retention-days: 1
-
-  # The same shape as the x86_64 job, on an arm64 runner, for the arm64 hosts that carry
-  # an NVIDIA GPU: the DGX Spark (GB10, compute capability 12.1) is the one that asked,
-  # and GH200 / GB200 boxes are the same target triple. Those runners are free on a public
-  # repository, the same as the x86_64 ones.
-  #
-  # CUDA 13.0 rather than 12.4, and the difference is not taste. The GB10 is sm_121, and
-  # no 12.4 nvcc can emit code for it — its newest PTX would be JIT-compiled by the driver
-  # on first run, minutes of it, with the result cached somewhere under $HOME. 12.9 could
-  # emit sm_121, but DGX OS ships the 13.0 runtime and nothing older, and `centinel-whisper`
-  # resolves libcudart.so.<major> at run time — so a 12.x whisper on a Spark would fail to
-  # start until somebody installed a second runtime beside the one already there. 13.0 is
-  # what the host has.
-  linux-arm64-cuda:
-    name: aarch64 cuda (${{ matrix.package }})
-    # Pinned for the same reason as the macOS job: the image decides the oldest glibc the
-    # asset will start on. 24.04 is what DGX OS 7 is built from, and the installer runs
-    # the binary before it keeps it, so a host below the floor builds instead.
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      matrix:
-        package: [centinel, centinel-whisper]
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.tag }}
-
-      - name: free disk
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
-          df -h /
-
-      - name: install build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake clang libclang-dev protobuf-compiler libprotobuf-dev
-
-      # `sbsa` is NVIDIA's name for the arm64 server repository — the one for Grace, the
-      # Spark and any other arm64 host with a discrete-style driver. The Jetson line is a
-      # different repository and a different driver, and this asset is not for it.
-      - name: install CUDA 13.0
-        run: |
-          set -euo pipefail
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/sbsa/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cuda-toolkit-13-0
-          echo "/usr/local/cuda-13.0/bin" >> "$GITHUB_PATH"
-          echo "CUDA_PATH=/usr/local/cuda-13.0" >> "$GITHUB_ENV"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - name: build web workspace
-        run: |
-          npm ci
-          npm run build
-
-      # No target-cpu: llama-cpp-sys-2 forces GGML_CPU_ARM_ARCH=armv8-a on Linux aarch64
-      # whenever the target-cpu is not `native`, so a flag here would tune the Rust side
-      # and leave ggml's CPU kernels at the baseline anyway. The CPU kernels are not what
-      # this asset is for.
-      #
-      # The GPU architectures are named rather than left to ggml's list. Its 13.0 default
-      # is Turing through both Blackwells, eight compilations of every kernel, and most of
-      # them are consumer GeForce parts that no arm64 host carries. Three cover the hosts
-      # that exist: sm_121 as device code for the GB10, sm_90 for GH200, and PTX at
-      # compute_80 for anything else with a 13.0 driver to JIT it — GB200, Thor. Both sys
-      # crates forward every CMAKE_* variable in the environment to cmake as-is.
-      - name: build ${{ matrix.package }}
-        env:
-          CMAKE_CUDA_ARCHITECTURES: "80-virtual;90-real;121a-real"
-        run: cargo build --release --locked --features cuda -p ${{ matrix.package }}
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-arm64-cuda-${{ matrix.package }}
-          path: target/release/${{ matrix.package }}
-          retention-days: 1
-
-  linux-arm64-package:
-    name: aarch64 cuda (package)
-    needs: linux-arm64-cuda
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          pattern: linux-arm64-cuda-*
-          merge-multiple: true
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --release --locked -p centinel
 
       - name: package and upload
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag }}
-          ASSET: centinel-aarch64-unknown-linux-gnu-cuda.tar.gz
+          ASSET: centinel-${{ matrix.target }}.tar.gz
         run: |
           set -euo pipefail
-          chmod +x dist/centinel dist/centinel-whisper
-          tar -czf "$ASSET" -C dist centinel centinel-whisper
-          sha256sum "$ASSET" > "$ASSET.sha256"
-          gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
-
-  linux-package:
-    name: x86_64 cuda (package)
-    needs: linux-cuda
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          pattern: linux-cuda-*
-          merge-multiple: true
-
-      # No checkout in this job — there is nothing here to build, only two artifacts to
-      # tie together — so `gh` is told which repository it is talking about rather than
-      # working it out from a git directory that is not there.
-      - name: package and upload
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ inputs.tag }}
-          ASSET: centinel-x86_64-unknown-linux-gnu-cuda.tar.gz
-        run: |
-          set -euo pipefail
-          # The artifact download does not keep the executable bit.
-          chmod +x dist/centinel dist/centinel-whisper
-          tar -czf "$ASSET" -C dist centinel centinel-whisper
+          tar -czf "$ASSET" -C target/release centinel
           sha256sum "$ASSET" > "$ASSET.sha256"
           gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber

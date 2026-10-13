@@ -331,17 +331,18 @@ pub enum Anchor {
     CharSpan { start: usize, end: usize },
 }
 
-/// Which local model tier produced an artifact.
+/// Which model produced an artifact, and where it ran.
 ///
-/// Part of provenance because **output quality varies by machine** (SPEC §2.1): the
-/// same audio on a laptop and a workstation yields different transcripts. Recording
-/// the tier is what makes "the source changed" mechanically distinguishable from
-/// "this ran on a weaker machine" (§4.6).
+/// Part of provenance because **output quality varies by model**: the same audio through
+/// `whisper-tiny` and `whisper-large-v3-turbo` yields different transcripts. Recording
+/// the tier is what makes "the source changed" mechanically distinguishable from "this
+/// ran on a weaker model" (§4.6).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelTier {
-    /// e.g. `whisper-large-v3`, `qwen3-embedding-0.6b`.
+    /// e.g. `whisper-large-v3-turbo`, `qwen3-embedding-0.6b`.
     pub model_id: String,
-    /// Quantization or variant, e.g. `q5_k_m`, `f16`.
+    /// What ran it: the server's `host:port` for a transcript, or, on derivations written
+    /// before `[inference]`, the quantization the in-process model loaded — `q5_k_m`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
 }
