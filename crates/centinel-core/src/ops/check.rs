@@ -38,6 +38,7 @@ use crate::content::ContentKind;
 use crate::extract::{self, Extracted};
 use crate::policy::HostPolicy;
 use crate::prelude::*;
+use crate::requests::{self, RequestLog, RequestRecord};
 use crate::sources::SiteSource;
 use crate::verdict::{Read, ReadQuality};
 
@@ -201,6 +202,9 @@ pub struct CheckReport {
     /// What `--strategy` found. Absent unless it was asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enumeration: Option<Enumerated>,
+    /// Every request the fetch and the enumeration made, and what each returned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<RequestRecord>,
     /// The command this platform opens a file with.
     pub opener: String,
     pub elapsed_secs: f64,
@@ -278,8 +282,12 @@ pub async fn check(
         ),
     };
 
+    // One log for the fetch and the enumeration below it, so the report says what the site
+    // was asked in total.
+    let log = RequestLog::default();
+
     let (acquired, not_fetched) = match Target::of(&args.target) {
-        Target::Url(url) => acquire_url(&url, &args, progress).await?,
+        Target::Url(url) => acquire_url(&url, &args, &log, progress).await?,
         Target::File(path) => (vec![acquire_file(&path).await?], Vec::new()),
     };
 
@@ -392,7 +400,7 @@ pub async fn check(
     // a strategy that runs long should not delay the answer somebody asked for.
     let enumeration = match (&args.strategy, Target::of(&args.target)) {
         (Some(name), Target::Url(url)) => {
-            Some(enumerate_with(name, &url, &args, progress, cancel).await?)
+            Some(enumerate_with(name, &url, &args, &log, progress, cancel).await?)
         }
         // A local file has no host to enumerate, and no address for a relative link to
         // resolve against. Saying so beats reporting an empty result.
@@ -409,6 +417,7 @@ pub async fn check(
         documents,
         not_fetched,
         enumeration,
+        requests: log.records(),
         opener: super::open::system_opener().to_string(),
         elapsed_secs: started.elapsed().as_secs_f64(),
     })
@@ -428,6 +437,7 @@ async fn enumerate_with(
     name: &str,
     url: &str,
     args: &CheckArgs,
+    log: &RequestLog,
     progress: &Progress,
     cancel: &Cancel,
 ) -> anyhow::Result<Enumerated> {
@@ -435,7 +445,7 @@ async fn enumerate_with(
         AUTO => None,
         other => Some(crate::strategies::crawl::by_name(other)?),
     };
-    let site = super::probe::site("check", url, &args.net)?
+    let site = super::probe::site("check", url, &args.net, log)?
         .with_strategy(named)
         .with_cancel(cancel.clone());
 
@@ -502,6 +512,7 @@ struct Item {
 async fn acquire_url(
     url: &str,
     args: &CheckArgs,
+    log: &RequestLog,
     progress: &Progress,
 ) -> anyhow::Result<(Vec<Item>, Vec<String>)> {
     let id = SourceId::new("check".to_string())?;
@@ -512,7 +523,7 @@ async fn acquire_url(
         max_requests_per_second: 0.0,
         ..args.net.policy()
     };
-    let site = SiteSource::new(id.clone(), url, policy, Default::default())?;
+    let site = SiteSource::new(id.clone(), url, policy, Default::default())?.with_log(log.clone());
     let resource = Resource::new(id.clone(), url.to_string());
 
     let acquired = site
@@ -712,6 +723,8 @@ impl Render for CheckReport {
                 p.blank()?;
                 e.render(p)?;
             }
+
+            requests::render(&self.requests, p)?;
 
             if self.temporary {
                 p.blank()?;

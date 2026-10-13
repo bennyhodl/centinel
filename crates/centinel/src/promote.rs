@@ -209,6 +209,7 @@ mod tests {
                 robots_declared: true,
             },
             recognised: Vec::new(),
+            declined: Vec::new(),
             probe: None,
             lead: None,
             crumbs: Vec::new(),
@@ -218,6 +219,7 @@ mod tests {
                 strategy: None,
             }),
             warnings: Vec::new(),
+            requests: Vec::new(),
             elapsed_secs: 0.1,
         };
 

@@ -40,9 +40,10 @@ use crate::domain::{
     SourceKind,
 };
 use crate::enclosure;
-use crate::fetch::{Fetch, Fetcher};
+use crate::fetch::{Fetch, Fetcher, status_in};
 use crate::op::{Cancel, ItemOutcome, Progress, Verdict};
 use crate::policy::{HostPolicy, Pacer};
+use crate::requests::{RequestLog, Step};
 use crate::strategies::Recognition;
 use crate::strategies::crawl::{self, Addresses, Seed, StrategyDef, Walk};
 
@@ -56,6 +57,9 @@ pub struct SiteSource {
     /// map and reach everything above the fetch — which is where this branch's defects
     /// were, and why they survived.
     fetcher: Arc<dyn Fetch>,
+    /// Where each request is written down, for the ops that report them. See
+    /// [`crate::requests`]. Absent on a collect, which would otherwise keep a record per page.
+    log: Option<RequestLog>,
     /// The strategy the `[[source]]` block pinned, if it pinned one.
     named: Option<&'static StrategyDef>,
     /// The strategy that actually ran.
@@ -100,20 +104,6 @@ pub struct SiteSource {
 /// How many refused documents a report names before it stops listing them.
 const MAX_REMARKS: usize = 10;
 
-/// The status code out of a `Fetcher` refusal, when it carried one.
-///
-/// [`crate::fetch`] renders a non-success as `HTTP 404 Not Found`, so the code is
-/// recoverable — and worth recovering, because "the server answered 404" and "we never
-/// reached the server" are different facts that a bare message would show alike.
-fn status_in(detail: &str) -> Option<u16> {
-    detail
-        .strip_prefix("HTTP ")?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
-}
-
 /// How a refusal reads on the progress line.
 ///
 /// From the [`Liveness`] the fetcher already decided, not from a second reading of the
@@ -150,6 +140,7 @@ impl SiteSource {
             id,
             site: site.into(),
             fetcher: Arc::new(Fetcher::new(&policy)?),
+            log: None,
             policy,
             limits,
             named: None,
@@ -184,6 +175,22 @@ impl SiteSource {
     pub fn with_fetcher(mut self, fetcher: Arc<dyn Fetch>) -> Self {
         self.fetcher = fetcher;
         self
+    }
+
+    /// Writes every request this Source makes into `log`, so an op can report them.
+    pub fn with_log(mut self, log: RequestLog) -> Self {
+        self.log = Some(log);
+        self
+    }
+
+    /// One GET through the fetcher, recorded when a log is attached.
+    ///
+    /// The only place this Source fetches, so the log is complete by construction.
+    async fn fetch(&self, step: Step, url: &str) -> Result<Fetched, Refusal> {
+        match &self.log {
+            Some(log) => log.timed(step, url, self.fetcher.get(url)).await,
+            None => self.fetcher.get(url).await,
+        }
     }
 
     /// The strategy in force: what ran, else what was pinned, else nothing yet.
@@ -238,7 +245,7 @@ impl SiteSource {
         ));
         let robots_url = base.join("/robots.txt")?;
         self.pacer_for(robots_url.as_str()).wait().await;
-        let robots = match self.fetcher.get(robots_url.as_str()).await {
+        let robots = match self.fetch(Step::Robots, robots_url.as_str()).await {
             Ok(f) => Robots::parse(&self.policy.user_agent, &f.bytes),
             Err(e) => {
                 // Measured on phila.gov: CloudFront 403 on robots.txt, 200 on the site.
@@ -259,7 +266,7 @@ impl SiteSource {
         }
 
         self.pacer_for(&self.site).wait().await;
-        let page = match self.fetcher.get(&self.site).await {
+        let page = match self.fetch(Step::Seed, &self.site).await {
             Ok(f) => f,
             Err(refusal) => {
                 warnings.push(format!(
@@ -291,6 +298,7 @@ impl SiteSource {
 
         let crawl = SiteCrawl {
             site: self,
+            strategy: chosen.name,
             progress,
             spent: AtomicUsize::new(0),
             // `--max-sitemaps` names the only strategy that existed when the flag was
@@ -380,7 +388,11 @@ impl SiteSource {
     ) -> Result<crate::domain::Fetched, Refusal> {
         let started = std::time::Instant::now();
         self.pacer_for(url).wait().await;
-        let result = self.fetcher.get(url).await;
+        let step = match enclosed {
+            true => Step::Enclosure,
+            false => Step::Page,
+        };
+        let result = self.fetch(step, url).await;
         let millis = started.elapsed().as_millis() as u64;
 
         progress.item(match &result {
@@ -464,6 +476,8 @@ impl SiteSource {
 /// and reports differently.
 struct SiteCrawl<'a> {
     site: &'a SiteSource,
+    /// Whose walk this is, so each request it makes is recorded under that strategy.
+    strategy: &'static str,
     progress: &'a Progress,
     spent: AtomicUsize,
     budget: usize,
@@ -481,7 +495,10 @@ impl Walk for SiteCrawl<'_> {
         Box::pin(async move {
             self.spent.fetch_add(1, Ordering::Relaxed);
             self.site.pacer_for(url).wait().await;
-            self.site.fetcher.get(url).await
+            let step = Step::Probe {
+                strategy: self.strategy.to_string(),
+            };
+            self.site.fetch(step, url).await
         })
     }
 

@@ -52,7 +52,9 @@ use serde::{Deserialize, Serialize};
 use crate::content::ContentKind;
 use crate::crumbs::{self, Crumb};
 use crate::prelude::*;
-use crate::strategies::crawl::{self, Seed};
+use crate::requests::{self, RequestLog, RequestRecord};
+use crate::strategies::Recognition;
+use crate::strategies::crawl::{self, Seed, StrategyDef};
 use crate::verdict::{Read, ReadQuality};
 
 /// Addresses shown before the list is cut off.
@@ -211,6 +213,18 @@ pub struct InvestigateReport {
     /// Everything that recognised it, most specific first. Empty is a real answer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recognised: Vec<Recognised>,
+    /// Every other strategy in the registry, which looked at the address and did not
+    /// recognise it. Named so the report says which methods were asked, not only which
+    /// answered.
+    ///
+    /// **No reasons**, and that is the honest shape of what exists: [`Strategy::recognise`]
+    /// answers `Option<Recognition>`, so a decline carries nothing to report. Giving each a
+    /// reason is a change to that return type, made once in each recogniser, rather than a
+    /// guess written here.
+    ///
+    /// [`Strategy::recognise`]: crate::strategies::crawl::Strategy::recognise
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declined: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe: Option<Probe>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -223,6 +237,9 @@ pub struct InvestigateReport {
     pub promote: Option<Promote>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Every request made, in the order it was sent, and what each returned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<RequestRecord>,
     pub elapsed_secs: f64,
 }
 
@@ -249,8 +266,9 @@ pub async fn investigate(
         .filter(|u| matches!(u.scheme(), "http" | "https"))
         .ok_or_else(|| anyhow::anyhow!("`{}` is not an http(s) address", args.target))?;
 
-    let site =
-        super::probe::site("investigate", url.as_str(), &args.net)?.with_cancel(cancel.clone());
+    let log = RequestLog::default();
+    let site = super::probe::site("investigate", url.as_str(), &args.net, &log)?
+        .with_cancel(cancel.clone());
 
     let (seed, mut warnings) = site.seed(progress).await?;
     cancel.check()?;
@@ -374,13 +392,27 @@ pub async fn investigate(
             robots_declared: seed.robots.declared,
         },
         recognised,
+        declined: declined(&hits),
         probe,
         lead,
         crumbs: crumbs_on(&seed),
         promote,
         warnings,
+        requests: log.records(),
         elapsed_secs: started.elapsed().as_secs_f64(),
     })
+}
+
+/// The strategies in the registry that did not recognise the seed.
+///
+/// Asked of the registry rather than a list kept here, so a strategy added tomorrow is
+/// reported as asked without this file learning its name.
+fn declined(hits: &[(&'static StrategyDef, Recognition)]) -> Vec<String> {
+    crawl::all()
+        .iter()
+        .filter(|def| !hits.iter().any(|(hit, _)| hit.name == def.name))
+        .map(|def| def.name.to_string())
+        .collect()
 }
 
 /// The five measurements §17 names, taken on the seed.
@@ -542,6 +574,16 @@ impl Render for InvestigateReport {
                     p.nest(|p| p.marked(Mark::Warn, p.paint("nothing", Ink::Bold)))?;
                 }
             }
+            if !self.declined.is_empty() {
+                // After what answered, and without reasons: see [`InvestigateReport::declined`].
+                p.nest(|p| {
+                    p.kv(
+                        "declined",
+                        12,
+                        p.paint(&self.declined.join(", "), Ink::Dim),
+                    )
+                })?;
+            }
             if let Some(probe) = &self.probe {
                 probe.render(p)?;
             }
@@ -575,6 +617,8 @@ impl Render for InvestigateReport {
                     Ok(())
                 })?;
             }
+
+            requests::render(&self.requests, p)?;
 
             p.blank()?;
             match &self.promote {
@@ -823,6 +867,40 @@ mod tests {
             page: seed_of(body, url).page,
             ..seed_with_robots(url, &format!("User-agent: *\nSitemap: {url}sitemap.xml\n"))
         }
+    }
+
+    /// The report names every method that was asked, not only the one that answered: the
+    /// two lists together are the registry, and neither repeats the other.
+    #[test]
+    fn every_registered_strategy_is_either_recognised_or_declined() {
+        let seed = seed_with_robots(
+            "https://x.gov/",
+            "User-agent: *\nSitemap: https://x.gov/sitemap.xml\n",
+        );
+        let hits = crawl::recognise(&seed);
+        let declined_here = declined(&hits);
+
+        assert!(
+            hits.iter().any(|(def, _)| def.name == "sitemap"),
+            "the fixture should be recognised by sitemap"
+        );
+        assert!(
+            declined_here.contains(&"listing".to_string()),
+            "{declined_here:?}"
+        );
+
+        let mut asked: Vec<&str> = hits
+            .iter()
+            .map(|(def, _)| def.name)
+            .chain(declined_here.iter().map(String::as_str))
+            .collect();
+        asked.sort_unstable();
+        let registry: Vec<&str> = crawl::all().iter().map(|def| def.name).collect();
+        assert_eq!(asked, registry, "each strategy exactly once");
+
+        // A page nothing recognises declines them all.
+        let blank = seed_of("<html/>", "https://x.gov/");
+        assert_eq!(declined(&crawl::recognise(&blank)), registry);
     }
 
     #[test]
@@ -1084,11 +1162,13 @@ mod tests {
                 robots_declared: true,
             },
             recognised: Vec::new(),
+            declined: Vec::new(),
             probe: None,
             lead: None,
             crumbs: Vec::new(),
             promote: None,
             warnings: Vec::new(),
+            requests: Vec::new(),
             elapsed_secs: 0.4,
         }
     }
