@@ -23,6 +23,7 @@
 //! for each log directory that has none, once. It never overwrites a definition the store
 //! already holds, so running it at every start is safe and cheap.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::{Config, ScheduleConfig, SourceConfig};
@@ -72,6 +73,20 @@ impl<'a> Sources<'a> {
             }
         }
         Ok(out)
+    }
+
+    /// Each defined source's id and the host it collects from.
+    ///
+    /// The one mapping the web needs to draw a source's icon: a source is named by its
+    /// id everywhere in the page and by its host only here. A user may read it, which
+    /// the full definitions are not for.
+    pub async fn hosts(&self) -> anyhow::Result<BTreeMap<String, String>> {
+        Ok(self
+            .list()
+            .await?
+            .into_iter()
+            .filter_map(|source| Some((source.id.clone(), source.host()?)))
+            .collect())
     }
 
     /// The source with this id, if the store defines one.

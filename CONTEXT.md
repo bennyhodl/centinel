@@ -205,6 +205,14 @@ still one owner of the number — the fold over the log — so no two surfaces c
 Rebuilt on read rather than maintained on append because the counts are sets, and a set
 kept current per line is quadratic over a collect.
 
+**Icon** — the favicon a host serves, kept in `icons/<host>.<ext>` so the web can draw it beside
+every source and host. Fetched once, when the page first asks, and never by a collection run:
+it is not corpus, so it has no Observation and no log line. A host with no icon is recorded as
+*none, checked at T* and not asked again for a week. *Why it matters:* it is the one thing the
+store fetches on a person's behalf rather than the operator's, so only a host the store already
+knows (a defined source, or one a crumb names) is ever requested, and no third-party icon
+service is asked — it would learn every host the archive follows.
+
 **The layout** — where each thing lives under the store root is named in `store` and
 nowhere else. A path spelled out by a caller is a second, unenforced copy of this file's
 header.

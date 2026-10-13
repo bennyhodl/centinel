@@ -44,19 +44,26 @@ pub async fn authenticate(
     if role != Role::Admin
         && request.uri().path().starts_with("/workspace/")
         && (!matches!(request.method().as_str(), "GET" | "HEAD")
-            || !matches!(
-                request.uri().path(),
-                "/workspace/documents"
-                    | "/workspace/document"
-                    | "/workspace/original"
-                    | "/workspace/questions"
-                    | "/workspace/system"
-            ))
+            || !user_may_read(request.uri().path()))
     {
         return forbidden();
     }
     request.extensions_mut().insert(role);
     next.run(request).await
+}
+
+/// The `/workspace` paths a user may GET. Everything else under it is the administrator's,
+/// and no user may write to any of it.
+fn user_may_read(path: &str) -> bool {
+    matches!(
+        path,
+        "/workspace/documents"
+            | "/workspace/document"
+            | "/workspace/original"
+            | "/workspace/questions"
+            | "/workspace/system"
+            | "/workspace/source-hosts"
+    ) || path.starts_with("/workspace/icons/")
 }
 
 pub fn forbidden() -> Response {
@@ -91,6 +98,13 @@ mod tests {
             ("secret", "user", "/workspace/questions", "PUT", 403),
             ("secret", "user", "/workspace/runs", "POST", 403),
             ("secret", "user", "/workspace/jobs/events", "GET", 403),
+            // Icons and the host each source collects from: a user sees sources in Search,
+            // so may read these. A 404 is the route answering, which is past the role check.
+            ("secret", "user", "/workspace/icons/tampa.gov", "GET", 404),
+            ("secret", "user", "/workspace/source-hosts", "GET", 200),
+            ("secret", "user", "/workspace/icons/tampa.gov", "POST", 403),
+            ("secret", "user", "/workspace/icons/tampa.gov", "PUT", 403),
+            ("secret", "user", "/workspace/sources", "GET", 403),
             ("secret", "user", "/ops/doctor", "POST", 403),
             ("secret", "admin", "/workspace/questions", "PUT", 200),
         ] {
