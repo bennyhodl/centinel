@@ -193,6 +193,11 @@ pub struct Attempt {
     /// The `[[schedule]]` that fired, or `None` for a manual run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
+    /// The sources it was started for; empty for every enabled one. Recorded from the
+    /// arguments, not the report, so a run stopped before it reported is still a run of
+    /// its source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
     pub trigger: Trigger,
     /// When it was nominally due, with jitter applied. Absent for a manual run, which is
     /// due the moment it is typed.
@@ -214,6 +219,19 @@ pub struct Attempt {
 }
 
 impl Attempt {
+    /// Whether this attempt ran `source`: named in its arguments, or — for a run over every
+    /// enabled source — present in its report. A run over every source that stopped before
+    /// it reported cannot say which it reached, so it answers for none.
+    pub fn covers(&self, source: &str) -> bool {
+        match self.sources.is_empty() {
+            false => self.sources.iter().any(|s| s == source),
+            true => self
+                .report
+                .as_ref()
+                .is_some_and(|r| r.sources.iter().any(|s| s.source == source)),
+        }
+    }
+
     /// Whether this attempt's id starts with `prefix` — the git-style resolution rule.
     pub fn matches(&self, prefix: &str) -> bool {
         self.run_id.starts_with(prefix)
@@ -339,6 +357,9 @@ pub struct Holder {
     pub trigger: Trigger,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
+    /// The sources it was started for; empty for every enabled one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
     /// The run's arguments, one line, for the message a refused second run prints.
     #[serde(default)]
     pub args: String,
@@ -455,6 +476,7 @@ impl RunLock {
                 // A lock file that exists but cannot be read is still a lock. Reporting it
                 // as unheld would let a second run start beside the first.
                 pid: 0,
+                sources: Vec::new(),
                 started_at: Timestamp::now().to_string(),
                 trigger: Trigger::Manual,
                 schedule: None,
@@ -518,14 +540,27 @@ mod tests {
             started_at: Timestamp::now().to_string(),
             trigger: Trigger::Schedule,
             schedule: schedule.map(str::to_string),
+            sources: Vec::new(),
             args: "--source tampa".into(),
         }
+    }
+
+    /// A run names its sources in its arguments, so one stopped before it reported is still
+    /// a run of them; a run over every source answers only for the ones its report reached.
+    #[test]
+    fn an_attempt_covers_the_sources_it_was_started_for() {
+        let named = Attempt { sources: vec!["tampa".into()], ..attempt("a", None, Outcome::Interrupted) };
+        assert!(named.covers("tampa"));
+        assert!(!named.covers("hillsborough"));
+        let everything = attempt("b", Some("nightly"), Outcome::Interrupted);
+        assert!(!everything.covers("tampa"), "no arguments and no report says nothing");
     }
 
     fn attempt(id: &str, schedule: Option<&str>, outcome: Outcome) -> Attempt {
         Attempt {
             run_id: id.into(),
             schedule: schedule.map(str::to_string),
+            sources: Vec::new(),
             trigger: Trigger::Schedule,
             due_at: None,
             started_at: id.into(),

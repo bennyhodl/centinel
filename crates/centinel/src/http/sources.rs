@@ -103,17 +103,13 @@ async fn detail(State(ctx): State<Arc<Ctx>>, Path(id): Path<String>) -> Response
         .sources
         .into_iter()
         .next();
-        // Runs whose report names this source, newest first. A run that failed before it
-        // produced a report names no source, so it shows on the Runs page rather than here.
+        // The runs that covered this source, newest first — including one stopped before it
+        // reported, which its arguments still name (`Attempt::covers`).
         let mut runs: Vec<_> = Journal::new(&ctx.store)
             .read()
             .await?
             .into_iter()
-            .filter(|a| {
-                a.report
-                    .as_ref()
-                    .is_some_and(|r| r.sources.iter().any(|s| s.source == id))
-            })
+            .filter(|a| a.covers(&id))
             .collect();
         runs.reverse();
         runs.truncate(RUNS_SHOWN);

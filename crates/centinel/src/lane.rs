@@ -65,6 +65,7 @@ impl Lane {
             started_at: started.to_string(),
             trigger: launch.trigger,
             schedule: launch.schedule.clone(),
+            sources: args.sources.clone(),
             args: one_line_args(&args),
         };
         let lock = RunLock::acquire(&ctx.store, &holder)?;
@@ -166,6 +167,7 @@ impl Lane {
         let attempt = Attempt {
             run_id: started.to_string(),
             schedule: launch.schedule,
+            sources: args.sources.clone(),
             trigger: launch.trigger,
             due_at: launch.due_at,
             started_at: started.to_string(),
