@@ -108,7 +108,8 @@ function Ring({ job }: { job: JobState }) {
 
 const count = (job: JobState) => job.total ? `${number(job.done ?? 0)}/${number(job.total)}` : ''
 
-function Bar({ job, thin }: { job: JobState; thin?: boolean }) {
+/** How far through its work list a job is. */
+export function Bar({ job, thin }: { job: JobState; thin?: boolean }) {
   const width = job.total ? (job.done ?? 0) / job.total * 100 : 0
   return <span className={`block rounded-full bg-track ${thin ? 'h-1' : 'h-1.5'}`}>
     <i className="block h-full rounded-full bg-foreground transition-[width] duration-(--motion-progress) ease-out" style={{ width: `${job.outcome ? 100 : width}%` }} />
@@ -186,7 +187,8 @@ function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) {
   </Sheet>
 }
 
-function LogLine({ line, answer, questions }: { line: JobEvent; answer?: RunResult; questions: Parameters<typeof answerSummary>[0] }) {
+/** One line of a job's log, on the server's clock. A scored line says what Jev decided when its answer and questions are given. */
+export function LogLine({ line, answer, questions = [] }: { line: JobEvent; answer?: RunResult; questions?: Parameters<typeof answerSummary>[0] }) {
   const row = (word: string, tone: string, body: ReactNode) => <div className="flex gap-3 px-5">
     <span className="w-16 shrink-0 text-[#6B6458]">{clock(line.at)}</span>
     <span className={`w-16 shrink-0 truncate ${tone}`}>{word}</span>

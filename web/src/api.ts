@@ -445,11 +445,25 @@ export const DEFAULT_MODEL = 'jev-1.13.0'
 
 export type SourceKind = 'site' | 'channel'
 
-/** One source the store defines, as `source list` reports it. `resources` is every address its log knows, discovered or collected. */
-export type ListedSource = { id: string; kind: SourceKind; target: string; enabled: boolean; resources: number }
+/**
+ * One source the store defines, as `source list` reports it. `resources` is every address its
+ * log knows, discovered or collected; `liveness` counts the collected ones by state.
+ */
+export type ListedSource = {
+  id: string
+  kind: SourceKind
+  target: string
+  enabled: boolean
+  resources: number
+  liveness: Record<string, number>
+  last_run?: LastRun
+}
 
-/** The run holding the store's one lane. */
-export type LaneHolder = { pid: number; started_at: string; trigger: 'schedule' | 'manual' | 'catch-up'; schedule?: string; args: string }
+/** The newest run in the journal that covered a source. */
+export type LastRun = { started_at: string; outcome: RunAttempt['outcome']; trigger: RunAttempt['trigger']; schedule?: string; documents: number }
+
+/** The run holding the store's one lane. `sources` is empty for a run over every enabled source. */
+export type LaneHolder = { pid: number; started_at: string; trigger: 'schedule' | 'manual' | 'catch-up'; schedule?: string; sources?: string[]; args: string }
 
 /** `log/<id>/source.toml`. */
 export type SourceDefinition = {
@@ -490,6 +504,8 @@ export type RunAttempt = {
   detail?: string
   added: { documents: number; derived: number; chunks: number }
   subtracted: { vanished: number; gone: number; blocked: number; errored: number }
+  /** The sources it was started for; empty for every enabled one. */
+  sources?: string[]
 }
 
 export type SourceDetail = { definition: SourceDefinition; summary?: SourceSummary; runs: RunAttempt[]; running: LaneHolder | null }

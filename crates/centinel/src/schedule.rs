@@ -224,6 +224,7 @@ impl Scheduler {
         let attempt = Attempt {
             run_id: holder.started_at.clone(),
             schedule: holder.schedule.clone(),
+            sources: holder.sources.clone(),
             trigger: holder.trigger,
             due_at: None,
             started_at: holder.started_at.clone(),
@@ -386,6 +387,7 @@ impl Scheduler {
                 self.record(Attempt {
                     run_id,
                     schedule: Some(due.schedule.id.clone()),
+                    sources: due.schedule.sources.clone(),
                     trigger: due.trigger,
                     due_at: Some(due.at.to_string()),
                     started_at: started.to_string(),
@@ -418,6 +420,7 @@ impl Scheduler {
                 self.record(Attempt {
                     run_id,
                     schedule: Some(due.schedule.id.clone()),
+                    sources: due.schedule.sources.clone(),
                     trigger: due.trigger,
                     due_at: Some(due.at.to_string()),
                     started_at: started.to_string(),
@@ -709,6 +712,7 @@ mod tests {
                 started_at: Timestamp::now().to_string(),
                 trigger: Trigger::Manual,
                 schedule: None,
+                sources: Vec::new(),
                 args: String::new(),
             },
         )
@@ -748,6 +752,7 @@ mod tests {
                 started_at: Timestamp::now().to_string(),
                 trigger: Trigger::Manual,
                 schedule: None,
+                sources: Vec::new(),
                 args: String::new(),
             },
         )
@@ -789,6 +794,7 @@ mod tests {
                 started_at: "2026-08-06T03:00:00Z".into(),
                 trigger: Trigger::Schedule,
                 schedule: Some("daily".into()),
+                sources: Vec::new(),
                 args: String::new(),
             })
             .unwrap(),

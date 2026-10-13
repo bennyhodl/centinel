@@ -110,6 +110,26 @@ pub struct ListedSource {
     /// `centinel list` reports. Zero means defined and never run, the state a fresh
     /// `source add` leaves behind.
     pub resources: usize,
+    /// Addresses per liveness state (`live`, `gone`, `blocked`, `error`). Their sum is what
+    /// has been fetched; `resources` less that sum is what discovery found and collection has
+    /// not reached yet.
+    #[serde(default)]
+    pub liveness: std::collections::BTreeMap<String, usize>,
+    /// The latest run that covered it, from the journal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<LastRun>,
+}
+
+/// A run, as a row of the source list needs it.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LastRun {
+    pub started_at: String,
+    pub outcome: crate::journal::Outcome,
+    pub trigger: crate::journal::Trigger,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    /// Documents it newly stored, across every source it ran.
+    pub documents: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -236,6 +256,9 @@ async fn add(
 async fn list(ctx: &Ctx) -> anyhow::Result<SourceReport> {
     let mut out = Vec::new();
     let summaries = crate::summary::Summaries::new(&ctx.store);
+    // Newest first, read once: every row looks for its latest run in the same list.
+    let mut attempts = crate::journal::Journal::new(&ctx.store).read().await?;
+    attempts.reverse();
     for source in Sources::new(&ctx.store).list().await? {
         let acquisition = source.acquisition()?;
         // Every address the log knows, discovered or collected — the count `centinel list`
@@ -243,16 +266,22 @@ async fn list(ctx: &Ctx) -> anyhow::Result<SourceReport> {
         // From the summary rather than a replay: it is the replay's own number, kept
         // beside the log and rebuilt when the log grows, and the list is asked every few
         // seconds by a page that replaying sixteen logs made wait over a second.
-        let resources = summaries
-            .get(&SourceId::new(source.id.clone())?)
-            .await?
-            .resources;
+        let summary = summaries.get(&SourceId::new(source.id.clone())?).await?;
+        let last_run = attempts.iter().find(|a| a.covers(&source.id)).map(|a| LastRun {
+            started_at: a.started_at.clone(),
+            outcome: a.outcome,
+            trigger: a.trigger,
+            schedule: a.schedule.clone(),
+            documents: a.added.documents,
+        });
         out.push(ListedSource {
             id: source.id.clone(),
             kind: acquisition.kind(),
             target: acquisition.target().to_string(),
             enabled: source.is_enabled(),
-            resources,
+            resources: summary.resources,
+            liveness: summary.liveness,
+            last_run,
         });
     }
     Ok(SourceReport::List { sources: out })
@@ -396,6 +425,8 @@ mod tests {
             target: format!("https://{id}.gov"),
             enabled: true,
             resources,
+            liveness: Default::default(),
+            last_run: None,
         }
     }
 

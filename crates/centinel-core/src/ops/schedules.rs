@@ -573,6 +573,7 @@ mod tests {
         Attempt {
             run_id: id.into(),
             schedule: schedule.map(str::to_string),
+            sources: Vec::new(),
             trigger: Trigger::Schedule,
             due_at: None,
             started_at: id.into(),
@@ -734,6 +735,7 @@ mod tests {
                 started_at: jiff::Timestamp::now().to_string(),
                 trigger: Trigger::Schedule,
                 schedule: Some("daily".into()),
+                sources: Vec::new(),
                 args: String::new(),
             },
         )
