@@ -6,6 +6,7 @@
   log/<source>/YYYY-MM.jsonl     TRUTH    append-only: observations, discovery runs, status, derivations
   crumbs/<source>.jsonl          DERIVED  the off-host links each page dropped, written as it was stored
   summaries/<source>.json        DERIVED  what the log adds up to, keyed by the log's size
+  icons/<host>.<ext>, .json      DERIVED  the favicon a host serves, fetched once when the web first asks
   current/<source>/…             DERIVED  a tree that mirrors the URLs
   centinel.db                    DERIVED  SQLite metadata + FTS5   — the BM25 arm
   chunks.lance/                  DERIVED  LanceDB chunk vectors    — the vector arm
@@ -91,6 +92,20 @@ It is rebuilt by the reader rather than maintained on append because the counts 
 an address observed twice is one address — and keeping a set current on every append would
 rewrite it once per line, which is quadratic over a collect. Delete `summaries/` and the
 next read rebuilds it.
+
+## Icons
+
+The web draws a site's favicon beside every source and host. Each one is fetched the first
+time the page asks (`GET /workspace/icons/{host}`) and kept in `icons/<host>.<ext>`, with
+`icons/<host>.json` beside it saying where it came from. A host with no icon gets only the
+record, "none, checked at T", and is not asked again for seven days.
+
+It is not corpus: no Observation, no log line, and no collection run touches it. Delete
+`icons/` and the next request finds each icon again. The icon comes from what the store
+already holds when it can (the `<link rel="icon">` in a source's collected front page) and
+from one request to the host otherwise. Only a defined source's host, or a host a crumb
+names, is ever fetched; no third-party icon service is asked, since it would learn every host
+the archive follows.
 
 ## The layout is named once
 

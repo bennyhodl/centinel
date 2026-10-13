@@ -27,7 +27,9 @@ export async function createGateway(config: { root: string; origin: string; back
     const output = new Headers(response.headers)
     output.delete('content-encoding')
     output.delete('content-length')
-    output.set('cache-control', 'no-store')
+    // Nothing forwarded is stored unless the backend says it may be: an icon is kept for a
+    // week, and a signed-in user's list of documents is not.
+    if (!output.has('cache-control')) output.set('cache-control', 'no-store')
     return new Response(response.body, { status: response.status, headers: output })
   }
   const mcpHandler = requireMcpAuth(auth, async (request, claims) => {

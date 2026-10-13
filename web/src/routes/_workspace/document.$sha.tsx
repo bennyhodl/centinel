@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { ArrowLeft, Download, ExternalLink, Play, RotateCcw } from 'lucide-react'
 import { api, DEFAULT_MODEL, originalUrl, type ReadReport } from '../../api'
+import { SourceIcon } from '../../host-icon'
 import { queries } from '../../queries'
 import { parseCsv } from '../../csv'
 import { number, tail } from '../../format'
@@ -59,7 +60,7 @@ function Reader() {
     {query.error ? <ErrorBox error={query.error} /> : read ? <>
       <div className="-mt-4 mb-5 flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground">
         <span className="rounded bg-foreground px-2 py-0.5 text-[11px] font-bold tracking-[0.06em] text-parchment">{read.kind.toUpperCase()}</span>
-        <span className="wrap-anywhere">{read.source} · {read.url} · {number(read.total_chars)} characters · <span className="font-mono">{shortSha(read.blob_sha)}</span></span>
+        <span className="wrap-anywhere"><SourceIcon source={read.source} className="mr-1.5 align-[-3px]" />{read.source} · {read.url} · {number(read.total_chars)} characters · <span className="font-mono">{shortSha(read.blob_sha)}</span></span>
       </div>
       <div className="mb-5 flex gap-6 border-b" role="tablist">
         {tabs.map(name => <button type="button" role="tab" aria-selected={current === name} key={name} onClick={() => setTab(name)} className={`-mb-px pb-2.5 text-sm ${current === name ? 'border-b-2 border-foreground font-semibold' : 'text-muted-foreground hover:text-foreground'}`}>{name === 'Text' ? `Text · ${number(read.total_chars)} chars` : name}</button>)}

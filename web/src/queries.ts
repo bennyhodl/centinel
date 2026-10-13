@@ -71,6 +71,9 @@ export const queries = {
     placeholderData: keepPreviousData,
   }),
 
+  /** Which host each source collects from, for its icon. A source's host does not change; a new source is picked up within the stale time. */
+  sourceHosts: () => queryOptions({ queryKey: ['source-hosts'], queryFn: api.sourceHosts, staleTime: 10 * 60_000 }),
+
   /** Every source, and the run holding the lane. Re-read while a run holds it, so a row's state follows. */
   sources: () => queryOptions({
     queryKey: ['sources'],

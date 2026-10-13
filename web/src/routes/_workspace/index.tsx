@@ -6,6 +6,7 @@ import type { CorpusFacets, CorpusFilters, Document, Question } from '../../api'
 import { classifierOptions } from '../../classify'
 import { Candle, useElapsed, useShownInPlace } from '../../feedback'
 import { characters, compact, number, tail } from '../../format'
+import { SourceIcon } from '../../host-icon'
 import { classificationBadges, hasScores } from '../../policy'
 import { queries } from '../../queries'
 import { DocumentLink, documentTransition, Empty, ErrorBox, shortSha } from '../../ui'
@@ -226,7 +227,7 @@ function SourcePanel({ chosen, set, sources, counts }: { chosen: string[]; set: 
         const count = counts?.[source]
         return <button type="button" key={source} aria-pressed={active} onClick={() => toggle(source)} className={`grid gap-1 rounded-lg px-2 py-1.5 text-left ${active ? 'bg-slate-soft' : 'hover:bg-hover'}`}>
           <span className="flex items-center justify-between gap-2 text-sm">
-            <span className="flex min-w-0 items-center gap-2"><span className={`grid size-3.5 shrink-0 place-items-center rounded-[4px] ${active ? 'bg-slate text-slate-soft' : 'shadow-[inset_0_0_0_1.5px_var(--slate-line)]'}`}>{active && <svg viewBox="0 0 24 24" className="size-2.5" fill="none" stroke="currentColor" strokeWidth="4"><path d="M5 12l5 5L20 7" /></svg>}</span><span className={`truncate ${active ? `font-semibold ${tone.source.label}` : ''}`}>{source}</span></span>
+            <span className="flex min-w-0 items-center gap-2"><span className={`grid size-3.5 shrink-0 place-items-center rounded-[4px] ${active ? 'bg-slate text-slate-soft' : 'shadow-[inset_0_0_0_1.5px_var(--slate-line)]'}`}>{active && <svg viewBox="0 0 24 24" className="size-2.5" fill="none" stroke="currentColor" strokeWidth="4"><path d="M5 12l5 5L20 7" /></svg>}</span><SourceIcon source={source} /><span className={`truncate ${active ? `font-semibold ${tone.source.label}` : ''}`}>{source}</span></span>
             {count != null && <span className="font-mono text-xs text-muted-foreground">{number(count)}</span>}
           </span>
           {count != null && <Meter value={count} max={max} kind="source" strong={active} />}
@@ -277,7 +278,7 @@ function ResultRow({ doc, questions }: { doc?: Document; questions: Question[] }
     <DocumentLink doc={doc} className="grid min-w-0 flex-1 gap-1.5">
       <b className="w-fit text-[15px] leading-5 font-semibold group-hover:underline" style={documentTransition(doc)}>{doc.title || tail(doc.resource)}</b>
       <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-        <span className={`shrink-0 rounded px-1.5 py-px font-medium ${tone.source.on}`}>{doc.source}</span>
+        <span className={`inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-px font-medium ${tone.source.on}`}><SourceIcon source={doc.source} size={12} />{doc.source}</span>
         <span className="truncate">{doc.resource}</span>
         <span className="shrink-0">· {characters(doc.chars)}</span>
         {doc.excluded && <span className="shrink-0 rounded px-1.5 py-px font-medium text-destructive shadow-[inset_0_0_0_1px_var(--destructive-line)]">excluded</span>}

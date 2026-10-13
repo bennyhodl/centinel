@@ -273,6 +273,7 @@ runs/             TRUTH     what this machine attempted
 decisions.jsonl   TRUTH     what the operator decided
 crumbs/           derived   a link read out of a page
 summaries/        derived   what each log adds up to, the hosts it observed among them
+icons/            derived   the favicon of each host the web has shown, fetched once
 ```
 
 See [The store](../internals/store.md).
