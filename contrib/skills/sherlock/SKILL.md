@@ -104,9 +104,9 @@ Nothing else. No score, no rank, no recommendation, no `promote` field of your o
 
 A Tip is worth the operator's time only if it is new. Check both:
 
-1. **Sources** — parse `[[source]]` blocks in `centinel.toml` and take the origin of each
-   `site` and `channel`. `centinel list --json` carries source **ids** and no hosts, so the
-   config is the only place the hosts are written.
+1. **Sources** — run `centinel source list --json` and take the origin of each source's
+   `target`. The store owns the list of sources, so this is every source there is, with its
+   address.
 2. **Crumbs** — the union of `crumbs[].host` over every `investigate` report available: the
    `investigate` objects already in `prospects/*.json`, plus any report the operator saved.
 

@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { useIsFetching, useIsMutating, useQueryErrorResetBoundary } from '@tanstack/react-query'
-import { useRouter, useRouterState, type ErrorComponentProps } from '@tanstack/react-router'
+import { rootRouteId, useLocation, useMatches, useRouter, useRouterState, type ErrorComponentProps } from '@tanstack/react-router'
 import { RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -78,6 +78,32 @@ export function Candle({ className = '' }: { className?: string }) {
   return <span aria-hidden className={`relative inline-block size-3 shrink-0 ${className}`}>
     <span className="absolute inset-0 animate-flicker rounded-[50%_50%_50%_50%/60%_60%_40%_40%] bg-[radial-gradient(circle_at_50%_70%,#FFE3B8,#F0A04B_45%,#C8761E_75%)] shadow-[0_0_10px_rgba(240,160,75,0.8)]" />
   </span>
+}
+
+/**
+ * The first paint. Before the scripts run, the server draws the root route alone, whatever
+ * the address. This draws the wait of the layout the address opens instead: the workspace's
+ * chrome or the sign-in column. The page's own skeleton fills in once the scripts run.
+ */
+export function ShellPending() {
+  const router = useRouter()
+  const pathname = useLocation({ select: location => location.pathname })
+  const layout = router.getMatchedRoutes(pathname)[0].find(route => route.id !== rootRouteId)
+  const Pending = layout?.options.pendingComponent
+  return Pending ? <Pending /> : null
+}
+
+/**
+ * The skeleton of the page being opened. A layout draws it inside its own chrome while the
+ * layout itself waits, so the first frame already has the page's shape. Nothing when the
+ * page has none.
+ */
+export function PagePending() {
+  const router = useRouter()
+  const page = useMatches({ select: matches => matches.at(-1)?.routeId })
+  const route = page && router.routesById[page]
+  const Page = route && !route.children && route.options.pendingComponent
+  return Page ? <Page /> : null
 }
 
 /** What a page shows while its loader runs, when the page has no skeleton of its own. */

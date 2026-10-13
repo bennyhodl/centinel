@@ -20,7 +20,7 @@ and each entry carries a count once it does.
 | Group | Page | What it is for |
 |---|---|---|
 | Archive | **Search** | Find documents by their words, narrowed by source, usage, classifier score and address. [Searching](../use/search.md) |
-| | **Spend** | Every model call and what it cost. [Spend](../use/spend.md) |
+| | **Sources** | What the archive collects: try an address, add it, run it, see what each source holds and where it links off-site. Administrators only. [Sources](../operate/sources.md) |
 | Classifiers | **Classify** | Write the questions that sort the corpus, and run them. [Classify](../use/classify.md) |
 | | **Runs** | What each run asked, decided and cost. [Runs](../use/runs.md) |
 | | **Review** | Check the model's answers one document at a time. [Review](../use/review.md) |
@@ -31,22 +31,25 @@ Opening a result takes you to the reader, which shows the document as it was col
 beside the text that was extracted from it. [Reading a document](../use/read.md)
 
 At the foot of the sidebar, **Working now** lists whatever the server is doing, such as a
-classifier run or a scheduled collection. Click one to follow its log. Below it are this
-documentation and the light and dark toggle.
+classifier run or a collection. Click one to follow its log. Below it is your account: open
+it for **Spend** (every model call and what it cost, [Spend](../use/spend.md)), this
+documentation, the light and dark toggle, **Admin** (who may use this archive) and signing
+out.
 
 ## What it cannot do
 
 The workspace reads the corpus and records decisions about it. It does not collect.
 
-- You add a source, run collection, set a schedule, pull model weights and check a host
-  from the command line and the config file. That is the [Operator](operator.md) job, and it
-  is the one part of Centinel that is deliberately not a button.
-- It does not change the archive. Collected bytes and the log are never written from the
-  page. Everything the workspace records (questions, answers, reviews, a person's overrides)
+- Schedules, model weights and host checks are set from the command line and the config file.
+  That is the [Operator](operator.md) job. An administrator signed in to the page is the
+  operator too, so the Sources page can add a source, try an address and run collection —
+  but an agent never can, whatever its token: those routes answer a browser session only.
+- Apart from a run an administrator starts, it does not change the archive. Collected bytes
+  and the log are never written from the page. Everything the workspace records (questions, answers, reviews, a person's overrides)
   lives in `workspace/`, and every decision it makes can be undone.
 
-The split is on purpose. What gets collected should not depend on whoever happens to have a
-page open. See [The shape](../internals/shape.md).
+The split is on purpose. What gets collected should not depend on a model, or on whoever
+happens to have a page open without the administrator's role. See [The shape](../internals/shape.md).
 
 ## Where it runs
 

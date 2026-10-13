@@ -29,7 +29,7 @@ it prints. On Linux, `sudo tailscale set --operator=$USER` lets it configure ser
 root.
 
 Users sign in with email/password or a Nostr browser signer. The first account is the
-administrator; later users wait for approval under **User access**. Approved users can
+administrator; later users wait for approval under **Admin**, in the account menu. Approved users can
 search and read. Administrators can classify, review and approve or revoke users.
 Collection remains controlled by the local operator's configuration.
 

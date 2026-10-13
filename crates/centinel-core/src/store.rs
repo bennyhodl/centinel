@@ -12,6 +12,7 @@
 //!   workspace/embed.lock       RUNTIME  the one `embed` run at a time
 //!   spend/YYYY-MM.jsonl        TRUTH    every model call, its tokens and its cost
 //!   crumbs/<source>.jsonl      DERIVED  the off-host links each page dropped
+//!   summaries/<source>.json    DERIVED  what the log adds up to, keyed by its size
 //!   current/<source>/…         DERIVED  URL-mirroring tree. Regenerable.
 //!   centinel.db                DERIVED  SQLite: metadata + FTS5   — the BM25 arm
 //!   chunks.lance/              DERIVED  LanceDB: chunk vectors    — the vector arm
@@ -251,6 +252,20 @@ impl Store {
     /// `--rescan` compacts it back to one row per address.
     pub fn crumbs_path(&self, source: &SourceId) -> PathBuf {
         self.crumbs_dir().join(format!("{source}.jsonl"))
+    }
+
+    /// `summaries/` — what each Source's log adds up to: its address count, its liveness,
+    /// the hosts it has observed. **Derived**, and safe to delete: each one is a replay's
+    /// counts stamped with the log sizes it was read from, and the next reader rebuilds it
+    /// when they no longer match. See [`crate::summary`] for why it is cached by size
+    /// rather than maintained on append.
+    pub fn summaries_dir(&self) -> PathBuf {
+        self.root.join("summaries")
+    }
+
+    /// `summaries/<source>.json` — per Source, as the log is.
+    pub fn summary_path(&self, source: &SourceId) -> PathBuf {
+        self.summaries_dir().join(format!("{source}.json"))
     }
 
     /// `decisions.jsonl` — what the operator decided. **Truth, and the fourth thing that
@@ -641,6 +656,36 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// The length of every month file in a Source's log, by file name.
+    ///
+    /// The log is append-only, so these lengths are its version: anything derived from
+    /// the log and stamped with them is current while they match. A `stat` per file, no
+    /// read — the whole reason [`crate::summary`] can answer for a log without opening it.
+    /// An unknown Source has no files, which is an empty map rather than an error.
+    pub async fn log_sizes(&self, source: &SourceId) -> Result<BTreeMap<String, u64>> {
+        let dir = self.root.join("log").join(source.as_str());
+        let mut sizes = BTreeMap::new();
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(sizes),
+            Err(e) => {
+                return Err(StoreError::Io {
+                    path: dir,
+                    source: e,
+                });
+            }
+        };
+        while let Some(entry) = entries.next_entry().await.map_err(io_at(&dir))? {
+            let path = entry.path();
+            if !path.extension().is_some_and(|x| x == "jsonl") {
+                continue;
+            }
+            let len = entry.metadata().await.map_err(io_at(&path))?.len();
+            sizes.insert(entry.file_name().to_string_lossy().into_owned(), len);
+        }
+        Ok(sizes)
     }
 
     /// Lists every Source that has a log directory.
@@ -1211,6 +1256,10 @@ mod tests {
         assert!(
             s.crumbs_path(&SourceId::new("tampa").unwrap())
                 .ends_with("crumbs/tampa.jsonl")
+        );
+        assert!(
+            s.summary_path(&SourceId::new("tampa").unwrap())
+                .ends_with("summaries/tampa.json")
         );
         assert!(s.index_path().ends_with("centinel.db"));
         assert!(s.vectors_path().ends_with("chunks.lance"));

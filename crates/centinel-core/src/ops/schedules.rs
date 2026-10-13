@@ -102,6 +102,9 @@ pub async fn schedules(ctx: &Ctx, args: SchedulesArgs) -> anyhow::Result<Schedul
 
     if args.check {
         config.validate_schedules()?;
+        crate::catalog::Sources::new(&ctx.store)
+            .check_schedules(&config)
+            .await?;
     }
 
     let journal = Journal::new(&ctx.store);
@@ -156,10 +159,11 @@ pub async fn schedules(ctx: &Ctx, args: SchedulesArgs) -> anyhow::Result<Schedul
         if let Err(e) = schedule.run_args() {
             problem.get_or_insert_with(|| format!("{e:#}"));
         }
-        for id in &schedule.sources {
-            if config.source(id).is_none() {
-                problem.get_or_insert_with(|| format!("source `{id}` has no [[source]] block"));
-            }
+        if let Some(id) = crate::catalog::Sources::new(&ctx.store)
+            .missing_from(schedule)
+            .await?
+        {
+            problem.get_or_insert_with(|| format!("source `{id}` is not in this store"));
         }
 
         out.push(ScheduleStatus {
@@ -554,9 +558,14 @@ mod tests {
     use crate::journal::{Journal, Trigger};
     use crate::store::Store;
 
+    /// A store that defines `tampa`, the source the schedules here name.
     async fn ctx() -> (tempfile::TempDir, Ctx) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
+        crate::catalog::Sources::new(&store)
+            .add(&crate::config::SourceConfig::site("tampa", "https://tampa.gov"))
+            .await
+            .unwrap();
         (dir, Ctx::new(store))
     }
 

@@ -557,8 +557,7 @@ only safe because item 4 makes the ceiling visible.
 Then the pipeline. Three of the four stages change nothing at all.
 
 ```rust
-// ── source add ──────────────────────────────────────────────────────────────
-[[source]]
+// ── source add — log/tampa-agendas/source.toml ───────────────────────────────
 id       = "tampa-agendas"
 site     = "https://tampagov.hylandcloud.com/251agendaonline/"
 strategy = "onbase-agenda"     # written down, so later disagreement can WARN (§7.5)

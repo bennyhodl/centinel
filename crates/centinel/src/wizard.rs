@@ -122,7 +122,7 @@ pub async fn schedule_set(ctx: &Ctx, mut args: Value, assume_yes: bool) -> Resul
     let id = id.trim().to_string();
 
     // ── sources ───────────────────────────────────────────────────────────────
-    let sources = choose_sources(&theme, &config, &ctx.store).await?;
+    let sources = choose_sources(&theme, &ctx.store).await?;
 
     // ── cadence ───────────────────────────────────────────────────────────────
     let cron = choose_cadence(&theme)?;
@@ -184,18 +184,15 @@ pub async fn schedule_set(ctx: &Ctx, mut args: Value, assume_yes: bool) -> Resul
 /// The counts come from the log rather than the index, so this is right on a store whose
 /// `centinel.db` has been deleted — and "never collected" is a real and useful answer for
 /// a source added five minutes ago.
-async fn choose_sources(
-    theme: &ColorfulTheme,
-    config: &Config,
-    store: &Store,
-) -> Result<Vec<String>> {
-    if config.sources.is_empty() {
-        eprintln!("  no [[source]] blocks yet — this schedule will run whatever you add");
+async fn choose_sources(theme: &ColorfulTheme, store: &Store) -> Result<Vec<String>> {
+    let defined = centinel_core::catalog::Sources::new(store).list().await?;
+    if defined.is_empty() {
+        eprintln!("  no sources in this store yet — this schedule will run whatever you add");
         return Ok(Vec::new());
     }
 
-    let mut labels = Vec::with_capacity(config.sources.len());
-    for source in &config.sources {
+    let mut labels = Vec::with_capacity(defined.len());
+    for source in &defined {
         let kind = match source.acquisition() {
             Ok(a) => a.kind().to_string(),
             Err(_) => "?".to_string(),
@@ -211,7 +208,7 @@ async fn choose_sources(
 
     Ok(chosen
         .into_iter()
-        .map(|i| config.sources[i].id.clone())
+        .map(|i| defined[i].id.clone())
         .collect())
 }
 

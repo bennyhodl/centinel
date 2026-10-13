@@ -386,7 +386,7 @@ pub async fn collect(
                         )
                         .await?;
 
-                    record_crumbs(store, &ledger, &artifact.resource, bytes, kind, &obs).await;
+                    ledger.record(&artifact.resource, bytes, kind, &obs).await;
 
                     // Against the preloaded map, not a fresh log scan per address.
                     if seen.get(&artifact.resource) != Some(&obs.fingerprint) {
@@ -473,59 +473,6 @@ fn part_of(parent: &Resource, acquired: &Resource) -> String {
         .map(|rest| rest.trim_start_matches('#').to_string())
         .filter(|rest| !rest.is_empty())
         .unwrap_or_else(|| WHOLE.to_string())
-}
-
-/// Writes down what one stored artifact points at, off its own host.
-///
-/// **The cheapest moment there will ever be.** The bytes are in memory, the kind is already
-/// classified, and a page's `<a>` tags are already being walked one layer down for the
-/// documents it encloses. Off-host links were dropped there — `enclosure` takes same-host
-/// documents and returns `None` for everything else — so this is the same information, kept
-/// instead of discarded.
-///
-/// **A row for every artifact, including the ones with nothing to say.** An empty row is what
-/// separates *scanned and points nowhere* from *never scanned*, which is what lets `crumbs`
-/// tell a complete ledger from a partial one without opening a blob.
-///
-/// **A failure here never fails a collection.** The ledger is derived: a missing row costs the
-/// reader one blob read, which it already knows how to do and already reports. A run of a
-/// city is an hour of paced requests, and losing it to a write error on a rebuildable file
-/// would be the wrong trade in the wrong direction.
-async fn record_crumbs(
-    store: &Store,
-    ledger: &crate::crumbs::Ledger<'_>,
-    resource: &Resource,
-    bytes: &[u8],
-    kind: crate::content::ContentKind,
-    obs: &crate::domain::Observation,
-) {
-    let page = crate::crumbs::Carrier {
-        address: resource.natural_key.clone(),
-        at: Some(obs.at.to_string()),
-        blob: Some(crate::render::short_sha(obs.blob_sha.as_str())),
-    };
-
-    // Only markup holds links. A PDF still gets its row, so the ledger accounts for every
-    // blob the log names — it just has nothing in it.
-    let row = match kind {
-        crate::content::ContentKind::Html => {
-            crate::crumbs::scan_page(&String::from_utf8_lossy(bytes), page)
-        }
-        _ => crate::crumbs::Recorded {
-            page,
-            links: Vec::new(),
-        },
-    };
-
-    if let Err(e) = ledger.append(&row).await {
-        tracing::warn!(
-            source = %resource.source,
-            page = %resource.natural_key,
-            path = %store.crumbs_path(&resource.source).display(),
-            error = %e,
-            "could not write a crumb row; `centinel crumbs` will read this page's blob instead"
-        );
-    }
 }
 
 /// Keeps the failure list bounded. A wholesale block would otherwise produce thousands of

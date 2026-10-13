@@ -111,10 +111,10 @@ impl Stage {
 
 #[derive(Clone, Debug, Default, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct RunArgs {
-    /// Source to run. Repeatable. Omit for every enabled source in the config.
+    /// Source to run. Repeatable. Omit for every enabled source in the store.
     ///
-    /// Naming a source runs it even when its block says `enabled = false` — the flag is
-    /// a default, and typing the id is an instruction.
+    /// Naming a source runs it even when it is disabled — the flag is a default, and
+    /// typing the id is an instruction.
     #[arg(long = "source", value_name = "ID")]
     #[serde(default)]
     pub sources: Vec<String>,
@@ -366,7 +366,7 @@ pub struct RunReport {
     /// The config that was read, or `None` when none was found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<String>,
-    /// Acquisition, one entry per source, in config order.
+    /// Acquisition, one entry per source, by id.
     pub sources: Vec<SourceRun>,
     /// Derivation, corpus-wide, in pipeline order.
     pub derive: Vec<StageRun>,
@@ -431,7 +431,7 @@ pub async fn run(
         }
         None => (Config::load()?, Config::locate()),
     };
-    let selected = config.selected(&args.sources)?;
+    let selected = crate::catalog::Sources::new(&ctx.store).selected(&args.sources).await?;
 
     let mut report = RunReport {
         config: config_path.map(|p| p.display().to_string()),
@@ -1029,7 +1029,7 @@ async fn unserved(inference: &InferenceConfig, capability: Capability) -> Option
 impl Render for RunReport {
     fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
         if self.sources.is_empty() {
-            p.line(p.paint("No sources configured.", Ink::Dim))?;
+            p.line(p.paint("No sources in this store.", Ink::Dim))?;
             p.blank()?;
             return p.note("centinel source add tampa --site https://www.tampa.gov");
         }
@@ -1308,7 +1308,7 @@ mod tests {
     fn an_empty_config_points_at_the_command_that_fixes_it() {
         let r = report(vec![], vec![]);
         let out = render_to_string(&r);
-        assert!(out.contains("No sources configured"), "{out}");
+        assert!(out.contains("No sources in this store"), "{out}");
         assert!(out.contains("centinel source add"), "{out}");
     }
 

@@ -6,6 +6,7 @@ import { EntryHeading } from '../../entry'
 import { queries } from '../../queries'
 import { Button } from '@/components/ui/button'
 import { Field, FieldError, FieldGroup } from '@/components/ui/field'
+import { Skeleton } from '@/components/ui/skeleton'
 
 export const Route = createFileRoute('/_entry/consent')({
   // Better Auth sends a signed-in person here with the client's request in the query. Anyone
@@ -17,6 +18,7 @@ export const Route = createFileRoute('/_entry/consent')({
     if (!request) throw redirect({ to: '/', search: {} })
     return { request, account }
   },
+  pendingComponent: ConsentPending,
   component: Consent,
 })
 
@@ -26,6 +28,17 @@ const permissions: Record<string, string> = {
   openid: 'Know which account it acts as',
   profile: 'See your name and picture',
   offline_access: 'Stay connected without asking again',
+}
+
+/** While the account is read: the request's frame, with the client and its asks blank. */
+function ConsentPending() {
+  return <FieldGroup aria-busy>
+    <EntryHeading title="Connect an agent">
+      <p className="text-balance text-sm"><Skeleton mask="An agent wants to use Centinel as Archive reader. It can do no more than you can." /></p>
+    </EntryHeading>
+    <Skeleton className="h-40 rounded-lg" />
+    <Field><Skeleton className="h-9 rounded-md" /><Skeleton className="h-9 rounded-md" /></Field>
+  </FieldGroup>
 }
 
 function Consent() {

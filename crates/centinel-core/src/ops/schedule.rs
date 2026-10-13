@@ -1,8 +1,8 @@
 //! `schedule` — writing the cadences `serve` fires.
 //!
-//! The peer of [`crate::ops::source`], and it exists for the same reason: this edits a file
-//! a person wrote and will read again, and the mistakes that file invites here are silent
-//! until 3am. A `sources` entry naming no `[[source]]` block, and `0 3 * * 1` written when
+//! It exists rather than leaving people to edit TOML because this edits a file a person
+//! wrote and will read again, and the mistakes that file invites here are silent until
+//! 3am. A `sources` entry naming no source in the store, and `0 3 * * 1` written when
 //! `0 3 1 * *` was meant — Mondays instead of the 1st — both parse cleanly and both produce
 //! a schedule that looks fine and does the wrong thing, or nothing.
 //!
@@ -173,6 +173,18 @@ async fn set(ctx: &Ctx, args: SetArgs) -> anyhow::Result<ScheduleReport> {
         refresh: args.refresh,
     };
 
+    // Checked before the file is touched: a schedule naming a source the store does not
+    // hold fires on time, collects nothing, and reports success.
+    if let Some(missing) = crate::catalog::Sources::new(&ctx.store)
+        .missing_from(&block)
+        .await?
+    {
+        anyhow::bail!(
+            "schedule `{id}` names source `{missing}`, which {} does not hold",
+            ctx.store.root().display()
+        );
+    }
+
     // Replacing is remove-then-append rather than an in-place rewrite, so the one code
     // path that validates an addition is the one that runs.
     if args.replace && path.exists() {
@@ -292,9 +304,14 @@ mod tests {
     use super::*;
     use crate::store::Store;
 
+    /// A store that defines `tampa`, the source every schedule here names.
     async fn ctx() -> (tempfile::TempDir, Ctx) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
+        crate::catalog::Sources::new(&store)
+            .add(&crate::config::SourceConfig::site("tampa", "https://tampa.gov"))
+            .await
+            .unwrap();
         (dir, Ctx::new(store))
     }
 

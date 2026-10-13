@@ -17,13 +17,16 @@ import { Route as WorkspaceIndexRouteImport } from './routes/_workspace/index'
 import { Route as WorkspaceAdminRouteImport } from './routes/_workspace/_admin'
 import { Route as WorkspaceConnectRouteImport } from './routes/_workspace/connect'
 import { Route as WorkspaceSkillsRouteImport } from './routes/_workspace/skills'
+import { Route as WorkspaceAdminAdminRouteImport } from './routes/_workspace/_admin/admin'
 import { Route as WorkspaceAdminClassifiersRouteImport } from './routes/_workspace/_admin/classifiers'
 import { Route as WorkspaceAdminReviewRouteImport } from './routes/_workspace/_admin/review'
 import { Route as WorkspaceAdminRunsRouteImport } from './routes/_workspace/_admin/runs'
 import { Route as WorkspaceAdminSpendRouteImport } from './routes/_workspace/_admin/spend'
-import { Route as WorkspaceAdminUsersRouteImport } from './routes/_workspace/_admin/users'
 import { Route as WorkspaceDocsSplatRouteImport } from './routes/_workspace/docs.$'
 import { Route as WorkspaceDocumentShaRouteImport } from './routes/_workspace/document.$sha'
+import { Route as WorkspaceAdminSourcesIndexRouteImport } from './routes/_workspace/_admin/sources.index'
+import { Route as WorkspaceAdminSourcesIdRouteImport } from './routes/_workspace/_admin/sources.$id'
+import { Route as WorkspaceAdminSourcesTryIdRouteImport } from './routes/_workspace/_admin/sources.try.$id'
 
 const EntryRoute = EntryRouteImport.update({
   id: '/_entry',
@@ -62,6 +65,11 @@ const WorkspaceSkillsRoute = WorkspaceSkillsRouteImport.update({
   path: '/skills',
   getParentRoute: () => WorkspaceRoute,
 } as any)
+const WorkspaceAdminAdminRoute = WorkspaceAdminAdminRouteImport.update({
+  id: '/admin',
+  path: '/admin',
+  getParentRoute: () => WorkspaceAdminRoute,
+} as any)
 const WorkspaceAdminClassifiersRoute =
   WorkspaceAdminClassifiersRouteImport.update({
     id: '/classifiers',
@@ -83,11 +91,6 @@ const WorkspaceAdminSpendRoute = WorkspaceAdminSpendRouteImport.update({
   path: '/spend',
   getParentRoute: () => WorkspaceAdminRoute,
 } as any)
-const WorkspaceAdminUsersRoute = WorkspaceAdminUsersRouteImport.update({
-  id: '/users',
-  path: '/users',
-  getParentRoute: () => WorkspaceAdminRoute,
-} as any)
 const WorkspaceDocsSplatRoute = WorkspaceDocsSplatRouteImport.update({
   id: '/docs/$',
   path: '/docs/$',
@@ -98,6 +101,23 @@ const WorkspaceDocumentShaRoute = WorkspaceDocumentShaRouteImport.update({
   path: '/document/$sha',
   getParentRoute: () => WorkspaceRoute,
 } as any)
+const WorkspaceAdminSourcesIndexRoute =
+  WorkspaceAdminSourcesIndexRouteImport.update({
+    id: '/sources/',
+    path: '/sources/',
+    getParentRoute: () => WorkspaceAdminRoute,
+  } as any)
+const WorkspaceAdminSourcesIdRoute = WorkspaceAdminSourcesIdRouteImport.update({
+  id: '/sources/$id',
+  path: '/sources/$id',
+  getParentRoute: () => WorkspaceAdminRoute,
+} as any)
+const WorkspaceAdminSourcesTryIdRoute =
+  WorkspaceAdminSourcesTryIdRouteImport.update({
+    id: '/sources/try/$id',
+    path: '/sources/try/$id',
+    getParentRoute: () => WorkspaceAdminRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof WorkspaceIndexRoute
@@ -105,13 +125,16 @@ export interface FileRoutesByFullPath {
   '/login': typeof EntryLoginRoute
   '/connect': typeof WorkspaceConnectRoute
   '/skills': typeof WorkspaceSkillsRoute
+  '/admin': typeof WorkspaceAdminAdminRoute
   '/classifiers': typeof WorkspaceAdminClassifiersRoute
   '/review': typeof WorkspaceAdminReviewRoute
   '/runs': typeof WorkspaceAdminRunsRoute
   '/spend': typeof WorkspaceAdminSpendRoute
-  '/users': typeof WorkspaceAdminUsersRoute
   '/docs/$': typeof WorkspaceDocsSplatRoute
   '/document/$sha': typeof WorkspaceDocumentShaRoute
+  '/sources/$id': typeof WorkspaceAdminSourcesIdRoute
+  '/sources/': typeof WorkspaceAdminSourcesIndexRoute
+  '/sources/try/$id': typeof WorkspaceAdminSourcesTryIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof WorkspaceIndexRoute
@@ -119,13 +142,16 @@ export interface FileRoutesByTo {
   '/login': typeof EntryLoginRoute
   '/connect': typeof WorkspaceConnectRoute
   '/skills': typeof WorkspaceSkillsRoute
+  '/admin': typeof WorkspaceAdminAdminRoute
   '/classifiers': typeof WorkspaceAdminClassifiersRoute
   '/review': typeof WorkspaceAdminReviewRoute
   '/runs': typeof WorkspaceAdminRunsRoute
   '/spend': typeof WorkspaceAdminSpendRoute
-  '/users': typeof WorkspaceAdminUsersRoute
   '/docs/$': typeof WorkspaceDocsSplatRoute
   '/document/$sha': typeof WorkspaceDocumentShaRoute
+  '/sources/$id': typeof WorkspaceAdminSourcesIdRoute
+  '/sources': typeof WorkspaceAdminSourcesIndexRoute
+  '/sources/try/$id': typeof WorkspaceAdminSourcesTryIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -137,13 +163,16 @@ export interface FileRoutesById {
   '/_workspace/connect': typeof WorkspaceConnectRoute
   '/_workspace/skills': typeof WorkspaceSkillsRoute
   '/_workspace/': typeof WorkspaceIndexRoute
+  '/_workspace/_admin/admin': typeof WorkspaceAdminAdminRoute
   '/_workspace/_admin/classifiers': typeof WorkspaceAdminClassifiersRoute
   '/_workspace/_admin/review': typeof WorkspaceAdminReviewRoute
   '/_workspace/_admin/runs': typeof WorkspaceAdminRunsRoute
   '/_workspace/_admin/spend': typeof WorkspaceAdminSpendRoute
-  '/_workspace/_admin/users': typeof WorkspaceAdminUsersRoute
   '/_workspace/docs/$': typeof WorkspaceDocsSplatRoute
   '/_workspace/document/$sha': typeof WorkspaceDocumentShaRoute
+  '/_workspace/_admin/sources/$id': typeof WorkspaceAdminSourcesIdRoute
+  '/_workspace/_admin/sources/': typeof WorkspaceAdminSourcesIndexRoute
+  '/_workspace/_admin/sources/try/$id': typeof WorkspaceAdminSourcesTryIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -153,13 +182,16 @@ export interface FileRouteTypes {
     | '/login'
     | '/connect'
     | '/skills'
+    | '/admin'
     | '/classifiers'
     | '/review'
     | '/runs'
     | '/spend'
-    | '/users'
     | '/docs/$'
     | '/document/$sha'
+    | '/sources/$id'
+    | '/sources/'
+    | '/sources/try/$id'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -167,13 +199,16 @@ export interface FileRouteTypes {
     | '/login'
     | '/connect'
     | '/skills'
+    | '/admin'
     | '/classifiers'
     | '/review'
     | '/runs'
     | '/spend'
-    | '/users'
     | '/docs/$'
     | '/document/$sha'
+    | '/sources/$id'
+    | '/sources'
+    | '/sources/try/$id'
   id:
     | '__root__'
     | '/_entry'
@@ -184,13 +219,16 @@ export interface FileRouteTypes {
     | '/_workspace/connect'
     | '/_workspace/skills'
     | '/_workspace/'
+    | '/_workspace/_admin/admin'
     | '/_workspace/_admin/classifiers'
     | '/_workspace/_admin/review'
     | '/_workspace/_admin/runs'
     | '/_workspace/_admin/spend'
-    | '/_workspace/_admin/users'
     | '/_workspace/docs/$'
     | '/_workspace/document/$sha'
+    | '/_workspace/_admin/sources/$id'
+    | '/_workspace/_admin/sources/'
+    | '/_workspace/_admin/sources/try/$id'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -256,6 +294,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceSkillsRouteImport
       parentRoute: typeof WorkspaceRoute
     }
+    '/_workspace/_admin/admin': {
+      id: '/_workspace/_admin/admin'
+      path: '/admin'
+      fullPath: '/admin'
+      preLoaderRoute: typeof WorkspaceAdminAdminRouteImport
+      parentRoute: typeof WorkspaceAdminRoute
+    }
     '/_workspace/_admin/classifiers': {
       id: '/_workspace/_admin/classifiers'
       path: '/classifiers'
@@ -284,13 +329,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceAdminSpendRouteImport
       parentRoute: typeof WorkspaceAdminRoute
     }
-    '/_workspace/_admin/users': {
-      id: '/_workspace/_admin/users'
-      path: '/users'
-      fullPath: '/users'
-      preLoaderRoute: typeof WorkspaceAdminUsersRouteImport
-      parentRoute: typeof WorkspaceAdminRoute
-    }
     '/_workspace/docs/$': {
       id: '/_workspace/docs/$'
       path: '/docs/$'
@@ -304,6 +342,27 @@ declare module '@tanstack/react-router' {
       fullPath: '/document/$sha'
       preLoaderRoute: typeof WorkspaceDocumentShaRouteImport
       parentRoute: typeof WorkspaceRoute
+    }
+    '/_workspace/_admin/sources/': {
+      id: '/_workspace/_admin/sources/'
+      path: '/sources'
+      fullPath: '/sources/'
+      preLoaderRoute: typeof WorkspaceAdminSourcesIndexRouteImport
+      parentRoute: typeof WorkspaceAdminRoute
+    }
+    '/_workspace/_admin/sources/$id': {
+      id: '/_workspace/_admin/sources/$id'
+      path: '/sources/$id'
+      fullPath: '/sources/$id'
+      preLoaderRoute: typeof WorkspaceAdminSourcesIdRouteImport
+      parentRoute: typeof WorkspaceAdminRoute
+    }
+    '/_workspace/_admin/sources/try/$id': {
+      id: '/_workspace/_admin/sources/try/$id'
+      path: '/sources/try/$id'
+      fullPath: '/sources/try/$id'
+      preLoaderRoute: typeof WorkspaceAdminSourcesTryIdRouteImport
+      parentRoute: typeof WorkspaceAdminRoute
     }
   }
 }
@@ -321,19 +380,25 @@ const EntryRouteChildren: EntryRouteChildren = {
 const EntryRouteWithChildren = EntryRoute._addFileChildren(EntryRouteChildren)
 
 interface WorkspaceAdminRouteChildren {
+  WorkspaceAdminAdminRoute: typeof WorkspaceAdminAdminRoute
   WorkspaceAdminClassifiersRoute: typeof WorkspaceAdminClassifiersRoute
   WorkspaceAdminReviewRoute: typeof WorkspaceAdminReviewRoute
   WorkspaceAdminRunsRoute: typeof WorkspaceAdminRunsRoute
   WorkspaceAdminSpendRoute: typeof WorkspaceAdminSpendRoute
-  WorkspaceAdminUsersRoute: typeof WorkspaceAdminUsersRoute
+  WorkspaceAdminSourcesIdRoute: typeof WorkspaceAdminSourcesIdRoute
+  WorkspaceAdminSourcesIndexRoute: typeof WorkspaceAdminSourcesIndexRoute
+  WorkspaceAdminSourcesTryIdRoute: typeof WorkspaceAdminSourcesTryIdRoute
 }
 
 const WorkspaceAdminRouteChildren: WorkspaceAdminRouteChildren = {
+  WorkspaceAdminAdminRoute: WorkspaceAdminAdminRoute,
   WorkspaceAdminClassifiersRoute: WorkspaceAdminClassifiersRoute,
   WorkspaceAdminReviewRoute: WorkspaceAdminReviewRoute,
   WorkspaceAdminRunsRoute: WorkspaceAdminRunsRoute,
   WorkspaceAdminSpendRoute: WorkspaceAdminSpendRoute,
-  WorkspaceAdminUsersRoute: WorkspaceAdminUsersRoute,
+  WorkspaceAdminSourcesIdRoute: WorkspaceAdminSourcesIdRoute,
+  WorkspaceAdminSourcesIndexRoute: WorkspaceAdminSourcesIndexRoute,
+  WorkspaceAdminSourcesTryIdRoute: WorkspaceAdminSourcesTryIdRoute,
 }
 
 const WorkspaceAdminRouteWithChildren = WorkspaceAdminRoute._addFileChildren(

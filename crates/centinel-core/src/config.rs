@@ -1,8 +1,9 @@
 //! Configuration.
 //!
 //! SPEC §1 calls Centinel "generic, config-driven — Tampa is the first config file, not
-//! an assumption". This module is where that stops being aspirational: `[[source]]`
-//! blocks name what the corpus is made of, and [`crate::ops::run`] walks them.
+//! an assumption". This module holds what is true of a *machine*: where its store is,
+//! its defaults, how it opens files, and the `[[schedule]]` blocks it fires. What the
+//! corpus is made of — its sources — lives in the store; see [`crate::catalog`].
 //!
 //! ## Why config is looked up outside the store
 //!
@@ -14,18 +15,19 @@
 //! says about the store rather than about the machine or the corpus. See [`default_root`]
 //! for why the answer is in `$HOME` and not in the working directory.
 //!
-//! Sources are the interesting case, because they arguably *are* corpus. They live here
-//! anyway: a source is a statement of **intent to collect**, and intent is not something
-//! a recipient of your blobs should silently inherit. Handing someone the store gives
-//! them what you gathered; handing them the config asks their machine to go crawling.
+//! Sources used to live here, as `[[source]]` blocks, on the argument that a source is an
+//! intent to collect and a recipient of your store should not inherit one. Two lists
+//! drifted instead — the config's and the store's — so sources moved into the store, and
+//! the intent that fires on its own, a `[[schedule]]`, stayed here. A legacy block is
+//! still parsed, so [`crate::catalog::Sources::import`] can carry it into the store once.
 //!
 //! ## Why writes are textual rather than a serialize round-trip
 //!
-//! `centinel source add` edits a file a person wrote and will read again. Serializing a
+//! `centinel schedule add` edits a file a person wrote and will read again. Serializing a
 //! [`Config`] back over it would parse-and-reprint — silently deleting every comment and
-//! reordering every key. So [`append_source`] appends and [`remove_source`] excises
+//! reordering every key. So [`append_schedule`] appends and [`remove_schedule`] excises
 //! lines, and both re-parse the result to prove the edit did what it claimed before it
-//! reaches disk (see [`verify_edit`]).
+//! reaches disk.
 
 use std::path::{Path, PathBuf};
 
@@ -130,17 +132,18 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub classify: Option<ClassifyConfig>,
 
-    /// The sources a bare `centinel run` walks, in file order.
+    /// Legacy `[[source]]` blocks. Read only so [`crate::catalog::Sources::import`] can
+    /// carry them into the store; nothing else reads them, because the store owns the
+    /// list now.
     ///
-    /// `rename` because TOML spells a list of tables `[[source]]` — singular reads
-    /// correctly at each block, where the plural would not.
-    #[serde(default, rename = "source")]
+    /// `rename` because TOML spells a list of tables `[[source]]`.
+    #[serde(default, rename = "source", skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<SourceConfig>,
 
     /// The cadences `centinel serve` fires runs on, in file order.
     ///
-    /// Beside the sources they name, and in the same file, because **this is where the
-    /// authority to collect comes from**. A scheduled run is not the server deciding to
+    /// In this file rather than the store because **this is where the authority to
+    /// collect on its own comes from**. A scheduled run is not the server deciding to
     /// crawl; it is this file, which only the operator can write, executed later. Nothing
     /// arriving over HTTP or MCP can add a block here, which is the whole of the access
     /// story in `docs/SCHEDULING.md` §1.1.
@@ -676,47 +679,6 @@ impl SourceConfig {
     pub fn is_enabled(&self) -> bool {
         self.enabled.unwrap_or(true)
     }
-
-    /// The TOML block this source serializes to, ready to append.
-    ///
-    /// Hand-written rather than `toml::to_string`, so `id` leads and the acquisition key
-    /// follows it — the two lines a person actually reads — instead of arriving in
-    /// whatever order the serializer chose.
-    pub fn to_toml_block(&self) -> String {
-        let mut s = String::from("[[source]]\n");
-        s.push_str(&format!("id = {}\n", quote(&self.id)));
-        if let Some(site) = &self.site {
-            s.push_str(&format!("site = {}\n", quote(site)));
-        }
-        if let Some(channel) = &self.channel {
-            s.push_str(&format!("channel = {}\n", quote(channel)));
-        }
-        if let Some(enabled) = self.enabled {
-            s.push_str(&format!("enabled = {enabled}\n"));
-        }
-        if let Some(rps) = self.rps {
-            s.push_str(&format!("rps = {rps}\n"));
-        }
-        if let Some(strategy) = &self.strategy {
-            s.push_str(&format!("strategy = {}\n", quote(strategy)));
-        }
-        if let Some(lang) = &self.lang {
-            s.push_str(&format!("lang = {}\n", quote(lang)));
-        }
-        if let Some(audio) = self.audio_if_no_captions {
-            s.push_str(&format!("audio_if_no_captions = {audio}\n"));
-        }
-        if !self.matches.is_empty() {
-            s.push_str(&format!("matches = {}\n", quote_list(&self.matches)));
-        }
-        if !self.yt_dlp_args.is_empty() {
-            s.push_str(&format!(
-                "yt_dlp_args = {}\n",
-                quote_list(&self.yt_dlp_args)
-            ));
-        }
-        s
-    }
 }
 
 /// The jitter every schedule gets unless it says otherwise. See [`ScheduleConfig::jitter_secs`].
@@ -960,15 +922,9 @@ impl Config {
                 schedule.cron
             );
 
-            // A source id that names nothing is the mistake this file invites most: the
-            // schedule fires on time, collects nothing, and reports success.
-            for id in &schedule.sources {
-                anyhow::ensure!(
-                    self.source(id).is_some(),
-                    "schedule `{}` names source `{id}`, which has no [[source]] block",
-                    schedule.id
-                );
-            }
+            // Whether each named source exists is a question for the store, not this
+            // file: see `catalog::Sources::check_schedules`, which `serve` and `schedule
+            // add` ask before anything fires.
         }
         Ok(())
     }
@@ -1027,60 +983,20 @@ impl Config {
         paths
     }
 
-    pub fn source(&self, id: &str) -> Option<&SourceConfig> {
-        self.sources.iter().find(|s| s.id == id)
-    }
-
-    /// The sources a run walks: every enabled one, or exactly those named.
-    ///
-    /// Naming a disabled source runs it. `enabled = false` is a default, and an explicit
-    /// argument is an instruction — the person typing the id can see the block.
-    pub fn selected(&self, only: &[String]) -> anyhow::Result<Vec<&SourceConfig>> {
-        if only.is_empty() {
-            return Ok(self.sources.iter().filter(|s| s.is_enabled()).collect());
-        }
-        let mut out = Vec::with_capacity(only.len());
-        for id in only {
-            let source = self.source(id).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no source `{id}` in {}{}",
-                    Self::locate()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "the config".into()),
-                    self.nearby(id)
-                )
-            })?;
-            out.push(source);
-        }
-        Ok(out)
-    }
-
-    /// " (did you mean `tampa`?)", or empty. Config ids are typed by hand, and a
-    /// transposed character should not read as "that source does not exist".
-    fn nearby(&self, id: &str) -> String {
-        let close = self.sources.iter().find(|s| {
-            s.id.eq_ignore_ascii_case(id) || s.id.starts_with(id) || id.starts_with(&s.id)
-        });
-        match close {
-            Some(s) => format!(" (did you mean `{}`?)", s.id),
-            None if self.sources.is_empty() => " — it has no sources yet".to_string(),
-            None => String::new(),
-        }
-    }
-
     /// A starter file, written by `centinel open --write-config`.
     pub fn example() -> &'static str {
         EXAMPLE
     }
 }
 
-/// The file `centinel source add` creates when none exists, and what ships as
+/// The file `centinel schedule add` creates when none exists, and what ships as
 /// `centinel.toml.example`.
-pub const EXAMPLE: &str = r#"# Centinel configuration.
+pub const EXAMPLE: &str = r#"# Centinel configuration — what is true of this machine.
 #
-# `centinel run` walks every [[source]] below: discover, collect, extract, index, then
-# one corpus-wide embed. Every stage skips work it has already done, so running it twice
-# is cheap and running it from cron is the intended use.
+# The sources a corpus is made of live in the store, not here: add them with
+# `centinel source add` or from the web's Sources page. `centinel run` walks every enabled
+# one: discover, collect, extract, index, then one corpus-wide embed. Every stage skips
+# work it has already done, so running it twice is cheap.
 
 # Where the store lives. Defaults to ~/.centinel, so every run collects into one corpus
 # whatever directory it was started from. `--root` and $CENTINEL_ROOT override it.
@@ -1121,16 +1037,12 @@ model = "whisper-large-v3-turbo"
 #   [classify]
 #   model = "jev-1.13.0"
 
-# A website. `site` is any URL on it; only the origin is used.
-#   [[source]]
-#   id = "tampa"
-#   site = "https://www.tampa.gov"
-
-# A YouTube channel — a peer of a website, differing only in how it is acquired.
-#   [[source]]
-#   id = "tampa-council"
-#   channel = "https://www.youtube.com/@CityofTampa"
-#   audio_if_no_captions = true
+# A cadence `centinel serve` fires `centinel run` on. Here rather than in the store, so
+# a store handed to someone else collects nothing on its own.
+#   [[schedule]]
+#   id = "nightly"
+#   cron = "0 3 * * *"
+#   sources = ["tampa"]
 
 [open]
 # Either an application name, or a command template containing {path}.
@@ -1143,114 +1055,11 @@ model = "whisper-large-v3-turbo"
 default = "system"
 "#;
 
-/// Appends a `[[source]]` block, creating the file from [`EXAMPLE`] if absent.
-///
-/// Appending — rather than reserializing — is what keeps a hand-written config
-/// hand-written. Everything above the new block is byte-identical afterwards.
-pub fn append_source(path: &Path, source: &SourceConfig) -> anyhow::Result<()> {
-    source.acquisition()?;
-    crate::domain::SourceId::new(source.id.clone())?;
-
-    let existing = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => EXAMPLE.to_string(),
-        Err(e) => anyhow::bail!("reading {}: {e}", path.display()),
-    };
-
-    let before = Config::parse(&existing).map_err(|e| {
-        anyhow::anyhow!(
-            "{} does not parse, so it cannot be edited safely: {e}",
-            path.display()
-        )
-    })?;
-    if before.source(&source.id).is_some() {
-        anyhow::bail!(
-            "source `{}` is already in {}; edit it there or remove it first",
-            source.id,
-            path.display()
-        );
-    }
-
-    let mut text = existing;
-    if !text.is_empty() {
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push('\n');
-    }
-    text.push_str(&source.to_toml_block());
-
-    let mut expected: Vec<String> = before.sources.iter().map(|s| s.id.clone()).collect();
-    expected.push(source.id.clone());
-    verify_edit(path, &text, &expected)?;
-    write_atomically(path, &text)
-}
-
-/// Removes the `[[source]]` block with this id.
-///
-/// Excises the header line through the line before the next top-level table, which takes
-/// the block's own keys and its trailing blank lines and nothing else. Comments *above*
-/// the header are left alone: they may describe the block or may be a section banner,
-/// and deleting a person's prose on a guess is the worse error.
-pub fn remove_source(path: &Path, id: &str) -> anyhow::Result<()> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-    let before = Config::parse(&text).map_err(|e| {
-        anyhow::anyhow!(
-            "{} does not parse, so it cannot be edited safely: {e}",
-            path.display()
-        )
-    })?;
-    anyhow::ensure!(
-        before.source(id).is_some(),
-        "no source `{id}` in {}",
-        path.display()
-    );
-
-    let lines: Vec<&str> = text.lines().collect();
-    let ranges = block_ranges(&lines, "[[source]]");
-    let (start, end) = ranges
-        .into_iter()
-        .find(|(s, e)| block_declares(&lines[*s..*e], id))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "source `{id}` parses out of {} but its `[[source]]` block could not be \
-                 located; edit the file by hand",
-                path.display()
-            )
-        })?;
-
-    let kept: Vec<&str> = lines[..start]
-        .iter()
-        .chain(lines[end..].iter())
-        .copied()
-        .collect();
-    let mut out = kept.join("\n");
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-
-    let expected: Vec<String> = before
-        .sources
-        .iter()
-        .filter(|s| s.id != id)
-        .map(|s| s.id.clone())
-        .collect();
-    verify_edit(path, &out, &expected)?;
-    write_atomically(path, &out)
-}
-
-/// Proves a textual edit produced the source list it claimed, before it reaches disk.
-///
-/// This is what makes line-splicing an acceptable way to edit TOML. The splice is a
-/// guess about the grammar; this re-parses the result and checks it against the answer
-/// computed from the *parsed* config, so a mis-split fails loudly with the file
-/// untouched instead of quietly dropping the block below it.
 /// Appends a `[[schedule]]` block, validated against the file it is joining.
 ///
-/// Validated against the *whole* config rather than in isolation, because the mistakes
-/// this block invites are relational: a `sources` entry naming no `[[source]]`, and an id
-/// already taken. Both parse cleanly on their own and are silent until 3am.
+/// Validated against the *whole* config rather than in isolation, because an id already
+/// taken parses cleanly on its own and is silent until 3am. Whether its sources exist is
+/// checked by the caller, against the store.
 pub fn append_schedule(path: &Path, schedule: &ScheduleConfig) -> anyhow::Result<()> {
     let existing = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -1340,7 +1149,7 @@ pub fn remove_schedule(path: &Path, id: &str) -> anyhow::Result<()> {
     write_atomically(path, &out)
 }
 
-/// [`verify_edit`], for the schedule list.
+/// Re-parses an edited file and checks it holds exactly the schedules expected.
 fn verify_schedule_edit(path: &Path, text: &str, expected: &[String]) -> anyhow::Result<()> {
     let after = Config::parse(text).map_err(|e| {
         anyhow::anyhow!(
@@ -1353,24 +1162,6 @@ fn verify_schedule_edit(path: &Path, text: &str, expected: &[String]) -> anyhow:
     anyhow::ensure!(
         got == expected,
         "editing {} would have left schedules {got:?} rather than {expected:?}; it was \
-         left unchanged",
-        path.display()
-    );
-    Ok(())
-}
-
-fn verify_edit(path: &Path, text: &str, expected: &[String]) -> anyhow::Result<()> {
-    let after = Config::parse(text).map_err(|e| {
-        anyhow::anyhow!(
-            "editing {} would have produced a file that does not parse ({e}); it was \
-             left unchanged",
-            path.display()
-        )
-    })?;
-    let got: Vec<String> = after.sources.iter().map(|s| s.id.clone()).collect();
-    anyhow::ensure!(
-        got == expected,
-        "editing {} would have left sources {got:?} rather than {expected:?}; it was \
          left unchanged",
         path.display()
     );
@@ -1709,16 +1500,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_schedule_naming_a_source_that_does_not_exist_is_refused() {
-        let err =
-            with_schedule("[[schedule]]\nid = \"x\"\ncron = \"@daily\"\nsources = [\"orlando\"]\n")
-                .unwrap_err()
-                .to_string();
-        assert!(err.contains("orlando"), "{err}");
-        assert!(err.contains("[[source]]"), "{err}");
-    }
-
     /// Syntactically valid, and it never happens. Caught at load rather than by a
     /// schedule that has quietly never fired.
     #[test]
@@ -1836,37 +1617,6 @@ mod tests {
         );
     }
 
-    /// The relational check has to happen against the file being joined, not in isolation.
-    #[test]
-    fn appending_a_schedule_for_an_unknown_source_is_refused_before_writing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("centinel.toml");
-        std::fs::write(
-            &path,
-            "[[source]]\nid = \"tampa\"\nsite = \"https://tampa.gov\"\n",
-        )
-        .unwrap();
-
-        let err = append_schedule(
-            &path,
-            &ScheduleConfig {
-                id: "daily".into(),
-                cron: "0 3 * * *".into(),
-                sources: vec!["orlando".into()],
-                ..Default::default()
-            },
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("orlando"), "{err}");
-
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            !text.contains("schedule"),
-            "the file was written anyway: {text}"
-        );
-    }
-
     #[test]
     fn a_source_naming_neither_or_both_is_rejected() {
         let err = Config::parse("[[source]]\nid = \"x\"\n")
@@ -1907,45 +1657,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("invalid source id"), "{err}");
-    }
-
-    #[test]
-    fn selection_defaults_to_every_enabled_source() {
-        let c = parse(
-            r#"
-            [[source]]
-            id = "a"
-            site = "https://a.gov"
-
-            [[source]]
-            id = "b"
-            site = "https://b.gov"
-            enabled = false
-        "#,
-        );
-        let ids: Vec<&str> = c
-            .selected(&[])
-            .unwrap()
-            .iter()
-            .map(|s| s.id.as_str())
-            .collect();
-        assert_eq!(ids, ["a"]);
-
-        // Naming a disabled source explicitly runs it — that is an instruction.
-        let ids: Vec<&str> = c
-            .selected(&["b".into()])
-            .unwrap()
-            .iter()
-            .map(|s| s.id.as_str())
-            .collect();
-        assert_eq!(ids, ["b"]);
-    }
-
-    #[test]
-    fn selecting_an_unknown_source_suggests_a_near_miss() {
-        let c = parse("[[source]]\nid = \"tampa\"\nsite = \"https://t.gov\"\n");
-        let err = c.selected(&["Tampa".into()]).unwrap_err().to_string();
-        assert!(err.contains("did you mean `tampa`"), "{err}");
     }
 
     #[test]
@@ -2023,174 +1734,5 @@ mod tests {
             Config::parse("[[source]]\nid = \"a\"\nsite = \"https://a.gov\"\nrps = -1.0\n")
                 .is_err()
         );
-    }
-
-    // ── writing ────────────────────────────────────────────────────────────────
-
-    fn temp(text: &str) -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("centinel.toml");
-        std::fs::write(&path, text).unwrap();
-        (dir, path)
-    }
-
-    /// The property the whole textual-edit decision buys.
-    #[test]
-    fn appending_preserves_comments_and_everything_above_it() {
-        let original = "# my notes, hard won\n\n[open]\npdf = \"Preview\"  # inline, too\n";
-        let (_d, path) = temp(original);
-
-        append_source(&path, &SourceConfig::site("tampa", "https://www.tampa.gov")).unwrap();
-
-        let after = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            after.starts_with(original),
-            "the prefix was rewritten:\n{after}"
-        );
-        assert!(after.contains("# my notes, hard won"));
-        assert!(after.contains("# inline, too"));
-
-        let c = Config::parse(&after).unwrap();
-        assert_eq!(c.sources.len(), 1);
-        assert_eq!(c.sources[0].id, "tampa");
-        assert_eq!(c.open.opener_for("pdf"), "Preview");
-    }
-
-    #[test]
-    fn appending_to_a_missing_file_creates_one_from_the_example() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested").join("centinel.toml");
-        append_source(
-            &path,
-            &SourceConfig::channel("council", "https://youtube.com/@x"),
-        )
-        .unwrap();
-
-        let c = Config::from_file(&path).unwrap();
-        assert_eq!(c.sources.len(), 1);
-        assert!(std::fs::read_to_string(&path).unwrap().contains("[open]"));
-    }
-
-    #[test]
-    fn appending_a_duplicate_is_refused() {
-        let (_d, path) = temp("[[source]]\nid = \"tampa\"\nsite = \"https://t.gov\"\n");
-        let err = append_source(&path, &SourceConfig::site("tampa", "https://other.gov"))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("already in"), "{err}");
-    }
-
-    #[test]
-    fn removing_takes_the_block_and_leaves_its_neighbours() {
-        let (_d, path) = temp(
-            "[open]\npdf = \"Preview\"\n\n\
-             [[source]]\nid = \"a\"\nsite = \"https://a.gov\"\n\n\
-             [[source]]\nid = \"b\"\nsite = \"https://b.gov\"\nrps = 0.5\n\n\
-             [[source]]\nid = \"c\"\nsite = \"https://c.gov\"\n",
-        );
-        remove_source(&path, "b").unwrap();
-
-        let c = Config::from_file(&path).unwrap();
-        let ids: Vec<&str> = c.sources.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, ["a", "c"]);
-        assert_eq!(c.open.opener_for("pdf"), "Preview");
-
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains("b.gov"), "{text}");
-        assert!(text.contains("a.gov") && text.contains("c.gov"), "{text}");
-    }
-
-    #[test]
-    fn removing_the_last_source_leaves_a_valid_file() {
-        let (_d, path) = temp("[[source]]\nid = \"only\"\nsite = \"https://x.gov\"\n");
-        remove_source(&path, "only").unwrap();
-        assert!(Config::from_file(&path).unwrap().sources.is_empty());
-    }
-
-    #[test]
-    fn removing_an_absent_source_is_an_error() {
-        let (_d, path) = temp("[[source]]\nid = \"a\"\nsite = \"https://a.gov\"\n");
-        assert!(remove_source(&path, "zzz").is_err());
-    }
-
-    /// A `[[source]]` followed by another table — the splice has to stop at the header
-    /// rather than swallowing it. The verify step is what makes that safe.
-    #[test]
-    fn a_source_followed_by_another_table_splices_correctly() {
-        let (_d, path) = temp(
-            "[[source]]\nid = \"a\"\nsite = \"https://a.gov\"\n\n\
-             [defaults]\nrps = 2.0\n\n\
-             [[source]]\nid = \"b\"\nsite = \"https://b.gov\"\n",
-        );
-        remove_source(&path, "a").unwrap();
-        let c = Config::from_file(&path).unwrap();
-        assert_eq!(c.sources.len(), 1);
-        assert_eq!(c.sources[0].id, "b");
-        assert_eq!(c.defaults.rps, 2.0);
-    }
-
-    #[test]
-    fn add_then_remove_returns_the_file_to_its_content() {
-        let original = "[open]\npdf = \"Preview\"\n";
-        let (_d, path) = temp(original);
-        append_source(&path, &SourceConfig::site("tampa", "https://t.gov")).unwrap();
-        remove_source(&path, "tampa").unwrap();
-
-        let after = std::fs::read_to_string(&path).unwrap();
-        assert!(Config::parse(&after).unwrap().sources.is_empty());
-        assert!(after.starts_with(original), "{after:?}");
-    }
-
-    #[test]
-    fn a_round_trip_through_the_block_writer_preserves_every_field() {
-        let source = SourceConfig {
-            id: "tampa-council".into(),
-            site: None,
-            channel: Some("https://www.youtube.com/@CityofTampa".into()),
-            enabled: Some(false),
-            rps: Some(0.25),
-            matches: vec!["/agenda/".into(), "budget".into()],
-            yt_dlp_args: vec!["--cookies-from-browser=brave".into()],
-            audio_if_no_captions: Some(true),
-            lang: Some("es".into()),
-            strategy: Some("listing".into()),
-        };
-        let c = Config::parse(&source.to_toml_block()).unwrap();
-        let got = &c.sources[0];
-        assert_eq!(got.id, "tampa-council");
-        assert_eq!(
-            got.channel.as_deref(),
-            Some("https://www.youtube.com/@CityofTampa")
-        );
-        assert_eq!(got.enabled, Some(false));
-        assert_eq!(got.rps, Some(0.25));
-        assert_eq!(got.matches, ["/agenda/", "budget"]);
-        assert_eq!(got.yt_dlp_args, ["--cookies-from-browser=brave"]);
-        assert_eq!(got.audio_if_no_captions, Some(true));
-        assert_eq!(got.lang.as_deref(), Some("es"));
-        assert_eq!(got.strategy.as_deref(), Some("listing"));
-        assert!(!got.is_enabled());
-    }
-
-    /// Quoting has to survive a URL carrying characters the grammar cares about.
-    #[test]
-    fn block_values_are_escaped() {
-        let s = SourceConfig::site("x", r#"https://x.gov/a"b\c"#);
-        let c = Config::parse(&s.to_toml_block()).unwrap();
-        assert_eq!(c.sources[0].site.as_deref(), Some(r#"https://x.gov/a"b\c"#));
-    }
-
-    /// The guard that makes splicing acceptable: a bad edit must not reach disk.
-    #[test]
-    fn a_verify_mismatch_refuses_the_write() {
-        let path = Path::new("centinel.toml");
-        let err = verify_edit(
-            path,
-            "[[source]]\nid=\"a\"\nsite=\"https://a.gov\"\n",
-            &["b".into()],
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("left unchanged"), "{err}");
     }
 }

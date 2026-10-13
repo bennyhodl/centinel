@@ -1,16 +1,20 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { createFileRoute, Link, Navigate, Outlet, redirect, useLocation } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { BookOpen, CircleDollarSign, Eye, FlaskConical, History, LogOut, Moon, Plug, Search, ShieldCheck, Sparkles, Sun, Users } from 'lucide-react'
+import { BookOpen, ChevronsUpDown, CircleDollarSign, Eye, FlaskConical, Globe, History, LogOut, Moon, Plug, Search, ShieldCheck, Sparkles, Sun, Users } from 'lucide-react'
 import { signOut } from '../auth'
 import { queries } from '../queries'
 import { JobDrawerProvider, WorkingNow, useJobEvents } from '../jobs'
-import { ActivityBar } from '../feedback'
+import { ActivityBar, PagePending } from '../feedback'
 import { quotes } from '../quotes'
 import { number } from '../format'
 import { useTheme } from '../theme'
+import { handle, Portrait } from '../ui'
+import type { Account } from '../api'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar'
 import crest from '../assets/crest.jpg'
 
 /**
@@ -23,6 +27,7 @@ export const Route = createFileRoute('/_workspace')({
     if (account?.access !== 'approved') throw redirect({ to: '/login' })
     return { account }
   },
+  pendingComponent: WorkspacePending,
   component: Workspace,
 })
 
@@ -30,14 +35,16 @@ function Workspace() {
   // The account is re-read while the page is open. The moment it is gone or revoked, so is the page.
   const account = useQuery(queries.account()).data
   if (account?.access !== 'approved') return <Navigate to="/login" />
-  return <Shell admin={account.role === 'admin'} />
+  return <Shell account={account} />
 }
 
-function Shell({ admin }: { admin: boolean }) {
+function Shell({ account }: { account: Account }) {
+  const admin = account.role === 'admin'
   const pathname = useLocation({ select: location => location.pathname })
   const system = useQuery(queries.system())
   const corpus = useQuery(queries.corpus({}, 1, 1))
   const questions = useQuery(queries.questions())
+  const sources = useQuery({ ...queries.sources(), enabled: admin })
   const review = useQuery({ ...queries.reviewQueue(1), enabled: admin })
   // The rail says when a run is going, from any page.
   const recent = useQuery({
@@ -52,8 +59,53 @@ function Shell({ admin }: { admin: boolean }) {
   const stale = Boolean(serverVersion && serverVersion !== __CENTINEL_VERSION__)
   const at = (path: string) => pathname === path
 
-  return <JobDrawerProvider><SidebarProvider defaultOpen={false} className="bg-ground">
+  return <JobDrawerProvider>
     <ActivityBar />
+    <Frame nav={<>
+      <NavGroup label="Archive">
+        <NavItem active={at('/')} label="Search" count={corpus.data && number(corpus.data.total)}>
+          <Link to="/" search={{}}><Search /><span>Search</span></Link>
+        </NavItem>
+        {admin && <NavItem active={pathname.startsWith('/sources')} label="Sources" count={sources.data && number(sources.data.sources.length)}>
+          <Link to="/sources"><Globe /><span>Sources</span></Link>
+        </NavItem>}
+      </NavGroup>
+      {admin && <NavGroup label="Classifiers">
+        <NavItem active={at('/classifiers')} label="Classify" count={questions.data && number(questions.data.questions.length)}>
+          <Link to="/classifiers"><FlaskConical /><span>Classify</span></Link>
+        </NavItem>
+        <NavItem active={at('/runs')} label="Runs" count={running.length ? <LivePill>{running.length} live</LivePill> : recent.data && number(recent.data.total)}>
+          <Link to="/runs" search={{ run: '', page: 1, outcome: '' }}><History /><span>Runs</span></Link>
+        </NavItem>
+        <NavItem active={at('/review')} label="Review" count={review.data?.in_review_band ? <span className="font-semibold text-flame-ink">{number(review.data.in_review_band)}</span> : undefined}>
+          <Link to="/review"><Eye /><span>Review</span></Link>
+        </NavItem>
+      </NavGroup>}
+      <NavGroup label="Agent">
+        <NavItem active={at('/connect')} label="Connect" count={<span className="inline-flex items-center gap-1.5"><span className="size-1.5 rounded-full bg-moss" />MCP</span>}>
+          <Link to="/connect"><Plug /><span>Connect</span></Link>
+        </NavItem>
+        <NavItem active={at('/skills')} label="Skills" count="1">
+          <Link to="/skills"><Sparkles /><span>Skills</span></Link>
+        </NavItem>
+      </NavGroup>
+    </>} footer={<>
+      {admin && <WorkingNow />}
+      <Quote />
+      <SidebarMenu className="-mx-1"><AccountMenu account={account} /></SidebarMenu>
+    </>}>
+      {stale && <Alert className="mb-6"><ShieldCheck /><AlertTitle>Server is v{serverVersion}</AlertTitle><AlertDescription>This page is v{__CENTINEL_VERSION__}. Stop the old `centinel web` and start it again, then reload.</AlertDescription></Alert>}
+      <Outlet />
+    </Frame>
+  </JobDrawerProvider>
+}
+
+/**
+ * The workspace's chrome: the rail and the card a page sits in. The shell fills it once the
+ * account is read; until then its skeleton does, so nothing moves when the account lands.
+ */
+function Frame({ nav, footer, children }: { nav?: ReactNode; footer: ReactNode; children: ReactNode }) {
+  return <SidebarProvider defaultOpen={false} className="bg-ground">
     <Sidebar variant="floating" collapsible="icon">
       <SidebarHeader className="px-3 pt-4 pb-2">
         <div className="flex items-center gap-3 px-1 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:px-0">
@@ -65,54 +117,32 @@ function Shell({ admin }: { admin: boolean }) {
           <SidebarTrigger className="size-7 self-start text-muted-foreground group-data-[collapsible=icon]:self-center" />
         </div>
       </SidebarHeader>
-      <SidebarContent>
-        <NavGroup label="Archive">
-          <NavItem active={at('/')} label="Search" count={corpus.data && number(corpus.data.total)}>
-            <Link to="/" search={{}}><Search /><span>Search</span></Link>
-          </NavItem>
-          {admin && <NavItem active={at('/spend')} label="Spend">
-            <Link to="/spend" search={{ metric: 'cost', days: 30 }}><CircleDollarSign /><span>Spend</span></Link>
-          </NavItem>}
-        </NavGroup>
-        {admin && <NavGroup label="Classifiers">
-          <NavItem active={at('/classifiers')} label="Classify" count={questions.data && number(questions.data.questions.length)}>
-            <Link to="/classifiers"><FlaskConical /><span>Classify</span></Link>
-          </NavItem>
-          <NavItem active={at('/runs')} label="Runs" count={running.length ? <LivePill>{running.length} live</LivePill> : recent.data && number(recent.data.total)}>
-            <Link to="/runs" search={{ run: '', page: 1, outcome: '' }}><History /><span>Runs</span></Link>
-          </NavItem>
-          <NavItem active={at('/review')} label="Review" count={review.data?.in_review_band ? <span className="font-semibold text-flame-ink">{number(review.data.in_review_band)}</span> : undefined}>
-            <Link to="/review"><Eye /><span>Review</span></Link>
-          </NavItem>
-        </NavGroup>}
-        <NavGroup label="Agent">
-          <NavItem active={at('/connect')} label="Connect" count={<span className="inline-flex items-center gap-1.5"><span className="size-1.5 rounded-full bg-moss" />MCP</span>}>
-            <Link to="/connect"><Plug /><span>Connect</span></Link>
-          </NavItem>
-          <NavItem active={at('/skills')} label="Skills" count="1">
-            <Link to="/skills"><Sparkles /><span>Skills</span></Link>
-          </NavItem>
-        </NavGroup>
-      </SidebarContent>
-      <SidebarFooter className="gap-3 px-3 pb-3">
-        {admin && <WorkingNow />}
-        <Quote />
-        <SidebarMenu className="-mx-1">
-          <NavItem active={pathname.startsWith('/docs')} label="Documentation"><Link to="/docs/$" params={{ _splat: '' }}><BookOpen /><span>Documentation</span></Link></NavItem>
-          {admin && <NavItem active={at('/users')} label="User access"><Link to="/users"><Users /><span>User access</span></Link></NavItem>}
-          <SidebarMenuItem><SidebarMenuButton onClick={signOut} tooltip="Sign out" className="h-9 text-[14px]"><LogOut /><span>Sign out</span></SidebarMenuButton></SidebarMenuItem>
-          <ThemeToggle />
-        </SidebarMenu>
-      </SidebarFooter>
+      <SidebarContent>{nav}</SidebarContent>
+      <SidebarFooter className="gap-3 px-3 pb-3">{footer}</SidebarFooter>
     </Sidebar>
     <SidebarInset className="min-w-0 bg-background md:my-2.5 md:mr-2.5 md:rounded-2xl md:border md:border-sidebar-border md:shadow-[0_1px_2px_rgba(26,23,18,0.06),0_8px_24px_rgba(26,23,18,0.05)]">
       <div className="flex h-12 items-center px-4 md:hidden"><SidebarTrigger /></div>
-      <div className="min-w-0 px-5 py-6 [view-transition-name:page] md:px-10 md:py-8">
-        {stale && <Alert className="mb-6"><ShieldCheck /><AlertTitle>Server is v{serverVersion}</AlertTitle><AlertDescription>This page is v{__CENTINEL_VERSION__}. Stop the old `centinel web` and start it again, then reload.</AlertDescription></Alert>}
-        <Outlet />
-      </div>
+      <div className="min-w-0 px-5 py-6 [view-transition-name:page] md:px-10 md:py-8">{children}</div>
     </SidebarInset>
-  </SidebarProvider></JobDrawerProvider>
+  </SidebarProvider>
+}
+
+/**
+ * While the account is read: the chrome, an empty rail (the account decides its links), a
+ * blank where the account sits, and the skeleton of the page being opened, if it has one.
+ */
+function WorkspacePending() {
+  return <Frame footer={<SidebarMenu className="-mx-1"><SidebarMenuItem>
+    <SidebarMenuButton size="lg" disabled tooltip="Account" className="disabled:opacity-100">
+      <Skeleton className="size-8 shrink-0 rounded-full" />
+      <div className="grid flex-1 text-left leading-tight">
+        <span className="truncate font-semibold"><Skeleton mask="Archive reader" /></span>
+        <span className="truncate text-xs"><Skeleton mask="reader@example.org" /></span>
+      </div>
+    </SidebarMenuButton>
+  </SidebarMenuItem></SidebarMenu>}>
+    <PagePending />
+  </Frame>
 }
 
 function NavGroup({ label, children }: { label: string; children: ReactNode }) {
@@ -129,13 +159,44 @@ function NavItem({ active, label, count, children }: { active: boolean; label: s
   </SidebarMenuItem>
 }
 
-function ThemeToggle() {
-  const [theme, toggle] = useTheme()
-  const label = theme === 'dark' ? 'Light mode' : 'Dark mode'
+/**
+ * Who is signed in, and behind it everything about the workspace rather than the archive:
+ * spend, documentation, colour mode, the admin page and signing out.
+ */
+function AccountMenu({ account }: { account: Account }) {
+  const { isMobile } = useSidebar()
+  const [theme, toggleTheme] = useTheme()
+  const admin = account.role === 'admin'
+  const who = <>
+    <Portrait account={account} className="size-8 text-base" />
+    <div className="grid flex-1 text-left leading-tight">
+      <span className="truncate font-semibold">{account.name}</span>
+      <span className="truncate text-xs text-muted-foreground">{handle(account)}</span>
+    </div>
+  </>
   return <SidebarMenuItem>
-    <SidebarMenuButton onClick={toggle} tooltip={label} className="h-9 text-[14px] text-muted-foreground">
-      {theme === 'dark' ? <Sun /> : <Moon />}<span>{label}</span>
-    </SidebarMenuButton>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <SidebarMenuButton size="lg" tooltip={account.name} className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground">
+          {who}<ChevronsUpDown className="ml-auto size-4" />
+        </SidebarMenuButton>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side={isMobile ? 'bottom' : 'right'} align="end" sideOffset={4} className="w-(--radix-dropdown-menu-trigger-width) min-w-56 rounded-lg">
+        <DropdownMenuLabel className="p-0 font-normal"><div className="flex items-center gap-2 px-1 py-1.5 text-sm">{who}</div></DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuGroup>
+          {admin && <DropdownMenuItem asChild><Link to="/spend" search={{ metric: 'cost', days: 30 }}><CircleDollarSign />Spend</Link></DropdownMenuItem>}
+          <DropdownMenuItem asChild><Link to="/docs/$" params={{ _splat: '' }}><BookOpen />Documentation</Link></DropdownMenuItem>
+          {/* Kept open, so the page changes colour under the menu. */}
+          <DropdownMenuItem onSelect={event => { event.preventDefault(); toggleTheme() }}>
+            {theme === 'dark' ? <Sun /> : <Moon />}{theme === 'dark' ? 'Light mode' : 'Dark mode'}
+          </DropdownMenuItem>
+          {admin && <DropdownMenuItem asChild><Link to="/admin"><Users />Admin</Link></DropdownMenuItem>}
+        </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={signOut}><LogOut />Sign out</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   </SidebarMenuItem>
 }
 

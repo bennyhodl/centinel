@@ -9,6 +9,7 @@ mod access;
 mod bundle;
 mod gateway;
 mod http;
+mod lane;
 mod logging;
 mod mcp;
 mod promote;
@@ -360,6 +361,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("opening store at {}", root.display()))?;
     tracing::debug!(root = %root.display(), "store open");
+    import_sources(&store, &matches).await?;
     let ctx = Arc::new(Ctx::new(store));
 
     match name {
@@ -410,7 +412,7 @@ async fn serve(ctx: Arc<Ctx>, bind: &str, matches: &clap::ArgMatches) -> Result<
         None
     } else {
         let config = matches.get_one::<String>("config").map(String::as_str);
-        let scheduler = schedule::Scheduler::new(Arc::clone(&ctx), config)?;
+        let scheduler = schedule::Scheduler::new(Arc::clone(&ctx), config).await?;
         let count = scheduler.schedules().len();
         let (reload_tx, reload_rx) = schedule::ReloadSignal::channel();
         let armed = schedule::spawn(scheduler, reload_rx)?;
@@ -519,10 +521,8 @@ fn install_reload_handler(_tx: tokio::sync::mpsc::Sender<()>) {}
 /// 2. `root` in the config file — the standing preference;
 /// 3. `~/.centinel` — see [`config::default_root`].
 ///
-/// The config consulted is whichever one this invocation named, so `centinel run --config
-/// other.toml` collects that file's sources into that file's store. Reading the sources
-/// from one config and the root from another would put a corpus somewhere nothing else
-/// would look for it.
+/// The config consulted is whichever one this invocation named, so `--config other.toml`
+/// reads that file's root.
 ///
 /// A config that does not parse is an error here rather than a fall back to the default:
 /// the alternative is collecting into the wrong store and saying nothing about why.
@@ -537,11 +537,43 @@ fn resolve_root(matches: &clap::ArgMatches) -> Result<PathBuf> {
     Ok(config.store_root())
 }
 
+/// Carries a legacy config's `[[source]]` blocks into the store, and gives every log that
+/// predates definitions one inferred from what it holds. See [`centinel_core::catalog`].
+///
+/// Runs before every command and writes only what is missing, so it costs a directory
+/// listing once the store is up to date. Blocks left in the config are said out loud on
+/// every run: the store owns the list now, and an edit to a block nothing reads would
+/// otherwise be silently ignored.
+async fn import_sources(store: &Store, matches: &clap::ArgMatches) -> Result<()> {
+    let (config, path) = match explicit_config(matches) {
+        Some(path) => (Config::from_file(Path::new(path))?, Some(PathBuf::from(path))),
+        None => (Config::load()?, Config::locate()),
+    };
+    let imported = centinel_core::catalog::Sources::new(store)
+        .import(&config)
+        .await?;
+    for id in &imported.from_config {
+        tracing::info!(source = %id, "carried the config's [[source]] block into the store");
+    }
+    for id in &imported.from_log {
+        tracing::info!(source = %id, "defined from what its log holds");
+    }
+    if !config.sources.is_empty() {
+        tracing::warn!(
+            blocks = config.sources.len(),
+            config = %path.map(|p| p.display().to_string()).unwrap_or_default(),
+            "this config's [[source]] blocks are no longer read — the store owns the list; \
+             delete them, and change a source with `centinel source` or the web's Sources page"
+        );
+    }
+    Ok(())
+}
+
 /// A `--config` typed anywhere in the subcommand chain.
 ///
 /// Walked rather than read off one level, because `--config` is an op's own argument and
-/// an op can nest: it sits on `run`, but on `source `**`list`** — one deeper. Reading only
-/// the first level found it for `run` and silently missed it for every `source` action,
+/// an op can nest: it sits on `run`, but on `schedule `**`set`** — one deeper. Reading only
+/// the first level found it for `run` and silently missed it for every nested action,
 /// which is the whole of the bug this walk exists for.
 fn explicit_config(matches: &clap::ArgMatches) -> Option<&String> {
     let mut level = matches;
@@ -727,7 +759,7 @@ mod tests {
         assert!(!flag(&["centinel", "investigate", "https://x.gov/"]));
     }
 
-    /// The nesting `--config` actually has: on `run` at one level, on `source list` at
+    /// The nesting `--config` actually has: on `run` at one level, on `schedule set` at
     /// two. Reading a fixed level found one and silently missed the other, which put the
     /// store somewhere the named config never asked for.
     #[test]
@@ -741,7 +773,7 @@ mod tests {
             Some("a.toml")
         );
         assert_eq!(
-            at(&["centinel", "source", "list", "--config", "b.toml"]).as_deref(),
+            at(&["centinel", "schedule", "set", "--config", "b.toml"]).as_deref(),
             Some("b.toml")
         );
         assert_eq!(at(&["centinel", "doctor"]), None);

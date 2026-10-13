@@ -73,7 +73,7 @@ answers it in advance, which is the form for a session where you are working thr
 of hosts.
 
 Three things the offer deliberately does not do. It does not **collect**: adding is one
-`[[source]]` block, and `centinel run` is still a command you type. It does not appear
+source definition, and `centinel run` is still a command you type. It does not appear
 without a terminal, so `centinel investigate … | tee log` and any scheduled investigation
 print the command and stop. And it is not part of the op — `investigate` itself still writes
 nothing, on every surface, which is what keeps it safe to point at an address nobody has

@@ -29,7 +29,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use centinel_core::config::Config;
 use centinel_core::op::{self, Ctx};
 use centinel_core::ops::Promote;
 use centinel_core::render::Painter;
@@ -42,7 +41,7 @@ use crate::{Output, logging};
 /// Offers to add what an investigation found, and adds it if told to.
 ///
 /// A no-op for every other op, for an investigation that found nothing worth adding, and
-/// for a source the config already names.
+/// for a source the store already defines.
 pub async fn offer(
     ctx: &Arc<Ctx>,
     name: &str,
@@ -61,27 +60,24 @@ pub async fn offer(
     let promote: Promote = serde_json::from_value(found.clone())
         .context("`investigate` changed the shape of what it says would be added")?;
 
-    // The file `source add` would edit, asked the same way it asks.
-    let path = Config::write_path();
-    let config = match path.exists() {
-        true => Config::from_file(&path)?,
-        false => Config::default(),
-    };
-    if config.source(&promote.id).is_some() {
+    if centinel_core::catalog::Sources::new(&ctx.store)
+        .get(&promote.id)
+        .await?
+        .is_some()
+    {
         // Said rather than asked. The suggested id comes from the host, so investigating a
         // site a second time reaches this every time, and a prompt whose default answer
         // produces an error is worse than no prompt. It says why there was no offer and
-        // not that the site is collected — the id could belong to another block entirely,
+        // not that the site is collected — the id could belong to another source entirely,
         // and the command printed above is still there to edit.
         tracing::info!(
             id = %promote.id,
-            config = %path.display(),
-            "already in the config — not offering to add it again"
+            "already a source in this store — not offering to add it again"
         );
         return Ok(());
     }
 
-    match assume_yes || ask(&promote, &path, output) {
+    match assume_yes || ask(&promote, ctx.store.root(), output) {
         true => add(ctx, &promote, output).await,
         false => Ok(()),
     }
@@ -101,13 +97,13 @@ fn can_ask(output: Output) -> bool {
 /// The default is yes. This writes one `[[source]]` block, collects nothing, and is undone
 /// by `centinel source remove`; the expensive decision is `centinel run`, which is still a
 /// separate command you type yourself.
-fn ask(promote: &Promote, path: &Path, output: Output) -> bool {
+fn ask(promote: &Promote, store: &Path, output: Output) -> bool {
     if !can_ask(output) {
         return false;
     }
 
     Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("Add `{}` to {}?", promote.id, path.display()))
+        .with_prompt(format!("Add `{}` to {}?", promote.id, store.display()))
         .default(true)
         // A terminal that stopped answering, or ctrl-C. Not adding is the safe reading of
         // both, and neither is worth an error over a question.
@@ -123,11 +119,7 @@ async fn add(ctx: &Arc<Ctx>, promote: &Promote, output: Output) -> Result<()> {
     if output.json {
         // stdout is carrying the investigation as one JSON document and must stay one, so
         // the outcome goes where progress goes.
-        let config = value
-            .get("config")
-            .and_then(Value::as_str)
-            .unwrap_or("the config");
-        tracing::info!(id = %promote.id, config, "added to the config");
+        tracing::info!(id = %promote.id, "added as a source");
         return Ok(());
     }
 
@@ -146,7 +138,7 @@ async fn add(ctx: &Arc<Ctx>, promote: &Promote, output: Output) -> Result<()> {
 /// The arguments the `source` op is invoked with — the shape every surface sends.
 ///
 /// `run` is deliberately absent: adding is not collecting, and a command that fetched an
-/// hour of a city because somebody pressed `y` at a prompt about a config file would be the
+/// hour of a city because somebody pressed `y` at a prompt about adding a source would be the
 /// worst kind of surprise.
 fn add_args(promote: &Promote) -> Value {
     json!({

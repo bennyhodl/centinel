@@ -163,7 +163,9 @@ current on the operator's cadence.**
 
 ## 3. Where a schedule lives — `centinel.toml`
 
-A `[[schedule]]` block, in the same file as the `[[source]]` blocks it names.
+A `[[schedule]]` block in `centinel.toml`. The sources it names live in the store
+(`log/<id>/source.toml`, see `crates/centinel-core/src/catalog.rs`); the schedule stays in
+the config so a store handed to someone else collects nothing on its own.
 
 ```toml
 [[schedule]]
@@ -245,9 +247,10 @@ centinel schedule rm  tampa-daily
 
 `schedule set` writes one block and stops, exactly as `source add` does — and for the
 reason `ops/source.rs` already gives: the mistakes the file invites are silent until a run
-is well underway. Here they are an `id` in `sources` that names no `[[source]]`, and a cron
+is well underway. Here they are an `id` in `sources` that names no source in the store, and a cron
 expression that parses cleanly and means something else (`0 3 * * 1` is Mondays, not the
-1st). Both are caught at write time, against the config being written.
+1st). Both are caught at write time: the cron against the config being written, the sources
+against the store.
 
 `schedule set` is `Reach::Operator`. It writes the file that grants authority; reachable
 remotely it would be privilege escalation with extra steps.
@@ -719,7 +722,8 @@ walked.**
 ### 9.1 Startup: an invalid schedule refuses to start
 
 `centinel serve` validates every `[[schedule]]` before binding: cron parses, `tz` resolves,
-every id in `sources` names a real `[[source]]`, `skip` names real stages, ids are unique.
+every id in `sources` names a source the store defines, `skip` names real stages, ids are
+unique.
 **Any failure is fatal to `serve`.**
 
 This matches the config loader's existing stance — unknown keys are rejected rather than

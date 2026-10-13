@@ -344,7 +344,7 @@ export type JobOutcome = 'ok' | 'failed' | 'cancelled'
 
 /** What happened to a job, as the server stamped it. `seq` only grows, across every job. */
 export type JobEvent = { seq: number; at: number; job: string } & (
-  | { type: 'started'; kind: string; label: string }
+  | { type: 'started'; kind: string; label: string; stoppable?: boolean }
   | { type: 'step'; step: string }
   | { type: 'progress'; message: string; done: number; total: number; current?: string }
   | { type: 'item'; item: JobItem }
@@ -355,9 +355,11 @@ export type JobEvent = { seq: number; at: number; job: string } & (
 /** A job as it stands: every event folded in, and the latest readable ones. */
 export type JobState = {
   id: string
-  /** The op it runs, or `classify` for a workspace run (whose id is the run's). */
+  /** The op it runs, or `classify` for a workspace run (whose id is the run's). A `run` from the Sources page carries its journal run id. */
   kind: string
   label: string
+  /** Whether `api.stopJob` can end it. */
+  stoppable?: boolean
   started_at: number
   finished_at?: number
   /** The last event folded in. */
@@ -439,6 +441,112 @@ export const originalUrl = (blob: string, source: string, download = false) =>
 /** The Jev model a run asks unless the person picks another. */
 export const DEFAULT_MODEL = 'jev-1.13.0'
 
+// ── Sources ─────────────────────────────────────────────────────────────────
+
+export type SourceKind = 'site' | 'channel'
+
+/** One source the store defines, as `source list` reports it. `resources` is every address its log knows, discovered or collected. */
+export type ListedSource = { id: string; kind: SourceKind; target: string; enabled: boolean; resources: number }
+
+/** The run holding the store's one lane. */
+export type LaneHolder = { pid: number; started_at: string; trigger: 'schedule' | 'manual' | 'catch-up'; schedule?: string; args: string }
+
+/** `log/<id>/source.toml`. */
+export type SourceDefinition = {
+  id: string
+  site?: string
+  channel?: string
+  enabled?: boolean
+  rps?: number
+  matches?: string[]
+  yt_dlp_args?: string[]
+  audio_if_no_captions?: boolean
+  lang?: string
+  strategy?: string
+}
+
+export type SourceProblem = { natural_key: string; state: string; since: string; consecutive_failures: number; detail?: string }
+
+/** What the log says of a source: `centinel list`, one row. */
+export type SourceSummary = {
+  source: string
+  defined: boolean
+  resources: number
+  observations: number
+  liveness: Record<string, number>
+  problems: SourceProblem[]
+  problems_truncated?: number
+  last_discovery?: { at: string; method: string; addresses: number }
+}
+
+/** One run in the journal. */
+export type RunAttempt = {
+  run_id: string
+  schedule?: string
+  trigger: 'schedule' | 'manual' | 'catch-up'
+  started_at: string
+  finished_at: string
+  outcome: 'ok' | 'partial' | 'failed' | 'skipped' | 'interrupted'
+  detail?: string
+  added: { documents: number; derived: number; chunks: number }
+  subtracted: { vanished: number; gone: number; blocked: number; errored: number }
+}
+
+export type SourceDetail = { definition: SourceDefinition; summary?: SourceSummary; runs: RunAttempt[]; running: LaneHolder | null }
+
+export type CrumbStanding = 'open' | 'ignored' | 'promoted'
+export type Crumb = { host: string; links: number; pages: number; example: string; standing?: CrumbStanding }
+/** The ledger, read. `unrecorded` pages have no row yet and are not counted; a rescan writes them down. */
+export type CrumbsList = { action: 'list'; sources: string[]; documents: number; crumbs: Crumb[]; hidden: number; unrecorded: number }
+
+export type Note = { label: string; detail: string; mark?: 'ok' | 'warn' | 'bad' }
+export type ReadQuality = { chars: number; bytes: number; chars_per_kb: number; links: number; link_share: number; findings?: string[] }
+
+export type InvestigateReport = {
+  address: string
+  seed: { http_status?: string; bytes: number; kind: string; final_url?: string; robots_declared: boolean }
+  recognised?: Array<{ strategy: string; keyed_on: string; kind: string; best: boolean; evidence: Note[]; warnings?: Note[] }>
+  probe?: { addresses: number; complete: boolean; strategy: string; by_fallback: boolean; requests_allowed: number; sample?: string[]; declared_total?: number }
+  lead?: { read: ReadQuality; anchors: number; script_bytes: number; sitemap_declared: boolean; findings?: string[] }
+  crumbs?: Crumb[]
+  promote?: { id: string; site: string; strategy?: string }
+  warnings?: string[]
+  elapsed_secs: number
+}
+
+export type CheckedDocument = {
+  address: string
+  enclosed?: boolean
+  bytes: number
+  declared_type?: string
+  kind: string
+  http_status?: string
+  final_url?: string
+  tool?: string
+  title?: string
+  chars: number
+  verdict?: ReadQuality
+  recovered_by_fallback?: boolean
+  pages_needing_ocr?: number
+  notes?: string[]
+  unextractable?: string
+  preview?: string
+}
+
+export type CheckReport = {
+  target: string
+  documents: CheckedDocument[]
+  not_fetched?: string[]
+  enumeration?: { strategy: string; recognised: boolean; truncated: boolean; addresses: number; sample?: string[]; notes?: Note[]; warnings?: string[] }
+  elapsed_secs: number
+}
+
+/** Each half of a try, kept whatever became of the other. */
+export type Half<T> = { report: T; error?: undefined } | { report?: undefined; error: string }
+export type TryReport = { address: string; started_at: string; finished_at: string; investigate: Half<InvestigateReport>; check: Half<CheckReport> }
+
+export type NewSource = { id: string; site?: string; channel?: string; strategy?: string; disabled?: boolean }
+
 export const api = {
   /** The signed-in account, or null when nobody is. */
   account: () => request<{ account: Account | null }>('/api/account').then(value => value.account),
@@ -516,6 +624,19 @@ export const api = {
   },
   /** What each model is priced at. Local models carry the cloud model they are priced as. */
   prices: () => request<{ prices: SpendPrice[] }>('/workspace/prices').then(value => withArray(value, 'prices', '/workspace/prices')),
+  sources: () => request<{ sources: ListedSource[]; running: LaneHolder | null }>('/workspace/sources').then(value => withArray(value, 'sources', '/workspace/sources')),
+  source: (id: string) => request<SourceDetail>(`/workspace/sources/${encodeURIComponent(id)}`),
+  sourceCrumbs: (id: string) => request<CrumbsList>(`/workspace/sources/${encodeURIComponent(id)}/crumbs`).then(value => withArray(value, 'crumbs', 'crumbs')),
+  /** Reads every blob of the source once and writes its crumb rows, as a job. The answer is the job's id. */
+  rescanCrumbs: (id: string) => request<{ id: string }>(`/workspace/sources/${encodeURIComponent(id)}/crumbs/rescan`, { method: 'POST' }),
+  /** Asks a stoppable job to stop at its next item. A run so stopped is journaled `interrupted`. */
+  stopJob: (id: string) => request<{ stopped: string }>(`/workspace/jobs/${encodeURIComponent(id)}/stop`, { method: 'POST' }),
+  addSource: (source: NewSource) => request<unknown>('/workspace/sources', { method: 'POST', body: JSON.stringify(source) }),
+  setSourceEnabled: (id: string, enabled: boolean) => request<unknown>(`/workspace/sources/${encodeURIComponent(id)}/enabled`, { method: 'POST', body: JSON.stringify({ enabled }) }),
+  /** Starts a run in the store's one lane. `run_id` is the journal's handle and the job's id, so the page opens the drawer on it. */
+  runSource: (id: string, body: { skip?: string[]; limit?: number; refresh?: boolean } = {}) => request<{ run_id: string }>(`/workspace/sources/${encodeURIComponent(id)}/run`, { method: 'POST', body: JSON.stringify(body) }),
+  tryAddress: (url: string) => request<{ id: string }>('/workspace/sources/try', { method: 'POST', body: JSON.stringify({ url }) }),
+  tried: (id: string) => request<TryReport>(`/workspace/sources/tries/${encodeURIComponent(id)}`),
 }
 
 /** Who ran a model: TypeSafe's Jev, OpenRouter, or weights on this machine. */

@@ -43,8 +43,8 @@ To ask a narrower question — *what would extraction make of this one document*
 centinel source add agartha --site https://www.agartha.gov
 ```
 
-That writes a `[[source]]` block into your config file. A YouTube channel is the same
-command with a different key:
+That defines the source in the store, at `~/.centinel/log/agartha/source.toml`. A YouTube
+channel is the same command with a different key:
 
 ```bash
 centinel source add agartha-council --channel https://www.youtube.com/@CityofAgartha

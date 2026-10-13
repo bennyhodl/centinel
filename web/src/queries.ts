@@ -71,6 +71,26 @@ export const queries = {
     placeholderData: keepPreviousData,
   }),
 
+  /** Every source, and the run holding the lane. Re-read while a run holds it, so a row's state follows. */
+  sources: () => queryOptions({
+    queryKey: ['sources'],
+    queryFn: api.sources,
+    refetchInterval: query => query.state.data?.running ? 3000 : 30_000,
+  }),
+
+  /** One source: its definition, what its log says, its runs. Faster while a run holds the lane. */
+  source: (id: string) => queryOptions({
+    queryKey: ['source', id],
+    queryFn: () => api.source(id),
+    refetchInterval: query => query.state.data?.running ? 3000 : 30_000,
+  }),
+
+  /** A source's off-host links. Reading them can take seconds on a large source, so they are asked once. */
+  sourceCrumbs: (id: string) => queryOptions({ queryKey: ['source-crumbs', id], queryFn: () => api.sourceCrumbs(id), staleTime: 5 * 60_000 }),
+
+  /** What a try found. A try never changes once filed. */
+  tried: (id: string) => queryOptions({ queryKey: ['tried', id], queryFn: () => api.tried(id), staleTime: Infinity, retry: false }),
+
   reviewQueue: (pageSize: number) => queryOptions({
     queryKey: ['review-queue', pageSize],
     queryFn: () => api.reviewQueue({ page_size: pageSize }),

@@ -43,7 +43,7 @@ serializable result. Behaviour that deserves tests belongs in the library, not i
 body.
 
 No op knows a site from a channel. `discover` and `collect` name what happens, not how.
-Which adapter you get is decided once, from the `[[source]]` block.
+Which adapter you get is decided once, from the source's definition in the store.
 
 ## Three axes on every op
 

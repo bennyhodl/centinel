@@ -29,6 +29,14 @@ describe('foldJob', () => {
     expect(activeJobs(done)).toHaveLength(0)
   })
 
+  it('carries whether a job can be stopped from its start', () => {
+    const jobs = fold([
+      event('2026-10-13T00:00:00Z', { type: 'started', kind: 'run', label: 'tampa', stoppable: true }),
+      event('embed-1', { type: 'started', kind: 'embed', label: 'schedule' }),
+    ])
+    expect(jobs.map(job => Boolean(job.stoppable))).toEqual([true, false])
+  })
+
   it('starts a new stage with no count of its own', () => {
     const jobs = fold([
       event('run-2', { type: 'started', kind: 'run', label: 'schedule' }),

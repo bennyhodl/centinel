@@ -118,15 +118,14 @@ $ centinel source add agartha --site https://www.agartha.gov/ --strategy=sitemap
 … added agartha to /Users/you/centinel.toml
 
 ✓ agartha site https://www.agartha.gov/
-  written to /Users/you/centinel.toml
 
   centinel run --source agartha
 ```
 
-It writes one block into your config and prints the next command:
+It defines the source in the store, at `~/.centinel/log/agartha/source.toml`, and prints the
+next command:
 
 ```toml
-[[source]]
 id = "agartha"
 site = "https://www.agartha.gov/"
 strategy = "sitemap"
@@ -258,12 +257,10 @@ agartha-permits  in centinel.toml, nothing collected yet
 `213 resources · 237 observations` is the versioning: 213 addresses, seen 237 times,
 because 24 of them changed and both versions are kept.
 
-**The rows are your config's sources first, then anything else the store holds.** A source
-you added five minutes ago has no directory under `log/` yet, and listing the store alone
-would leave it out — which reads as an add that did not work. The two gaps this makes
-visible point opposite ways: *in the config, nothing collected* is a run waiting to happen,
-and a row that says *not in centinel.toml* is a source `centinel run` will skip. The second
-is `centinel source adopt`; see [Sources](../operate/sources.md).
+**Every source the store defines has a row, collected or not.** A source you added five
+minutes ago says *defined, nothing collected yet* — a run waiting to happen — rather than
+being left out, which would read as an add that did not work. See
+[Sources](../operate/sources.md).
 
 A failure is printed with **the reason and the count**, not as a gap. That is load-bearing:
 a WAF 403 and a 404 are the same `Err` in most crawlers and completely different facts

@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
+use centinel_core::jobs::Job;
 use centinel_core::op::{Cancel, Ctx, OpDef, Progress};
 use serde_json::Value;
 use tracing::Instrument;
@@ -88,9 +89,10 @@ pub async fn invoke(
 
 /// [`invoke`], for a caller that may need to stop the work.
 ///
-/// Only the scheduler passes a live token today: the CLI's interruption is the process
-/// dying, and an HTTP or MCP caller hanging up cannot ask for a crawl to stop — it never
-/// had the authority to start one (SPEC scheduling §1.1).
+/// A live token comes from the run lane ([`crate::lane`]), whose job the Stop button and
+/// a process shutdown both trip. The CLI's interruption is the process dying, and an
+/// HTTP or MCP caller hanging up cannot ask for a crawl to stop — it never had the
+/// authority to start one (SPEC scheduling §1.1).
 pub async fn invoke_cancellable(
     surface: &'static str,
     def: &'static OpDef,
@@ -98,6 +100,23 @@ pub async fn invoke_cancellable(
     args: Value,
     progress: Option<Progress>,
     cancel: Cancel,
+) -> Result<Value> {
+    // A long-running op is worth watching from elsewhere; a `list` is over before
+    // anyone could look.
+    let job = def.long_running.then(|| ctx.jobs.start(def.name, surface));
+    invoke_as(surface, def, ctx, args, progress, cancel, job).await
+}
+
+/// [`invoke_cancellable`] under a job the caller already started — the lane's, whose id
+/// is the journal's run id, so the page that clicked Run can open the drawer on it.
+pub async fn invoke_as(
+    surface: &'static str,
+    def: &'static OpDef,
+    ctx: Arc<Ctx>,
+    args: Value,
+    progress: Option<Progress>,
+    cancel: Cancel,
+    job: Option<Job>,
 ) -> Result<Value> {
     // Every line the op writes carries which op and from where. The name is the span's
     // own field rather than its name so `op{run cli}` reads as one thing across a run
@@ -109,9 +128,6 @@ pub async fn invoke_cancellable(
         tracing::info!(args = %one_line(&args), "started");
         let started = Instant::now();
 
-        // A long-running op is worth watching from elsewhere; a `list` is over before
-        // anyone could look.
-        let job = def.long_running.then(|| ctx.jobs.start(def.name, surface));
         let progress = match &job {
             Some(job) => job.watch(progress),
             None => progress,
