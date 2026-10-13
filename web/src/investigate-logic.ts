@@ -33,7 +33,7 @@ export function verdictOf(report: InvestigationReport): Verdict {
 
   const best = investigate.recognised?.find(hit => hit.best)
   const probe = investigate.probe
-  const findings = [...(investigate.lead?.read.findings ?? []), ...(investigate.lead?.findings ?? [])]
+  const findings = [...(investigate.lead?.read.findings ?? []), ...(investigate.lead?.findings ?? [])].map(sentence)
   const requests = requestsOf(report)
 
   const headline = best
