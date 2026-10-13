@@ -40,11 +40,14 @@ pub struct Ctx {
     pub store: Store,
     /// What this process is working on, for whoever is watching. See [`crate::jobs`].
     pub jobs: crate::jobs::Jobs,
+    /// The favicons the web asks for, fetched once and kept in the store. See [`crate::icons`].
+    pub icons: crate::icons::Icons,
 }
 
 impl Ctx {
     pub fn new(store: Store) -> Self {
         Self {
+            icons: crate::icons::Icons::new(store.clone()),
             store,
             jobs: crate::jobs::Jobs::default(),
         }

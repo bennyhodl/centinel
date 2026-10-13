@@ -44,6 +44,7 @@ pub mod enclosure;
 pub mod extract;
 pub mod fetch;
 pub mod html;
+pub mod icons;
 pub mod index;
 pub mod inference;
 pub mod jobs;

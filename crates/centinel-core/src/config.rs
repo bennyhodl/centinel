@@ -679,6 +679,12 @@ impl SourceConfig {
     pub fn is_enabled(&self) -> bool {
         self.enabled.unwrap_or(true)
     }
+
+    /// The host this source collects from: `tampa.gov` for `https://tampa.gov/a`, and
+    /// `www.youtube.com` for a channel. What the web shows an icon for.
+    pub fn host(&self) -> Option<String> {
+        crate::crumbs::host_of(self.acquisition().ok()?.target())
+    }
 }
 
 /// The jitter every schedule gets unless it says otherwise. See [`ScheduleConfig::jitter_secs`].

@@ -13,6 +13,8 @@
 //!   spend/YYYY-MM.jsonl        TRUTH    every model call, its tokens and its cost
 //!   crumbs/<source>.jsonl      DERIVED  the off-host links each page dropped
 //!   summaries/<source>.json    DERIVED  what the log adds up to, keyed by its size
+//!   icons/<host>.<ext>         DERIVED  the favicon a host serves, fetched once on demand
+//!   icons/<host>.json          DERIVED  where it came from, or that the host has none (checked at T)
 //!   current/<source>/…         DERIVED  URL-mirroring tree. Regenerable.
 //!   centinel.db                DERIVED  SQLite: metadata + FTS5   — the BM25 arm
 //!   chunks.lance/              DERIVED  LanceDB: chunk vectors    — the vector arm
@@ -266,6 +268,26 @@ impl Store {
     /// `summaries/<source>.json` — per Source, as the log is.
     pub fn summary_path(&self, source: &SourceId) -> PathBuf {
         self.summaries_dir().join(format!("{source}.json"))
+    }
+
+    /// `icons/` — the favicon of each host the web has shown, fetched once when first asked
+    /// for. **Derived**, and safe to delete: the next request for a host finds its icon
+    /// again. Not corpus — no Observation, no log line — which is why it sits beside
+    /// `summaries/` and not in `log/`. See [`crate::icons`].
+    pub fn icons_dir(&self) -> PathBuf {
+        self.root.join("icons")
+    }
+
+    /// `icons/<host>.json` — what was found for a host, or that nothing was and when it was
+    /// last looked. `host` must already be a bare lowercase hostname; [`crate::icons`]
+    /// checks that before it builds a path.
+    pub fn icon_record_path(&self, host: &str) -> PathBuf {
+        self.icons_dir().join(format!("{host}.json"))
+    }
+
+    /// `icons/<host>.<ext>` — the image itself, named for what its bytes are.
+    pub fn icon_path(&self, host: &str, ext: &str) -> PathBuf {
+        self.icons_dir().join(format!("{host}.{ext}"))
     }
 
     /// `decisions.jsonl` — what the operator decided. **Truth, and the fourth thing that
