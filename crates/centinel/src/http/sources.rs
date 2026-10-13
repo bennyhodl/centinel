@@ -9,8 +9,6 @@
 //! | `POST /workspace/sources/{id}/crumbs/rescan` | write the ledger again from the blobs, as a job |
 //! | `POST /workspace/sources/{id}/enabled` | `{ "enabled": bool }` |
 //! | `POST /workspace/sources/{id}/run` | run it in the store's one lane; 409 when the lane is held |
-//! | `POST /workspace/sources/try` | `{ "url" }`: investigate it and check it, as a job |
-//! | `GET /workspace/sources/tries/{id}` | what a try found, once it has finished |
 //!
 //! ## Who may call these
 //!
@@ -38,22 +36,18 @@ use centinel_core::ops::{
     self, AddArgs, CrumbsArgs, ListArgs, RunArgs, SourceAction, SourceArgs, SourceReport, Stage,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::{forbidden_origin, same_origin, workspace_error};
 use crate::lane::{Lane, Launch};
 
 /// Runs shown on a source's page, newest first.
 const RUNS_SHOWN: usize = 20;
-/// Lines of extracted text a try keeps per document.
-const TRY_HEAD: usize = 40;
 
 pub fn routes() -> axum::Router<Arc<Ctx>> {
     use axum::routing::{get, post};
     axum::Router::new()
         .route("/workspace/sources", get(list).post(add))
-        .route("/workspace/sources/try", post(try_address))
-        .route("/workspace/sources/tries/{id}", get(tried))
         .route("/workspace/sources/{id}", get(detail))
         .route("/workspace/sources/{id}/crumbs", get(crumbs))
         .route("/workspace/sources/{id}/crumbs/rescan", post(rescan_crumbs))
@@ -266,122 +260,5 @@ async fn run(
     match spawned {
         Ok(_) => (StatusCode::ACCEPTED, Json(json!({ "run_id": run_id }))).into_response(),
         Err(e) => workspace_error(anyhow::anyhow!("could not start the run: {e}")),
-    }
-}
-
-#[derive(Deserialize)]
-struct TryBody {
-    url: String,
-}
-
-/// Investigates an address and checks what extraction makes of it, as one job, and files
-/// both reports under `tries/<job>/` in the store.
-///
-/// Filed rather than returned because a try takes tens of seconds and the person may leave
-/// the page; filed in the store so the report, and the bytes `check` saved beside it, are
-/// still there to hand to an agent tomorrow. Nothing here is a Source or an Observation —
-/// `tries/` is outside the log, and deleting it loses nothing the corpus holds.
-async fn try_address(
-    State(ctx): State<Arc<Ctx>>,
-    headers: HeaderMap,
-    Json(body): Json<TryBody>,
-) -> Response {
-    if !same_origin(&headers) {
-        return forbidden_origin();
-    }
-    // An address, never a path: `check` reads local files, and this is not a file reader.
-    let url = match reqwest::Url::parse(body.url.trim()) {
-        Ok(url) if matches!(url.scheme(), "http" | "https") => url,
-        _ => return workspace_error(anyhow::anyhow!("`{}` is not an http(s) address", body.url)),
-    };
-    // Named by the instant rather than the process's counter, so a try filed before a
-    // restart is not overwritten by the first one after it.
-    let job = ctx.jobs.start_as(
-        format!("try-{}", jiff::Timestamp::now().as_millisecond()),
-        "try",
-        url.as_str(),
-    );
-    let id = job.id().to_string();
-    let dir = ctx.store.root().join("tries").join(&id);
-    let worker = Arc::clone(&ctx);
-    tokio::spawn(async move {
-        let progress = job.watch(Progress::none());
-        let result = tried_report(&worker, url.as_str(), &dir, &progress).await;
-        if let Err(error) = &result {
-            tracing::warn!(address = %url, error = %format!("{error:#}"), "try failed");
-        }
-        job.finish(&result);
-    });
-    (StatusCode::ACCEPTED, Json(json!({ "id": id }))).into_response()
-}
-
-async fn tried_report(
-    ctx: &Ctx,
-    url: &str,
-    dir: &std::path::Path,
-    progress: &Progress,
-) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let started = jiff::Timestamp::now();
-
-    progress.say("investigating");
-    let investigate = ops::investigate(
-        ctx,
-        serde_json::from_value(json!({ "target": url }))?,
-        progress,
-        &Cancel::none(),
-    )
-    .await;
-
-    progress.say("checking what extraction makes of it");
-    let check = ops::check(
-        ctx,
-        serde_json::from_value(json!({
-            "target": url,
-            "out": dir.join("files"),
-            "head": TRY_HEAD,
-            "strategy": "auto",
-        }))?,
-        progress,
-        &Cancel::none(),
-    )
-    .await;
-
-    // Each half is kept whatever became of the other: a site that refuses the probe may
-    // still serve its front page, and that difference is the finding.
-    let report = json!({
-        "address": url,
-        "started_at": started.to_string(),
-        "finished_at": jiff::Timestamp::now().to_string(),
-        "investigate": as_outcome(investigate),
-        "check": as_outcome(check),
-    });
-    std::fs::write(dir.join("report.json"), serde_json::to_vec_pretty(&report)?)?;
-    Ok(())
-}
-
-fn as_outcome<T: serde::Serialize>(result: anyhow::Result<T>) -> Value {
-    match result {
-        Ok(report) => json!({ "report": report }),
-        Err(error) => json!({ "error": format!("{error:#}") }),
-    }
-}
-
-async fn tried(State(ctx): State<Arc<Ctx>>, Path(id): Path<String>) -> Response {
-    // A job id is `try-<n>`; anything else is not a name this route wrote.
-    if !id.starts_with("try-") || !id[4..].chars().all(|c| c.is_ascii_digit()) {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "no such try" }))).into_response();
-    }
-    let path = ctx.store.root().join("tries").join(&id).join("report.json");
-    match std::fs::read(&path) {
-        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
-            Ok(value) => Json(value).into_response(),
-            Err(e) => workspace_error(anyhow::anyhow!("{} does not parse: {e}", path.display())),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            (StatusCode::NOT_FOUND, Json(json!({ "error": "not finished, or no such try" })))
-                .into_response()
-        }
-        Err(e) => workspace_error(e.into()),
     }
 }
