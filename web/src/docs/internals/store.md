@@ -4,6 +4,8 @@
 <root>/
   blobs/ab/cd/abcd1234…          TRUTH    immutable, content-addressed, pooled across sources
   log/<source>/YYYY-MM.jsonl     TRUTH    append-only: observations, discovery runs, status, derivations
+  crumbs/<source>.jsonl          DERIVED  the off-host links each page dropped, written as it was stored
+  summaries/<source>.json        DERIVED  what the log adds up to, keyed by the log's size
   current/<source>/…             DERIVED  a tree that mirrors the URLs
   centinel.db                    DERIVED  SQLite metadata + FTS5   — the BM25 arm
   chunks.lance/                  DERIVED  LanceDB chunk vectors    — the vector arm
@@ -75,6 +77,20 @@ the records that one disk read produced.
 
 A `Replay` is a **snapshot**. It answers what the log said when it was read, so a caller
 that appends and wants to see the append takes a new one.
+
+## Summary
+
+A replay's counts — addresses, observations, liveness, the hosts the log has observed —
+written to `summaries/<source>.json` beside the length of every month file they were read
+from. The log is append-only, so a file's length is its version: while the lengths match
+the summary *is* the replay, and when they do not the next reader replays the log and
+writes the summary again. `source list`, the Sources page and `crumbs` read it; `centinel
+list` replays and reports the same number, because both are one fold over the same records.
+
+It is rebuilt by the reader rather than maintained on append because the counts are sets —
+an address observed twice is one address — and keeping a set current on every append would
+rewrite it once per line, which is quadratic over a collect. Delete `summaries/` and the
+next read rebuilds it.
 
 ## The layout is named once
 

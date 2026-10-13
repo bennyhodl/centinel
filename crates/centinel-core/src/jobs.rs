@@ -31,20 +31,29 @@
 //! are kept in the tail, so two hundred ticks of a counter never push the last page that
 //! failed out of it.
 //!
+//! ## Stopping one
+//!
+//! A job started with [`Jobs::start_stoppable`] carries the [`Canceller`] end of a
+//! [`Cancel`] token, and [`Jobs::stop`] trips it by job id. The token travels to the op
+//! the way `Progress` does, so the op never learns who asked; it stops at its next item
+//! boundary, where everything so far is durable ([`Cancel`]). Held here rather than by
+//! whoever started the job because the Stop button is on a page that found the job by
+//! its id, and the id is the one handle the page and the server share.
+//!
 //! ## In memory, for this process
 //!
 //! Nothing here is written down. The record of what a run did is the journal and the log;
 //! this is the window onto what it is doing. A restart empties it, and a `centinel run`
 //! typed in another terminal is another process with its own.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::op::{ItemOutcome, Progress, ProgressEvent, TOTAL_TRACK};
+use crate::op::{Cancel, Canceller, ItemOutcome, Progress, ProgressEvent, TOTAL_TRACK};
 
 /// Events kept per job for a subscriber that arrives late.
 const TAIL: usize = 200;
@@ -74,6 +83,10 @@ pub enum JobEvent {
         kind: String,
         /// Who asked, or what it runs over.
         label: String,
+        /// Whether [`Jobs::stop`] can end it. Said at the start, so a page that follows
+        /// the stream knows whether to offer a Stop button without a second read.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        stoppable: bool,
     },
     /// The stage the job is now in: `tampa.gov · collect`, `embed`.
     Step {
@@ -145,6 +158,8 @@ pub struct JobState {
     pub id: String,
     pub kind: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stoppable: bool,
     pub started_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<i64>,
@@ -173,11 +188,12 @@ pub struct JobState {
 }
 
 impl JobState {
-    fn new(event: &Stamped, kind: &str, label: &str) -> Self {
+    fn new(event: &Stamped, kind: &str, label: &str, stoppable: bool) -> Self {
         Self {
             id: event.job.clone(),
             kind: kind.to_string(),
             label: label.to_string(),
+            stoppable,
             started_at: event.at,
             finished_at: None,
             seq: 0,
@@ -278,6 +294,9 @@ struct Board {
     active: Vec<JobState>,
     /// Newest first.
     finished: VecDeque<JobState>,
+    /// The stop handle of each active job that has one, by id. Dropped as the job
+    /// finishes: a stop asked of a finished job is nothing.
+    stoppers: BTreeMap<String, Canceller>,
 }
 
 impl Board {
@@ -300,13 +319,45 @@ impl Jobs {
     /// Starts a job under an id the caller already has — a classifier run's, so the page
     /// that started it can find it.
     pub fn start_as(&self, id: impl Into<String>, kind: &str, label: impl Into<String>) -> Job {
-        let id: String = id.into();
+        self.begin(id.into(), kind, label.into(), None)
+    }
+
+    /// [`Jobs::start_as`], for work that [`Jobs::stop`] may end. The token is the op's to
+    /// poll; the handle that trips it stays here, under the job's id.
+    pub fn start_stoppable(
+        &self,
+        id: impl Into<String>,
+        kind: &str,
+        label: impl Into<String>,
+    ) -> (Job, Cancel) {
+        let (canceller, cancel) = Cancel::channel();
+        (self.begin(id.into(), kind, label.into(), Some(canceller)), cancel)
+    }
+
+    /// Asks a running job to stop at its next item boundary. False when no active job
+    /// has this id, or the one that does was not started as stoppable.
+    pub fn stop(&self, id: &str) -> bool {
+        match self.board().stoppers.get(id) {
+            Some(canceller) => {
+                canceller.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn begin(&self, id: String, kind: &str, label: String, stopper: Option<Canceller>) -> Job {
         let id: Arc<str> = id.into();
+        let stoppable = stopper.is_some();
+        if let Some(canceller) = stopper {
+            self.board().stoppers.insert(id.to_string(), canceller);
+        }
         self.publish(
             &id,
             JobEvent::Started {
                 kind: kind.to_string(),
-                label: label.into(),
+                label,
+                stoppable,
             },
         );
         Job {
@@ -349,8 +400,13 @@ impl Jobs {
             job: job.to_string(),
             event,
         };
-        if let JobEvent::Started { kind, label } = &stamped.event {
-            let mut state = JobState::new(&stamped, kind, label);
+        if let JobEvent::Started {
+            kind,
+            label,
+            stoppable,
+        } = &stamped.event
+        {
+            let mut state = JobState::new(&stamped, kind, label, *stoppable);
             state.apply(&stamped);
             board.active.push(state);
         } else {
@@ -360,6 +416,7 @@ impl Jobs {
             board.active[at].apply(&stamped);
             if matches!(stamped.event, JobEvent::Finished { .. }) {
                 let done = board.active.remove(at);
+                board.stoppers.remove(&done.id);
                 board.finished.push_front(done);
                 board.finished.truncate(FINISHED);
             }
@@ -577,6 +634,35 @@ mod tests {
             ]
         );
         assert_eq!(snapshot[2].error.as_deref(), Some("Jev is down"));
+    }
+
+    /// A job started as stoppable is stopped by its id, which trips the token the op
+    /// polls; a job that was not, or has finished, cannot be — and says so by its answer
+    /// rather than by doing nothing.
+    #[tokio::test]
+    async fn a_stoppable_job_is_stopped_by_id_and_nothing_else_is() {
+        let jobs = Jobs::default();
+        let (_, mut rx) = jobs.subscribe();
+        let (job, cancel) = jobs.start_stoppable("2026-10-13T00:00:00Z", "run", "tampa");
+        let plain = jobs.start("embed", "cli");
+
+        assert!(jobs.snapshot()[0].stoppable);
+        assert!(!jobs.snapshot()[1].stoppable);
+        assert!(!cancel.is_cancelled());
+        assert!(!jobs.stop(plain.id()), "a plain job has no stop handle");
+        assert!(!jobs.stop("nobody"));
+
+        assert!(jobs.stop(job.id()));
+        assert!(cancel.is_cancelled(), "the op's token must trip");
+        assert!(cancel.check().is_err());
+
+        job.finish::<()>(&Err(crate::op::Cancelled.into()));
+        assert!(!jobs.stop("2026-10-13T00:00:00Z"), "a finished job cannot be stopped");
+        let started = rx.try_recv().unwrap();
+        assert!(
+            matches!(started.event, JobEvent::Started { stoppable: true, .. }),
+            "{started:?}"
+        );
     }
 
     /// The shape on the wire is what the web client reads. `type` names the event and the

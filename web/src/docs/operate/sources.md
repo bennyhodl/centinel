@@ -1,15 +1,15 @@
 # Sources
 
 A **Source** is one thing you collect: a website, or a YouTube channel. It is a trait in
-the code, not an entity with a `kind` field, and that shows up here as one key in the
-config.
+the code, not an entity with a `kind` field, and that shows up here as one key in its
+definition.
+
+The store owns the list. Each source is defined by `log/<id>/source.toml`, beside the log
+it feeds, so every surface — the CLI, the web's Sources page, MCP, the scheduler — reads
+one list:
 
 ```toml
-[[source]]
-id   = "agartha"
-site = "https://www.agartha.gov"
-
-[[source]]
+# ~/.centinel/log/agartha-council/source.toml
 id                   = "agartha-council"
 channel              = "https://www.youtube.com/@CityofAgartha"
 audio_if_no_captions = true
@@ -27,30 +27,62 @@ For a website, `site` is any URL on it; only the origin is used.
 centinel source add agartha --site https://www.agartha.gov
 centinel source add agartha-council --channel https://www.youtube.com/@CityofAgartha
 centinel source list
-centinel source remove agartha
+centinel source disable agartha     # a bare `centinel run` skips it; naming it still runs it
+centinel source enable agartha
 ```
 
-`source add` writes into whichever config file was found, and into
-`~/.centinel/centinel.toml` when none was — beside the store the same command collects
-into.
-
-Before adding a host you have not collected before, investigate it — see
+`source add` defines the source and stops; `--run` collects it straight away. Before adding
+a host you have not collected before, investigate it — see
 [Investigate and check](investigate.md). Nothing here is expensive to undo except the hour
 a wrong strategy spends.
 
+## From the web
+
+The **Sources** page does the same, for an administrator signed in to the workspace:
+
+- **Try an address** asks which collection method recognises it and shows what extraction
+  makes of the page, without adding anything. The report — status, method and evidence,
+  probe, extracted text, off-site links — is filed under `tries/` in the store, and **Copy
+  report for an agent** puts all of it on the clipboard as Markdown, for an agent to improve
+  the scraping from. If something recognised it, adding it is one click.
+- Each source's page shows what its log holds, the addresses that are not live, its runs,
+  and its crumbs, each with a **Try** button. **Run** takes the store's one run lane, the
+  same one a schedule takes: while a run holds it, a second is refused rather than queued.
+  The run is a job under its journal id — the page opens the live drawer on it as it
+  starts, and **Stop** ends it at its next page, journaled `interrupted`. A run started
+  by a schedule can be watched and stopped the same way.
+- The list reads each source's address count from its [summary](../internals/store.md#summary),
+  so it answers in milliseconds however large the logs are. Crumbs come from the ledger
+  `collect` writes; a source collected before the ledger existed shows how many of its
+  pages have no record yet, and **Record its crumbs** reads them once.
+
+An agent cannot reach any of this. Those routes answer a browser session only, never an
+MCP token, so a model can read the record but never decide what it collects.
+
+## Configs that still hold `[[source]]` blocks
+
+Sources used to be `[[source]]` blocks in `centinel.toml`, and the store kept its own list
+in `log/`. The two drifted: a source collected by hand was missing from the config, and a
+block removed from the config left its documents searchable. Now, at the start of every
+command, Centinel writes a definition for each block the store does not yet hold, and one
+for each log that predates definitions, read back out of what it collected. Nothing is
+overwritten. After that the blocks are no longer read, and every command says so until
+you delete them.
+
 ## Where the config lives
 
-Nearest answer wins:
+The config holds what is true of **this machine**: where the store is, the defaults below,
+how files open, and the [schedules](schedules.md) it fires. Schedules stay here on purpose:
+a store handed to someone else lists its sources and collects nothing until its new owner
+runs a command. Nearest answer wins:
 
 1. `$CENTINEL_CONFIG`
 2. `./centinel.toml`
 3. `~/.centinel/centinel.toml`
 4. `~/.config/centinel/config.toml`
 
-A per-project `centinel.toml` still wins, so a checkout travels with its own sources.
-`centinel doctor` prints which file was used and which store root it named.
-
-There is a starting point at [`contrib/centinel.toml.example`](https://github.com/bennyhodl/centinel/blob/master/contrib/centinel.toml.example).
+`centinel doctor` prints which file was used and which store root it named. There is a
+starting point at [`contrib/centinel.toml.example`](https://github.com/bennyhodl/centinel/blob/master/contrib/centinel.toml.example).
 
 ## Defaults
 
@@ -83,39 +115,6 @@ you were standing in. This defaulted to `.centinel` in the **working directory**
 the result was that every shell got its own corpus: a separate blob pool, a separate log,
 a separate index, none of them answering a search against the others, and none of it
 visible until a search from one directory up came back empty.
-
-## The config is intent; the store is fact
-
-They can disagree, and that disagreement is a real state you will hit.
-
-Running `centinel discover --source valhalla --site …` by hand collects a source the
-config never named. `run` then ignores it — correctly, because nothing declared it. Left
-alone, that is an invisible corpus: collected, indexed, searchable, and never refreshed.
-
-So `source list` reports the **union** and marks what the config does not name:
-
-```console
-$ centinel source list
-   source    kind  resources             target
-✓  agartha   site      1,847             https://www.agartha.gov
-   valhalla  site        412  untracked  https://www.valhallacounty.org
-
-1 source is in the store but not in the config — `centinel run` skips it.
-  centinel source adopt
-```
-
-Those addresses are **read back out of the log, not guessed.** A `DiscoveryRun` records
-its method — `sitemap`, `playlist` — and the resources say where from. A channel is the
-interesting case: the log records the videos, never the channel they were listed from, but
-the archived `yt-dlp -J` document beside each recording carries `uploader_url`.
-
-```bash
-centinel source adopt          # write every recoverable one into the config
-centinel source add valhalla    # the same, for one, with no --site needed
-```
-
-A source whose address cannot be recovered is **named and skipped**, rather than written
-as a block that would fail on the next run.
 
 ## One-off addresses
 

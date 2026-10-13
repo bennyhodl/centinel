@@ -12,8 +12,10 @@
 //! | `GET /workspace/classify/plan?source=&resource=&derived_sha=&questions=&model=` | what a classify run over that scope would send, and its cost |
 //! | `GET /workspace/jobs` | what this process is working on, and what it just finished |
 //! | `GET /workspace/jobs/events` | the same, then every job event as it happens (SSE) |
+//! | `POST /workspace/jobs/{id}/stop` | ask a stoppable job — a run from the Sources page — to stop at its next item |
 //! | `GET /workspace/spend?since=` | every model call since then, by hour and model |
 //! | `GET /workspace/prices` | what each model is priced at, and where the price came from |
+//! | `/workspace/sources…` | the Sources page: list, define, run, try; see [`sources`] |
 //!
 //! ## Long-running operations
 //!
@@ -58,6 +60,8 @@ use futures::stream::Stream;
 use serde_json::{Value, json};
 
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
+
+mod sources;
 
 /// Identifies the binary this process runs: the executable's size and modification
 /// time. Two `centinel web` invocations from the same build agree on it; a rebuild
@@ -207,6 +211,8 @@ pub(crate) fn router(ctx: Arc<Ctx>) -> Router {
         .route("/workspace/prices", get(workspace_prices))
         .route("/workspace/jobs", get(workspace_jobs))
         .route("/workspace/jobs/events", get(workspace_job_events))
+        .route("/workspace/jobs/{id}/stop", post(workspace_stop_job))
+        .merge(sources::routes())
         .route("/ops", get(list_ops))
         .route("/ops/{name}", post(invoke))
         .route("/ops/{name}/stream", post(invoke_streaming))
@@ -590,6 +596,28 @@ struct JobsQuery {
 /// Every active job, then the recently finished, each with its latest log lines.
 async fn workspace_jobs(State(ctx): State<Arc<Ctx>>) -> Response {
     Json(json!({ "jobs": ctx.jobs.snapshot() })).into_response()
+}
+
+/// Asks a job to stop. It ends at its next item boundary, where everything so far is
+/// durable, and a run so stopped is journaled `interrupted` ([`crate::lane`]). A job that
+/// is not running, or was not started as stoppable, is a 404: the page offered a button
+/// for a job that is not there to stop.
+async fn workspace_stop_job(
+    State(ctx): State<Arc<Ctx>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !same_origin(&headers) {
+        return forbidden_origin();
+    }
+    match ctx.jobs.stop(&id) {
+        true => Json(json!({ "stopped": id })).into_response(),
+        false => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no running job `{id}` can be stopped") })),
+        )
+            .into_response(),
+    }
 }
 
 /// A `snapshot` event with the jobs as they stand, then one `job` event per thing that
@@ -1258,6 +1286,39 @@ mod tests {
         assert_eq!(jobs[0]["id"], wanted.id());
         assert_eq!(jobs[0]["current"], "https://www.tampa.gov/a");
         assert_eq!(jobs[0]["total"], 1005);
+    }
+
+    /// Stop reaches the token the op polls, through the job's id, and refuses a job that
+    /// cannot be stopped rather than answering as if it had.
+    #[tokio::test]
+    async fn a_stoppable_job_is_stopped_through_its_route_and_a_plain_one_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(Ctx::new(Store::open(dir.path()).await.unwrap()));
+        let app = router(Arc::clone(&ctx)).layer(axum::Extension(crate::access::Role::Admin));
+        let (job, cancel) = ctx.jobs.start_stoppable("2026-10-13T00:00:00Z", "run", "tampa");
+        let plain = ctx.jobs.start("embed", "schedule");
+        let stop = |id: &str| {
+            Request::post(format!("/workspace/jobs/{id}/stop"))
+                .header("host", "127.0.0.1:8787")
+                .header("origin", "http://127.0.0.1:8787")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let resp = app.clone().oneshot(stop(plain.id())).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(!cancel.is_cancelled());
+
+        let resp = app.clone().oneshot(stop(job.id())).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(cancel.is_cancelled(), "the op's token must trip");
+
+        let foreign = Request::post(format!("/workspace/jobs/{}/stop", job.id()))
+            .header("host", "127.0.0.1:8787")
+            .header("origin", "http://attacker.example")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.oneshot(foreign).await.unwrap().status(), StatusCode::FORBIDDEN);
     }
 
     #[test]

@@ -1,10 +1,11 @@
 import React from 'react'
 import { Link } from '@tanstack/react-router'
 import { CircleHelp } from 'lucide-react'
+import { nip19 } from 'nostr-tools'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import type { DocumentIdentity } from './api'
+import type { Account, DocumentIdentity } from './api'
 import { decisionLabels, type Decision } from './policy'
 
 /**
@@ -37,6 +38,15 @@ export function SectionRule({ children, aside }: { children: React.ReactNode; as
 }
 
 /** The first seven characters of a hash: what Centinel prints, and takes back. */
+/** An account's picture, else the first letter of its name. The caller sets the size. */
+export function Portrait({ account, className }: { account: Pick<Account, 'name' | 'image'>; className: string }) {
+  if (account.image) return <img src={account.image} alt="" className={`shrink-0 rounded-full border object-cover ${className}`} />
+  return <span className={`grid shrink-0 place-items-center rounded-full bg-muted font-serif ${className}`}>{account.name.trim().charAt(0).toUpperCase() || '?'}</span>
+}
+
+/** How an account is told apart: its npub when it signed in with Nostr, else its email. */
+export const handle = (account: Pick<Account, 'email' | 'publicKey'>) => account.publicKey ? nip19.npubEncode(account.publicKey) : account.email
+
 export const shortSha = (sha: string) => sha.slice(0, 7)
 export function ErrorBox({ error }: { error: Error }) { return <Alert variant="destructive" className="my-3"><AlertDescription>{error.message}</AlertDescription></Alert> }
 export function Empty({ children }: { children: React.ReactNode }) { return <div className="grid place-items-center gap-3 p-12 text-center text-sm text-muted-foreground [&_svg]:size-6"><CircleHelp /><p>{children}</p></div> }

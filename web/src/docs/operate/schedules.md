@@ -55,9 +55,9 @@ cadence, they all hit their upstreams on the same minute.
 
 ## Schedules live in the config
 
-`centinel.toml`, as `[[schedule]]` blocks, beside the `[[source]]` blocks they name.
-Not in the store, because the store is *fact* — what was collected — and a cadence is
-*intent*. The same distinction that makes `source list` report a union.
+`centinel.toml`, as `[[schedule]]` blocks. Not in the store, though the sources they name
+are: a cadence is an intent to collect on its own, and a store handed to someone else
+should list its sources without starting to crawl them on that person's machine.
 
 Creation is a command rather than hand-edited TOML because a hand-written block invites
 two silent mistakes: a cron expression that parses and means something else, and a source

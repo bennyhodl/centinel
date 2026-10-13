@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react'
-import { createRootRouteWithContext, HeadContent, Outlet, Scripts } from '@tanstack/react-router'
+import { createRootRouteWithContext, HeadContent, Scripts, useRouter } from '@tanstack/react-router'
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query'
 import { themeScript } from '../theme'
+import { ShellPending } from '../feedback'
 import crest from '../assets/crest.jpg'
 import styles from '../styles.css?url'
 
@@ -19,14 +20,13 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     links: [{ rel: 'stylesheet', href: styles }, { rel: 'icon', type: 'image/jpeg', href: crest }],
   }),
   shellComponent: RootDocument,
-  component: App,
+  pendingComponent: ShellPending,
 })
 
+/** The query cache wraps everything drawn, the first paint's skeletons included: some read the cache. */
 function RootDocument({ children }: { children: ReactNode }) {
-  return <html lang="en" suppressHydrationWarning><head><script dangerouslySetInnerHTML={{ __html: themeScript }} /><HeadContent /></head><body>{children}<Scripts /></body></html>
-}
-
-function App() {
-  const { queryClient } = Route.useRouteContext()
-  return <QueryClientProvider client={queryClient}><Outlet /></QueryClientProvider>
+  const { queryClient } = useRouter().options.context
+  return <html lang="en" suppressHydrationWarning><head><script dangerouslySetInnerHTML={{ __html: themeScript }} /><HeadContent /></head><body>
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider><Scripts />
+  </body></html>
 }

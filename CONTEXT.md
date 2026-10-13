@@ -56,10 +56,13 @@ asking becomes a read of one file. Measured on 5,000 pages: 0.05s from the ledge
 from the blobs.
 
 **A crumb is derived; the ruling on it is truth.** The ledger is derived and the blobs stay the
-floor beneath it: a link is parsed out of immutable bytes, so a missing row costs a blob read
-rather than an answer, and a scanner bug is repaired by deleting the file. `crumbs` reports how
-many pages it had to read that way, because a slow answer is a fine failure and a quietly
-incomplete one is not. It is the same guarantee that lets `extract` drop an `href` from the
+floor beneath it: a link is parsed out of immutable bytes, so a missing row is never a wrong
+answer, and a scanner bug is repaired by deleting the file. `crumbs` reads the ledger alone,
+reports how many pages have no row, and names `--rescan`, the one pass that reads blobs and
+writes them down — because a quietly incomplete answer is the failure to avoid, and a
+nineteen-thousand-blob backfill behind every click of a web page is not the way to avoid it.
+A row is keyed by the page's **address** and answers only for the blob the log says is
+current: keyed on the blob alone, two pages with identical bytes got each other's row. It is the same guarantee that lets `extract` drop an `href` from the
 derived text. Nothing in a page, though, records that a person looked at `facebook.com` and
 refused it, so a **Ruling**
 (`ignore` / `allow`) is appended to `decisions.jsonl` as truth. Without it every pass
@@ -191,6 +194,16 @@ liveness, the latest Observation per Resource, what was derived from what — is
 in-memory scan over the records that one disk read produced. A `Replay` is a **snapshot**:
 it answers what the log said when it was read, so a caller that appends and wants to see
 the append takes a new one.
+
+**Summary** — one Source's replay, added up and written to `summaries/<source>.json` beside
+the length of every month file it was read from. The log is append-only, so a file's length
+is its version: while the lengths match the summary *is* the replay, and when they do not
+the next reader replays and writes it again. `source list`, the Sources page and `crumbs`
+read it; `centinel list` replays and reports the same count. *Why it matters:* a list of
+sixteen sources is a `stat` per source rather than a parse of 50 MB of logs, and there is
+still one owner of the number — the fold over the log — so no two surfaces can disagree.
+Rebuilt on read rather than maintained on append because the counts are sets, and a set
+kept current per line is quadratic over a collect.
 
 **The layout** — where each thing lives under the store root is named in `store` and
 nowhere else. A path spelled out by a caller is a second, unenforced copy of this file's

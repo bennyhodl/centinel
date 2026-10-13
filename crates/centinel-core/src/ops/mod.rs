@@ -64,17 +64,14 @@ pub use ingest::{IngestArgs, IngestOutcome, IngestReport, ingest};
 pub use investigate::{
     InvestigateArgs, InvestigateReport, Lead, Probe, Promote, Recognised, SeedSummary, investigate,
 };
-pub use list::{ListArgs, ListReport, Problem, SourceSummary, list};
+pub use list::{Discovered, ListArgs, ListReport, Problem, SourceSummary, list};
 pub use run::{RunArgs, RunReport, SourceRun, Stage, StageRun, StageStatus, run};
 pub use schedule::{RmArgs, ScheduleAction, ScheduleArgs, ScheduleReport, SetArgs, schedule};
 pub use schedules::{
     HistoryArgs, HistoryReport, ScheduleStatus, SchedulesArgs, SchedulesReport, history, schedules,
 };
 pub use search::{AlsoAt, SearchArgs, SearchReport, SearchResult, search};
-pub use source::{
-    AddArgs, AdoptArgs, ConfiguredSource, RemoveArgs as SourceRemoveArgs, SourceAction, SourceArgs,
-    SourceReport, source,
-};
+pub use source::{AddArgs, IdArgs, ListedSource, SourceAction, SourceArgs, SourceReport, source};
 pub use status::{SourceCount, StatusArgs, StatusReport, status};
 pub use transcribe::{
     TranscribeArgs, TranscribeFailure, TranscribeReport, TranscribedItem, transcribe,
@@ -109,8 +106,8 @@ pub(crate) fn load_config(explicit: Option<&str>) -> anyhow::Result<(Config, Opt
 /// Three answers in order, and the order is the point:
 ///
 /// 1. an explicit `--site`/`--channel` — someone typing an address is an instruction;
-/// 2. the `[[source]]` block — the standing statement of intent;
-/// 3. whatever the store remembers — evidence, for something collected by hand.
+/// 2. the store's definition, `log/<id>/source.toml` — see [`crate::catalog`];
+/// 3. whatever the log remembers — evidence, for something collected before definitions.
 ///
 /// Nothing in this function knows what a site or a channel *is*; it decides which
 /// description to hand [`sources::from_config`] and stops there.
@@ -130,17 +127,18 @@ pub(crate) async fn resolve_source(
 
     // 1. An address typed on the command line, merged onto the block's other settings so
     //    `--site` retypes the address and not the crawl rate.
+    let defined = crate::catalog::Sources::new(&ctx.store).get(id).await?;
     if site.is_some() || channel.is_some() {
-        let mut cfg = config.source(id).cloned().unwrap_or_default();
+        let mut cfg = defined.unwrap_or_default();
         cfg.id = id.to_string();
         cfg.site = site.map(str::to_string);
         cfg.channel = channel.map(str::to_string);
         return sources::from_config(&cfg, &config.defaults, over);
     }
 
-    // 2. The config.
-    if let Some(cfg) = config.source(id) {
-        return sources::from_config(cfg, &config.defaults, over);
+    // 2. The store's definition.
+    if let Some(cfg) = defined {
+        return sources::from_config(&cfg, &config.defaults, over);
     }
 
     // 3. The store.

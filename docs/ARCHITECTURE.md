@@ -116,45 +116,25 @@ An **Observation always has bytes, and so does a Derivation.** Failures on the a
 
 ## The pipeline
 
-Collection is one process with six stages. Typing them in order is a chore that also has to be got right — `index` before `extract` silently indexes nothing — so the order is written down once, in `centinel.toml`:
-
-```toml
-[[source]]
-id   = "tampa"
-site = "https://www.tampa.gov"
-
-[[source]]
-id      = "tampa-council"
-channel = "https://www.youtube.com/@CityofTampa"
-```
+Collection is one process with six stages. Typing them in order is a chore that also has to be got right — `index` before `extract` silently indexes nothing — so `run` does it, over every source the store defines:
 
 ```console
+$ centinel source add tampa --site https://www.tampa.gov
+$ centinel source add tampa-council --channel https://www.youtube.com/@CityofTampa
 $ centinel run                      # every source: discover → collect → extract → index → embed
 $ centinel run --source tampa       # one of them
 $ centinel run --skip embed         # stop before the hours-long stage
 ```
 
-`site` versus `channel` is the *whole* of the website/YouTube difference, mirroring the domain model: the two Source kinds are peers differing only in acquisition, so the config difference is one key and everything downstream is shared.
+`site` versus `channel` is the *whole* of the website/YouTube difference, mirroring the domain model: the two Source kinds are peers differing only in acquisition, so a definition differs by one key and everything downstream is shared.
 
-### The config is intent; the store is fact
+### The store owns the list of sources
 
-They can disagree. Running `centinel discover --source hillsborough --site …` by hand collects a source the config never named — so `run` ignores it, correctly, because nothing declared it. Left there, that is an invisible corpus.
+A source is defined by `log/<id>/source.toml`, beside the log it feeds, and `crates/centinel-core/src/catalog.rs` is the one module that reads and writes those files. Every surface — the CLI, the web's Sources page, MCP, the scheduler — asks it.
 
-So `source list` reports the **union**, marking what the config does not name:
+There used to be two lists: `[[source]]` blocks in `centinel.toml`, found by a search path that starts in the working directory, and the store's own `log/` directories. They drifted. A source collected by hand was "untracked" and skipped by `run`; a block removed from the config left its documents searchable; `source adopt` existed only to copy one list into the other. Now, at the start of every command, a legacy block becomes a definition, and so does any log that predates definitions — its address **read back out of the log, not guessed**. `DiscoveryRun::method` says `sitemap` or `playlist`, and the resources say where from. A channel is the interesting case: the log records the videos, never the channel they were listed from, but the archived `yt-dlp -J` document beside each recording carries `uploader_url`. Retaining originals (§5.4) pays for a question nobody had yet.
 
-```console
-$ centinel source list
-   source        kind  resources             target
-✓  tampa         site      1,847             https://www.tampa.gov
-   hillsborough  site        412  untracked  https://www.hillsboroughcounty.org
-
-1 source is in the store but not in the config — `centinel run` skips it.
-  centinel source adopt
-```
-
-Those addresses are **read back out of the log, not guessed**. `DiscoveryRun::method` says `sitemap` or `playlist`, and the resources say where from — provenance recorded for other reasons, answering this. A channel is the interesting case: the log records the videos, never the channel they were listed from, but the archived `yt-dlp -J` document beside each recording carries `uploader_url`. Retaining originals (§5.4) pays for a question nobody had yet.
-
-`centinel source adopt` writes every recoverable one into the config; `centinel source add <id>` with no `--site`/`--channel` does the same for one. A source whose address cannot be recovered is **named and skipped** rather than written as a block that would fail on the next run.
+Schedules stay in the config. A cadence is an intent to collect on its own, and a store handed to someone else should list its sources without crawling them on that person's machine.
 
 ### Two phases
 
@@ -302,7 +282,7 @@ centinel list
 # What does it point at that it does not collect? The next source is on this list.
 centinel crumbs
 centinel crumbs ignore facebook.com     # refuse one, for the life of the corpus
-centinel crumbs --rescan                # only for a corpus collected before v0.3
+centinel crumbs --rescan                # writes the ledger for a corpus collected before it existed
 
 # Serve it
 centinel serve          # HTTP + MCP over HTTP

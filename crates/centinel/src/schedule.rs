@@ -23,11 +23,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use centinel_core::config::{Config, ScheduleConfig};
-use centinel_core::journal::{
-    Attempt, Holder, Journal, Outcome, RunLock, Subtracted, Trigger, arithmetic,
-};
-use centinel_core::op::{self, Cancel, Canceller, Ctx};
-use centinel_core::ops::RunReport;
+use centinel_core::journal::{Attempt, Journal, Outcome, RunLock, Subtracted, Trigger};
+use centinel_core::op::{Cancel, Canceller, Ctx};
+
+use crate::lane::{Lane, Launch};
 use centinel_core::schedule::jitter_offset;
 use jiff::{Timestamp, Unit};
 
@@ -82,7 +81,7 @@ impl Scheduler {
     /// broken schedule collects nothing and says so nowhere; the operator finds out weeks
     /// later from an empty search result. Refusing is loud at the one moment it is cheap —
     /// while somebody is watching it start.
-    pub fn new(ctx: Arc<Ctx>, config_path: Option<&str>) -> Result<Self> {
+    pub async fn new(ctx: Arc<Ctx>, config_path: Option<&str>) -> Result<Self> {
         // The context sits on the *load*, not on a second validation pass: reading a
         // config already validates it, so a `validate_schedules()` call here would be a
         // check that can never fire — and the operator would get the bare parse error with
@@ -95,6 +94,12 @@ impl Scheduler {
             }
             None => (Config::load().context(REFUSING)?, Config::locate()),
         };
+        // Which sources exist is the store's to say, so it is asked here rather than by
+        // the config's own validation.
+        centinel_core::catalog::Sources::new(&ctx.store)
+            .check_schedules(&config)
+            .await
+            .context(REFUSING)?;
 
         let node_seed = ctx.store.root().display().to_string();
         Ok(Self {
@@ -140,12 +145,15 @@ impl Scheduler {
     /// The running configuration is known-good, and a typo must not disarm it. A restart
     /// is always correct and always sufficient; this exists so that `schedule set` against
     /// a live server is not one.
-    pub fn reload(&mut self) -> Result<()> {
+    pub async fn reload(&mut self) -> Result<()> {
         let config = match &self.config_path {
             Some(path) => Config::from_file(path)?,
             None => Config::load()?,
         };
         config.validate_schedules()?;
+        centinel_core::catalog::Sources::new(&self.ctx.store)
+            .check_schedules(&config)
+            .await?;
         self.config = config;
         Ok(())
     }
@@ -347,7 +355,7 @@ impl Scheduler {
             _ = nap => {}
             _ = cancel.cancelled() => {}
             _ = reload.recv() => {
-                match self.reload() {
+                match self.reload().await {
                     Ok(()) => tracing::info!(
                         schedules = self.config.schedules.len(),
                         "reloaded the config"
@@ -393,19 +401,18 @@ impl Scheduler {
             }
         };
 
-        let holder = Holder {
-            pid: std::process::id(),
-            started_at: run_id.clone(),
+        // The lane. Held by another run — possibly a `centinel run` in another process, or
+        // one started from the web — means this fire is skipped, and **recorded as
+        // skipped**: "my cron never ran" deserves an answer in the journal rather than a
+        // hunch.
+        let launch = Launch {
+            surface: "schedule",
             trigger: due.trigger,
             schedule: Some(due.schedule.id.clone()),
-            args: one_line_args(&args),
+            due_at: Some(due.at.to_string()),
         };
-
-        // The lane. Held by another run — possibly a `centinel run` in another process —
-        // means this fire is skipped, and **recorded as skipped**: "my cron never ran"
-        // deserves an answer in the journal rather than a hunch.
-        let lock = match RunLock::acquire(&self.ctx.store, &holder) {
-            Ok(lock) => lock,
+        let lane = match Lane::acquire(&self.ctx, args, launch) {
+            Ok(lane) => lane,
             Err(held) => {
                 tracing::info!(schedule = %due.schedule.id, "skipping: {held}");
                 self.record(Attempt {
@@ -426,103 +433,15 @@ impl Scheduler {
             }
         };
 
-        tracing::info!(schedule = %due.schedule.id, trigger = due.trigger.as_str(), "run started");
-
-        let def = op::find("run").expect("`run` is always registered");
-        let value = serde_json::to_value(&args).expect("RunArgs always serializes");
-        let result = crate::logging::invoke_cancellable(
-            "schedule",
-            def,
-            Arc::clone(&self.ctx),
-            value,
-            // No sink: a scheduled run has nobody watching a terminal, so its progress
-            // goes to the log, which is the server's only way to speak.
-            None,
-            cancel.clone(),
-        )
-        .await;
-
-        // Released before the record is written, so a slow append cannot hold the lane.
-        drop(lock);
-
-        let (outcome, detail, report) = match result {
-            Ok(value) => match serde_json::from_value::<RunReport>(value) {
-                Ok(report) => {
-                    let outcome = if report.failed_stages > 0 {
-                        Outcome::Partial
-                    } else {
-                        Outcome::Ok
-                    };
-                    (outcome, None, Some(report))
-                }
-                Err(e) => (
-                    Outcome::Failed,
-                    Some(format!("unreadable report: {e}")),
-                    None,
-                ),
-            },
-            // A cancellation is the operator stopping the process, not a broken source.
-            // Filed as a failure it would count against the schedule and, over a week of
-            // nightly restarts, bury a source that had genuinely stopped responding.
-            Err(e) if op::is_cancelled(&e) => (Outcome::Interrupted, None, None),
-            Err(e) => (Outcome::Failed, Some(format!("{e:#}")), None),
-        };
-
-        let (added, subtracted) = report
-            .as_ref()
-            .map(arithmetic)
-            .unwrap_or_else(|| (Default::default(), Subtracted::default()));
-
-        self.record(Attempt {
-            run_id,
-            schedule: Some(due.schedule.id.clone()),
-            trigger: due.trigger,
-            due_at: Some(due.at.to_string()),
-            started_at: started.to_string(),
-            finished_at: Timestamp::now().to_string(),
-            outcome,
-            detail,
-            added,
-            subtracted,
-            report,
-        })
-        .await;
+        // No sink: a scheduled run has nobody watching a terminal, so its progress goes to
+        // the log, which is the server's only way to speak.
+        lane.run(None, cancel.clone()).await;
     }
 
-    /// Appends an attempt, complaining loudly rather than failing the loop.
-    ///
-    /// A journal write that fails must not take the scheduler down: the next fire is worth
-    /// more than the record of this one. It must also not be silent, or the corpus grows
-    /// while its history quietly stops.
+    /// Appends an attempt; see [`crate::lane::record`].
     async fn record(&self, attempt: Attempt) {
-        tracing::info!(
-            schedule = attempt.schedule.as_deref().unwrap_or("-"),
-            outcome = attempt.outcome.as_str(),
-            added = attempt.added.documents,
-            "run finished"
-        );
-        if let Err(e) = Journal::new(&self.ctx.store).append(&attempt).await {
-            tracing::error!(error = %format!("{e:#}"), "could not append to the run journal");
-        }
+        crate::lane::record(&self.ctx, &attempt).await;
     }
-}
-
-/// The arguments, for the lock file and for the log.
-fn one_line_args(args: &centinel_core::ops::RunArgs) -> String {
-    let mut parts = Vec::new();
-    for source in &args.sources {
-        parts.push(format!("--source {source}"));
-    }
-    for stage in &args.skip {
-        parts.push(format!("--skip {}", stage.name()));
-    }
-    if let Some(limit) = args.limit {
-        parts.push(format!("--limit {limit}"));
-    }
-    if args.refresh {
-        parts.push("--refresh".into());
-    }
-    parts.join(" ")
 }
 
 /// A signal that the config should be re-read.
@@ -618,11 +537,17 @@ fn lower_priority() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use centinel_core::journal::Holder;
     use centinel_core::store::Store;
 
     async fn scheduler(schedules: &str) -> (tempfile::TempDir, tempfile::TempDir, Scheduler) {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Store::open(store_dir.path()).await.unwrap();
+        // The source the schedules here name, defined where the scheduler now looks.
+        centinel_core::catalog::Sources::new(&store)
+            .add(&centinel_core::config::SourceConfig::site("tampa", "https://tampa.gov"))
+            .await
+            .unwrap();
         let ctx = Arc::new(Ctx::new(store));
 
         let config_dir = tempfile::tempdir().unwrap();
@@ -633,7 +558,8 @@ mod tests {
         )
         .unwrap();
 
-        let s = Scheduler::new(ctx, Some(&path.display().to_string())).unwrap();
+        let s = Scheduler::new(ctx, Some(&path.display().to_string())).await
+            .unwrap();
         (store_dir, config_dir, s)
     }
 
@@ -653,7 +579,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = Scheduler::new(ctx, Some(&path.display().to_string()))
+        let err = Scheduler::new(ctx, Some(&path.display().to_string())).await
             .unwrap_err()
             .to_string();
         assert!(err.contains("refusing to serve"), "{err}");
@@ -661,7 +587,8 @@ mod tests {
         // of twenty blocks is the broken one.
         let full = format!(
             "{:#}",
-            Scheduler::new(ctx2, Some(&path.display().to_string())).unwrap_err()
+            Scheduler::new(ctx2, Some(&path.display().to_string())).await
+            .unwrap_err()
         );
         assert!(full.contains("orlando"), "{full}");
     }
@@ -916,29 +843,17 @@ mod tests {
         )
         .unwrap();
 
-        let mut sched = Scheduler::new(ctx, Some(&path.display().to_string())).unwrap();
+        let mut sched = Scheduler::new(ctx, Some(&path.display().to_string())).await
+            .unwrap();
         assert_eq!(sched.schedules().len(), 1);
 
         std::fs::write(&path, "this is not toml at all\n").unwrap();
-        assert!(sched.reload().is_err());
+        assert!(sched.reload().await.is_err());
         assert_eq!(
             sched.schedules().len(),
             1,
             "a broken edit disarmed the running server"
         );
         assert_eq!(sched.schedules()[0].id, "daily");
-    }
-
-    #[test]
-    fn the_arguments_read_back_as_the_command_somebody_would_type() {
-        use centinel_core::ops::{RunArgs, Stage};
-        let line = one_line_args(&RunArgs {
-            sources: vec!["tampa".into()],
-            skip: vec![Stage::Embed],
-            limit: Some(500),
-            refresh: true,
-            ..Default::default()
-        });
-        assert_eq!(line, "--source tampa --skip embed --limit 500 --refresh");
     }
 }

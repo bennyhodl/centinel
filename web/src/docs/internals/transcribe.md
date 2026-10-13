@@ -15,7 +15,7 @@ to a server re-transcribes nothing.
 
 A YouTube video is one address holding up to three artifacts: metadata, captions and
 audio. Captions are free, already text, and usually good enough. So audio is only fetched
-when there are none, which is what `audio_if_no_captions` in a `[[source]]` block controls.
+when there are none, which is what `audio_if_no_captions` in a source's definition controls.
 
 About 7% of a real council channel has no captions and never will. That is also why
 resumption keys on the **metadata** artifact rather than on captions — keying on captions

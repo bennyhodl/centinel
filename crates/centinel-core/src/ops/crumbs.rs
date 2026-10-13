@@ -21,10 +21,17 @@
 //!
 //! A row can be missing for exactly three reasons — the page was collected before the ledger
 //! existed, a write failed, or somebody deleted the file — and in all three the blob is still
-//! there, immutable, and says the same thing. So the pass falls through to it, counts how
-//! often it had to, and names the one command that stops the cost. A slow answer is a fine
-//! failure mode; a quietly incomplete one is not, which is why the count is on the report
-//! rather than in a log line.
+//! there, immutable, and says the same thing. The pass **counts** those pages and names the
+//! one command that writes them down, `--rescan`; it does not read them itself. It used to,
+//! and on a source collected before the ledger existed that was every blob of the source on
+//! every read — nineteen thousand reads behind one click of a web page, and a web page is
+//! not where a one-time backfill of a corpus belongs. The count is on the report rather than
+//! in a log line because a quietly incomplete answer is the failure this codebase is most
+//! consistently written against.
+//!
+//! Whether a host is **already a Source** is asked of every definition and every log's
+//! [`crate::summary::Summary`], which is a `stat` and a small read per source rather than a
+//! replay of every log to answer a question about one.
 //!
 //! ## `Operator`, because it writes a ruling
 //!
@@ -77,11 +84,6 @@ pub struct CrumbsArgs {
     #[arg(long)]
     #[serde(default)]
     pub rescan: bool,
-
-    /// Config file to read the `[[source]]` list from. Defaults to the usual search path.
-    #[arg(long, value_name = "FILE")]
-    #[serde(default)]
-    pub config: Option<String>,
 }
 
 /// Hand-written, because a derived one would set `max` to zero — and a list that silently
@@ -94,7 +96,6 @@ impl Default for CrumbsArgs {
             all: false,
             max: default_max(),
             rescan: false,
-            config: None,
         }
     }
 }
@@ -150,8 +151,12 @@ pub enum CrumbsReport {
         hidden: usize,
         /// Hosts past `--max`.
         truncated: usize,
-        /// Pages that had no ledger row, so their blob was read instead. Zero on a corpus
-        /// collected by this build; the whole page count on one collected before it.
+        /// Pages with no ledger row for their current blob, so their links are not in these
+        /// counts. Zero on a corpus collected by this build; the whole page count on one
+        /// collected before the ledger existed, until `--rescan` writes them down.
+        #[serde(default)]
+        unrecorded: usize,
+        /// Pages read out of their blob and written down. Only `--rescan` reads a blob.
         from_blobs: usize,
         /// Blobs that could not be read, so their links are missing from these counts. A
         /// pass over every blob in a corpus is the first thing to notice a damaged pool, and
@@ -218,7 +223,6 @@ async fn list(
     let field = survey(
         ctx,
         args.source.as_deref(),
-        args.config.as_deref(),
         args.rescan,
         p,
         cancel,
@@ -247,6 +251,7 @@ async fn list(
         crumbs,
         hidden,
         truncated,
+        unrecorded: field.unrecorded,
         from_blobs: field.from_blobs,
         unread: field.unread,
         rescanned: args.rescan,
@@ -264,7 +269,7 @@ async fn show(
     let started = std::time::Instant::now();
     let host = as_host(&which.host)?;
     let source = which.source.as_deref().or(args.source.as_deref());
-    let field = survey(ctx, source, args.config.as_deref(), args.rescan, p, cancel).await?;
+    let field = survey(ctx, source, args.rescan, p, cancel).await?;
 
     let crumb = field.trail.crumbs().into_iter().find(|c| c.host == host);
     let (carried_by, dropped) = field.trail.carriers_of(&host);
@@ -319,7 +324,9 @@ struct Field {
     /// Hosts a Source already covers, so a crumb pointing at one is not a candidate.
     promoted: BTreeSet<String>,
     decisions: BTreeMap<String, Decision>,
-    /// Pages whose links had to be read out of a blob because no row recorded them.
+    /// Pages with no row for their current blob. Counted, never read.
+    unrecorded: usize,
+    /// Pages read out of a blob and written down, which only `--rescan` does.
     from_blobs: usize,
     unread: usize,
 }
@@ -338,7 +345,7 @@ impl Field {
     }
 }
 
-/// The hosts the operator's own `[[source]]` blocks claim.
+/// The hosts the store's source definitions claim.
 ///
 /// The **intent** half of "already a Source"; [`survey`] adds the evidence half out of the
 /// logs it is reading anyway. A block for a host nothing has collected yet still answers the
@@ -348,35 +355,37 @@ impl Field {
 ///
 /// **A channel claims no host.** `youtube.com` holds every channel there is, so a source for
 /// one of them says nothing about a crumb pointing at another. Marking the host answered would
-/// hide it; leaving it open costs one `crumbs ignore youtube.com` and hides nothing. The config
-/// knows a channel by which field is set, and the store by
+/// hide it; leaving it open costs one `crumbs ignore youtube.com` and hides nothing. A
+/// definition knows a channel by which field is set, and the log by
 /// [`crate::sources::channel::claims`].
-fn claimed_hosts(config: &crate::config::Config) -> BTreeSet<String> {
-    config
-        .sources
+fn claimed_hosts(defined: &[crate::config::SourceConfig]) -> BTreeSet<String> {
+    defined
         .iter()
-        .filter_map(|s| s.site.as_deref().and_then(host_of))
+        .filter_map(|s| s.site.as_deref().and_then(crumbs::host_of))
         .collect()
 }
 
-/// Every page of the selected Sources, from the ledger where there is a row and from the
-/// blob where there is not.
+/// Every page of the selected Sources, from the ledger.
 ///
-/// **The ledger is the fast path and the blobs are the floor.** `collect` writes a row per
-/// stored artifact, so a corpus collected by this build answers out of one file per Source.
-/// A row is missing for exactly three reasons — the page predates the ledger, a write failed,
-/// or somebody deleted the file — and in all three the blob is still there, immutable, and
-/// says the same thing. So a missing row costs a read rather than an answer, and the count of
-/// them is reported: a number that quietly falls short is the failure this codebase is most
-/// consistently written against.
+/// **The ledger is the fast path and the blobs are the floor — and only `--rescan` walks
+/// the floor.** `collect` writes a row per stored artifact, so a corpus collected by this
+/// build answers out of one file per Source. A page with no row for its current blob is
+/// counted as `unrecorded` and left out, and the report names the command that writes it
+/// down once. Reading it here instead would put a one-time backfill of a corpus behind
+/// every read of it, which on the web is a click.
 ///
-/// Whether a host is **already a Source** is a corpus-wide question, so it is asked of the
-/// config and of every log rather than only of the selected Sources — a crumb Tampa dropped
-/// may be a Source somebody added last week. See [`claimed_hosts`] for the config half.
+/// Rows are keyed by the page's **address**, and a row answers only for the blob the log
+/// says is current ([`Recorded::is_of`]). Keyed on the blob alone, two pages with identical
+/// bytes — one blob — got each other's row, and a page re-collected with new content was
+/// answered by the links it used to have.
+///
+/// Whether a host is **already a Source** is a corpus-wide question, so it is asked of every
+/// definition and every Source's summary rather than only of the selected Sources — a crumb
+/// Tampa dropped may be a Source somebody added last week. See [`claimed_hosts`] for the
+/// definition half; the evidence half is [`crate::summary::Summary::claimed_hosts`].
 async fn survey(
     ctx: &Ctx,
     source: Option<&str>,
-    config_path: Option<&str>,
     rescan: bool,
     p: &Progress,
     cancel: &Cancel,
@@ -405,49 +414,42 @@ async fn survey(
 
     // The config first, so a malformed one fails before an hour of blob reads rather than
     // after them.
-    let (config, _) = super::load_config(config_path)?;
-    let mut promoted = claimed_hosts(&config);
-
-    // One replay per Source and one loop, because both questions are answered from it: what
-    // every Source has already collected, and what the selected ones have to say.
-    let mut work: Vec<(SourceId, Vec<Observation>)> = Vec::new();
+    let mut promoted = claimed_hosts(&crate::catalog::Sources::new(&ctx.store).list().await?);
+    let summaries = crate::summary::Summaries::new(&ctx.store);
     for id in &known {
-        let replay = ctx.store.replay(id).await?;
+        promoted.extend(summaries.get(id).await?.claimed_hosts);
+    }
 
-        let observed: Vec<&str> = replay.observed().into_iter().collect();
-        if !crate::sources::channel::claims(replay.discovery_method(), &observed) {
-            promoted.extend(observed.iter().filter_map(|key| host_of(key)));
-        }
-
-        if selected.contains(id) {
-            // The newest Observation per Resource, never the history: one page holds one set
-            // of links, and an older version of it holds the links the site has since dropped.
-            let mut pages: Vec<Observation> = replay.latest_observations().into_values().collect();
-            // Deterministic order, so two passes over one store read the same.
-            pages.sort_by(|a, b| a.resource.natural_key.cmp(&b.resource.natural_key));
-            work.push((id.clone(), pages));
-        }
+    // The newest Observation per Resource of each selected Source, never the history: one
+    // page holds one set of links, and an older version of it holds the links the site has
+    // since dropped. One replay per selected Source, which is the one log this question is
+    // about.
+    let mut work: Vec<(SourceId, Vec<Observation>)> = Vec::with_capacity(selected.len());
+    for id in &selected {
+        let mut pages: Vec<Observation> = ctx
+            .store
+            .replay(id)
+            .await?
+            .latest_observations()
+            .into_values()
+            .collect();
+        // Deterministic order, so two passes over one store read the same.
+        pages.sort_by(|a, b| a.resource.natural_key.cmp(&b.resource.natural_key));
+        work.push((id.clone(), pages));
     }
 
     let total: u64 = work.iter().map(|(_, pages)| pages.len() as u64).sum();
     let mut trail = Trail::default();
     let mut done = 0u64;
+    let mut unrecorded = 0;
     let mut from_blobs = 0;
     let mut unread = 0;
 
     for (id, pages) in &work {
         let ledger = Ledger::new(&ctx.store, id.clone());
-        // Keyed on the blob rather than the address: a page re-collected with new content has
-        // a new blob, so its old row is superseded rather than current, and reading it would
-        // report links the site has since dropped.
         let recorded: BTreeMap<String, Recorded> = match rescan {
             true => BTreeMap::new(),
-            false => ledger
-                .read()
-                .await?
-                .into_iter()
-                .filter_map(|row| row.page.blob.clone().map(|blob| (blob, row)))
-                .collect(),
+            false => ledger.current().await?,
         };
 
         let mut rows: Vec<Recorded> = Vec::with_capacity(pages.len());
@@ -456,13 +458,18 @@ async fn survey(
             p.step(obs.resource.natural_key.clone(), done, total);
             done += 1;
 
-            let short = render::short_sha(obs.blob_sha.as_str());
-            if let Some(row) = recorded.get(&short) {
+            if let Some(row) = recorded
+                .get(&obs.resource.natural_key)
+                .filter(|row| row.is_of(&obs.blob_sha))
+            {
                 trail.absorb(row);
                 rows.push(row.clone());
                 continue;
             }
-
+            if !rescan {
+                unrecorded += 1;
+                continue;
+            }
             match scan_blob(ctx, obs).await {
                 Some(row) => {
                     from_blobs += 1;
@@ -485,6 +492,7 @@ async fn survey(
         trail,
         promoted,
         decisions: Decisions::new(&ctx.store).current().await?,
+        unrecorded,
         from_blobs,
         unread,
     })
@@ -498,7 +506,7 @@ async fn scan_blob(ctx: &Ctx, obs: &Observation) -> Option<Recorded> {
     let page = Carrier {
         address: obs.resource.natural_key.clone(),
         at: Some(obs.at.to_string()),
-        blob: Some(render::short_sha(obs.blob_sha.as_str())),
+        blob: Some(obs.blob_sha.as_str().to_string()),
     };
 
     // The head decides the kind; reading whole PDFs to find out would be gigabytes to answer
@@ -514,14 +522,6 @@ async fn scan_blob(ctx: &Ctx, obs: &Observation) -> Option<Recorded> {
     // Verified, because these bytes are about to be shown to a person as evidence.
     let bytes = ctx.store.get_blob(&obs.blob_sha).await.ok()?;
     Some(crumbs::scan_page(&String::from_utf8_lossy(&bytes), page))
-}
-
-/// The host of an address, or `None` for one that does not name one.
-fn host_of(address: &str) -> Option<String> {
-    url::Url::parse(address)
-        .ok()?
-        .host_str()
-        .map(str::to_ascii_lowercase)
 }
 
 /// A host, from a host or from any URL on one.
@@ -564,9 +564,10 @@ impl Render for CrumbsReport {
                 crumbs,
                 hidden,
                 truncated,
+                unrecorded,
                 from_blobs,
                 unread,
-                rescanned,
+                rescanned: _,
                 elapsed_secs,
             } => {
                 let scanned = format!(
@@ -640,20 +641,33 @@ impl Render for CrumbsReport {
                             ),
                         )?;
                     }
-                    // What it cost, and how to stop paying it. `collect` writes a row per
-                    // page, so a non-zero count here is a backlog — pages collected before
-                    // the ledger existed — and it is a one-command fix.
-                    match (*from_blobs, *rescanned) {
-                        (0, _) => Ok(()),
-                        (n, true) => p.note(format!(
+                    if *from_blobs > 0 {
+                        p.note(format!(
                             "{} read from blobs and written down",
-                            render::plural(n, "page", "pages")
-                        )),
-                        (n, false) => p.note(format!(
-                            "{} had no record and were read from blobs — \
-                             `centinel crumbs --rescan` writes them down once",
-                            render::plural(n, "page", "pages")
-                        )),
+                            render::plural(*from_blobs, "page", "pages")
+                        ))?;
+                    }
+                    // What is missing, and the one command that fixes it. `collect` writes
+                    // a row per page, so a non-zero count here is a backlog — pages
+                    // collected before the ledger existed — and the counts above are a
+                    // floor until it is written down.
+                    match *unrecorded {
+                        0 => Ok(()),
+                        n => p.marked(
+                            Mark::Warn,
+                            p.paint(
+                                &format!(
+                                    "{} have no record and are not counted — \
+                                     `centinel crumbs --rescan{}` writes them down once",
+                                    render::plural(n, "page", "pages"),
+                                    match sources.as_slice() {
+                                        [one] => format!(" --source {one}"),
+                                        _ => String::new(),
+                                    }
+                                ),
+                                Ink::Dim,
+                            ),
+                        ),
                     }
                 })?;
 
@@ -727,7 +741,7 @@ impl Render for CrumbsReport {
                                 if !aside.is_empty() {
                                     aside.push_str(" · ");
                                 }
-                                aside.push_str(blob);
+                                aside.push_str(&render::short_sha(blob));
                             }
                             if !aside.is_empty() {
                                 p.nest(|p| p.line(p.paint(&aside, Ink::Dim)))?;
@@ -797,7 +811,7 @@ impl Render for CrumbsReport {
 mod tests {
     use super::*;
     use crate::crumbs::MAX_CARRIERS;
-    use crate::domain::Resource;
+    use crate::domain::{Observation, Resource};
     use crate::store::Store;
 
     async fn ctx() -> (tempfile::TempDir, Ctx) {
@@ -806,11 +820,29 @@ mod tests {
         (dir, Ctx::new(store))
     }
 
-    /// One document into the store, as `collect` would leave it.
+    /// One document into the store, as `collect` leaves it: an Observation in the log and
+    /// a row in the ledger.
     async fn stored(ctx: &Ctx, source: &str, address: &str, bytes: &[u8], content_type: &str) {
+        let (resource, obs) = observed(ctx, source, address, bytes, content_type).await;
+        let kind = ContentKind::classify(&obs.meta, &bytes[..bytes.len().min(SNIFF_BYTES)]);
+        Ledger::new(&ctx.store, resource.source.clone())
+            .record(&resource, bytes, kind, &obs)
+            .await;
+    }
+
+    /// One document into the log and **not** the ledger: a page collected before the
+    /// ledger existed, or whose row failed to write.
+    async fn observed(
+        ctx: &Ctx,
+        source: &str,
+        address: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> (Resource, Observation) {
         let id = SourceId::new(source.to_string()).unwrap();
         let resource = Resource::new(id, address);
-        ctx.store
+        let obs = ctx
+            .store
             .record_observation(
                 &resource,
                 bytes,
@@ -819,36 +851,22 @@ mod tests {
             )
             .await
             .unwrap();
+        (resource, obs)
     }
 
     async fn page(ctx: &Ctx, source: &str, address: &str, html: &str) {
         stored(ctx, source, address, html.as_bytes(), "text/html").await;
     }
 
-    /// Runs the op against **this** store's config and never the machine's.
-    ///
-    /// Without the substitution `Config::locate` would find `./centinel.toml` or
-    /// `~/.centinel/centinel.toml`, and every assertion about which hosts are already Sources
-    /// would depend on whose laptop ran it. A test that reads the machine is not a test of the
-    /// code.
     async fn run(ctx: &Ctx, args: CrumbsArgs) -> CrumbsReport {
-        let args = match args.config {
-            Some(_) => args,
-            None => CrumbsArgs {
-                config: Some(config_with(ctx, "")),
-                ..args
-            },
-        };
         crumbs(ctx, args, &Progress::none(), &Cancel::none())
             .await
             .unwrap()
     }
 
-    /// A config file inside the store, holding whatever the test wants to say.
-    fn config_with(ctx: &Ctx, body: &str) -> String {
-        let path = ctx.store.root().join("centinel.toml");
-        std::fs::write(&path, body).unwrap();
-        path.display().to_string()
+    /// Defines a source in the store, as `source add` would.
+    async fn define(ctx: &Ctx, source: crate::config::SourceConfig) {
+        crate::catalog::Sources::new(&ctx.store).add(&source).await.unwrap();
     }
 
     fn listed(report: &CrumbsReport) -> &Vec<Crumb> {
@@ -897,9 +915,112 @@ mod tests {
             unreachable!()
         };
         assert_eq!((*documents, *unread), (2, 0));
-        // Both pages were stored by `record_observation` directly, so no ledger row exists
-        // and the blobs are the floor that answered. This is the pre-ledger corpus case.
-        assert_eq!(*from_blobs, 2);
+        // Both pages were written down as they were stored, so nothing was read out of
+        // a blob and nothing is missing.
+        assert_eq!(*from_blobs, 0);
+    }
+
+    /// A page with no row is counted and named, never read: a one-time backfill of a
+    /// corpus is `--rescan`'s job, not every reader's. The blob is removed from the pool
+    /// to prove it — a reader that opened it would count it as `unread` instead.
+    #[tokio::test]
+    async fn a_page_with_no_row_is_counted_and_not_read() {
+        let (_d, ctx) = ctx().await;
+        page(
+            &ctx,
+            "tampa",
+            "https://www.tampa.gov/recorded",
+            r#"<a href="https://x.example.com/a">x</a>"#,
+        )
+        .await;
+        let (_, obs) = observed(
+            &ctx,
+            "tampa",
+            "https://www.tampa.gov/unrecorded",
+            br#"<a href="https://lost.example.com/">gone</a>"#,
+            "text/html",
+        )
+        .await;
+        std::fs::remove_file(ctx.store.blob_path_of(&obs.blob_sha)).unwrap();
+
+        let report = run(&ctx, CrumbsArgs::default()).await;
+        let hosts: Vec<&str> = listed(&report).iter().map(|c| c.host.as_str()).collect();
+        assert_eq!(hosts, ["x.example.com"]);
+        let CrumbsReport::List {
+            unrecorded,
+            unread,
+            from_blobs,
+            documents,
+            ..
+        } = &report
+        else {
+            unreachable!()
+        };
+        assert_eq!((*unrecorded, *unread, *from_blobs), (1, 0, 0), "the blob was opened");
+        assert_eq!(*documents, 1, "an unrecorded page is not accounted for");
+    }
+
+    /// The bug this guards: two pages with identical bytes share one blob, and a ledger
+    /// keyed on the blob alone handed each of them the other's row — `show` named one page
+    /// twice and the other never. Rows are keyed on the address, so each keeps its own.
+    #[tokio::test]
+    async fn two_pages_with_identical_bytes_keep_their_own_rows() {
+        let (_d, ctx) = ctx().await;
+        let same = r#"<a href="https://vendor.example.com/login">login</a>"#;
+        page(&ctx, "tampa", "https://www.tampa.gov/a", same).await;
+        page(&ctx, "tampa", "https://www.tampa.gov/b", same).await;
+
+        let report = run(
+            &ctx,
+            CrumbsArgs {
+                action: Some(CrumbsAction::Show(ShowArgs {
+                    host: "vendor.example.com".into(),
+                    source: None,
+                })),
+                ..Default::default()
+            },
+        )
+        .await;
+        let CrumbsReport::Show { carried_by, pages, .. } = &report else {
+            panic!("expected a show, got {report:?}");
+        };
+        let addresses: Vec<&str> = carried_by.iter().map(|c| c.address.as_str()).collect();
+        assert_eq!(addresses, ["https://www.tampa.gov/a", "https://www.tampa.gov/b"]);
+        assert_eq!(*pages, 2);
+    }
+
+    /// Rows written before v0.23 carry the 12-character short digest. A corpus with
+    /// megabytes of them must keep answering without a rescan.
+    #[tokio::test]
+    async fn a_row_with_a_short_digest_still_answers() {
+        let (_d, ctx) = ctx().await;
+        let (resource, obs) = observed(
+            &ctx,
+            "tampa",
+            "https://www.tampa.gov/old",
+            br#"<a href="https://x.example.com/a">x</a>"#,
+            "text/html",
+        )
+        .await;
+        let ledger = Ledger::new(&ctx.store, resource.source.clone());
+        ledger
+            .append(&crumbs::scan_page(
+                r#"<a href="https://x.example.com/a">x</a>"#,
+                Carrier {
+                    address: resource.natural_key.clone(),
+                    at: Some(obs.at.to_string()),
+                    blob: Some(render::short_sha(obs.blob_sha.as_str())),
+                },
+            ))
+            .await
+            .unwrap();
+
+        let report = run(&ctx, CrumbsArgs::default()).await;
+        assert_eq!(listed(&report)[0].host, "x.example.com");
+        let CrumbsReport::List { unrecorded, .. } = &report else {
+            unreachable!()
+        };
+        assert_eq!(*unrecorded, 0);
     }
 
     /// A refusal is truth, so the next pass must not offer the host again — and `--all`
@@ -992,12 +1113,12 @@ mod tests {
         );
     }
 
-    /// A `[[source]]` block answers the question on its own, before a single page of it has
-    /// been collected. `source add` therefore needs no crumb-related code at all: standing is
-    /// derived on every read, so the crumb stops being a candidate the moment the block exists
-    /// and there is nothing to keep in step.
+    /// A definition answers the question on its own, before a single page of it has been
+    /// collected. `source add` therefore needs no crumb-related code at all: standing is
+    /// derived on every read, so the crumb stops being a candidate the moment the definition
+    /// exists and there is nothing to keep in step.
     #[tokio::test]
-    async fn a_host_the_config_already_claims_is_not_offered_as_a_candidate() {
+    async fn a_host_a_definition_already_claims_is_not_offered_as_a_candidate() {
         let (_d, ctx) = ctx().await;
         page(
             &ctx,
@@ -1014,21 +1135,17 @@ mod tests {
             "nothing claims either host yet"
         );
 
-        // What `centinel source add hillsclerk --site …` writes. Nothing has been collected
-        // from it, and `enabled = false` on top of that: the operator decided twice.
-        let config = config_with(
+        // What `centinel source add hillsclerk --site … --disabled` writes. Nothing has been
+        // collected from it, and disabled on top of that: the operator decided twice.
+        define(
             &ctx,
-            "[[source]]\nid = \"hillsclerk\"\n\
-             site = \"https://publicrec.hillsclerk.com/Civil/\"\nenabled = false\n",
-        );
-        let after = run(
-            &ctx,
-            CrumbsArgs {
-                config: Some(config),
-                ..Default::default()
+            crate::config::SourceConfig {
+                enabled: Some(false),
+                ..crate::config::SourceConfig::site("hillsclerk", "https://publicrec.hillsclerk.com/Civil/")
             },
         )
         .await;
+        let after = run(&ctx, CrumbsArgs::default()).await;
 
         let promoted: Vec<&Crumb> = listed(&after)
             .iter()
@@ -1051,19 +1168,12 @@ mod tests {
         )
         .await;
 
-        let config = config_with(
+        define(
             &ctx,
-            "[[source]]\nid = \"tampa-tv\"\n\
-             channel = \"https://www.youtube.com/@CityofTampa\"\n",
-        );
-        let report = run(
-            &ctx,
-            CrumbsArgs {
-                config: Some(config),
-                ..Default::default()
-            },
+            crate::config::SourceConfig::channel("tampa-tv", "https://www.youtube.com/@CityofTampa"),
         )
         .await;
+        let report = run(&ctx, CrumbsArgs::default()).await;
 
         let crumbs = listed(&report);
         assert_eq!(crumbs[0].host, "www.youtube.com");
@@ -1204,20 +1314,21 @@ mod tests {
         assert!(example.is_none());
     }
 
-    /// A blob a PDF is stored under must not be scanned for links, and a page whose blob has
-    /// gone must not fail the whole pass.
+    /// On a rescan, a blob a PDF is stored under must not be scanned for links, and a page
+    /// whose blob has gone must not fail the whole pass.
     #[tokio::test]
-    async fn only_html_is_scanned_and_an_unreadable_blob_is_counted() {
+    async fn a_rescan_scans_only_html_and_counts_an_unreadable_blob() {
         let (_d, ctx) = ctx().await;
-        page(
+        observed(
             &ctx,
             "tampa",
             "https://www.tampa.gov/page",
-            r#"<a href="https://x.example.com/a">x</a>"#,
+            br#"<a href="https://x.example.com/a">x</a>"#,
+            "text/html",
         )
         .await;
         // A PDF whose bytes happen to contain something that looks like markup.
-        stored(
+        observed(
             &ctx,
             "tampa",
             "https://www.tampa.gov/a.pdf",
@@ -1225,25 +1336,25 @@ mod tests {
             "application/pdf",
         )
         .await;
-
         // And an Observation whose blob has been removed from the pool.
-        let resource = Resource::new(
-            SourceId::new("tampa".to_string()).unwrap(),
+        let (_, obs) = observed(
+            &ctx,
+            "tampa",
             "https://www.tampa.gov/lost",
-        );
-        let obs = ctx
-            .store
-            .record_observation(
-                &resource,
-                b"<a href=\"https://lost.example.com/\">gone</a>",
-                "2026-08-01T00:00:00Z".parse().unwrap(),
-                BTreeMap::new(),
-            )
-            .await
-            .unwrap();
+            b"<a href=\"https://lost.example.com/\">gone</a>",
+            "text/html",
+        )
+        .await;
         std::fs::remove_file(ctx.store.blob_path_of(&obs.blob_sha)).unwrap();
 
-        let report = run(&ctx, CrumbsArgs::default()).await;
+        let report = run(
+            &ctx,
+            CrumbsArgs {
+                rescan: true,
+                ..Default::default()
+            },
+        )
+        .await;
         let hosts: Vec<&str> = listed(&report).iter().map(|c| c.host.as_str()).collect();
         assert_eq!(hosts, ["x.example.com"]);
 
@@ -1259,30 +1370,25 @@ mod tests {
         assert_eq!(*documents, 2);
     }
 
-    /// The point of the ledger: a pass over a recorded corpus opens no blobs at all.
-    ///
-    /// Written here rather than only in `acquire`, because what has to hold is that the two
-    /// feeds produce **the same answer** — the row `collect` writes and the blob `--rescan`
-    /// reads are one scan, and a difference between them would be invisible in either alone.
+    /// The two feeds are one scan: the row `collect` writes as it stores a page and the row
+    /// `--rescan` reads out of the blob later must say the same thing, and a difference
+    /// between them would be invisible in either alone. A pre-ledger corpus answers nothing
+    /// until the rescan, and says so.
     #[tokio::test]
-    async fn a_recorded_page_costs_no_blob_read_and_says_what_a_rescan_says() {
+    async fn a_rescan_writes_what_collect_would_have_and_a_recorded_page_reads_the_same() {
         let (_d, ctx) = ctx().await;
-        page(
-            &ctx,
-            "tampa",
-            "https://www.tampa.gov/clerk",
-            r#"<a href="https://publicrec.hillsclerk.com/Probate/">probate</a>
+        let html = r#"<a href="https://publicrec.hillsclerk.com/Probate/">probate</a>
                <a href="https://publicrec.hillsclerk.com/Civil/">civil</a>
-               <a href="/ours">ours</a>"#,
-        )
-        .await;
+               <a href="/ours">ours</a>"#;
+        observed(&ctx, "tampa", "https://www.tampa.gov/clerk", html.as_bytes(), "text/html").await;
 
-        // A pre-ledger corpus: the answer comes from blobs, and says so.
+        // A pre-ledger corpus: nothing is read, and the report says what is missing.
         let cold = run(&ctx, CrumbsArgs::default()).await;
-        let CrumbsReport::List { from_blobs, .. } = &cold else {
+        assert!(listed(&cold).is_empty());
+        let CrumbsReport::List { unrecorded, .. } = &cold else {
             unreachable!()
         };
-        assert_eq!(*from_blobs, 1);
+        assert_eq!(*unrecorded, 1);
 
         // `--rescan` writes the ledger the way `collect` would have.
         let written = run(
@@ -1293,6 +1399,10 @@ mod tests {
             },
         )
         .await;
+        let CrumbsReport::List { from_blobs, .. } = &written else {
+            unreachable!()
+        };
+        assert_eq!(*from_blobs, 1);
         assert!(
             ctx.store
                 .crumbs_path(&SourceId::new("tampa".to_string()).unwrap())
@@ -1304,16 +1414,21 @@ mod tests {
         let warm = run(&ctx, CrumbsArgs::default()).await;
         let CrumbsReport::List {
             from_blobs,
+            unrecorded,
             documents,
             ..
         } = &warm
         else {
             unreachable!()
         };
-        assert_eq!(*from_blobs, 0, "a recorded page was read from its blob");
-        assert_eq!(*documents, 1);
-        assert_eq!(listed(&warm), listed(&written));
-        assert_eq!(listed(&warm), listed(&cold), "the two feeds disagree");
+        assert_eq!((*from_blobs, *unrecorded, *documents), (0, 0, 1));
+        assert_eq!(listed(&warm), listed(&written), "the two feeds disagree");
+
+        // The same page stored by `collect` — the row written from bytes in hand — reads
+        // the same as the row the rescan wrote from the blob.
+        let (_d2, fresh) = self::ctx().await;
+        page(&fresh, "tampa", "https://www.tampa.gov/clerk", html).await;
+        assert_eq!(listed(&run(&fresh, CrumbsArgs::default()).await), listed(&warm));
 
         // The example is the smallest address on the host, so it does not depend on which
         // feed answered or on what order the pages arrived in.
@@ -1345,9 +1460,10 @@ mod tests {
         )
         .await;
 
-        // The page changes: a new blob, and no row for it.
+        // The page changes: a new blob, and no row for it yet.
         let resource = Resource::new(SourceId::new("tampa".to_string()).unwrap(), url);
-        ctx.store
+        let obs = ctx
+            .store
             .record_observation(
                 &resource,
                 br#"<a href="https://new.example.com/">new</a>"#,
@@ -1358,13 +1474,21 @@ mod tests {
             .unwrap();
 
         let report = run(&ctx, CrumbsArgs::default()).await;
-        let hosts: Vec<&str> = listed(&report).iter().map(|c| c.host.as_str()).collect();
-        assert_eq!(hosts, ["new.example.com"], "a stale row answered");
-
-        let CrumbsReport::List { from_blobs, .. } = &report else {
+        assert!(listed(&report).is_empty(), "a stale row answered: {report:?}");
+        let CrumbsReport::List { unrecorded, .. } = &report else {
             unreachable!()
         };
-        assert_eq!(*from_blobs, 1, "the new blob had to be read");
+        assert_eq!(*unrecorded, 1, "the changed page has no current row");
+
+        // Written down as `collect` would, the new row answers and the old one does not.
+        Ledger::new(&ctx.store, resource.source.clone())
+            .record(&resource, br#"<a href="https://new.example.com/">new</a>"#, ContentKind::Html, &obs)
+            .await;
+        let hosts: Vec<String> = listed(&run(&ctx, CrumbsArgs::default()).await)
+            .iter()
+            .map(|c| c.host.clone())
+            .collect();
+        assert_eq!(hosts, ["new.example.com"]);
     }
 
     #[test]

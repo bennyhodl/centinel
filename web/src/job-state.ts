@@ -12,7 +12,7 @@ const FINISHED = 20
 export function foldJob(jobs: JobState[], event: JobEvent): JobState[] {
   if (event.type === 'started') {
     if (jobs.some(job => job.id === event.job)) return jobs
-    const job: JobState = { id: event.job, kind: event.kind, label: event.label, started_at: event.at, seq: event.seq, ok: 0, failed: 0, log: [event] }
+    const job: JobState = { id: event.job, kind: event.kind, label: event.label, stoppable: event.stoppable, started_at: event.at, seq: event.seq, ok: 0, failed: 0, log: [event] }
     return [...jobs, job]
   }
   const at = jobs.findIndex(job => job.id === event.job)

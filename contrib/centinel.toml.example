@@ -1,8 +1,9 @@
-# Centinel configuration.
+# Centinel configuration — what is true of this machine.
 #
-# `centinel run` walks every [[source]] below: discover, collect, extract, index, then
-# one corpus-wide embed. Every stage skips work it has already done, so running it twice
-# is cheap and running it from cron is the intended use.
+# The sources a corpus is made of live in the store, not here: add them with
+# `centinel source add` or from the web's Sources page. `centinel run` walks every enabled
+# one: discover, collect, extract, index, then one corpus-wide embed. Every stage skips
+# work it has already done, so running it twice is cheap.
 
 # Where the store lives. Defaults to ~/.centinel, so every run collects into one corpus
 # whatever directory it was started from. `--root` and $CENTINEL_ROOT override it.
@@ -39,16 +40,18 @@ model = "qwen3-reranker-0.6b"
 model = "whisper-large-v3-turbo"
 #   base_url = "http://127.0.0.1:8178/v1"
 
-# A website. `site` is any URL on it; only the origin is used.
-#   [[source]]
-#   id = "tampa"
-#   site = "https://www.tampa.gov"
+# The Jev model `centinel classify` scores documents with when no --model is given.
+# Classifying is never part of `centinel run`: document text leaves this machine for
+# api.typesafe.ai only when a person starts it, and $TYPESAFE_API_KEY must be set.
+#   [classify]
+#   model = "jev-1.13.0"
 
-# A YouTube channel — a peer of a website, differing only in how it is acquired.
-#   [[source]]
-#   id = "tampa-council"
-#   channel = "https://www.youtube.com/@CityofTampa"
-#   audio_if_no_captions = true
+# A cadence `centinel serve` fires `centinel run` on. Here rather than in the store, so
+# a store handed to someone else collects nothing on its own.
+#   [[schedule]]
+#   id = "nightly"
+#   cron = "0 3 * * *"
+#   sources = ["tampa"]
 
 [open]
 # Either an application name, or a command template containing {path}.

@@ -19,10 +19,11 @@
 //! ## A crumb is derived; the ruling on it is truth
 //!
 //! The ledger is **derived**, and the blobs remain the floor under it. A link is parsed out of
-//! immutable bytes, so a missing row costs a blob read rather than an answer, and a scanner
-//! bug is repaired by deleting the file — `centinel crumbs --rescan` writes it again and the
-//! rebuilt answer is the same answer. That is why it sits beside `log/` rather than in it, and
-//! it is the same reason `extract` may drop an `href` from the derived text: the blob is truth.
+//! immutable bytes, so a missing row is never a wrong answer — the reader counts it and names
+//! the command that writes it — and a scanner bug is repaired by deleting the file: `centinel
+//! crumbs --rescan` writes it again from the blobs and the rebuilt answer is the same answer.
+//! That is why it sits beside `log/` rather than in it, and it is the same reason `extract`
+//! may drop an `href` from the derived text: the blob is truth.
 //!
 //! What cannot be rebuilt is the operator saying **no**. Nothing in a page records that a
 //! person looked at `facebook.com` and refused it, so [`Decision`] is truth and is appended
@@ -65,10 +66,14 @@ pub struct Carrier {
     /// holds a seed and has no Observation to date it by.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
-    /// The blob the link was read out of, short form.
+    /// The blob the link was read out of: its full digest.
     ///
     /// So a crumb that looks wrong can be traced to the page that dropped it — anything
     /// Centinel prints, Centinel takes back. Absent for the same reason [`Self::at`] is.
+    ///
+    /// Rows written before v0.23 hold the 12-character short form. They are still read
+    /// ([`Recorded::is_of`] accepts a prefix, as every handle Centinel prints is taken
+    /// back), so a ledger does not have to be rewritten to keep answering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob: Option<String>,
 }
@@ -100,7 +105,7 @@ pub enum Standing {
     Ignored,
     /// A Source already covers this host, so the promotion has happened.
     ///
-    /// From the config or from the log, and **either is enough**. A `[[source]]` block is the
+    /// From a definition or from the log, and **either is enough**. A definition is the
     /// operator saying this host is theirs to collect; an Observation is proof that it
     /// happened. Offering a host somebody added an hour ago would be asking for a decision
     /// they have already made, and whether a run has followed is `list`'s question.
@@ -178,6 +183,22 @@ pub struct Recorded {
     pub page: Carrier,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Linked>,
+}
+
+impl Recorded {
+    /// Whether this row was read out of these bytes.
+    ///
+    /// Asked of the row the ledger holds for a page's *address*, against the blob the log
+    /// says is current for it — so a page re-collected with new content, whose row names
+    /// the old blob, is not answered by it. The address is half the key on purpose: two
+    /// pages with identical bytes share one blob, and a ledger keyed on the blob alone
+    /// handed each of them the other's row (234 such pairs in one corpus).
+    pub fn is_of(&self, sha: &crate::domain::BlobSha) -> bool {
+        self.page
+            .blob
+            .as_deref()
+            .is_some_and(|blob| !blob.is_empty() && sha.as_str().starts_with(blob))
+    }
 }
 
 /// Every off-host link on one page, ready to be written down or aggregated.
@@ -341,6 +362,18 @@ impl Trail {
     }
 }
 
+/// The host of an address, lowercased, or `None` for one that does not name one.
+///
+/// The one spelling of "which host is this", shared by the crumb reader and by the
+/// per-source summary that says which hosts a log has observed — the two sides of
+/// "already a Source", which must agree on what a host is.
+pub fn host_of(address: &str) -> Option<String> {
+    url::Url::parse(address)
+        .ok()?
+        .host_str()
+        .map(str::to_ascii_lowercase)
+}
+
 // ── the ledger: what each page dropped, written when it was collected ─────────
 
 /// The rows one Source has written down, and where they go.
@@ -363,8 +396,11 @@ impl Trail {
 ///    one file every replay reads, to hold something no replay needs.
 ///
 /// A lost or partial ledger is therefore an ordinary state and never a wrong answer: the
-/// reader compares the blobs it holds rows for against the blobs the log names, reads the
-/// difference out of `blobs/`, and says how many it had to.
+/// reader compares the rows it holds against the blobs the log names, counts the pages
+/// that have none, and names `centinel crumbs --rescan`, which reads those out of
+/// `blobs/` once and writes them down. **The reader itself opens no blob.** It used to
+/// fall through to the pool for every page without a row, which on a source collected
+/// before the ledger existed was nineteen thousand blob reads per click of a web page.
 pub struct Ledger<'a> {
     store: &'a Store,
     source: crate::domain::SourceId,
@@ -373,6 +409,48 @@ pub struct Ledger<'a> {
 impl<'a> Ledger<'a> {
     pub fn new(store: &'a Store, source: crate::domain::SourceId) -> Self {
         Self { store, source }
+    }
+
+    /// Writes down what one freshly stored artifact points at, from bytes already in hand.
+    ///
+    /// What `collect` calls the moment it has recorded an Observation — the cheapest moment
+    /// there will ever be: the bytes are in memory, the kind is already classified, and the
+    /// page's `<a>` tags are already being walked for the documents it encloses. Only markup
+    /// holds links; a PDF still gets its row, so the ledger accounts for every blob the log
+    /// names — it just has nothing in it.
+    ///
+    /// **A failure here never fails a collection.** The ledger is derived: a missing row is
+    /// a page `centinel crumbs` counts and `--rescan` writes down later. A run of a city is an
+    /// hour of paced requests, and losing it to a write error on a rebuildable file would be
+    /// the wrong trade in the wrong direction.
+    pub async fn record(
+        &self,
+        resource: &crate::domain::Resource,
+        bytes: &[u8],
+        kind: crate::content::ContentKind,
+        obs: &crate::domain::Observation,
+    ) {
+        let page = Carrier {
+            address: resource.natural_key.clone(),
+            at: Some(obs.at.to_string()),
+            blob: Some(obs.blob_sha.as_str().to_string()),
+        };
+        let row = match kind {
+            crate::content::ContentKind::Html => scan_page(&String::from_utf8_lossy(bytes), page),
+            _ => Recorded {
+                page,
+                links: Vec::new(),
+            },
+        };
+        if let Err(e) = self.append(&row).await {
+            tracing::warn!(
+                source = %resource.source,
+                page = %resource.natural_key,
+                path = %self.store.crumbs_path(&resource.source).display(),
+                error = %e,
+                "could not write a crumb row; `centinel crumbs --rescan` will write it later"
+            );
+        }
     }
 
     /// Appends one page's row.
@@ -427,6 +505,21 @@ impl<'a> Ledger<'a> {
             }
         }
         Ok(out)
+    }
+
+    /// The newest row per address.
+    ///
+    /// Rows are appended as pages are stored, so for a page collected twice the later row
+    /// is the later blob. Which blob is *current* is the log's to say, not the ledger's:
+    /// the caller checks the row against the Observation with [`Recorded::is_of`], and a
+    /// row for a page that has since changed is a page with no row.
+    pub async fn current(&self) -> anyhow::Result<BTreeMap<String, Recorded>> {
+        Ok(self
+            .read()
+            .await?
+            .into_iter()
+            .map(|row| (row.page.address.clone(), row))
+            .collect())
     }
 
     /// Replaces the ledger with exactly these rows.

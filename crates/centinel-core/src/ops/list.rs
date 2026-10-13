@@ -6,32 +6,24 @@
 //!
 //! ## Every source, not every source with something in it
 //!
-//! The rows are the config's sources first, then whatever else the store holds — and a
-//! source with nothing collected gets a row saying so. It used to list the store alone,
-//! which is a directory per source under `log/`, and a source nothing has run yet has no
-//! directory: so the command an operator types straight after `source add` answered *"No
-//! sources yet"*, about a config file naming five of them. Told that, the reasonable
-//! reading is that the add did not work.
-//!
-//! The union is also what makes the two failures distinguishable. *Configured and
-//! uncollected* is a run waiting to happen; *collected and unconfigured* is a source
-//! `centinel run` will silently skip. Listing one side only cannot say either.
+//! A source with nothing collected gets a row saying so. `source add` writes the
+//! definition into `log/<id>/`, so a source nothing has run yet still has a directory and
+//! still has a row — the command an operator types straight after adding one must not
+//! answer *"No sources yet"*.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
 use crate::prelude::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SourceSummary {
     pub source: String,
-    /// Whether `centinel.toml` names it. False means the store has been collecting it and
-    /// a bare `centinel run` will not — the config is the statement of intent, and this
-    /// source is not in it. `centinel source list` is where that gap is acted on.
-    pub tracked: bool,
+    /// Whether the store defines it (`log/<id>/source.toml`). False only for a log nothing
+    /// can say the address of, which nothing can collect again.
+    pub defined: bool,
     /// Addresses the log knows about. Zero for a source that has been added and not yet
     /// run, which is a state with a row rather than a state with no row.
     pub resources: usize,
@@ -43,6 +35,17 @@ pub struct SourceSummary {
     pub problems: Vec<Problem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problems_truncated: Option<usize>,
+    /// The latest enumeration of the source, if one ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_discovery: Option<Discovered>,
+}
+
+/// One `DiscoveryRun`, summarised: when, by which method, and how many addresses it saw.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Discovered {
+    pub at: String,
+    pub method: String,
+    pub addresses: usize,
 }
 
 impl SourceSummary {
@@ -83,30 +86,24 @@ pub struct ListArgs {
     #[arg(long, default_value_t = 20)]
     #[serde(default = "default_max_problems")]
     pub max_problems: usize,
-
-    /// Config file the source list is read from. Defaults to the one in effect.
-    #[arg(long, value_name = "FILE")]
-    #[serde(default)]
-    pub config: Option<String>,
 }
 
 fn default_max_problems() -> usize {
     20
 }
 
-/// List every source — configured or collected — with resource counts and liveness.
+/// List every source in the store, with resource counts and liveness.
 #[op(group = "corpus")]
 pub async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<ListReport> {
-    let (config, _) = super::load_config(args.config.as_deref())?;
-
+    let catalog = crate::catalog::Sources::new(&ctx.store);
     let sources = match &args.source {
         Some(s) => vec![SourceId::new(s.clone())?],
-        None => named(ctx, &config).await?,
+        None => ctx.store.sources().await?,
     };
 
     let mut out = Vec::with_capacity(sources.len());
     for source in sources {
-        let tracked = config.source(source.as_str()).is_some();
+        let defined = catalog.get(source.as_str()).await?.is_some();
         let replay = ctx.store.replay(&source).await?;
         // Statuses alone under-count: an address enumerated and never fetched is in a
         // DiscoveryRun and nowhere else, and it is exactly the "discovered, not
@@ -118,6 +115,14 @@ pub async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<ListReport> {
             .iter()
             .filter(|r| matches!(r, LogRecord::Observation(_)))
             .count();
+        let last_discovery = replay.records().iter().rev().find_map(|r| match r {
+            LogRecord::DiscoveryRun(d) => Some(Discovered {
+                at: d.at.to_string(),
+                method: d.method.clone(),
+                addresses: d.resources.len(),
+            }),
+            _ => None,
+        });
 
         let mut liveness: BTreeMap<String, usize> = BTreeMap::new();
         let mut problems = Vec::new();
@@ -147,12 +152,13 @@ pub async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<ListReport> {
 
         out.push(SourceSummary {
             source: source.to_string(),
-            tracked,
+            defined,
             resources,
             observations,
             liveness,
             problems,
             problems_truncated: (truncated > 0).then_some(truncated),
+            last_discovery,
         });
     }
 
@@ -160,35 +166,6 @@ pub async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<ListReport> {
         store_root: ctx.store.root().display().to_string(),
         sources: out,
     })
-}
-
-/// Every source there is: the config's, in the order they are written, then the store's.
-///
-/// Config order rather than alphabetical, because that file is a thing a person wrote and
-/// the order they wrote it in is information. The store's own list is sorted, and its
-/// entries are appended rather than merged in, so the two halves of the answer — declared,
-/// and merely present — stay visibly apart.
-///
-/// A config id the store could never hold is skipped: `SourceId` refuses what is not a
-/// legal directory name, and there is no log to read for a name no log can be written
-/// under. `run` is where that block earns its error, naming the id and the rule.
-async fn named(ctx: &Ctx, config: &Config) -> anyhow::Result<Vec<SourceId>> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::with_capacity(config.sources.len());
-
-    for source in &config.sources {
-        if let Ok(id) = SourceId::new(source.id.clone())
-            && seen.insert(id.clone())
-        {
-            out.push(id);
-        }
-    }
-    for id in ctx.store.sources().await? {
-        if seen.insert(id.clone()) {
-            out.push(id);
-        }
-    }
-    Ok(out)
 }
 
 /// One block per source: the counts, the liveness roll-up, then the addresses that are
@@ -213,7 +190,7 @@ impl Render for ListReport {
 
         // The rows above say *what is here*; this says what to do about the ones that are
         // here and empty. Printed once, at the bottom, rather than under every row: a
-        // freshly written config is all empty rows, and a command repeated eight times is
+        // freshly added store is all empty rows, and a command repeated eight times is
         // a wall rather than an instruction.
         let empty: Vec<&SourceSummary> =
             self.sources.iter().filter(|s| s.holds_nothing()).collect();
@@ -240,16 +217,16 @@ impl Render for SourceSummary {
         // The aside is the answer to "what state is this in", so for an empty source it
         // has to say the state rather than count it. `0 resources · 0 observations` is
         // two facts a reader has to add up into the one word that follows.
-        let counts = match (self.holds_nothing(), self.tracked) {
+        let counts = match (self.holds_nothing(), self.defined) {
             (false, _) => format!(
                 "{} · {}",
                 render::plural(self.resources, "resource", "resources"),
                 render::plural(self.observations, "observation", "observations"),
             ),
-            (true, true) => "in centinel.toml, nothing collected yet".to_string(),
-            // No config block and no records either: an empty directory under `log/`,
+            (true, true) => "defined, nothing collected yet".to_string(),
+            // No definition and no records either: an empty directory under `log/`,
             // which is what an interrupted first run leaves behind.
-            (true, false) => "nothing collected yet, and not in centinel.toml".to_string(),
+            (true, false) => "nothing collected yet, and no definition".to_string(),
         };
         p.title(&self.source, &counts)?;
 
@@ -334,15 +311,14 @@ fn liveness_mark(name: &str) -> Mark {
 mod tests {
     use super::*;
 
-    fn args(config: &std::path::Path) -> ListArgs {
+    fn args() -> ListArgs {
         ListArgs {
-            config: Some(config.display().to_string()),
             max_problems: default_max_problems(),
             ..Default::default()
         }
     }
 
-    /// A store that has been collecting one source, which nothing ever configured.
+    /// A store that has been collecting one source, from before definitions existed.
     async fn store_holding(dir: &std::path::Path, id: &str) -> Ctx {
         let store = crate::store::Store::open(dir.join("store")).await.unwrap();
         let source = SourceId::new(id).unwrap();
@@ -361,71 +337,44 @@ mod tests {
         Ctx::new(store)
     }
 
-    /// The state a `source add` leaves behind, and the whole reason the config is read
-    /// here: the store is a directory per source under `log/`, a source nothing has run
-    /// has no directory, and listing the store alone answered *"No sources yet"* at
-    /// somebody who had just added five.
+    /// The state a `source add` leaves behind: defined, never run. It must still have a
+    /// row — listing it as absent reads as an add that did not work.
     #[tokio::test]
-    async fn a_configured_source_the_store_has_never_seen_is_still_listed() {
+    async fn a_defined_source_the_store_has_never_collected_is_still_listed() {
         let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("centinel.toml");
-        std::fs::write(
-            &config,
-            "[[source]]\nid = \"tampa\"\nsite = \"https://www.tampa.gov\"\n",
-        )
-        .unwrap();
         let store = crate::store::Store::open(dir.path().join("store"))
             .await
             .unwrap();
+        crate::catalog::Sources::new(&store)
+            .add(&crate::config::SourceConfig::site("tampa", "https://www.tampa.gov"))
+            .await
+            .unwrap();
 
-        let report = list(&Ctx::new(store), args(&config)).await.unwrap();
+        let report = list(&Ctx::new(store), args()).await.unwrap();
 
         assert_eq!(report.sources.len(), 1, "{:?}", report.sources);
         assert_eq!(report.sources[0].source, "tampa");
         assert_eq!(report.sources[0].resources, 0);
-        assert!(report.sources[0].tracked);
+        assert!(report.sources[0].defined);
     }
 
-    /// Both halves of the answer, and in that order: what was declared, then what is
-    /// merely present. A source collected by hand is very much here.
+    /// A log with no definition is still listed, and marked, until `import` gives it one.
     #[tokio::test]
-    async fn the_config_leads_and_anything_else_the_store_holds_follows() {
+    async fn a_log_without_a_definition_is_listed_and_marked() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = store_holding(dir.path(), "hillsborough").await;
-        let config = dir.path().join("centinel.toml");
-        std::fs::write(
-            &config,
-            "[[source]]\nid = \"tampa\"\nsite = \"https://www.tampa.gov\"\n",
-        )
-        .unwrap();
 
-        let report = list(&ctx, args(&config)).await.unwrap();
-
-        let ids: Vec<&str> = report.sources.iter().map(|s| s.source.as_str()).collect();
-        assert_eq!(ids, ["tampa", "hillsborough"], "{ids:?}");
-        assert!(report.sources[0].tracked);
-        assert!(report.sources[0].holds_nothing());
-        assert!(!report.sources[1].tracked);
-        assert_eq!(report.sources[1].resources, 1);
-    }
-
-    /// A source in both is one row. It was listed twice for one commit, because the
-    /// config half and the store half were collected independently.
-    #[tokio::test]
-    async fn a_source_that_is_configured_and_collected_appears_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = store_holding(dir.path(), "tampa").await;
-        let config = dir.path().join("centinel.toml");
-        std::fs::write(
-            &config,
-            "[[source]]\nid = \"tampa\"\nsite = \"https://www.tampa.gov\"\n",
-        )
-        .unwrap();
-
-        let report = list(&ctx, args(&config)).await.unwrap();
-        assert_eq!(report.sources.len(), 1, "{:?}", report.sources);
-        assert!(report.sources[0].tracked);
+        let report = list(&ctx, args()).await.unwrap();
+        assert_eq!(report.sources.len(), 1);
+        assert!(!report.sources[0].defined);
         assert_eq!(report.sources[0].resources, 1);
+
+        crate::catalog::Sources::new(&ctx.store)
+            .import(&crate::config::Config::default())
+            .await
+            .unwrap();
+        let after = list(&ctx, args()).await.unwrap();
+        assert!(after.sources[0].defined);
     }
 
     // ── rendering ─────────────────────────────────────────────────────────────────
@@ -442,7 +391,7 @@ mod tests {
     fn summary(id: &str, resources: usize) -> SourceSummary {
         SourceSummary {
             source: id.into(),
-            tracked: true,
+            defined: true,
             resources,
             observations: resources,
             liveness: match resources {
@@ -451,6 +400,7 @@ mod tests {
             },
             problems: Vec::new(),
             problems_truncated: None,
+            last_discovery: None,
         }
     }
 
@@ -471,7 +421,7 @@ mod tests {
         assert!(out.contains("centinel run --source tampa"), "{out}");
     }
 
-    /// One command, once, at the bottom. A freshly written config is all empty rows, and
+    /// One command, once, at the bottom. A freshly added store is all empty rows, and
     /// eight copies of the same line is a wall rather than an instruction.
     #[test]
     fn several_uncollected_sources_get_one_line_between_them() {
@@ -490,14 +440,15 @@ mod tests {
         assert!(!out.contains("centinel run"), "{out}");
     }
 
-    /// The gap the other way round, which the aside is the only thing that reports here.
+    /// An empty directory with no definition, which the aside is the only thing that
+    /// reports here.
     #[test]
-    fn an_empty_source_the_config_never_named_says_that_too() {
+    fn an_empty_source_with_no_definition_says_that_too() {
         let loose = SourceSummary {
-            tracked: false,
+            defined: false,
             ..summary("hillsborough", 0)
         };
         let out = render_to_string(&report(vec![loose]));
-        assert!(out.contains("not in centinel.toml"), "{out}");
+        assert!(out.contains("no definition"), "{out}");
     }
 }

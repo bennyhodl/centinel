@@ -5,9 +5,11 @@ import { api } from '../../api'
 import { queries } from '../../queries'
 import { ErrorBox, PageHeader, SectionRule } from '../../ui'
 import { CopyBlock } from '../../copy'
+import { Skeleton } from '@/components/ui/skeleton'
 
 export const Route = createFileRoute('/_workspace/connect')({
   loader: ({ context: { queryClient } }) => Promise.all([queryClient.ensureQueryData(queries.ops()), queryClient.ensureQueryData(queries.system())]),
+  pendingComponent: ConnectSkeleton,
   component: Connect,
 })
 
@@ -20,6 +22,26 @@ const clients = [
 
 const json = (server: Record<string, unknown>) => JSON.stringify({ mcpServers: { centinel: server } }, null, 2)
 
+const detail = 'Connect an OAuth-capable MCP client to this corpus. It can search, read and download. Collecting and classifying stay with you.'
+
+function ConnectSkeleton() {
+  return <>
+    <PageHeader title="Connect an agent" detail={detail} />
+    <div aria-busy className="grid max-w-3xl gap-10">
+      <section className="grid gap-4">
+        <SectionRule aside={<Skeleton mask="https://archive.example.ts.net/mcp" className="font-mono" />}>1 · Add the server</SectionRule>
+        <Skeleton className="h-[38px] w-[330px] max-w-full rounded-lg" />
+        <Skeleton className="h-12 rounded-[10px]" />
+        <p className="text-[13px]"><Skeleton mask="Run once. Claude Code keeps it for every project. Sign in and allow access when the client opens your browser. Your account must be approved. The address is the one the server publishes." /></p>
+      </section>
+      <section className="grid">
+        <SectionRule aside={<Skeleton mask="5 tools · read only" />}>2 · What the agent gets</SectionRule>
+        {Array.from({ length: 5 }, (_, i) => <div key={i} className="flex gap-4 border-b py-2.5"><span className="w-28 shrink-0 font-mono text-[13px]"><Skeleton mask="search" /></span><span className="text-sm"><Skeleton mask="Find documents in the corpus by meaning and by words." /></span></div>)}
+      </section>
+    </div>
+  </>
+}
+
 function Connect() {
   const [client, setClient] = useState(clients[0].id)
   const system = useQuery(queries.system())
@@ -29,7 +51,7 @@ function Connect() {
   const url = `${base}/mcp`
   const chosen = clients.find(c => c.id === client) || clients[0]
   return <>
-    <PageHeader title="Connect an agent" detail="Connect an OAuth-capable MCP client to this corpus. It can search, read and download. Collecting and classifying stay with you." />
+    <PageHeader title="Connect an agent" detail={detail} />
     <div className="grid max-w-3xl gap-10">
       <section className="grid gap-4">
         <SectionRule aside={<span className="font-mono">{url}</span>}>1 · Add the server</SectionRule>

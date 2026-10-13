@@ -9,6 +9,7 @@ import { queries } from '../../queries'
 import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel, FieldSeparator } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
+import { Skeleton } from '@/components/ui/skeleton'
 
 export const Route = createFileRoute('/_entry/login')({
   // Someone approved has nothing to do here, unless an agent sent them to pick up its authorization.
@@ -16,6 +17,7 @@ export const Route = createFileRoute('/_entry/login')({
     const account = await queryClient.ensureQueryData(queries.account())
     if (account?.access === 'approved' && !oauthRequest(location.searchStr)) throw redirect({ to: '/', search: {} })
   },
+  pendingComponent: LoginPending,
   component: Login,
 })
 
@@ -26,6 +28,22 @@ function Login() {
   if (account.access !== 'approved') return <Waiting account={account} />
   if (request) return <Continue account={account} request={request} />
   return <Navigate to="/" search={{}} />
+}
+
+/**
+ * While the account is read: the sign-in form, which is what most people get, with its
+ * fields and buttons blank so nothing can be typed into a form about to be replaced.
+ */
+function LoginPending() {
+  return <FieldGroup aria-busy>
+    <EntryHeading title="Centinel"><FieldDescription><Skeleton mask="New here? Request access" /></FieldDescription></EntryHeading>
+    <Field><FieldLabel>Email</FieldLabel><Skeleton className="h-9 rounded-md" /></Field>
+    <Field><FieldLabel>Password</FieldLabel><Skeleton className="h-9 rounded-md" /></Field>
+    <Field><Skeleton className="h-9 rounded-md" /></Field>
+    <FieldSeparator className="dark:*:data-[slot=field-separator-content]:bg-night">Or</FieldSeparator>
+    <Field><Skeleton className="h-9 rounded-md" /></Field>
+    <FieldDescription className="px-6 text-center"><Skeleton mask="Nostr signs with your browser extension. Your key stays in it." /></FieldDescription>
+  </FieldGroup>
 }
 
 function SignIn() {

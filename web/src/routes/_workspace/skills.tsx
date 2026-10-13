@@ -3,7 +3,8 @@ import { Search } from 'lucide-react'
 import { PageHeader, SectionRule } from '../../ui'
 import { CopyBlock } from '../../copy'
 
-export const Route = createFileRoute('/_workspace/skills')({ component: Skills })
+// Nothing here is read from the server, so the page draws itself even while the account is read.
+export const Route = createFileRoute('/_workspace/skills')({ pendingComponent: () => <Skills />, component: Skills })
 
 /** The skills `npx skills add bennyhodl/centinel` installs. One entry per directory in contrib/skills. */
 const skills = [

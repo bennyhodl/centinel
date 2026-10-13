@@ -58,7 +58,7 @@ a host twenty times is a widget in a template. Twenty pages linking it once each
 system. `aca-prod.accela.com` at 264 links across 132 pages is a link in a shared footer;
 `valhallagov.formstack.com` at 7 links across 7 pages is seven pages that each chose it.
 
-**A `✓` row is already answered.** `already a source` means a `[[source]]` block claims that
+**A `✓` row is already answered.** `already a source` means a source definition claims that
 host, or the log holds an Observation on it — see [three states](#three-states) below.
 
 **The last line is the next command**, filled in for the first host still open. Promotion is
@@ -85,19 +85,25 @@ Measured over 5,000 pages of 91 KB — 449 MB of blobs:
 | read the ledger | 0.05 s |
 | the ledger | 2.3 MB |
 
-**The ledger is derived, and the blobs stay the floor under it.** A row goes missing for
-three reasons — the page predates the ledger, a write failed, somebody deleted the file —
-and in all three the bytes are still there and immutable. So the pass falls through to the
-blobs, counts how many it had to read, and names the one command that stops paying:
+**The ledger is derived, and the blobs stay the floor under it — but only `--rescan` walks
+the floor.** A row goes missing for three reasons — the page predates the ledger, a write
+failed, somebody deleted the file — and in all three the bytes are still there and
+immutable. The pass counts those pages, leaves them out, and names the one command that
+writes them down:
 
 ```console
-    236 pages had no record and were read from blobs — `centinel crumbs --rescan` writes
-    them down once
+  ⚠ 236 pages have no record and are not counted — `centinel crumbs --rescan` writes them
+    down once
 ```
 
-That count is on the report rather than in a log line on purpose. A slow answer is a fine
-failure mode; a quietly incomplete one is not. `--rescan` re-reads every HTML blob in the
-selected sources and writes the ledger again:
+It does not read them itself. It used to, and on a source collected before the ledger
+existed that was every blob of the source on every read — nineteen thousand reads behind
+one click on the Sources page. A one-time backfill of a corpus is a cost somebody should
+choose. That count is on the report rather than in a log line on purpose: a quietly
+incomplete answer is the failure this codebase is most consistently written against.
+`--rescan` re-reads every HTML blob in the selected sources and writes the ledger again;
+on the web, **Record its crumbs** on the source's page runs the same thing as a job you
+can watch:
 
 ```console
 $ centinel crumbs --rescan
@@ -110,6 +116,16 @@ crumbs  236 documents in 3 sources · 0.2s
 A scanner bug is repaired the same way — delete the file, rescan, and the rebuilt answer is
 the same answer. That is why the ledger sits beside `log/` rather than in it.
 
+**A row answers for one address and one blob.** Rows are keyed by the page's address, and a
+row counts only if it names the blob the log says is current for that page: a page
+re-collected with new content is a page with no row until its new one is written. The
+address is half the key because two pages with identical bytes share one blob, and a ledger
+keyed on the blob alone handed each the other's row.
+
+**Already a source** is read from each source's [summary](../internals/store.md#summary)
+— the hosts its log has observed — rather than by replaying every log in the store to
+answer a question about one.
+
 ---
 
 ## Three states
@@ -120,13 +136,13 @@ Standing is **derived on every read**, never stored as a row and never deleted.
 |---|---|---|
 | *(blank)* | open — nothing decided, nothing collects it. The only kind that wants a person | the default |
 | `ignored` | you refused it | `decisions.jsonl` |
-| `already a source` | a Source covers this host, so the promotion happened | the config, or the log |
+| `already a source` | a Source covers this host, so the promotion happened | a definition, or the log |
 
-**`already a source` reads two halves, and either is enough.** A `[[source]]` block with a
+**`already a source` reads two halves, and either is enough.** A source definition with a
 `site` is you saying this host is yours to collect — *intent*. An Observation on it is proof
 it happened — *evidence*. A host added an hour ago and not yet collected is answered by the
 first, because offering it back would ask you to decide something you already decided. A
-source collected by hand that no config names is answered by the second.
+host a source reached through a link, such as a CDN, is answered by the second.
 
 `enabled = false` still claims the host. Choosing a host and then choosing not to run it is
 two decisions, and neither of them was *ask me again*.
@@ -184,7 +200,7 @@ re-offer every host already rejected. That one fault is what would make the list
 reading twice.
 
 Nothing removes a crumb, and nothing needs to. Standing is derived on every read, so the
-`[[source]]` block existing is what stops a host being a candidate. Deleting rows to record
+source definition existing is what stops a host being a candidate. Deleting rows to record
 a decision would put the ledger at odds with the blobs it is built from, and the next
 `--rescan` would resurrect them.
 
@@ -256,6 +272,7 @@ log/              TRUTH     what this machine observed
 runs/             TRUTH     what this machine attempted
 decisions.jsonl   TRUTH     what the operator decided
 crumbs/           derived   a link read out of a page
+summaries/        derived   what each log adds up to, the hosts it observed among them
 ```
 
 See [The store](../internals/store.md).

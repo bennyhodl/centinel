@@ -34,14 +34,11 @@ const windowLabels: Array<[string, string]> = [['1', 'Past 24h'], ['7', '7 days'
 
 export function Spend() {
   const { metric, days } = route.useSearch()
-  const navigate = route.useNavigate()
   const span = windowFor(days)
   const query = useQuery(queries.spend(span.since))
   const priceList = useQuery(queries.prices())
   const [breakdown, setBreakdown] = useState<'model' | 'time'>('model')
   const [open, setOpen] = useState('')
-  // A window or metric changes in place: the figures swap, and only the chart's lines move.
-  const set = (next: Partial<SpendSearch>) => navigate({ search: previous => ({ ...previous, ...next }), replace: true, viewTransition: false })
 
   const merged = merge(query.data?.buckets ?? [], span)
   const prices = priceList.data?.prices ?? []
@@ -54,14 +51,8 @@ export function Spend() {
   const selected = models.find(m => m.model === open)
 
   return <div className="mx-auto w-full max-w-5xl">
-    <PageHeader title="Spend" detail="Every model call and what it cost. Local models are priced as the cloud.">
-      <div className="flex flex-wrap items-center gap-2 lg:flex-nowrap">
-        <Segmented small label="Metric" value={metric} onChange={value => set({ metric: value })} options={[['cost', 'Cost'], ['tokens', 'Tokens']]} />
-        <Segmented small label="Window" value={String(days)} onChange={value => set({ days: Number(value) as WindowDays })} options={windowLabels} />
-        <Button size="icon-sm" variant="ghost" aria-label="Refresh" onClick={() => void query.refetch()}><RefreshCw className={cn(query.isFetching && 'animate-spin motion-reduce:animate-none')} /></Button>
-      </div>
-    </PageHeader>
-    {query.error ? <ErrorBox error={query.error} /> : !query.data ? <SpendSkeleton /> : <div className="flex flex-col gap-8">
+    <SpendHeader />
+    {query.error ? <ErrorBox error={query.error} /> : !query.data ? <FiguresSkeleton /> : <div className="flex flex-col gap-8">
       <section className="grid gap-6 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
         <div className="flex min-w-0 flex-col gap-5">
           <div className="flex flex-col gap-1">
@@ -260,8 +251,31 @@ function ModelDialog({ model, metric, color, price, span, buckets, onClose }: {
   </Dialog>
 }
 
+/**
+ * The title and the window controls. The address already says which window and metric,
+ * so they draw for real while the figures load.
+ */
+function SpendHeader() {
+  const { metric, days } = route.useSearch()
+  const navigate = route.useNavigate()
+  const query = useQuery(queries.spend(windowFor(days).since))
+  // A window or metric changes in place: the figures swap, and only the chart's lines move.
+  const set = (next: Partial<SpendSearch>) => navigate({ search: previous => ({ ...previous, ...next }), replace: true, viewTransition: false })
+  return <PageHeader title="Spend" detail="Every model call and what it cost. Local models are priced as the cloud.">
+    <div className="flex flex-wrap items-center gap-2 lg:flex-nowrap">
+      <Segmented small label="Metric" value={metric} onChange={value => set({ metric: value })} options={[['cost', 'Cost'], ['tokens', 'Tokens']]} />
+      <Segmented small label="Window" value={String(days)} onChange={value => set({ days: Number(value) as WindowDays })} options={windowLabels} />
+      <Button size="icon-sm" variant="ghost" aria-label="Refresh" onClick={() => void query.refetch()}><RefreshCw className={cn(query.isFetching && 'animate-spin motion-reduce:animate-none')} /></Button>
+    </div>
+  </PageHeader>
+}
+
 export function SpendSkeleton() {
-  return <div className="mx-auto flex w-full max-w-5xl flex-col gap-8">
+  return <div className="mx-auto w-full max-w-5xl"><SpendHeader /><FiguresSkeleton /></div>
+}
+
+function FiguresSkeleton() {
+  return <div className="flex flex-col gap-8">
     <section className="grid gap-6 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
       <div className="flex flex-col gap-5">
         <span className="text-4xl font-semibold"><Skeleton mask="$12.34" /></span>
