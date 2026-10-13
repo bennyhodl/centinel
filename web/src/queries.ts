@@ -91,8 +91,8 @@ export const queries = {
   /** A source's off-host links. Reading them can take seconds on a large source, so they are asked once. */
   sourceCrumbs: (id: string) => queryOptions({ queryKey: ['source-crumbs', id], queryFn: () => api.sourceCrumbs(id), staleTime: 5 * 60_000 }),
 
-  /** What a try found. A try never changes once filed. */
-  tried: (id: string) => queryOptions({ queryKey: ['tried', id], queryFn: () => api.tried(id), staleTime: Infinity, retry: false }),
+  /** What an investigation found. One never changes once filed. */
+  investigation: (id: string) => queryOptions({ queryKey: ['investigation', id], queryFn: () => api.investigation(id), staleTime: Infinity, retry: false }),
 
   reviewQueue: (pageSize: number) => queryOptions({
     queryKey: ['review-queue', pageSize],

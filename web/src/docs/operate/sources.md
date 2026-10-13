@@ -40,13 +40,16 @@ a wrong strategy spends.
 
 The **Sources** page does the same, for an administrator signed in to the workspace:
 
-- **Try an address** asks which collection method recognises it and shows what extraction
-  makes of the page, without adding anything. The report — status, method and evidence,
-  probe, extracted text, off-site links — is filed under `tries/` in the store, and **Copy
-  report for an agent** puts all of it on the clipboard as Markdown, for an agent to improve
-  the scraping from. If something recognised it, adding it is one click.
+- **Investigate an address** asks which collection method recognises it and shows what
+  extraction makes of the page, without adding anything. It opens a page that says, in one
+  sentence, whether the site will collect and why not if it will not, then lists in order
+  every request made (status, type, size, time, where it redirected) beside each method's
+  decision: recognised, with its evidence, or declined. The report is filed under
+  `investigations/` in the store, and **Copy report for an agent** puts all of it on the
+  clipboard as Markdown, for an agent to improve the scraping from. If something recognised
+  it, adding it is one click.
 - Each source's page shows what its log holds, the addresses that are not live, its runs,
-  and its crumbs, each with a **Try** button. **Run** takes the store's one run lane, the
+  and its crumbs, each with an **Investigate** button. **Run** takes the store's one run lane, the
   same one a schedule takes: while a run holds it, a second is refused rather than queued.
   The run is a job under its journal id — the page opens the live drawer on it as it
   starts, and **Stop** ends it at its next page, journaled `interrupted`. A run started

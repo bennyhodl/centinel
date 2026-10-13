@@ -20,7 +20,7 @@ and each entry carries a count once it does.
 | Group | Page | What it is for |
 |---|---|---|
 | Archive | **Search** | Find documents by their words, narrowed by source, usage, classifier score and address. [Searching](../use/search.md) |
-| | **Sources** | What the archive collects: try an address, add it, run it, see what each source holds and where it links off-site. Administrators only. [Sources](../operate/sources.md) |
+| | **Sources** | What the archive collects: investigate an address, add it, run it, see what each source holds and where it links off-site. Administrators only. [Sources](../operate/sources.md) |
 | Classifiers | **Classify** | Write the questions that sort the corpus, and run them. [Classify](../use/classify.md) |
 | | **Runs** | What each run asked, decided and cost. [Runs](../use/runs.md) |
 | | **Review** | Check the model's answers one document at a time. [Review](../use/review.md) |
@@ -42,7 +42,7 @@ The workspace reads the corpus and records decisions about it. It does not colle
 
 - Schedules, model weights and host checks are set from the command line and the config file.
   That is the [Operator](operator.md) job. An administrator signed in to the page is the
-  operator too, so the Sources page can add a source, try an address and run collection —
+  operator too, so the Sources page can add a source, investigate an address and run collection —
   but an agent never can, whatever its token: those routes answer a browser session only.
 - Apart from a run an administrator starts, it does not change the archive. Collected bytes
   and the log are never written from the page. Everything the workspace records (questions, answers, reviews, a person's overrides)

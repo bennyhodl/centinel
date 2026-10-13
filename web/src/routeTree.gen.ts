@@ -26,7 +26,7 @@ import { Route as WorkspaceDocsSplatRouteImport } from './routes/_workspace/docs
 import { Route as WorkspaceDocumentShaRouteImport } from './routes/_workspace/document.$sha'
 import { Route as WorkspaceAdminSourcesIndexRouteImport } from './routes/_workspace/_admin/sources.index'
 import { Route as WorkspaceAdminSourcesIdRouteImport } from './routes/_workspace/_admin/sources.$id'
-import { Route as WorkspaceAdminSourcesTryIdRouteImport } from './routes/_workspace/_admin/sources.try.$id'
+import { Route as WorkspaceAdminSourcesInvestigateIdRouteImport } from './routes/_workspace/_admin/sources.investigate.$id'
 
 const EntryRoute = EntryRouteImport.update({
   id: '/_entry',
@@ -112,10 +112,10 @@ const WorkspaceAdminSourcesIdRoute = WorkspaceAdminSourcesIdRouteImport.update({
   path: '/sources/$id',
   getParentRoute: () => WorkspaceAdminRoute,
 } as any)
-const WorkspaceAdminSourcesTryIdRoute =
-  WorkspaceAdminSourcesTryIdRouteImport.update({
-    id: '/sources/try/$id',
-    path: '/sources/try/$id',
+const WorkspaceAdminSourcesInvestigateIdRoute =
+  WorkspaceAdminSourcesInvestigateIdRouteImport.update({
+    id: '/sources/investigate/$id',
+    path: '/sources/investigate/$id',
     getParentRoute: () => WorkspaceAdminRoute,
   } as any)
 
@@ -134,7 +134,7 @@ export interface FileRoutesByFullPath {
   '/document/$sha': typeof WorkspaceDocumentShaRoute
   '/sources/$id': typeof WorkspaceAdminSourcesIdRoute
   '/sources/': typeof WorkspaceAdminSourcesIndexRoute
-  '/sources/try/$id': typeof WorkspaceAdminSourcesTryIdRoute
+  '/sources/investigate/$id': typeof WorkspaceAdminSourcesInvestigateIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof WorkspaceIndexRoute
@@ -151,7 +151,7 @@ export interface FileRoutesByTo {
   '/document/$sha': typeof WorkspaceDocumentShaRoute
   '/sources/$id': typeof WorkspaceAdminSourcesIdRoute
   '/sources': typeof WorkspaceAdminSourcesIndexRoute
-  '/sources/try/$id': typeof WorkspaceAdminSourcesTryIdRoute
+  '/sources/investigate/$id': typeof WorkspaceAdminSourcesInvestigateIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -172,7 +172,7 @@ export interface FileRoutesById {
   '/_workspace/document/$sha': typeof WorkspaceDocumentShaRoute
   '/_workspace/_admin/sources/$id': typeof WorkspaceAdminSourcesIdRoute
   '/_workspace/_admin/sources/': typeof WorkspaceAdminSourcesIndexRoute
-  '/_workspace/_admin/sources/try/$id': typeof WorkspaceAdminSourcesTryIdRoute
+  '/_workspace/_admin/sources/investigate/$id': typeof WorkspaceAdminSourcesInvestigateIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -191,7 +191,7 @@ export interface FileRouteTypes {
     | '/document/$sha'
     | '/sources/$id'
     | '/sources/'
-    | '/sources/try/$id'
+    | '/sources/investigate/$id'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -208,7 +208,7 @@ export interface FileRouteTypes {
     | '/document/$sha'
     | '/sources/$id'
     | '/sources'
-    | '/sources/try/$id'
+    | '/sources/investigate/$id'
   id:
     | '__root__'
     | '/_entry'
@@ -228,7 +228,7 @@ export interface FileRouteTypes {
     | '/_workspace/document/$sha'
     | '/_workspace/_admin/sources/$id'
     | '/_workspace/_admin/sources/'
-    | '/_workspace/_admin/sources/try/$id'
+    | '/_workspace/_admin/sources/investigate/$id'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -357,11 +357,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceAdminSourcesIdRouteImport
       parentRoute: typeof WorkspaceAdminRoute
     }
-    '/_workspace/_admin/sources/try/$id': {
-      id: '/_workspace/_admin/sources/try/$id'
-      path: '/sources/try/$id'
-      fullPath: '/sources/try/$id'
-      preLoaderRoute: typeof WorkspaceAdminSourcesTryIdRouteImport
+    '/_workspace/_admin/sources/investigate/$id': {
+      id: '/_workspace/_admin/sources/investigate/$id'
+      path: '/sources/investigate/$id'
+      fullPath: '/sources/investigate/$id'
+      preLoaderRoute: typeof WorkspaceAdminSourcesInvestigateIdRouteImport
       parentRoute: typeof WorkspaceAdminRoute
     }
   }
@@ -387,7 +387,7 @@ interface WorkspaceAdminRouteChildren {
   WorkspaceAdminSpendRoute: typeof WorkspaceAdminSpendRoute
   WorkspaceAdminSourcesIdRoute: typeof WorkspaceAdminSourcesIdRoute
   WorkspaceAdminSourcesIndexRoute: typeof WorkspaceAdminSourcesIndexRoute
-  WorkspaceAdminSourcesTryIdRoute: typeof WorkspaceAdminSourcesTryIdRoute
+  WorkspaceAdminSourcesInvestigateIdRoute: typeof WorkspaceAdminSourcesInvestigateIdRoute
 }
 
 const WorkspaceAdminRouteChildren: WorkspaceAdminRouteChildren = {
@@ -398,7 +398,8 @@ const WorkspaceAdminRouteChildren: WorkspaceAdminRouteChildren = {
   WorkspaceAdminSpendRoute: WorkspaceAdminSpendRoute,
   WorkspaceAdminSourcesIdRoute: WorkspaceAdminSourcesIdRoute,
   WorkspaceAdminSourcesIndexRoute: WorkspaceAdminSourcesIndexRoute,
-  WorkspaceAdminSourcesTryIdRoute: WorkspaceAdminSourcesTryIdRoute,
+  WorkspaceAdminSourcesInvestigateIdRoute:
+    WorkspaceAdminSourcesInvestigateIdRoute,
 }
 
 const WorkspaceAdminRouteWithChildren = WorkspaceAdminRoute._addFileChildren(

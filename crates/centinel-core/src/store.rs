@@ -11,6 +11,7 @@
 //!   workspace/vectors.lock     RUNTIME  the one writer of chunks.lance at a time
 //!   workspace/embed.lock       RUNTIME  the one `embed` run at a time
 //!   spend/YYYY-MM.jsonl        TRUTH    every model call, its tokens and its cost
+//!   investigations/<id>/       RUNTIME  one web investigation: report.json and the bytes `check` saved
 //!   crumbs/<source>.jsonl      DERIVED  the off-host links each page dropped
 //!   summaries/<source>.json    DERIVED  what the log adds up to, keyed by its size
 //!   icons/<host>.<ext>         DERIVED  the favicon a host serves, fetched once on demand
