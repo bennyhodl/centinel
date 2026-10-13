@@ -34,6 +34,7 @@ https://www.agartha.gov  3.6s
     ✓ sitemap — sitemap.xml (standard)
     robots.txt    declares one sitemap
     declared      https://www.agartha.gov/sitemap.xml
+    declined      listing
 
   size
     ! 500 address(es) across 2 sitemaps   (probe STOPPED, 25 req allowed — there is more)
@@ -54,6 +55,11 @@ https://www.agartha.gov  3.6s
 
   warnings
     ! stopped at 500 addresses; the surface is larger than this run captured
+
+  requests
+    +0.00s  200  robots.txt       https://www.agartha.gov/robots.txt           22 B  222 ms  text/plain; charset=utf-8
+    +1.00s  200  seed             https://www.agartha.gov/                 148 KiB   57 ms  text/html; charset=utf-8
+    +2.00s  200  probe (sitemap)  https://www.agartha.gov/sitemap.xml      887 B  123 ms  application/xml
 
   centinel source add agartha --site https://www.agartha.gov/ --strategy=sitemap
 
@@ -93,6 +99,23 @@ The evidence lines under the checkmark are printed because a confident wrong rec
 the worst outcome available. A strategy that matched on a weak signal and enumerated a
 front page produces 75 Resources, 75 successful acquisitions, and 75 copies of a menu. The
 evidence is how you catch that before it costs an hour, not after.
+
+`declined` names the other strategies that were asked and did not recognise the address. It
+says which methods looked, not why they said no: a recogniser answers yes or no, and no
+reason is recorded.
+
+### `requests` is what the site actually said
+
+One row per request the investigation made, in the order it was sent: when (from the first),
+the status, which step made it (`robots.txt`, the `seed`, or a strategy's `probe`), the
+address, the size, the time, and the type the server declared or where it redirected to.
+A refusal shows the status it got, or the reason when no answer arrived at all.
+
+This is the part to hand over when a site will not collect: it is what the site returned,
+not what a warning made of it afterwards. `check` prints the same table for the page it
+fetched and the documents it followed. In the web workspace, **Investigate an address** shows
+the same log as a timeline beside each method's decision, and **Copy report for an agent**
+puts it on the clipboard as Markdown.
 
 ### `size` is bounded, and says when it stopped
 

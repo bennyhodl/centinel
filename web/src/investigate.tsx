@@ -114,8 +114,8 @@ function Result({ report, id, onAdd }: { report: InvestigationReport; id: string
         <Button onClick={copy}><ClipboardCopy />{copied ? 'Copied' : 'Copy report for an agent'}</Button>
       </div>
     </Header>
-    <div className="grid max-w-6xl items-start gap-10 lg:grid-cols-[minmax(0,1fr)_320px]">
-      <div className="grid gap-6">
+    <div className="grid items-start gap-10 lg:grid-cols-[minmax(0,1fr)_320px]">
+      <div className="grid min-w-0 grid-cols-1 gap-6">
         <VerdictBlock verdict={verdict} />
         <Timeline entries={timelineOf(report)} tone={verdict.tone} />
       </div>
@@ -160,12 +160,12 @@ function RequestRow({ entry, tone }: { entry: Extract<Entry, { type: 'request' }
   const { record } = entry
   const meant = [typeOf(record.content_type), record.bytes || record.content_type ? sizeOf(record.bytes) : undefined, `${record.elapsed_ms} ms`].filter(Boolean).join(' · ')
   return <div className={cn('flex gap-4 px-5 py-3', entry.restsOn && restsOnStyle[tone])}>
-    <span className="w-12 shrink-0 font-mono text-xs leading-[22px] text-stone">+{entry.offset.toFixed(2)}</span>
-    <div className="grid min-w-0 flex-1 gap-1">
-      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+    <span className="w-12 shrink-0 font-mono text-xs leading-[22px] text-muted-foreground">+{entry.offset.toFixed(2)}</span>
+    <div className="flex min-w-0 flex-1 flex-col gap-1">
+      <div className="flex items-center gap-2.5">
         <StatusChip record={record} />
-        <a href={record.url} target="_blank" rel="noreferrer" className="min-w-0 font-mono text-[13px] wrap-anywhere hover:underline" title={record.url}>{record.method} {pathOf(record.url)}</a>
-        <span className="font-mono text-xs text-stone">{meant}</span>
+        <a href={record.url} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate font-mono text-[13px] hover:underline" title={record.url}>{record.method} {pathOf(record.url)}</a>
+        <span className="shrink-0 font-mono text-xs text-muted-foreground">{meant}</span>
       </div>
       {entry.note && <p className={cn('text-[13px] leading-[19px]', entry.restsOn ? 'font-medium' : 'text-ink-soft', entry.restsOn && toneInk[tone])}>{entry.note}</p>}
     </div>
@@ -233,7 +233,7 @@ export function InvestigateSkeleton({ address = '', status }: { address?: string
       <div className="flex shrink-0 items-center gap-2"><Button variant="outline" disabled><Plus />Add anyway</Button><Button disabled><ClipboardCopy />Copy report for an agent</Button></div>
     </Header>
     {status}
-    <div aria-busy className="grid max-w-6xl items-start gap-10 lg:grid-cols-[minmax(0,1fr)_320px]">
+    <div aria-busy className="grid items-start gap-10 lg:grid-cols-[minmax(0,1fr)_320px]">
       <div className="grid gap-6">
         <div className="grid gap-2">
           <span className="text-xs font-semibold uppercase tracking-[0.08em]"><Skeleton mask="Not recognised" /></span>
