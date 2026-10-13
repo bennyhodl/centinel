@@ -15,6 +15,7 @@
 use crate::discovery::DiscoveryLimits;
 use crate::domain::SourceId;
 use crate::policy::{DEFAULT_USER_AGENT, HostPolicy};
+use crate::requests::RequestLog;
 use crate::sources::SiteSource;
 
 /// Requests a probe may spend, and addresses it will keep.
@@ -81,8 +82,17 @@ impl NetArgs {
 ///
 /// `id` names the op in anything that reads a `SourceId` back, and nothing is written under
 /// it — neither op touches a store.
-pub(super) fn site(id: &str, url: &str, net: &NetArgs) -> anyhow::Result<SiteSource> {
-    SiteSource::new(
+///
+/// Every request it makes lands in `log`, which is the other thing both ops share: what the
+/// site answered is part of the report, and a source built without this would be one that
+/// forgot to say so.
+pub(super) fn site(
+    id: &str,
+    url: &str,
+    net: &NetArgs,
+    log: &RequestLog,
+) -> anyhow::Result<SiteSource> {
+    Ok(SiteSource::new(
         SourceId::new(id.to_string())?,
         url,
         net.policy(),
@@ -90,5 +100,6 @@ pub(super) fn site(id: &str, url: &str, net: &NetArgs) -> anyhow::Result<SiteSou
             max_sitemaps: REQUESTS,
             max_urls: ADDRESSES,
         },
-    )
+    )?
+    .with_log(log.clone()))
 }

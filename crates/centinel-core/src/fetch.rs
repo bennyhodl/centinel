@@ -134,6 +134,21 @@ impl Fetcher {
     }
 }
 
+/// The status code out of a [`FetchFailure`]'s detail, when it carried one.
+///
+/// [`Fetcher::get`] renders a non-success as `HTTP 404 Not Found`, so the code is
+/// recoverable — and worth recovering, because "the server answered 404" and "we never
+/// reached the server" are different facts that a bare message would show alike. It lives
+/// here, beside the format it reads, so the two cannot drift apart.
+pub fn status_in(detail: &str) -> Option<u16> {
+    detail
+        .strip_prefix("HTTP ")?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
 /// Path segments that name a missing document, and ones that name a fault.
 ///
 /// Matched whole and lowercased, never as a substring: a city's `/services/error-reporting`
