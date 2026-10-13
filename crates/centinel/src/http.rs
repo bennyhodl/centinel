@@ -15,7 +15,8 @@
 //! | `POST /workspace/jobs/{id}/stop` | ask a stoppable job — a run from the Sources page — to stop at its next item |
 //! | `GET /workspace/spend?since=` | every model call since then, by hour and model |
 //! | `GET /workspace/prices` | what each model is priced at, and where the price came from |
-//! | `/workspace/sources…` | the Sources page: list, define, run, try; see [`sources`] |
+//! | `/workspace/sources…` | the Sources page: list, define, run; see [`sources`] |
+//! | `/workspace/investigations…` | investigate an address and read what it found; see [`investigate`] |
 //! | `GET /workspace/icons/{host}`, `GET /workspace/source-hosts` | the favicon beside each source and host, and the host each source collects from; see [`icons`] |
 //!
 //! ## Long-running operations
@@ -63,6 +64,7 @@ use serde_json::{Value, json};
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
 
 mod icons;
+mod investigate;
 mod sources;
 
 /// Identifies the binary this process runs: the executable's size and modification
@@ -214,6 +216,7 @@ pub(crate) fn router(ctx: Arc<Ctx>) -> Router {
         .route("/workspace/jobs", get(workspace_jobs))
         .route("/workspace/jobs/events", get(workspace_job_events))
         .route("/workspace/jobs/{id}/stop", post(workspace_stop_job))
+        .merge(investigate::routes())
         .merge(sources::routes())
         .merge(icons::routes())
         .route("/ops", get(list_ops))
