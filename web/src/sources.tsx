@@ -573,6 +573,7 @@ function AddSource({ initial, onClose }: { initial: NewSource; onClose: () => vo
     mutationFn: () => api.addSource({ id: id.trim(), [kind]: address.trim(), strategy: initial.strategy }),
     onSuccess: () => {
       client.invalidateQueries({ queryKey: ['sources'] })
+      client.invalidateQueries({ queryKey: queries.sourceHosts().queryKey })
       onClose()
       navigate({ to: '/sources/$id', params: { id: id.trim() } })
     },
