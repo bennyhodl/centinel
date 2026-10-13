@@ -640,6 +640,8 @@ export const api = {
   },
   /** What each model is priced at. Local models carry the cloud model they are priced as. */
   prices: () => request<{ prices: SpendPrice[] }>('/workspace/prices').then(value => withArray(value, 'prices', '/workspace/prices')),
+  /** The host each source collects from, by source id. Readable by any approved user, unlike `sources`. */
+  sourceHosts: () => request<Record<string, string>>('/workspace/source-hosts'),
   sources: () => request<{ sources: ListedSource[]; running: LaneHolder | null }>('/workspace/sources').then(value => withArray(value, 'sources', '/workspace/sources')),
   source: (id: string) => request<SourceDetail>(`/workspace/sources/${encodeURIComponent(id)}`),
   sourceCrumbs: (id: string) => request<CrumbsList>(`/workspace/sources/${encodeURIComponent(id)}/crumbs`).then(value => withArray(value, 'crumbs', 'crumbs')),

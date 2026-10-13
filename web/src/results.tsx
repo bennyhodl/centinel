@@ -5,6 +5,7 @@ import type { Question, ResultOutcome, Run, RunDetailQuery, RunResult } from './
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { compact, number, seconds, tail } from './format'
+import { SourceIcon } from './host-icon'
 import { decisionOf, isChoice, optionScores, policyShort, sortKeys, tagsOf } from './policy'
 import { DecisionBadge, DocumentLink, Empty, ScoreBar } from './ui'
 
@@ -81,7 +82,7 @@ export function ResultsSection({ run, questions, view, setView, loading }: {
                 <TableCell className="w-8 [&_svg]:size-4"><ChevronDown className={isOpen ? 'rotate-180' : ''} /></TableCell>
                 <TableCell className="min-w-36 max-w-96 [&_b]:block [&_b]:truncate [&_small]:block [&_small]:truncate [&_small]:text-xs [&_small]:text-muted-foreground">
                   <b title={result.resource}>{tail(result.resource)}</b>
-                  <small>{result.source}{result.sampled ? ` · sampled ${compact(result.sampled.sent_chars)} of ${compact(result.sampled.total_chars)} chars` : ''}{(result.attempts || 0) > 1 ? ` · ${result.attempts} requests` : ''}</small>
+                  <small><SourceIcon source={result.source} size={12} className="mr-1 align-[-2px]" />{result.source}{result.sampled ? ` · sampled ${compact(result.sampled.sent_chars)} of ${compact(result.sampled.total_chars)} chars` : ''}{(result.attempts || 0) > 1 ? ` · ${result.attempts} requests` : ''}</small>
                 </TableCell>
                 <TableCell className="min-w-24"><DecisionBadge decision={decision} />{tagsOf(result).map(tag => <span className="ml-1 inline-flex rounded-full bg-secondary px-2 py-0.5 font-mono text-xs" key={tag}>{tag}</span>)}</TableCell>
                 {result.error

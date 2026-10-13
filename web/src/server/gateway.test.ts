@@ -20,6 +20,7 @@ beforeAll(async () => {
     expect(request.headers.get('x-centinel-secret')).toBe('private-test-credential')
     expect(request.headers.get('x-centinel-role')).toBe('user')
     forwarded++
+    if (new URL(request.url).pathname.startsWith('/workspace/icons/')) return new Response('icon', { headers: { 'content-type': 'image/png', 'cache-control': 'private, max-age=604800' } })
     return Response.json({ result: 'corpus result' })
   } })
   server = serve({ hostname: '127.0.0.1', port: 0, fetch: async request => await gateway.handle(request) ?? new Response('page') })
@@ -67,6 +68,12 @@ test('signup approval, OAuth MCP access, and revocation share current account pe
   expect((await request('/api/admin/users', { id: first.account.id, access: 'approved' }, admin.cookie)).status).toBe(200)
   expect((await request('/workspace/documents', undefined, first.cookie, { 'x-centinel-role': 'admin' })).status).toBe(200)
   expect(forwarded).toBe(1)
+  // The backend's own caching survives the gateway (an icon is kept for a week); a response
+  // that says nothing about caching is still never stored.
+  const icon = await request('/workspace/icons/tampa.gov', undefined, first.cookie)
+  expect(icon.headers.get('cache-control')).toBe('private, max-age=604800')
+  expect((await request('/workspace/documents', undefined, first.cookie)).headers.get('cache-control')).toBe('no-store')
+  expect(forwarded).toBe(3)
 
   const discoveryResponse = await request('/.well-known/oauth-authorization-server/api/auth')
   expect(discoveryResponse.status).toBe(200)
@@ -103,11 +110,11 @@ test('signup approval, OAuth MCP access, and revocation share current account pe
   // administrator can start collection — only the browser carries that authority.
   expect((await request('/workspace/sources', undefined, undefined, { authorization: `Bearer ${token.access_token}` })).status).toBe(401)
   expect((await request('/workspace/sources/try', { url: 'https://example.gov/' }, undefined, { authorization: `Bearer ${token.access_token}` })).status).toBe(401)
-  expect(forwarded).toBe(2)
+  expect(forwarded).toBe(4)
   expect((await request('/api/admin/users', { id: first.account.id, access: 'revoked' }, admin.cookie)).status).toBe(200)
   expect((await request('/workspace/documents', undefined, first.cookie)).status).toBe(403)
   expect((await request('/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/list' }, undefined, { authorization: `Bearer ${token.access_token}` })).status).toBe(403)
-  expect(forwarded).toBe(2)
+  expect(forwarded).toBe(4)
   const { users } = await (await request('/api/admin/users', undefined, admin.cookie)).json()
   expect(users.find((u: { id: string }) => u.id === first.account.id).access).toBe('revoked')
   const reopened = await createIdentity(root, origin)
