@@ -291,6 +291,13 @@ impl Store {
         self.icons_dir().join(format!("{host}.{ext}"))
     }
 
+    /// `summaries/<source>.links.json` — what a Source's crumb ledger adds up to, per
+    /// host. The same bargain as its neighbour: stamped with the ledger it was folded
+    /// from, rebuilt when the ledger moves, safe to delete. See [`crate::graph`].
+    pub fn linkage_path(&self, source: &SourceId) -> PathBuf {
+        self.summaries_dir().join(format!("{source}.links.json"))
+    }
+
     /// `decisions.jsonl` — what the operator decided. **Truth, and the fourth thing that
     /// is.**
     ///
@@ -1283,6 +1290,10 @@ mod tests {
         assert!(
             s.summary_path(&SourceId::new("tampa").unwrap())
                 .ends_with("summaries/tampa.json")
+        );
+        assert!(
+            s.linkage_path(&SourceId::new("tampa").unwrap())
+                .ends_with("summaries/tampa.links.json")
         );
         assert!(s.index_path().ends_with("centinel.db"));
         assert!(s.vectors_path().ends_with("chunks.lance"));

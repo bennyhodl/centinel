@@ -17,6 +17,7 @@
 //! | `GET /workspace/prices` | what each model is priced at, and where the price came from |
 //! | `/workspace/sources…` | the Sources page: list, define, run; see [`sources`] |
 //! | `/workspace/investigations…` | investigate an address and read what it found; see [`investigate`] |
+//! | `/workspace/graph…` | the Graph page: sources, the hosts they link to, and how much; see [`graph`] |
 //! | `GET /workspace/icons/{host}`, `GET /workspace/source-hosts` | the favicon beside each source and host, and the host each source collects from; see [`icons`] |
 //!
 //! ## Long-running operations
@@ -63,6 +64,7 @@ use serde_json::{Value, json};
 
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
 
+mod graph;
 mod icons;
 mod investigate;
 mod sources;
@@ -219,6 +221,7 @@ pub(crate) fn router(ctx: Arc<Ctx>) -> Router {
         .merge(investigate::routes())
         .merge(sources::routes())
         .merge(icons::routes())
+        .merge(graph::routes())
         .route("/ops", get(list_ops))
         .route("/ops/{name}", post(invoke))
         .route("/ops/{name}/stream", post(invoke_streaming))

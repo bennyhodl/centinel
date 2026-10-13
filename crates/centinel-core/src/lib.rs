@@ -43,6 +43,7 @@ pub mod embed;
 pub mod enclosure;
 pub mod extract;
 pub mod fetch;
+pub mod graph;
 pub mod html;
 pub mod icons;
 pub mod index;
