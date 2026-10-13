@@ -1,5 +1,5 @@
 import { keepPreviousData, queryOptions, skipToken } from '@tanstack/react-query'
-import { api, corpusParams, type CorpusFilters, type DocumentIdentity, type JobState, type RunDetailQuery } from './api'
+import { api, corpusParams, type CorpusFilters, type DocumentIdentity, type GraphFilter, type JobState, type RunDetailQuery } from './api'
 
 /**
  * Every read the workspace makes, one builder each. A route's loader warms the cache
@@ -93,6 +93,20 @@ export const queries = {
 
   /** What an investigation found. One never changes once filed. */
   investigation: (id: string) => queryOptions({ queryKey: ['investigation', id], queryFn: () => api.investigation(id), staleTime: Infinity, retry: false }),
+
+  /**
+   * The graph under a filter. The server answers from one fold per ledger, so asking
+   * again on every filter change is cheap; the previous view stays up while it does.
+   */
+  graph: (filter: GraphFilter) => queryOptions({
+    queryKey: ['graph', filter.min_pages, filter.hide_refused],
+    queryFn: () => api.graph(filter),
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+  }),
+
+  /** One host's card. Read from the ledgers on each open, so a refusal shows at once. */
+  graphHost: (host: string) => queryOptions({ queryKey: ['graph-host', host], queryFn: () => api.graphHost(host), staleTime: 60_000 }),
 
   reviewQueue: (pageSize: number) => queryOptions({
     queryKey: ['review-queue', pageSize],

@@ -16,6 +16,7 @@
 - [Classify](use/classify.md)
 - [Runs](use/runs.md)
 - [Review](use/review.md)
+- [Graph](use/graph.md)
 - [Spend](use/spend.md)
 - [Agents and programs](use/agents.md)
 
