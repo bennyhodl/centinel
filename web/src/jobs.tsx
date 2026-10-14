@@ -1,9 +1,9 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query'
 import { jobEventsUrl, type JobEvent, type JobItem, type JobState, type RunResult } from './api'
 import { activeJobs, foldJob, jobTitle, succeeded } from './job-state'
-import { number, seconds, tail } from './format'
+import { clock, number, seconds, tail } from './format'
 import { answerSummary } from './live'
 import { queries } from './queries'
 import { DocumentLink } from './ui'
@@ -28,18 +28,9 @@ export function useJobEvents(enabled = true) {
     stream.addEventListener('job', message => {
       const event = JSON.parse(message.data) as JobEvent
       client.setQueryData(key, jobs => foldJob(jobs ?? [], event))
-      const kind = event.type === 'finished' ? client.getQueryData(key)?.find(job => job.id === event.job)?.kind : undefined
-      // A classifier run that ends has changed the corpus.
-      if (kind === 'classify') {
-        client.invalidateQueries({ queryKey: ['runs'] })
-        client.invalidateQueries({ queryKey: ['run', event.job] })
-        client.invalidateQueries({ queryKey: ['corpus'] })
-      }
-      // A collection run that ends, finished or stopped, is in the journal: every source's state moved.
-      if (kind === 'run') {
-        client.invalidateQueries({ queryKey: ['sources'] })
-        client.invalidateQueries({ queryKey: ['source'] })
-      }
+      if (event.type !== 'finished') return
+      const kind = client.getQueryData(key)?.find(job => job.id === event.job)?.kind
+      for (const queryKey of (kind && ended[kind]?.(event.job)) || []) client.invalidateQueries({ queryKey })
     })
     // Every answer a running classifier writes is live in the corpus at once, so a page
     // showing the corpus is refreshed every few seconds while one scores.
@@ -48,6 +39,17 @@ export function useJobEvents(enabled = true) {
     }, CORPUS_REFRESH_MS)
     return () => { stream.close(); clearInterval(refresh) }
   }, [client, enabled])
+}
+
+/**
+ * What a job changes by ending, by kind: the queries to read again. A classifier run has
+ * changed the corpus; a collection run, finished or stopped, every source's state and the
+ * links its pages carry; a crumbs rescan, the links.
+ */
+const ended: Record<string, (job: string) => QueryKey[]> = {
+  classify: job => [['runs'], ['run', job], ['corpus']],
+  run: () => [['sources'], ['source'], ['source-crumbs'], ['graph'], ['graph-host']],
+  crumbs: () => [['source-crumbs'], ['graph'], ['graph-host']],
 }
 
 /** How often the corpus is re-read while a classifier scores. */
@@ -123,7 +125,6 @@ export function Bar({ job, thin }: { job: JobState; thin?: boolean }) {
 }
 
 const verdictTone: Record<JobItem['verdict'], string> = { ok: 'text-[#8FB58A]', warn: 'text-[#E8A65A]', missing: 'text-[#E8A65A]', fail: 'text-[#E57D6E]' }
-const clock = (ms: number) => new Date(ms).toTimeString().slice(0, 8)
 
 /**
  * One job as it happens, line by line, on the server's clock: the stage it is in, the

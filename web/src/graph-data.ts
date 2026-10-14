@@ -69,7 +69,7 @@ export function paintOf(node: GraphNode, palette: Palette): Pick<NodeAttributes,
 
 /** "198,470 links on 11,442 pages", with both ends named. */
 export function edgeTitle(edge: GraphEdge, nodes: Map<string, GraphNode>): { from: string; to: string; pages: number; links: number } {
-  const name = (id: string) => { const node = nodes.get(id); return node ? labelOf(node) : id.replace(/^(source|host):/, '') }
+  const name = (id: string) => { const node = nodes.get(id); return node ? labelOf(node) : id }
   return { from: name(edge.from), to: name(edge.to), pages: edge.pages, links: edge.links }
 }
 

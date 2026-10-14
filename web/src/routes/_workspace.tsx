@@ -70,7 +70,7 @@ function Shell({ account }: { account: Account }) {
           <Link to="/sources"><Globe /><span>Sources</span></Link>
         </NavItem>}
         {admin && <NavItem active={at('/graph')} label="Graph">
-          <Link to="/graph" search={{ min: 5, refused: false }}><Waypoints /><span>Graph</span></Link>
+          <Link to="/graph" search={{}}><Waypoints /><span>Graph</span></Link>
         </NavItem>}
       </NavGroup>
       {admin && <NavGroup label="Classifiers">

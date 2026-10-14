@@ -7,8 +7,8 @@ import { api, type InvestigationReport, type NewSource, type RequestRecord } fro
 import { AddSource } from './add-source'
 import { HostIcon } from './host-icon'
 import { useJobs } from './jobs'
-import { plural } from './format'
-import { agentReport, clock, frontPage, glanceOf, hostOf, pathOf, sizeOf, summaryOf, timelineOf, typeOf, verdictOf, type Decisions, type Entry, type Verdict } from './investigate-logic'
+import { bytes, clock, plural } from './format'
+import { agentReport, frontPage, glanceOf, hostOf, pathOf, summaryOf, timelineOf, typeOf, verdictOf, type Decisions, type Entry, type Verdict } from './investigate-logic'
 import { queries } from './queries'
 import { ErrorBox, SectionRule, Spinner } from './ui'
 import { Button } from '@/components/ui/button'
@@ -158,7 +158,7 @@ function Timeline({ entries, tone }: { entries: Entry[]; tone: Verdict['tone'] }
 
 function RequestRow({ entry, tone }: { entry: Extract<Entry, { type: 'request' }>; tone: Verdict['tone'] }) {
   const { record } = entry
-  const meant = [typeOf(record.content_type), record.bytes || record.content_type ? sizeOf(record.bytes) : undefined, `${record.elapsed_ms} ms`].filter(Boolean).join(' · ')
+  const meant = [typeOf(record.content_type), record.bytes || record.content_type ? bytes(record.bytes) : undefined, `${record.elapsed_ms} ms`].filter(Boolean).join(' · ')
   return <div className={cn('flex gap-4 px-5 py-3', entry.restsOn && restsOnStyle[tone])}>
     <span className="w-12 shrink-0 font-mono text-xs leading-[22px] text-muted-foreground">+{entry.offset.toFixed(2)}</span>
     <div className="flex min-w-0 flex-1 flex-col gap-1">

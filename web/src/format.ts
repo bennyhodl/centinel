@@ -16,6 +16,12 @@ export const seconds = (ms?: number | null) => {
   const minutes = Math.floor(ms / 60_000)
   return `${minutes} min ${Math.round((ms % 60_000) / 1_000)} s`
 }
+/** Bytes, in the unit that keeps the number short. */
+export const bytes = (n: number) => n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`
+/** A server timestamp to the minute, as the server wrote it: `2026-10-13 12:00`. */
+export const when = (at: string) => at.slice(0, 16).replace('T', ' ')
+/** The local time of day, to the second, of an instant in ms or an ISO string. */
+export const clock = (at: number | string) => new Date(at).toTimeString().slice(0, 8)
 export const money = (usd?: number | null) => usd == null ? 'Unknown' : usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`
 export const probability = (value?: number | null) => value == null ? '—' : value.toFixed(2)
 
