@@ -20,26 +20,27 @@ and each entry carries a count once it does.
 | Group | Page | What it is for |
 |---|---|---|
 | Archive | **Search** | Find documents by their words, narrowed by source, usage, classifier score and address. [Searching](../use/search.md) |
-| | **Sources** | What the archive collects: investigate an address, add it, run it, see what each source holds and where it links off-site. Administrators only. [Sources](../operate/sources.md) |
-| Collection | **Schedules** | Create, edit, pause and run collection schedules. [Schedules](../operate/schedules.md) |
-| | **History** | Inspect collection attempts across sources and schedules, and repeat their source scope. |
+| Admin | **Sources** | What the archive collects: investigate an address, add it, edit its settings, run it, see what each source holds and where it links off-site. [Sources](../operate/sources.md) |
+| | **Graph** | Explore sources and the hosts their pages link to. |
+| | **Schedules** | Create, edit, pause and run collection schedules. [Schedules](../operate/schedules.md) |
+| | **Collection history** | Inspect collection attempts across sources and schedules, and repeat their source scope. |
 | | **Ingest URLs** | Archive specific URLs under an existing source. Extract and index them afterwards from the source page. |
-| Classifiers | **Classify** | Write the questions that sort the corpus, and run them. [Classify](../use/classify.md) |
-| | **Runs** | What each run asked, decided and cost. [Runs](../use/runs.md) |
+| | **Classify** | Write the questions that sort the corpus, and run them. [Classify](../use/classify.md) |
+| | **Classifier runs** | What each run asked, decided and cost. [Runs](../use/runs.md) |
 | | **Review** | Check the model's answers one document at a time. [Review](../use/review.md) |
-| System | **Health** | Check required binaries, model servers, corpus storage and scheduler status. |
+| | **Health** | Check required binaries, model servers, corpus storage and scheduler status. |
 | | **Maintenance** | Verify vectors, review a repair, and re-embed missing chunks. |
+| | **Spend** | Check model usage and costs. [Spend](../use/spend.md) |
+| | **Accounts** | Approve or revoke access to the archive. |
 | Agent | **Connect** | The command that gives Claude, Cursor or another client this corpus. [Agents and programs](../use/agents.md) |
 | | **Skills** | Jobs an agent can do end to end, installed with one command. |
 
-Opening a result takes you to the reader, which shows the document as it was collected
+The Admin section appears only for administrators. Opening a result takes you to the reader, which shows the document as it was collected
 beside the text that was extracted from it. [Reading a document](../use/read.md)
 
 At the foot of the sidebar, **Working now** lists whatever the server is doing, such as a
 classifier run or a collection. Click one to follow its log. Below it is your account: open
-it for **Spend** (every model call and what it cost, [Spend](../use/spend.md)), this
-documentation, the light and dark toggle, **Admin** (who may use this archive) and signing
-out.
+it for documentation, the light and dark toggle and signing out.
 
 ## Administrator actions
 
