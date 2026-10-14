@@ -458,7 +458,7 @@ export type SystemHealth = {
   }
   corpus: { store_root: string; sources: Array<{ source: string; total: number; bytes: number }>; kinds: Record<string, number>; total: number; bytes: number; missing_blobs: number }
   running: LaneHolder | null
-  scheduler: { status: 'unknown'; detail: string }
+  scheduler: { status: 'running' | 'disabled'; detail: string }
 }
 
 /** One op the registry offers a remote caller. `mcp` says whether agents see it as a tool. */

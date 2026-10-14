@@ -4,12 +4,13 @@ import { Pause, Play, Plus, Trash2 } from 'lucide-react'
 import { api, type ScheduleDefinition, type ScheduleRow } from './api'
 import { queries } from './queries'
 import { useOpenJob } from './jobs'
+import { plural } from './format'
 import { ErrorBox, PageHeader, SectionRule, Spinner } from './ui'
 import { Button } from './components/ui/button'
 import { Input } from './components/ui/input'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './components/ui/dialog'
 
-const empty: ScheduleDefinition = { id: '', cron: '0 3 * * *', tz: 'America/New_York', sources: [], enabled: true }
+const empty: ScheduleDefinition = { id: '', cron: '0 3 * * *', tz: null, sources: [], enabled: true }
 const fireTime = (time: string, zone: string) => new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short', timeZone: zone === 'local' ? undefined : zone }).format(new Date(time))
 
 export function Schedules() {
@@ -23,7 +24,7 @@ export function Schedules() {
     <div className="grid max-w-5xl gap-7">
       {!data.scheduler.enabled && <p role="status" className="rounded-md border bg-muted p-4 text-sm">Automatic collection is off ({data.scheduler.disabled_reason}). Changes are saved for the next scheduled server. Run now starts a manual collection.</p>}
       <section>
-        <SectionRule aside={`${data.schedules.length} schedules`}>Collection times</SectionRule>
+        <SectionRule aside={plural(data.schedules.length, 'schedule')}>Collection times</SectionRule>
         {data.schedules.length === 0 && <p className="py-8 text-sm text-muted-foreground">No schedules yet. Add one to collect sources on a regular cadence.</p>}
         {data.schedules.map(row => <Schedule key={row.definition.id} row={row} laneHeld={Boolean(data.running)} automatic={data.scheduler.enabled} onEdit={() => { setCreating(false); setEditing(row.definition) }} />)}
       </section>

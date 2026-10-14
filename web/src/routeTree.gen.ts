@@ -20,6 +20,8 @@ import { Route as WorkspaceSkillsRouteImport } from './routes/_workspace/skills'
 import { Route as WorkspaceAdminAdminRouteImport } from './routes/_workspace/_admin/admin'
 import { Route as WorkspaceAdminClassifiersRouteImport } from './routes/_workspace/_admin/classifiers'
 import { Route as WorkspaceAdminGraphRouteImport } from './routes/_workspace/_admin/graph'
+import { Route as WorkspaceAdminHistoryRouteImport } from './routes/_workspace/_admin/history'
+import { Route as WorkspaceAdminIngestRouteImport } from './routes/_workspace/_admin/ingest'
 import { Route as WorkspaceAdminMaintenanceRouteImport } from './routes/_workspace/_admin/maintenance'
 import { Route as WorkspaceAdminReviewRouteImport } from './routes/_workspace/_admin/review'
 import { Route as WorkspaceAdminRunsRouteImport } from './routes/_workspace/_admin/runs'
@@ -83,6 +85,16 @@ const WorkspaceAdminClassifiersRoute =
 const WorkspaceAdminGraphRoute = WorkspaceAdminGraphRouteImport.update({
   id: '/graph',
   path: '/graph',
+  getParentRoute: () => WorkspaceAdminRoute,
+} as any)
+const WorkspaceAdminHistoryRoute = WorkspaceAdminHistoryRouteImport.update({
+  id: '/history',
+  path: '/history',
+  getParentRoute: () => WorkspaceAdminRoute,
+} as any)
+const WorkspaceAdminIngestRoute = WorkspaceAdminIngestRouteImport.update({
+  id: '/ingest',
+  path: '/ingest',
   getParentRoute: () => WorkspaceAdminRoute,
 } as any)
 const WorkspaceAdminMaintenanceRoute =
@@ -153,6 +165,8 @@ export interface FileRoutesByFullPath {
   '/admin': typeof WorkspaceAdminAdminRoute
   '/classifiers': typeof WorkspaceAdminClassifiersRoute
   '/graph': typeof WorkspaceAdminGraphRoute
+  '/history': typeof WorkspaceAdminHistoryRoute
+  '/ingest': typeof WorkspaceAdminIngestRoute
   '/maintenance': typeof WorkspaceAdminMaintenanceRoute
   '/review': typeof WorkspaceAdminReviewRoute
   '/runs': typeof WorkspaceAdminRunsRoute
@@ -174,6 +188,8 @@ export interface FileRoutesByTo {
   '/admin': typeof WorkspaceAdminAdminRoute
   '/classifiers': typeof WorkspaceAdminClassifiersRoute
   '/graph': typeof WorkspaceAdminGraphRoute
+  '/history': typeof WorkspaceAdminHistoryRoute
+  '/ingest': typeof WorkspaceAdminIngestRoute
   '/maintenance': typeof WorkspaceAdminMaintenanceRoute
   '/review': typeof WorkspaceAdminReviewRoute
   '/runs': typeof WorkspaceAdminRunsRoute
@@ -199,6 +215,8 @@ export interface FileRoutesById {
   '/_workspace/_admin/admin': typeof WorkspaceAdminAdminRoute
   '/_workspace/_admin/classifiers': typeof WorkspaceAdminClassifiersRoute
   '/_workspace/_admin/graph': typeof WorkspaceAdminGraphRoute
+  '/_workspace/_admin/history': typeof WorkspaceAdminHistoryRoute
+  '/_workspace/_admin/ingest': typeof WorkspaceAdminIngestRoute
   '/_workspace/_admin/maintenance': typeof WorkspaceAdminMaintenanceRoute
   '/_workspace/_admin/review': typeof WorkspaceAdminReviewRoute
   '/_workspace/_admin/runs': typeof WorkspaceAdminRunsRoute
@@ -222,6 +240,8 @@ export interface FileRouteTypes {
     | '/admin'
     | '/classifiers'
     | '/graph'
+    | '/history'
+    | '/ingest'
     | '/maintenance'
     | '/review'
     | '/runs'
@@ -243,6 +263,8 @@ export interface FileRouteTypes {
     | '/admin'
     | '/classifiers'
     | '/graph'
+    | '/history'
+    | '/ingest'
     | '/maintenance'
     | '/review'
     | '/runs'
@@ -267,6 +289,8 @@ export interface FileRouteTypes {
     | '/_workspace/_admin/admin'
     | '/_workspace/_admin/classifiers'
     | '/_workspace/_admin/graph'
+    | '/_workspace/_admin/history'
+    | '/_workspace/_admin/ingest'
     | '/_workspace/_admin/maintenance'
     | '/_workspace/_admin/review'
     | '/_workspace/_admin/runs'
@@ -362,6 +386,20 @@ declare module '@tanstack/react-router' {
       path: '/graph'
       fullPath: '/graph'
       preLoaderRoute: typeof WorkspaceAdminGraphRouteImport
+      parentRoute: typeof WorkspaceAdminRoute
+    }
+    '/_workspace/_admin/history': {
+      id: '/_workspace/_admin/history'
+      path: '/history'
+      fullPath: '/history'
+      preLoaderRoute: typeof WorkspaceAdminHistoryRouteImport
+      parentRoute: typeof WorkspaceAdminRoute
+    }
+    '/_workspace/_admin/ingest': {
+      id: '/_workspace/_admin/ingest'
+      path: '/ingest'
+      fullPath: '/ingest'
+      preLoaderRoute: typeof WorkspaceAdminIngestRouteImport
       parentRoute: typeof WorkspaceAdminRoute
     }
     '/_workspace/_admin/maintenance': {
@@ -460,6 +498,8 @@ interface WorkspaceAdminRouteChildren {
   WorkspaceAdminAdminRoute: typeof WorkspaceAdminAdminRoute
   WorkspaceAdminClassifiersRoute: typeof WorkspaceAdminClassifiersRoute
   WorkspaceAdminGraphRoute: typeof WorkspaceAdminGraphRoute
+  WorkspaceAdminHistoryRoute: typeof WorkspaceAdminHistoryRoute
+  WorkspaceAdminIngestRoute: typeof WorkspaceAdminIngestRoute
   WorkspaceAdminMaintenanceRoute: typeof WorkspaceAdminMaintenanceRoute
   WorkspaceAdminReviewRoute: typeof WorkspaceAdminReviewRoute
   WorkspaceAdminRunsRoute: typeof WorkspaceAdminRunsRoute
@@ -475,6 +515,8 @@ const WorkspaceAdminRouteChildren: WorkspaceAdminRouteChildren = {
   WorkspaceAdminAdminRoute: WorkspaceAdminAdminRoute,
   WorkspaceAdminClassifiersRoute: WorkspaceAdminClassifiersRoute,
   WorkspaceAdminGraphRoute: WorkspaceAdminGraphRoute,
+  WorkspaceAdminHistoryRoute: WorkspaceAdminHistoryRoute,
+  WorkspaceAdminIngestRoute: WorkspaceAdminIngestRoute,
   WorkspaceAdminMaintenanceRoute: WorkspaceAdminMaintenanceRoute,
   WorkspaceAdminReviewRoute: WorkspaceAdminReviewRoute,
   WorkspaceAdminRunsRoute: WorkspaceAdminRunsRoute,

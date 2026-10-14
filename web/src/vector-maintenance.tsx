@@ -45,7 +45,7 @@ export function VectorMaintenance({ reportId, onReport }: { reportId: string; on
         <h2 className={`flex items-center gap-2 text-xl font-semibold ${unreadable.length && !report.repaired ? 'text-destructive' : ''}`}>
           {report.repaired ? <><Check className="size-5 text-moss" />Repair completed</> : unreadable.length ? `${plural(unreadable.length, 'unreadable fragment')}` : report.fragments ? <><Check className="size-5 text-moss" />Every fragment reads</> : 'No vector table yet'}
         </h2>
-        <p className="text-sm text-muted-foreground">{report.repaired && 'Audit before repair: '}{number(report.fragments)} fragments checked · {number(report.readable)} readable · {number(unreadable.length)} unreadable</p>
+        <p className="text-sm text-muted-foreground">{report.repaired && 'Audit before repair: '}{plural(report.fragments, 'fragment')} checked · {number(report.readable)} readable · {number(unreadable.length)} unreadable</p>
         <p className="font-mono text-xs text-muted-foreground wrap-anywhere">{report.vectors}</p>
       </div>
       {unreadable.length > 0 && <Fragments report={report} />}

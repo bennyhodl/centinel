@@ -50,11 +50,11 @@ export function useJobEvents(enabled = true) {
  */
 const ended: Record<string, (job: string) => QueryKey[]> = {
   classify: job => [['runs'], ['run', job], ['corpus']],
-  run: () => [['collection-history'], ['sources'], ['source'], ['source-crumbs'], ['graph'], ['graph-host']],
+  run: () => [['collection-history'], ['schedules'], ['system-health'], ['sources'], ['source'], ['source-crumbs'], ['graph'], ['graph-host']],
   'vectors-verify': job => [['vector-report', job]],
-  'vectors-repair': job => [['vector-report', job], ['system'], ['corpus']],
-  'vectors-embed': () => [['system'], ['corpus']],
-  ingest: () => [['sources'], ['source']],
+  'vectors-repair': job => [['vector-report', job], ['system-health'], ['corpus']],
+  'vectors-embed': () => [['system-health'], ['corpus']],
+  ingest: () => [['sources'], ['source'], ['system-health']],
   crumbs: () => [['source-crumbs'], ['graph'], ['graph-host']],
   extract: () => [['source'], ['sources'], ['corpus'], ['read']],
   transcribe: () => [['source'], ['sources'], ['corpus'], ['read']],

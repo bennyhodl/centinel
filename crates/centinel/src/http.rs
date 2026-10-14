@@ -190,9 +190,10 @@ pub async fn listen(bind: &str) -> Result<tokio::net::TcpListener> {
 pub async fn serve_until(
     ctx: Arc<Ctx>,
     listener: tokio::net::TcpListener,
+    config: Option<&str>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    crate::gateway::serve(ctx, listener, shutdown).await
+    crate::gateway::serve(ctx, listener, config, shutdown).await
 }
 
 pub async fn serve_until_with_schedules(
@@ -216,9 +217,11 @@ pub fn page_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
 
 #[cfg(test)]
 pub(crate) fn router(ctx: Arc<Ctx>) -> Router {
+    let path = ctx.store.root().join("test-server.toml");
+    std::fs::write(&path, "").expect("temporary server config");
     router_with_schedules(
         ctx,
-        crate::schedule_control::ScheduleControl::load(None, "disabled by centinel web")
+        crate::schedule_control::ScheduleControl::load(path.to_str(), "disabled by centinel web")
             .expect("valid config"),
     )
 }

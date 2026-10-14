@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::State,
     response::{IntoResponse, Response},
     routing::get,
@@ -19,7 +19,10 @@ pub fn routes() -> Router<Arc<Ctx>> {
     Router::new().route("/workspace/admin/health", get(health))
 }
 
-async fn health(State(ctx): State<Arc<Ctx>>) -> Response {
+async fn health(
+    State(ctx): State<Arc<Ctx>>,
+    Extension(schedules): Extension<Arc<crate::schedule_control::ScheduleControl>>,
+) -> Response {
     // Keep readiness and corpus accounting with their existing owners. In particular,
     // status counts distinct current blobs, not every historical file in the store.
     match tokio::try_join!(
@@ -31,9 +34,10 @@ async fn health(State(ctx): State<Arc<Ctx>>) -> Response {
             "doctor": doctor,
             "corpus": corpus,
             "running": RunLock::current(&ctx.store),
-            // Configured schedules do not prove the scheduler is running. Its runtime
-            // owner must supply this before we can report running or disabled.
-            "scheduler": { "status": "unknown", "detail": "Scheduler runtime status is not available." },
+            "scheduler": {
+                "status": if schedules.is_running() { "running" } else { "disabled" },
+                "detail": schedules.disabled_reason().unwrap_or("Schedule changes apply to subsequent fires."),
+            },
         })).into_response(),
         Err(error) => super::workspace_error(error),
     }
@@ -100,6 +104,7 @@ mod tests {
                 schedule: None,
                 sources: vec!["city".into()],
                 args: "--sources city".into(),
+                operation: None,
             },
         )
         .unwrap();
@@ -128,7 +133,8 @@ mod tests {
         );
         assert!(report["doctor"]["ready"].is_boolean());
         assert_eq!(report["running"]["sources"], json!(["city"]));
-        assert_eq!(report["scheduler"]["status"], "unknown");
+        assert_eq!(report["scheduler"]["status"], "disabled");
+        assert_eq!(report["scheduler"]["detail"], "disabled by centinel web");
         drop(lock);
         let response = app.oneshot(request("secret", "admin")).await.unwrap();
         let report: Value =

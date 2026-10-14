@@ -21,9 +21,14 @@ and each entry carries a count once it does.
 |---|---|---|
 | Archive | **Search** | Find documents by their words, narrowed by source, usage, classifier score and address. [Searching](../use/search.md) |
 | | **Sources** | What the archive collects: investigate an address, add it, run it, see what each source holds and where it links off-site. Administrators only. [Sources](../operate/sources.md) |
+| Collection | **Schedules** | Create, edit, pause and run collection schedules. [Schedules](../operate/schedules.md) |
+| | **History** | Inspect collection attempts across sources and schedules, and repeat their source scope. |
+| | **Ingest URLs** | Archive specific URLs under an existing source. Extract and index them afterwards from the source page. |
 | Classifiers | **Classify** | Write the questions that sort the corpus, and run them. [Classify](../use/classify.md) |
 | | **Runs** | What each run asked, decided and cost. [Runs](../use/runs.md) |
 | | **Review** | Check the model's answers one document at a time. [Review](../use/review.md) |
+| System | **Health** | Check required binaries, model servers, corpus storage and scheduler status. |
+| | **Maintenance** | Verify vectors, review a repair, and re-embed missing chunks. |
 | Agent | **Connect** | The command that gives Claude, Cursor or another client this corpus. [Agents and programs](../use/agents.md) |
 | | **Skills** | Jobs an agent can do end to end, installed with one command. |
 
@@ -36,20 +41,19 @@ it for **Spend** (every model call and what it cost, [Spend](../use/spend.md)), 
 documentation, the light and dark toggle, **Admin** (who may use this archive) and signing
 out.
 
-## What it cannot do
+## Administrator actions
 
-The workspace reads the corpus and records decisions about it. It does not collect.
+Collection, classifier and system controls require an administrator's browser session.
+Readers and MCP clients cannot start these actions. Sources also provides settings and
+individual extraction, transcription, indexing and embedding stages.
 
-- Schedules, model weights and host checks are set from the command line and the config file.
-  That is the [Operator](operator.md) job. An administrator signed in to the page is the
-  operator too, so the Sources page can add a source, investigate an address and run collection —
-  but an agent never can, whatever its token: those routes answer a browser session only.
-- Apart from a run an administrator starts, it does not change the archive. Collected bytes
-  and the log are never written from the page. Everything the workspace records (questions, answers, reviews, a person's overrides)
-  lives in `workspace/`, and every decision it makes can be undone.
+Saving a schedule applies it to subsequent fires when this server runs the scheduler.
+`centinel web` and `serve --no-schedule` can save schedules but leave automatic collection
+disabled. Start `centinel serve` to fire them.
 
-The split is on purpose. What gets collected should not depend on a model, or on whoever
-happens to have a page open without the administrator's role. See [The shape](../internals/shape.md).
+History reruns repeat the attempt's source scope using current defaults. They do not
+replay the original flags, which older journal records do not retain. Vector maintenance
+repairs derived data and preserves archived documents and source logs.
 
 ## Where it runs
 

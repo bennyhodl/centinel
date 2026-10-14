@@ -382,7 +382,13 @@ async fn main() -> Result<()> {
             if rebuilt {
                 crate::web::rebuild_bundle()?;
             }
-            crate::web::open(ctx, &bind, rebuilt).await
+            crate::web::open(
+                ctx,
+                &bind,
+                rebuilt,
+                explicit_config(&matches).map(String::as_str),
+            )
+            .await
         }
         "mcp" => mcp::serve(ctx).await,
         op_name => run_op(ctx, op_name, sub, Output::detect(sub)).await,

@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { createFileRoute, Link, Navigate, Outlet, redirect, useLocation } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { BookOpen, ChevronsUpDown, CircleDollarSign, Eye, FlaskConical, Globe, History, LogOut, Moon, Plug, Search, ShieldCheck, Sparkles, Sun, Users, Waypoints } from 'lucide-react'
+import { Activity, BookOpen, CalendarClock, ChevronsUpDown, CircleDollarSign, Download, Eye, FlaskConical, Globe, History, LogOut, Moon, Plug, Search, ShieldCheck, Sparkles, Sun, Users, Waypoints, Wrench } from 'lucide-react'
 import { signOut } from '../auth'
 import { queries } from '../queries'
 import { JobDrawerProvider, WorkingNow, useJobEvents } from '../jobs'
@@ -73,6 +73,17 @@ function Shell({ account }: { account: Account }) {
           <Link to="/graph" search={{}}><Waypoints /><span>Graph</span></Link>
         </NavItem>}
       </NavGroup>
+      {admin && <NavGroup label="Collection">
+        <NavItem active={at('/schedules')} label="Schedules">
+          <Link to="/schedules"><CalendarClock /><span>Schedules</span></Link>
+        </NavItem>
+        <NavItem active={at('/history')} label="History">
+          <Link to="/history" search={{ source: '', schedule: '', outcome: '', page: 1, run: '' }}><History /><span>History</span></Link>
+        </NavItem>
+        <NavItem active={at('/ingest')} label="Ingest URLs">
+          <Link to="/ingest"><Download /><span>Ingest URLs</span></Link>
+        </NavItem>
+      </NavGroup>}
       {admin && <NavGroup label="Classifiers">
         <NavItem active={at('/classifiers')} label="Classify" count={questions.data && number(questions.data.questions.length)}>
           <Link to="/classifiers"><FlaskConical /><span>Classify</span></Link>
@@ -82,6 +93,14 @@ function Shell({ account }: { account: Account }) {
         </NavItem>
         <NavItem active={at('/review')} label="Review" count={review.data?.in_review_band ? <span className="font-semibold text-flame-ink">{number(review.data.in_review_band)}</span> : undefined}>
           <Link to="/review"><Eye /><span>Review</span></Link>
+        </NavItem>
+      </NavGroup>}
+      {admin && <NavGroup label="System">
+        <NavItem active={at('/system')} label="Health">
+          <Link to="/system"><Activity /><span>Health</span></Link>
+        </NavItem>
+        <NavItem active={at('/maintenance')} label="Maintenance">
+          <Link to="/maintenance" search={{}}><Wrench /><span>Maintenance</span></Link>
         </NavItem>
       </NavGroup>}
       <NavGroup label="Agent">

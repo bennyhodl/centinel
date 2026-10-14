@@ -442,7 +442,7 @@ pub struct RunLock {
 
 /// Why the lane could not be taken.
 #[derive(Debug)]
-pub struct Held(pub Holder);
+pub struct Held(pub Box<Holder>);
 
 impl std::fmt::Display for Held {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -474,7 +474,7 @@ impl RunLock {
         }
     }
 
-    fn try_create(path: &Path, holder: &Holder) -> std::result::Result<Self, Holder> {
+    fn try_create(path: &Path, holder: &Holder) -> std::result::Result<Self, Box<Holder>> {
         use std::io::Write;
         match std::fs::OpenOptions::new()
             .write(true)
@@ -490,7 +490,7 @@ impl RunLock {
                     path: path.to_path_buf(),
                 })
             }
-            Err(_) => Err(Self::read(path).unwrap_or_else(|| Holder {
+            Err(_) => Err(Box::new(Self::read(path).unwrap_or_else(|| Holder {
                 // A lock file that exists but cannot be read is still a lock. Reporting it
                 // as unheld would let a second run start beside the first.
                 pid: 0,
@@ -500,7 +500,7 @@ impl RunLock {
                 trigger: Trigger::Manual,
                 schedule: None,
                 args: "unreadable lock file".into(),
-            })),
+            }))),
         }
     }
 

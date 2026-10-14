@@ -317,6 +317,7 @@ mod tests {
                 schedule: None,
                 sources: vec![],
                 args: String::new(),
+                operation: None,
             },
         )
         .unwrap();

@@ -27,7 +27,7 @@ use centinel_core::op::Ctx;
 /// nothing it could switch back on. An occupied port is reused only when its product,
 /// API version, binary version, and canonical store root all match. Every other occupant
 /// is refused before a browser opens.
-pub async fn open(ctx: Arc<Ctx>, bind: &str, rebuilt: bool) -> Result<()> {
+pub async fn open(ctx: Arc<Ctx>, bind: &str, rebuilt: bool, config: Option<&str>) -> Result<()> {
     check_bundle()?;
     let url = format!(
         "{}/web",
@@ -78,7 +78,13 @@ pub async fn open(ctx: Arc<Ctx>, bind: &str, rebuilt: bool) -> Result<()> {
         return Ok(());
     }
     spawn_browser(url);
-    super::http::serve_until(ctx, super::http::listen(bind).await?, crate::terminate()).await
+    super::http::serve_until(
+        ctx,
+        super::http::listen(bind).await?,
+        config,
+        crate::terminate(),
+    )
+    .await
 }
 
 /// The workspace page must carry this binary's version. It is checked before a port is

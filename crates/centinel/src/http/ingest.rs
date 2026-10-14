@@ -1,12 +1,7 @@
 //! Browser-only URL acquisition. Shares the collection lock without starting a full run.
 use std::sync::Arc;
 
-use axum::{
-    Json,
-    extract::State,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
+use axum::{Json, extract::State, response::Response};
 use centinel_core::{
     catalog::Sources,
     op::Ctx,
@@ -77,7 +72,10 @@ async fn ingest(State(ctx): State<Arc<Ctx>>, Json(body): Json<IngestBody>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, http::Request};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
     use centinel_core::{
         config::SourceConfig,
         journal::{Holder, RunLock, Trigger},
@@ -86,10 +84,12 @@ mod tests {
     };
     use tower::ServiceExt;
 
-    async fn post(app: &axum::Router, value: serde_json::Value) -> Response {
+    async fn post(app: &axum::Router, role: &str, value: serde_json::Value) -> Response {
         app.clone()
             .oneshot(
                 Request::post("/workspace/ingest")
+                    .header("x-centinel-secret", "test-secret")
+                    .header("x-centinel-role", role)
                     .header("content-type", "application/json")
                     .header("host", "127.0.0.1:8787")
                     .header("origin", "http://127.0.0.1:8787")
@@ -108,8 +108,11 @@ mod tests {
             .add(&SourceConfig::site("fixture", "http://127.0.0.1/"))
             .await
             .unwrap();
-        let app = crate::http::router(Arc::clone(&ctx))
-            .layer(axum::Extension(crate::access::Role::Admin));
+        let app =
+            crate::http::router(Arc::clone(&ctx)).layer(axum::middleware::from_fn_with_state(
+                "test-secret".to_string(),
+                crate::access::authenticate,
+            ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/agenda", listener.local_addr().unwrap());
         let bytes = b"<html><body>Council agenda fixture</body></html>";
@@ -152,16 +155,14 @@ mod tests {
             json!({"source":"fixture", "urls": ["https://user:secret@example.com"]}),
             json!({"source":"fixture", "urls": [url], "user_agent":"custom"}),
         ] {
-            assert!(post(&app, body).await.status().is_client_error());
+            assert!(post(&app, "admin", body).await.status().is_client_error());
         }
         assert!(
             ctx.jobs.snapshot().is_empty(),
             "bad input must not start jobs"
         );
-        let reader =
-            crate::http::router(Arc::clone(&ctx)).layer(axum::Extension(crate::access::Role::User));
         assert_eq!(
-            post(&reader, json!({"source":"fixture", "urls":[url]}))
+            post(&app, "user", json!({"source":"fixture", "urls":[url]}))
                 .await
                 .status(),
             StatusCode::FORBIDDEN
@@ -181,14 +182,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            post(&app, json!({"source":"fixture", "urls":[url]}))
+            post(&app, "admin", json!({"source":"fixture", "urls":[url]}))
                 .await
                 .status(),
             StatusCode::CONFLICT
         );
         drop(held);
 
-        let response = post(&app, json!({"source":"fixture", "urls":[url]})).await;
+        let response = post(&app, "admin", json!({"source":"fixture", "urls":[url]})).await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let response: serde_json::Value = serde_json::from_slice(
             &axum::body::to_bytes(response.into_body(), 1024)
@@ -238,6 +239,7 @@ mod tests {
         let next_url = url.replace("/agenda", "/not-fetched");
         let response = post(
             &app,
+            "admin",
             json!({"source":"fixture", "urls":[slow_url, next_url]}),
         )
         .await;
@@ -260,6 +262,8 @@ mod tests {
             .clone()
             .oneshot(
                 Request::post(format!("/workspace/jobs/{id}/stop"))
+                    .header("x-centinel-secret", "test-secret")
+                    .header("x-centinel-role", "admin")
                     .header("host", "127.0.0.1:8787")
                     .header("origin", "http://127.0.0.1:8787")
                     .body(Body::empty())

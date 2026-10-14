@@ -883,7 +883,7 @@ mod tests {
         assert!(RunLock::current(&sched.ctx.store).is_none());
         let lane = Lane::acquire(
             &sched.ctx,
-            RunArgs::default(),
+            centinel_core::ops::RunArgs::default(),
             Launch {
                 surface: "schedule",
                 trigger: Trigger::Schedule,

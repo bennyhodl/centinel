@@ -21,10 +21,11 @@ pub fn store_id(root: &std::path::Path) -> String {
 pub async fn serve(
     ctx: Arc<Ctx>,
     public: tokio::net::TcpListener,
+    config: Option<&str>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let schedules =
-        crate::schedule_control::ScheduleControl::load(None, "disabled by centinel web")?;
+        crate::schedule_control::ScheduleControl::load(config, "disabled by centinel web")?;
     serve_with_schedules(ctx, public, schedules, shutdown).await
 }
 
@@ -155,9 +156,14 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let (stop, stopped) = tokio::sync::oneshot::channel();
-        let serving = tokio::spawn(serve(Arc::new(Ctx::new(store.clone())), listener, async {
-            let _ = stopped.await;
-        }));
+        let serving = tokio::spawn(serve(
+            Arc::new(Ctx::new(store.clone())),
+            listener,
+            None,
+            async {
+                let _ = stopped.await;
+            },
+        ));
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()

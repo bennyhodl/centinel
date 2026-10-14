@@ -57,10 +57,13 @@ impl Stage {
                 .await?;
             }
             Self::Transcribe => {
+                let config = centinel_core::config::Config::load()?;
+                let definition = Sources::new(&ctx.store).require(&source).await?;
                 ops::transcribe(
                     ctx,
                     TranscribeArgs {
                         source: Some(source),
+                        language: Some(definition.lang.unwrap_or(config.defaults.lang)),
                         refresh,
                         ..Default::default()
                     },
@@ -158,10 +161,7 @@ mod tests {
         let ctx = Arc::new(Ctx::new(store));
         for source in ["a", "b"] {
             Sources::new(&ctx.store)
-                .add(&SourceConfig::site(
-                    source,
-                    &format!("https://{source}.gov"),
-                ))
+                .add(&SourceConfig::site(source, format!("https://{source}.gov")))
                 .await
                 .unwrap();
             let text = "The county commission approved drainage repairs and a public hearing on the proposed budget. ".repeat(12);

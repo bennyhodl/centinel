@@ -79,7 +79,7 @@ async fn list(State(ctx): State<Arc<Ctx>>, Query(filters): Query<Filters>) -> Re
     }
 }
 
-async fn resolve(ctx: &Ctx, id: String) -> Result<Attempt, Response> {
+async fn resolve(ctx: &Ctx, id: String) -> Result<Attempt, Box<Response>> {
     match ops::history(
         ctx,
         HistoryArgs {
@@ -91,7 +91,7 @@ async fn resolve(ctx: &Ctx, id: String) -> Result<Attempt, Response> {
     {
         Ok(report) => {
             if let Some(ids) = report.ambiguous {
-                return Err((StatusCode::CONFLICT, Json(json!({ "error": "Run prefix is ambiguous. Use a longer id.", "ambiguous": ids }))).into_response());
+                return Err(Box::new((StatusCode::CONFLICT, Json(json!({ "error": "Run prefix is ambiguous. Use a longer id.", "ambiguous": ids }))).into_response()));
             }
             Ok(report
                 .attempts
@@ -102,13 +102,15 @@ async fn resolve(ctx: &Ctx, id: String) -> Result<Attempt, Response> {
         Err(error) => {
             // A missing handle is distinct from an unreadable journal.
             if error.to_string().starts_with("no run matching") {
-                Err((
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": error.to_string()})),
-                )
-                    .into_response())
+                Err(Box::new(
+                    (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({"error": error.to_string()})),
+                    )
+                        .into_response(),
+                ))
             } else {
-                Err(workspace_error(error))
+                Err(Box::new(workspace_error(error)))
             }
         }
     }
@@ -117,14 +119,14 @@ async fn resolve(ctx: &Ctx, id: String) -> Result<Attempt, Response> {
 async fn detail(State(ctx): State<Arc<Ctx>>, Path(id): Path<String>) -> Response {
     match resolve(&ctx, id).await {
         Ok(attempt) => Json(json!({ "attempt": attempt })).into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
 async fn rerun(State(ctx): State<Arc<Ctx>>, Path(id): Path<String>) -> Response {
     let attempt = match resolve(&ctx, id).await {
         Ok(attempt) => attempt,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     launch_run(
         &ctx,
