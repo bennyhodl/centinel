@@ -73,6 +73,7 @@ mod graph;
 mod health;
 mod history;
 mod icons;
+mod ingest;
 mod investigate;
 mod maintenance;
 mod schedules;
@@ -254,6 +255,7 @@ pub(crate) fn router_with_schedules(
         .merge(sources::routes())
         .merge(schedules::routes())
         .merge(stages::routes())
+        .merge(ingest::routes())
         .merge(icons::routes())
         .merge(graph::routes())
         .merge(vectors::routes())

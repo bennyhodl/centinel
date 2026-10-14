@@ -767,6 +767,7 @@ export const api = {
   },
   collectionAttempt: (id: string) => request<{ attempt: RunAttempt & { due_at?: string; report?: unknown } }>(`/workspace/history/${encodeURIComponent(id)}`),
   rerunCollection: (id: string) => request<{ run_id: string }>(`/workspace/history/${encodeURIComponent(id)}/rerun`, { method: 'POST' }),
+  ingest: (body: { source: string; urls: string[] }) => request<{ id: string }>('/workspace/ingest', { method: 'POST', body: JSON.stringify(body) }),
   sources: () => request<{ sources: ListedSource[]; running: LaneHolder | null }>('/workspace/sources').then(value => withArray(value, 'sources', '/workspace/sources')),
   source: (id: string) => request<SourceDetail>(`/workspace/sources/${encodeURIComponent(id)}`),
   startSourceStage: (id: string, stage: SourceStage, refresh = false) => request<{ id: string }>(`/workspace/sources/${encodeURIComponent(id)}/stages/${stage}`, { method: 'POST', body: JSON.stringify({ refresh }) }),

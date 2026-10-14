@@ -54,6 +54,7 @@ const ended: Record<string, (job: string) => QueryKey[]> = {
   'vectors-verify': job => [['vector-report', job]],
   'vectors-repair': job => [['vector-report', job], ['system'], ['corpus']],
   'vectors-embed': () => [['system'], ['corpus']],
+  ingest: () => [['sources'], ['source']],
   crumbs: () => [['source-crumbs'], ['graph'], ['graph-host']],
   extract: () => [['source'], ['sources'], ['corpus'], ['read']],
   transcribe: () => [['source'], ['sources'], ['corpus'], ['read']],

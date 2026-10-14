@@ -16,6 +16,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::fetch::{FetchFailure, Fetcher};
+use crate::op::{ItemOutcome, Verdict};
 use crate::policy::{DEFAULT_USER_AGENT, HostPolicy};
 use crate::prelude::*;
 use crate::store::LogRecord;
@@ -90,6 +91,7 @@ pub async fn ingest(
     ctx: &Ctx,
     args: IngestArgs,
     progress: &Progress,
+    cancel: &Cancel,
 ) -> anyhow::Result<IngestReport> {
     let source = SourceId::new(args.source.clone())?;
 
@@ -117,7 +119,9 @@ pub async fn ingest(
     let (mut stored, mut changed, mut failed) = (0usize, 0usize, 0usize);
 
     for (i, url) in args.urls.iter().enumerate() {
-        progress.step(format!("fetching {url}"), i as u64, total);
+        cancel.check()?;
+        let started = std::time::Instant::now();
+        progress.step_on("fetching", i as u64, total, url);
 
         let resource = Resource::new(source.clone(), url.clone());
         let at = Timestamp::now();
@@ -176,6 +180,29 @@ pub async fn ingest(
                 });
             }
         }
+        let outcome = outcomes.last().expect("every fetch has an outcome");
+        let (tag, verdict, bytes, detail) = match outcome {
+            IngestOutcome::Stored { bytes, changed, .. } => (
+                "stored".to_string(),
+                Verdict::Ok,
+                *bytes as u64,
+                Some(if *changed { "new bytes" } else { "unchanged" }.to_string()),
+            ),
+            IngestOutcome::Failed { state, detail, .. } => {
+                (state.to_string(), Verdict::Fail, 0, Some(detail.clone()))
+            }
+        };
+        progress.item(ItemOutcome {
+            address: url.clone(),
+            tag,
+            verdict,
+            noun: "requests".into(),
+            bytes,
+            produced: None,
+            millis: started.elapsed().as_millis() as u64,
+            detail,
+            nested: false,
+        });
     }
 
     progress.step("done", total, total);
