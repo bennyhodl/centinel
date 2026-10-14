@@ -69,6 +69,7 @@ use serde_json::{Value, json};
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
 
 mod graph;
+mod history;
 mod icons;
 mod investigate;
 mod maintenance;
@@ -251,7 +252,8 @@ pub(crate) fn router_with_schedules(
         .merge(schedules::routes())
         .merge(icons::routes())
         .merge(graph::routes())
-        .merge(vectors::routes())
+.merge(vectors::routes())
+        .merge(history::routes())
         .route("/ops", get(list_ops))
         .route("/ops/{name}", post(invoke))
         .route("/ops/{name}/stream", post(invoke_streaming))

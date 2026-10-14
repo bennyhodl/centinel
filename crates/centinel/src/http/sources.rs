@@ -214,13 +214,18 @@ async fn run(
         refresh: body.refresh,
         ..Default::default()
     };
+    launch_run(&ctx, args)
+}
+
+/// Starts an administrator collection through the shared lane and job lifecycle.
+pub(super) fn launch_run(ctx: &Arc<Ctx>, args: RunArgs) -> Response {
     let launch = Launch {
         surface: "web",
         trigger: Trigger::Manual,
         schedule: None,
         due_at: None,
     };
-    let lane = match Lane::acquire(&ctx, args, launch) {
+    let lane = match Lane::acquire(ctx, args, launch) {
         Ok(lane) => lane,
         Err(held) => {
             return (

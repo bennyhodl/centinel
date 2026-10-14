@@ -1,5 +1,5 @@
 import { keepPreviousData, queryOptions, skipToken } from '@tanstack/react-query'
-import { api, corpusParams, type CorpusFilters, type DocumentIdentity, type GraphFilter, type JobState, type RunDetailQuery } from './api'
+import { api, corpusParams, type CollectionHistoryFilters, type CorpusFilters, type DocumentIdentity, type GraphFilter, type JobState, type RunDetailQuery } from './api'
 
 /**
  * Every read the workspace makes, one builder each. A route's loader warms the cache
@@ -27,6 +27,15 @@ export const queries = {
     const params = corpusParams({ ...noFilters, ...filters }, page, pageSize)
     return queryOptions({ queryKey: ['corpus', params.toString()], queryFn: () => api.corpus(params), placeholderData: keepPreviousData })
   },
+
+  collectionHistory: ({ source, schedule, outcome, page }: CollectionHistoryFilters) => queryOptions({
+    queryKey: ['collection-history', { source, schedule, outcome, page }], queryFn: () => api.collectionHistory({ source, schedule, outcome, page }),
+    // CLI and scheduled collections can change the journal without a browser action.
+    placeholderData: keepPreviousData, refetchInterval: 5000,
+  }),
+  collectionAttempt: (id: string) => queryOptions({
+    queryKey: ['collection-history', 'attempt', id], queryFn: () => api.collectionAttempt(id), enabled: Boolean(id),
+  }),
 
   /** A page of the run ledger. Polls while one of its runs is scoring. */
   runs: (page: number, pageSize = 25) => queryOptions({

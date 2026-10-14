@@ -474,7 +474,7 @@ export type ListedSource = {
 export type LastRun = { started_at: string; outcome: RunAttempt['outcome']; trigger: RunAttempt['trigger']; schedule?: string; documents: number }
 
 /** The run holding the store's one lane. `sources` is empty for a run over every enabled source. */
-export type LaneHolder = { pid: number; started_at: string; trigger: 'schedule' | 'manual' | 'catch-up'; schedule?: string; sources?: string[]; args: string }
+export type LaneHolder = { pid: number; started_at: string; trigger: 'schedule' | 'manual' | 'catch_up'; schedule?: string; sources?: string[]; args: string }
 
 /** `log/<id>/source.toml`. */
 export type SourceDefinition = {
@@ -508,7 +508,7 @@ export type SourceSummary = {
 export type RunAttempt = {
   run_id: string
   schedule?: string
-  trigger: 'schedule' | 'manual' | 'catch-up'
+  trigger: 'schedule' | 'manual' | 'catch_up'
   started_at: string
   finished_at: string
   outcome: 'ok' | 'partial' | 'failed' | 'skipped' | 'interrupted'
@@ -518,6 +518,9 @@ export type RunAttempt = {
   /** The sources it was started for; empty for every enabled one. */
   sources?: string[]
 }
+
+export type CollectionHistoryFilters = { source: string; schedule: string; outcome: string; page: number }
+export type CollectionHistoryPage = { attempts: RunAttempt[]; total: number; page: number; page_size: number; running: LaneHolder | null }
 
 /** One source: its row as the list has it, its definition, what its log says, its runs. */
 export type SourceDetail = { source: ListedSource; definition: SourceDefinition; summary?: SourceSummary; runs: RunAttempt[]; running: LaneHolder | null }
@@ -734,6 +737,12 @@ export const api = {
   prices: () => request<{ prices: SpendPrice[] }>('/workspace/prices').then(value => withArray(value, 'prices', '/workspace/prices')),
   /** The host each source collects from, by source id. Readable by any approved user, unlike `sources`. */
   sourceHosts: () => request<Record<string, string>>('/workspace/source-hosts'),
+  collectionHistory: (filters: CollectionHistoryFilters) => {
+    const params = new URLSearchParams({ ...filters, page: String(filters.page) })
+    return request<CollectionHistoryPage>(`/workspace/history?${params}`)
+  },
+  collectionAttempt: (id: string) => request<{ attempt: RunAttempt & { due_at?: string; report?: unknown } }>(`/workspace/history/${encodeURIComponent(id)}`),
+  rerunCollection: (id: string) => request<{ run_id: string }>(`/workspace/history/${encodeURIComponent(id)}/rerun`, { method: 'POST' }),
   sources: () => request<{ sources: ListedSource[]; running: LaneHolder | null }>('/workspace/sources').then(value => withArray(value, 'sources', '/workspace/sources')),
   source: (id: string) => request<SourceDetail>(`/workspace/sources/${encodeURIComponent(id)}`),
   sourceCrumbs: (id: string) => request<CrumbsList>(`/workspace/sources/${encodeURIComponent(id)}/crumbs`).then(value => withArray(value, 'crumbs', 'crumbs')),
