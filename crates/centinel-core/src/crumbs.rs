@@ -45,6 +45,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
+use crate::domain::SourceId;
 use crate::render::Mark;
 use crate::store::Store;
 
@@ -374,6 +375,66 @@ pub fn host_of(address: &str) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
+/// A host, from a host or from any URL on one.
+///
+/// Both are what the operator has in hand — the list prints hosts and a crumb's example is a
+/// URL — so either is a reasonable thing to paste back. Anything that is neither is an error
+/// rather than a stored "host" with a slash in it that no crumb will ever equal. Every
+/// surface that takes a host from a person (`crumbs ignore`, the graph's card, an icon)
+/// reads it through here.
+pub fn as_host(input: &str) -> anyhow::Result<String> {
+    let trimmed = input.trim();
+    if let Some(host) = url::Url::parse(trimmed).ok().and_then(|u| {
+        u.host_str()
+            .filter(|_| matches!(u.scheme(), "http" | "https"))
+            .map(str::to_ascii_lowercase)
+    }) {
+        return Ok(host);
+    }
+
+    // A bare host has no scheme, so `Url::parse` refuses it outright.
+    let host = trimmed.trim_end_matches('/').to_ascii_lowercase();
+    let plausible = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'));
+    match plausible {
+        true => Ok(host),
+        false => anyhow::bail!("`{input}` is not a host, or a http(s) URL on one"),
+    }
+}
+
+/// Which sources answer for which host.
+///
+/// **The one rule for "is this host already a Source".** The intent half is each
+/// definition's site host — a source added an hour ago and never run still claims its host,
+/// and so does one that is `enabled = false`: they chose the host and then chose not to run
+/// it, and neither decision was "ask me again". The evidence half is every host a source's
+/// log has observed ([`crate::summary::Summary::claimed_hosts`]).
+///
+/// **A channel claims no host.** `youtube.com` holds every channel there is, so a source for
+/// one of them says nothing about a crumb pointing at another: marking the host answered
+/// would hide it, and leaving it open costs one `crumbs ignore youtube.com`. A definition
+/// knows a channel by which field is set ([`crate::config::SourceConfig::site_host`]), and
+/// the log by [`crate::sources::channel::claims`].
+///
+/// A map rather than the set `crumbs` needs, because the graph must know *which* source to
+/// draw the edge to. Walks the catalogue, the one owner of the list; a log directory with
+/// no definition is not a source.
+pub async fn claimants(store: &Store) -> anyhow::Result<BTreeMap<String, Vec<SourceId>>> {
+    let summaries = crate::summary::Summaries::new(store);
+    let mut out: BTreeMap<String, Vec<SourceId>> = BTreeMap::new();
+    for source in crate::catalog::Sources::new(store).list().await? {
+        let id = SourceId::new(source.id.clone())?;
+        let mut claimed = summaries.get(&id).await?.claimed_hosts;
+        claimed.extend(source.site_host());
+        for host in claimed {
+            out.entry(host).or_default().push(id.clone());
+        }
+    }
+    Ok(out)
+}
+
 // ── the ledger: what each page dropped, written when it was collected ─────────
 
 /// The rows one Source has written down, and where they go.
@@ -524,26 +585,19 @@ impl<'a> Ledger<'a> {
 
     /// Replaces the ledger with exactly these rows.
     ///
-    /// Write-then-rename, so an interrupted rewrite leaves the previous ledger rather than
-    /// half of a new one. What `--rescan` does, and it also drops the rows of superseded
+    /// Atomic ([`crate::store::write_atomically`]), so an interrupted rewrite leaves the
+    /// previous ledger rather than half of a new one. What `--rescan` does, and it also drops the rows of superseded
     /// blobs that an append-only file accumulates.
     pub async fn rewrite(&self, rows: &[Recorded]) -> anyhow::Result<()> {
-        let path = self.store.crumbs_path(&self.source);
-        let dir = path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("a crumb ledger always has a parent directory"))?;
-        tokio::fs::create_dir_all(dir).await?;
-
         let mut body = Vec::new();
         for row in rows {
             body.extend_from_slice(&serde_json::to_vec(row)?);
             body.push(b'\n');
         }
-
-        let tmp = dir.join(format!(".{}.tmp", self.source));
-        tokio::fs::write(&tmp, &body).await?;
-        tokio::fs::rename(&tmp, &path).await?;
-        Ok(())
+        Ok(crate::store::write_atomically(
+            &self.store.crumbs_path(&self.source),
+            body,
+        )?)
     }
 }
 
@@ -680,6 +734,20 @@ mod tests {
     use super::*;
 
     const PAGE: &str = "https://www.tampa.gov/clerk/records";
+
+    #[test]
+    fn a_host_is_taken_from_a_host_or_from_a_url_on_it() {
+        assert_eq!(as_host("Facebook.com").unwrap(), "facebook.com");
+        assert_eq!(as_host("  facebook.com/  ").unwrap(), "facebook.com");
+        assert_eq!(
+            as_host("https://www.facebook.com/CityofTampa?x=1").unwrap(),
+            "www.facebook.com"
+        );
+
+        for bad in ["", "mailto:clerk@tampa.gov", "two hosts", "a/b", "https://"] {
+            assert!(as_host(bad).is_err(), "`{bad}` was accepted as a host");
+        }
+    }
 
     fn read(html: &str) -> Vec<Crumb> {
         let mut trail = Trail::default();

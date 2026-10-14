@@ -560,6 +560,7 @@ mod tests {
                 Err(Refusal {
                     state,
                     detail: detail.to_string(),
+                    status: None,
                 }),
             );
             self

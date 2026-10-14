@@ -616,6 +616,7 @@ pub(crate) mod tests {
                 let body = self.pages.get(url).ok_or_else(|| Refusal {
                     state: crate::domain::Liveness::Gone,
                     detail: "HTTP 404 Not Found".into(),
+                    status: Some(404),
                 })?;
                 Ok(Fetched {
                     bytes: body.as_bytes().to_vec(),

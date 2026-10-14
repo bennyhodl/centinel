@@ -42,6 +42,10 @@
 //!
 //! TanStack Start authenticates public requests. The Rust listener is private and
 //! accepts only its per-launch credential; permissions are enforced here and in MCP.
+//!
+//! Every write under `/workspace` must also come from this server's own origin. That is one
+//! rule, [`crate::access::require_same_origin`], layered on the router: a handler never
+//! asks, so a new write route cannot forget to.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -226,6 +230,7 @@ pub(crate) fn router(ctx: Arc<Ctx>) -> Router {
         .route("/ops/{name}", post(invoke))
         .route("/ops/{name}/stream", post(invoke_streaming))
         .route("/mcp", post(mcp_over_http))
+        .layer(axum::middleware::from_fn(crate::access::require_same_origin))
         .layer(axum::middleware::from_fn(log_request))
         .with_state(ctx)
 }
@@ -409,15 +414,11 @@ async fn workspace_review_queue(
 }
 
 /// A person's verdicts on one document. A write: it can restore or exclude the document
-/// and it puts tags on it, so it wants the same origin every other write wants.
+/// and it puts tags on it.
 async fn workspace_review(
     State(ctx): State<Arc<Ctx>>,
-    headers: HeaderMap,
     Json(review): Json<Review>,
 ) -> Response {
-    if !same_origin(&headers) {
-        return forbidden_origin();
-    }
     let workspace = Workspace::new(&ctx.store);
     let report = workspace.review(review);
     workspace_response(match report {
@@ -458,12 +459,8 @@ async fn workspace_presets() -> Response {
 
 async fn workspace_save_questions(
     State(ctx): State<Arc<Ctx>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if !same_origin(&headers) {
-        return forbidden_origin();
-    }
     let questions =
         match serde_json::from_value(body.get("questions").cloned().unwrap_or(Value::Null)) {
             Ok(questions) => questions,
@@ -493,12 +490,8 @@ async fn workspace_run_detail(
 
 async fn workspace_run(
     State(ctx): State<Arc<Ctx>>,
-    headers: HeaderMap,
     Json(request): Json<RunRequest>,
 ) -> Response {
-    if !same_origin(&headers) {
-        return forbidden_origin();
-    }
     // Answer with the run as started, then score it on a task of its own, as a job under
     // the run's id. The browser follows it on the job stream and reads the answers from
     // the run detail; a request held open for a thousand documents sat behind proxies,
@@ -613,12 +606,8 @@ async fn workspace_jobs(State(ctx): State<Arc<Ctx>>) -> Response {
 /// for a job that is not there to stop.
 async fn workspace_stop_job(
     State(ctx): State<Arc<Ctx>>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if !same_origin(&headers) {
-        return forbidden_origin();
-    }
     match ctx.jobs.stop(&id) {
         true => Json(json!({ "stopped": id })).into_response(),
         false => (
@@ -679,12 +668,8 @@ async fn workspace_job_events(
 
 async fn workspace_restore(
     State(ctx): State<Arc<Ctx>>,
-    headers: HeaderMap,
     Json(request): Json<RestoreRequest>,
 ) -> Response {
-    if !same_origin(&headers) {
-        return forbidden_origin();
-    }
     let workspace = Workspace::new(&ctx.store);
     let report = workspace.restore(request);
     workspace_response(match report {
@@ -700,6 +685,38 @@ fn workspace_response<T: serde::Serialize>(result: anyhow::Result<T>) -> Respons
     }
 }
 
+/// Starts `work` as a stoppable job and answers `202 { "id" }`, the id the page follows on
+/// the job stream and hands to `POST /workspace/jobs/{id}/stop`.
+///
+/// The id is `{kind}-{ms}`, the instant rather than the process's counter, so a result filed
+/// under it before a restart is not overwritten by the first job after one. The work is
+/// handed the context, its own id, the job's progress and the token Stop trips; how it ended
+/// is the job's record, written here once rather than at every route that starts one.
+fn spawn_job<T, Fut>(
+    ctx: &Arc<Ctx>,
+    kind: &str,
+    label: impl Into<String>,
+    work: impl FnOnce(Arc<Ctx>, String, Progress, Cancel) -> Fut + Send + 'static,
+) -> Response
+where
+    T: Send + 'static,
+    Fut: std::future::Future<Output = Result<T>> + Send + 'static,
+{
+    let (job, cancel) = ctx.jobs.start_stoppable(
+        format!("{kind}-{}", jiff::Timestamp::now().as_millisecond()),
+        kind,
+        label,
+    );
+    let id = job.id().to_string();
+    let (worker, own_id) = (Arc::clone(ctx), id.clone());
+    tokio::spawn(async move {
+        let progress = job.watch(Progress::none());
+        let result = work(worker, own_id, progress, cancel).await;
+        job.finish(&result);
+    });
+    (StatusCode::ACCEPTED, Json(json!({ "id": id }))).into_response()
+}
+
 fn workspace_error(error: anyhow::Error) -> Response {
     (
         StatusCode::BAD_REQUEST,
@@ -710,7 +727,8 @@ fn workspace_error(error: anyhow::Error) -> Response {
 
 /// Workspace writes can cause paid inference or change corpus usage. A browser must send
 /// the same authority in `Origin` and `Host`, which blocks a page on another origin from
-/// using the loopback server as its write target.
+/// using the loopback server as its write target. Asked once, by
+/// [`crate::access::require_same_origin`].
 pub fn same_origin(headers: &HeaderMap) -> bool {
     same_origin_with(headers, PUBLISHED.get().map(String::as_str))
 }
@@ -748,14 +766,6 @@ fn same_origin_with(headers: &HeaderMap, published: Option<&str>) -> bool {
     published.is_some_and(|published| {
         origin == Some(published) && host == published.strip_prefix("https://")
     })
-}
-
-fn forbidden_origin() -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        Json(json!({ "error": "workspace mutations require a same-origin Origin and Host" })),
-    )
-        .into_response()
 }
 
 /// The registry as JSON — the same information the CLI turns into help text and MCP

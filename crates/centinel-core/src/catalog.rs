@@ -24,14 +24,10 @@
 //! already holds, so running it at every start is safe and cheap.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 
 use crate::config::{Config, ScheduleConfig, SourceConfig};
 use crate::domain::SourceId;
 use crate::store::Store;
-
-/// The file in each source's log directory that says what the source is.
-pub const DEFINITION: &str = "source.toml";
 
 /// The store's sources. Cheap to make; holds nothing but the store.
 pub struct Sources<'a> {
@@ -50,14 +46,6 @@ pub struct Imported {
 impl<'a> Sources<'a> {
     pub fn new(store: &'a Store) -> Self {
         Self { store }
-    }
-
-    fn path(&self, id: &SourceId) -> PathBuf {
-        self.store
-            .root()
-            .join("log")
-            .join(id.as_str())
-            .join(DEFINITION)
     }
 
     /// Every defined source, by id.
@@ -198,7 +186,7 @@ impl<'a> Sources<'a> {
             }
         }
         for id in self.store.sources().await? {
-            if self.path(&id).exists() {
+            if self.store.definition_path(&id).exists() {
                 continue;
             }
             let replay = self.store.replay(&id).await?;
@@ -214,7 +202,7 @@ impl<'a> Sources<'a> {
     }
 
     fn read(&self, id: &SourceId) -> anyhow::Result<Option<SourceConfig>> {
-        let path = self.path(id);
+        let path = self.store.definition_path(id);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -231,23 +219,12 @@ impl<'a> Sources<'a> {
         Ok(Some(source))
     }
 
-    /// Via a sibling temp file and a rename, so a crash cannot leave half a definition.
+    /// Atomic, so a crash cannot leave half a definition.
     fn write(&self, id: &SourceId, source: &SourceConfig) -> anyhow::Result<()> {
-        source.acquisition()?;
-        if let Some(rps) = source.rps {
-            anyhow::ensure!(rps > 0.0, "source `{id}`: rps must be greater than zero");
-        }
-        let path = self.path(id);
-        write_atomically(&path, &toml::to_string(source)?)
+        source.validate()?;
+        crate::store::write_atomically(&self.store.definition_path(id), toml::to_string(source)?)?;
+        Ok(())
     }
-}
-
-fn write_atomically(path: &Path, text: &str) -> anyhow::Result<()> {
-    let dir = path.parent().expect("a definition always sits in a directory");
-    std::fs::create_dir_all(dir).map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))?;
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text).map_err(|e| anyhow::anyhow!("writing {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| anyhow::anyhow!("replacing {}: {e}", path.display()))
 }
 
 #[cfg(test)]

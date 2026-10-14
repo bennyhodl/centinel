@@ -12,7 +12,7 @@
 //! ## One verb, whatever the source is
 //!
 //! A sitemap walk and a playlist listing are the same act, and this op does not know
-//! which one it asked for. [`crate::sources`] decides that from the `[[source]]` block;
+//! which one it asked for. [`crate::sources`] decides that from the source's definition;
 //! everything below talks to [`Source::enumerate`] and renders whatever provenance came
 //! back with it.
 //!
@@ -33,7 +33,7 @@ use crate::sources::Overrides;
 pub struct DiscoverArgs {
     /// Source id to file this run under, e.g. `tampa`.
     ///
-    /// With no `--site`/`--channel`, the address comes from the `[[source]]` block, or
+    /// With no `--site`/`--channel`, the address comes from the source's definition, or
     /// from what the store already holds for this id.
     #[arg(long)]
     pub source: String,

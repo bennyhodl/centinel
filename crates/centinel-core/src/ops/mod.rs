@@ -12,7 +12,7 @@
 //!
 //! `discover` and `collect` name what happens, not how. For a website they are a sitemap
 //! walk and HTTP GETs; for a channel a playlist listing and `yt-dlp`. Which one you get is
-//! decided once, by [`crate::sources::from_config`], from the `[[source]]` block — so
+//! decided once, by [`crate::sources::from_config`], from the source's definition — so
 //! there is no `youtube` verb, and adding a third Source kind adds no verb either.
 
 mod build_index;
@@ -71,7 +71,9 @@ pub use schedules::{
     HistoryArgs, HistoryReport, ScheduleStatus, SchedulesArgs, SchedulesReport, history, schedules,
 };
 pub use search::{AlsoAt, SearchArgs, SearchReport, SearchResult, search};
-pub use source::{AddArgs, IdArgs, ListedSource, SourceAction, SourceArgs, SourceReport, source};
+pub use source::{
+    AddArgs, IdArgs, ListedSource, SourceAction, SourceArgs, SourceReport, listed, source,
+};
 pub use status::{SourceCount, StatusArgs, StatusReport, status};
 pub use transcribe::{
     TranscribeArgs, TranscribeFailure, TranscribeReport, TranscribedItem, transcribe,

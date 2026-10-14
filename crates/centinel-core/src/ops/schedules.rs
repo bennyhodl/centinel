@@ -306,11 +306,7 @@ pub async fn history(ctx: &Ctx, args: HistoryArgs) -> anyhow::Result<HistoryRepo
         attempts.retain(|a| a.schedule.as_deref() == Some(id.as_str()));
     }
     if let Some(id) = &args.source {
-        attempts.retain(|a| {
-            a.report
-                .as_ref()
-                .is_some_and(|r| r.sources.iter().any(|s| s.source == *id))
-        });
+        attempts.retain(|a| a.covers(id));
     }
     if args.failed {
         attempts.retain(|a| a.outcome.is_failure());
@@ -831,6 +827,30 @@ mod tests {
         .unwrap();
         assert_eq!(capped.attempts.len(), 2);
         assert_eq!(capped.truncated, Some(2));
+    }
+
+    /// `--source` asks what [`Attempt::covers`] asks, so a run stopped before it reported
+    /// still answers for the source its arguments named.
+    #[tokio::test]
+    async fn history_by_source_includes_a_named_run_that_never_reported() {
+        let (_d, ctx) = ctx().await;
+        let mut stopped = attempt("2026-08-01T03:00:00Z", None, Outcome::Interrupted);
+        stopped.sources = vec!["tampa".into()];
+        Journal::new(&ctx.store).append(&stopped).await.unwrap();
+        Journal::new(&ctx.store)
+            .append(&attempt("2026-08-02T03:00:00Z", None, Outcome::Ok))
+            .await
+            .unwrap();
+
+        let ask = |source: &str| HistoryArgs {
+            source: Some(source.into()),
+            limit: 20,
+            ..Default::default()
+        };
+        let tampa = history(&ctx, ask("tampa")).await.unwrap();
+        assert_eq!(tampa.attempts.len(), 1);
+        assert_eq!(tampa.attempts[0].run_id, "2026-08-01T03:00:00Z");
+        assert!(history(&ctx, ask("pinellas")).await.unwrap().attempts.is_empty());
     }
 
     /// The handle rule: what `history` prints, `history --run` takes back, by prefix.

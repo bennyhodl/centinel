@@ -29,7 +29,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{Fetched, Refusal};
-use crate::fetch::status_in;
+use crate::fetch::status_of;
 use crate::render::{self, Align, Cell, Ink, Painter, Table};
 
 /// Which part of an op made a request.
@@ -103,7 +103,7 @@ impl RequestRecord {
             step,
             method: "GET".into(),
             url: url.to_string(),
-            status: None,
+            status: status_of(result),
             content_type: None,
             bytes: 0,
             elapsed_ms,
@@ -113,7 +113,6 @@ impl RequestRecord {
         };
         match result {
             Ok(fetched) => Self {
-                status: fetched.meta.get("http_status").and_then(|s| s.parse().ok()),
                 content_type: fetched.meta.get("content-type").cloned(),
                 bytes: fetched.bytes.len() as u64,
                 redirected_to: fetched
@@ -124,7 +123,6 @@ impl RequestRecord {
                 ..base
             },
             Err(refusal) => Self {
-                status: status_in(&refusal.detail),
                 error: Some(refusal.detail.clone()),
                 ..base
             },
@@ -221,7 +219,7 @@ mod tests {
     use super::*;
     use crate::domain::Liveness;
 
-    fn refused(detail: &str) -> RequestRecord {
+    fn refused(status: Option<u16>, detail: &str) -> RequestRecord {
         RequestRecord::of(
             Step::Seed,
             "https://x.gov/",
@@ -230,6 +228,7 @@ mod tests {
             &Err(Refusal {
                 state: Liveness::Error,
                 detail: detail.into(),
+                status,
             }),
         )
     }
@@ -238,12 +237,12 @@ mod tests {
     /// was no answer would make the log say something the site never did.
     #[test]
     fn a_request_that_never_got_an_answer_carries_no_status() {
-        let timed_out = refused("error sending request: operation timed out");
+        let timed_out = refused(None, "error sending request: operation timed out");
         assert_eq!(timed_out.status, None);
         assert!(!timed_out.ok());
         assert!(timed_out.error.as_deref().unwrap().contains("timed out"));
 
-        assert_eq!(refused("HTTP 503 Service Unavailable").status, Some(503));
+        assert_eq!(refused(Some(503), "HTTP 503 Service Unavailable").status, Some(503));
     }
 
     fn rendered(records: &[RequestRecord]) -> String {
@@ -272,7 +271,7 @@ mod tests {
             }),
         );
         moved.at_ms = 1_000;
-        let mut failed = refused("error sending request: operation timed out");
+        let mut failed = refused(None, "error sending request: operation timed out");
         failed.at_ms = 1_420;
 
         let out = rendered(&[moved, failed]);

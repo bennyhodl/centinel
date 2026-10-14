@@ -75,6 +75,7 @@ impl Fetcher {
             FetchFailure {
                 state: Liveness::Error,
                 detail: e.to_string(),
+                status: None,
             }
         })?;
 
@@ -97,6 +98,7 @@ impl Fetcher {
             return Err(FetchFailure {
                 state: classify(status.as_u16()),
                 detail: format!("HTTP {status}"),
+                status: Some(status.as_u16()),
             });
         }
         // A success status is not the last word. Plenty of platforms answer 200 and hand
@@ -105,6 +107,7 @@ impl Fetcher {
             return Err(FetchFailure {
                 state,
                 detail: format!("HTTP {status}, redirected to {}", resp.url()),
+                status: Some(status.as_u16()),
             });
         }
 
@@ -125,6 +128,7 @@ impl Fetcher {
         let bytes = resp.bytes().await.map_err(|e| FetchFailure {
             state: Liveness::Error,
             detail: format!("body read failed: {e}"),
+            status: None,
         })?;
 
         Ok(Fetched {
@@ -134,19 +138,17 @@ impl Fetcher {
     }
 }
 
-/// The status code out of a [`FetchFailure`]'s detail, when it carried one.
+/// The HTTP status a fetch ended with: the one it succeeded with, or the one the server
+/// refused it with. `None` when the server never answered.
 ///
-/// [`Fetcher::get`] renders a non-success as `HTTP 404 Not Found`, so the code is
-/// recoverable — and worth recovering, because "the server answered 404" and "we never
-/// reached the server" are different facts that a bare message would show alike. It lives
-/// here, beside the format it reads, so the two cannot drift apart.
-pub fn status_in(detail: &str) -> Option<u16> {
-    detail
-        .strip_prefix("HTTP ")?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
+/// "The server said 404" and "we never reached the server" are different facts that a bare
+/// message would show alike. Both sides are read here, from where each keeps it, so no
+/// consumer parses a status out of prose or out of the metadata on its own.
+pub fn status_of(result: &Result<Fetched, FetchFailure>) -> Option<u16> {
+    match result {
+        Ok(fetched) => fetched.meta.get("http_status").and_then(|s| s.parse().ok()),
+        Err(refusal) => refusal.status,
+    }
 }
 
 /// Path segments that name a missing document, and ones that name a fault.
@@ -241,6 +243,20 @@ mod tests {
         assert_eq!(classify(410), Liveness::Gone);
         assert_eq!(classify(500), Liveness::Error);
         assert_eq!(classify(503), Liveness::Error);
+    }
+
+    /// A success carries the status in its metadata and a refusal carries it as a number;
+    /// one that never reached the server has none.
+    #[test]
+    fn the_status_of_a_fetch_is_read_from_wherever_it_ended() {
+        let fetched = Fetched {
+            bytes: Vec::new(),
+            meta: BTreeMap::from([("http_status".to_string(), "200".to_string())]),
+        };
+        assert_eq!(status_of(&Ok(fetched)), Some(200));
+        let refused = |status| FetchFailure { state: Liveness::Gone, detail: "x".into(), status };
+        assert_eq!(status_of(&Err(refused(Some(404)))), Some(404));
+        assert_eq!(status_of(&Err(refused(None))), None);
     }
 
     fn redirected(from: &str, to: &str) -> Option<Liveness> {

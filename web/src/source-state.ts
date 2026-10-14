@@ -1,4 +1,4 @@
-import type { LaneHolder, LastRun, ListedSource } from './api'
+import type { ListedSource } from './api'
 
 /** Where a source stands, as the Sources list sorts it into tabs. */
 export type SourceState = 'collecting' | 'attention' | 'never' | 'disabled' | 'settled'
@@ -6,14 +6,10 @@ export type SourceState = 'collecting' | 'attention' | 'never' | 'disabled' | 's
 /** The one button a source's row and page offer. Resume and Run start the same run: every stage picks up where it stopped. */
 export type NextAction = 'stop' | 'enable' | 'resume' | 'run'
 
-type Source = Pick<ListedSource, 'id' | 'enabled' | 'resources' | 'liveness'> & { last_run?: Pick<LastRun, 'outcome'> }
+type Source = Pick<ListedSource, 'enabled' | 'resources' | 'liveness' | 'collecting' | 'last_run'>
 
-/** Whether the run holding the lane collects this source: one started for it, or one over every enabled source. */
-export const collects = (holder: LaneHolder | null | undefined, source: Pick<ListedSource, 'id' | 'enabled'>) =>
-  Boolean(holder && (holder.sources?.length ? holder.sources.includes(source.id) : source.enabled))
-
-export function sourceState(source: Source, holder: LaneHolder | null | undefined): SourceState {
-  if (collects(holder, source)) return 'collecting'
+export function sourceState(source: Source): SourceState {
+  if (source.collecting) return 'collecting'
   if (!source.enabled) return 'disabled'
   if (!source.last_run && !source.resources) return 'never'
   return troubled(source) ? 'attention' : 'settled'

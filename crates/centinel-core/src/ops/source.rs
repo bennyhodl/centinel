@@ -115,6 +115,10 @@ pub struct ListedSource {
     /// not reached yet.
     #[serde(default)]
     pub liveness: std::collections::BTreeMap<String, usize>,
+    /// Whether a run holding the lane is walking it right now
+    /// ([`crate::journal::Holder::covers`]).
+    #[serde(default)]
+    pub collecting: bool,
     /// The latest run that covered it, from the journal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<LastRun>,
@@ -254,12 +258,27 @@ async fn add(
 }
 
 async fn list(ctx: &Ctx) -> anyhow::Result<SourceReport> {
-    let mut out = Vec::new();
+    Ok(SourceReport::List {
+        sources: listed(ctx, None).await?,
+    })
+}
+
+/// The rows of the source list: every source the store defines, or the one named. The one
+/// place a [`ListedSource`] is built, so `source list`, the web's list and a source's own
+/// page show the same row.
+pub async fn listed(ctx: &Ctx, only: Option<&str>) -> anyhow::Result<Vec<ListedSource>> {
+    let catalog = Sources::new(&ctx.store);
+    let defined = match only {
+        Some(id) => vec![catalog.require(id).await?],
+        None => catalog.list().await?,
+    };
     let summaries = crate::summary::Summaries::new(&ctx.store);
+    let holder = crate::journal::RunLock::current(&ctx.store);
     // Newest first, read once: every row looks for its latest run in the same list.
     let mut attempts = crate::journal::Journal::new(&ctx.store).read().await?;
     attempts.reverse();
-    for source in Sources::new(&ctx.store).list().await? {
+    let mut out = Vec::with_capacity(defined.len());
+    for source in defined {
         let acquisition = source.acquisition()?;
         // Every address the log knows, discovered or collected — the count `centinel list`
         // and the web's source page give, so no two surfaces disagree about one source.
@@ -281,10 +300,13 @@ async fn list(ctx: &Ctx) -> anyhow::Result<SourceReport> {
             enabled: source.is_enabled(),
             resources: summary.resources,
             liveness: summary.liveness,
+            collecting: holder
+                .as_ref()
+                .is_some_and(|h| h.covers(&source.id, source.is_enabled())),
             last_run,
         });
     }
-    Ok(SourceReport::List { sources: out })
+    Ok(out)
 }
 
 async fn toggle(ctx: &Ctx, id: &str, enabled: bool) -> anyhow::Result<SourceReport> {
@@ -426,6 +448,7 @@ mod tests {
             enabled: true,
             resources,
             liveness: Default::default(),
+            collecting: false,
             last_run: None,
         }
     }

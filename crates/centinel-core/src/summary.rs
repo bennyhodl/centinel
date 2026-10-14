@@ -25,11 +25,13 @@
 //! costs one replay per source per change, and a source changes once per run.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{Liveness, SourceId};
-use crate::store::{Replay, Store};
+use crate::store::{Replay, Store, write_atomically};
 
 /// One Source's log, added up.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,33 +111,40 @@ impl<'a> Summaries<'a> {
     /// rebuilt, because that is what derived means.
     pub async fn get(&self, source: &SourceId) -> anyhow::Result<Summary> {
         let log = self.store.log_sizes(source).await?;
-        if let Some(cached) = self.read(source).await
-            && cached.log == log
-        {
-            return Ok(cached);
-        }
-        let summary = Summary::of(&self.store.replay(source).await?, log);
-        self.write(source, &summary).await?;
-        Ok(summary)
+        cached(
+            &self.store.summary_path(source),
+            |summary: &Summary| summary.log == log,
+            async { Ok(Summary::of(&self.store.replay(source).await?, log.clone())) },
+        )
+        .await
     }
+}
 
-    async fn read(&self, source: &SourceId) -> Option<Summary> {
-        let bytes = tokio::fs::read(self.store.summary_path(source)).await.ok()?;
-        serde_json::from_slice(&bytes).ok()
+/// A derived value kept in a file, trusted while `is_current` says it still answers.
+///
+/// The one rule [`Summaries`] and [`crate::graph::Linkages`] share: read the file, and if it
+/// parses and is current, that is the answer; otherwise `build` it and write it down. A file
+/// that cannot be read — absent, or written by a build with a different shape — is simply
+/// one to rebuild. The write is atomic, so two readers rebuilding at once leave one whole
+/// file.
+pub async fn cached<T, F>(
+    path: &Path,
+    is_current: impl FnOnce(&T) -> bool,
+    build: F,
+) -> anyhow::Result<T>
+where
+    T: Serialize + serde::de::DeserializeOwned,
+    F: Future<Output = anyhow::Result<T>>,
+{
+    if let Ok(bytes) = tokio::fs::read(path).await
+        && let Ok(kept) = serde_json::from_slice::<T>(&bytes)
+        && is_current(&kept)
+    {
+        return Ok(kept);
     }
-
-    /// Write-then-rename, so two readers rebuilding at once leave one whole file.
-    async fn write(&self, source: &SourceId, summary: &Summary) -> anyhow::Result<()> {
-        let path = self.store.summary_path(source);
-        let dir = path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("a summary always has a parent directory"))?;
-        tokio::fs::create_dir_all(dir).await?;
-        let tmp = dir.join(format!(".{source}.tmp"));
-        tokio::fs::write(&tmp, serde_json::to_vec(summary)?).await?;
-        tokio::fs::rename(&tmp, &path).await?;
-        Ok(())
-    }
+    let built = build.await?;
+    write_atomically(path, serde_json::to_vec(&built)?)?;
+    Ok(built)
 }
 
 #[cfg(test)]

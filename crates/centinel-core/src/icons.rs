@@ -28,9 +28,9 @@
 //! ## Which hosts may be fetched
 //!
 //! Only hosts the store already knows: the host of a defined source ([`Sources`]) or one a
-//! page's crumbs name ([`Ledger`]). Anything else is refused without a request. That is the
-//! whole defence of a route that makes the server fetch what a browser names — it cannot be
-//! pointed at an address nobody put in the archive. Crumbs come from pages we collected, so
+//! defined source's pages link to ([`Linkages`]). Anything else is refused without a
+//! request. That is the whole defence of a route that makes the server fetch what a browser
+//! names — it cannot be pointed at an address nobody put in the archive. Crumbs come from pages we collected, so
 //! a crumb host must also be a public name: an IP literal or a bare `localhost` in a link
 //! is a page trying to aim the server inward. (A name that *resolves* inward is not caught
 //! here; the redirect rule below covers the other half only.)
@@ -50,9 +50,8 @@
 //! share one fetch (the second waits on the first's lock, then reads what it wrote), and
 //! at most [`CONCURRENT_FETCHES`] requests are outbound across all hosts.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::net::IpAddr;
-use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -62,11 +61,12 @@ use tokio::sync::{Mutex, Semaphore};
 use url::Url;
 
 use crate::catalog::Sources;
-use crate::crumbs::Ledger;
+use crate::config::SourceConfig;
 use crate::domain::SourceId;
+use crate::graph::Linkages;
 use crate::html::Scan;
 use crate::policy::HostPolicy;
-use crate::store::Store;
+use crate::store::{Store, write_atomically};
 
 /// How long "this host has no icon" stands before it is asked again.
 pub const MISS_DAYS: i64 = 7;
@@ -99,14 +99,6 @@ struct Shared {
     /// One lock per host. Holding it is what makes a second ask wait for the first.
     hosts: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
     fetches: Semaphore,
-    /// The hosts crumbs name, valid while the ledgers keep the sizes they had.
-    crumbs: Mutex<Option<CrumbHosts>>,
-}
-
-#[derive(Debug)]
-struct CrumbHosts {
-    ledgers: Vec<(String, u64)>,
-    hosts: BTreeSet<String>,
 }
 
 /// What `icons/<host>.json` holds.
@@ -150,7 +142,6 @@ impl Icons {
             shared: Arc::new(Shared {
                 hosts: StdMutex::new(HashMap::new()),
                 fetches: Semaphore::new(CONCURRENT_FETCHES),
-                crumbs: Mutex::new(None),
             }),
         }
     }
@@ -192,16 +183,17 @@ impl Icons {
     // ---- which hosts the store knows ---------------------------------------------------
 
     async fn address_of(&self, host: &str) -> anyhow::Result<Option<Address>> {
-        for source in Sources::new(&self.store).list().await? {
+        let defined = Sources::new(&self.store).list().await?;
+        for source in &defined {
             if source.host().as_deref() == Some(host) {
                 let front = front_page(source.acquisition()?.target())?;
                 return Ok(Some(Address {
                     front,
-                    source: SourceId::new(source.id).ok(),
+                    source: SourceId::new(source.id.clone()).ok(),
                 }));
             }
         }
-        if is_public_name(host) && self.crumbs_name(host).await? {
+        if is_public_name(host) && self.linked_from(&defined, host).await? {
             return Ok(Some(Address {
                 front: Url::parse(&format!("https://{host}/"))?,
                 source: None,
@@ -210,53 +202,17 @@ impl Icons {
         Ok(None)
     }
 
-    /// Whether any crumb ledger names this host.
-    ///
-    /// A hundred hosts asked at once must not read every ledger a hundred times, and a
-    /// ledger is append-only, so its size is its version: the set is rebuilt when a size
-    /// changes and not otherwise.
-    async fn crumbs_name(&self, host: &str) -> anyhow::Result<bool> {
-        let ledgers = self.ledger_sizes().await?;
-        let mut cached = self.shared.crumbs.lock().await;
-        let current = match cached.take() {
-            Some(known) if known.ledgers == ledgers => known,
-            _ => CrumbHosts {
-                hosts: self.ledger_hosts(&ledgers).await?,
-                ledgers,
-            },
-        };
-        let found = current.hosts.contains(host);
-        *cached = Some(current);
-        Ok(found)
-    }
-
-    async fn ledger_sizes(&self) -> anyhow::Result<Vec<(String, u64)>> {
-        let mut out = Vec::new();
-        let mut dir = match tokio::fs::read_dir(self.store.crumbs_dir()).await {
-            Ok(dir) => dir,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-            Err(e) => return Err(e.into()),
-        };
-        while let Some(entry) = dir.next_entry().await? {
-            if let Some(source) = entry.file_name().to_string_lossy().strip_suffix(".jsonl") {
-                out.push((source.to_string(), entry.metadata().await?.len()));
+    /// Whether any defined source's pages link to this host. Read from each source's
+    /// [`crate::graph::Linkage`], which the graph keeps current against its ledger, so a hundred hosts
+    /// asked at once cost a hundred small reads and no ledger is walked.
+    async fn linked_from(&self, defined: &[SourceConfig], host: &str) -> anyhow::Result<bool> {
+        let linkages = Linkages::new(&self.store);
+        for source in defined {
+            if linkages.get(&SourceId::new(source.id.clone())?).await?.hosts.contains_key(host) {
+                return Ok(true);
             }
         }
-        out.sort();
-        Ok(out)
-    }
-
-    async fn ledger_hosts(&self, ledgers: &[(String, u64)]) -> anyhow::Result<BTreeSet<String>> {
-        let mut hosts = BTreeSet::new();
-        for (source, _) in ledgers {
-            let Ok(source) = SourceId::new(source.clone()) else {
-                continue;
-            };
-            for row in Ledger::new(&self.store, source).read().await? {
-                hosts.extend(row.links.into_iter().map(|link| link.host.to_ascii_lowercase()));
-            }
-        }
-        Ok(hosts)
+        Ok(false)
     }
 
     // ---- finding the icon --------------------------------------------------------------
@@ -364,38 +320,26 @@ impl Icons {
 
     /// Image first, record second: the record is what makes the image count.
     async fn keep(&self, host: &str, found: Option<&(Kept, Icon)>) -> anyhow::Result<()> {
-        tokio::fs::create_dir_all(self.store.icons_dir()).await?;
         if let Some((kept, icon)) = found {
-            write_atomically(&self.store.icon_path(host, &kept.ext), &icon.bytes).await?;
+            write_atomically(&self.store.icon_path(host, &kept.ext), &icon.bytes)?;
         }
         let record = Record {
             checked: Timestamp::now(),
             icon: found.map(|(kept, _)| kept.clone()),
         };
-        write_atomically(&self.store.icon_record_path(host), &serde_json::to_vec(&record)?).await
+        Ok(write_atomically(&self.store.icon_record_path(host), serde_json::to_vec(&record)?)?)
     }
-}
-
-/// Write-then-rename, so a reader sees a whole file or none.
-async fn write_atomically(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let mut name = path
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("an icon path always names a file"))?
-        .to_os_string();
-    name.push(".tmp");
-    let tmp = path.with_file_name(name);
-    tokio::fs::write(&tmp, bytes).await?;
-    tokio::fs::rename(&tmp, path).await?;
-    Ok(())
 }
 
 // ---- hosts -----------------------------------------------------------------------------
 
 /// A bare lowercase hostname that is safe to put in a file name, or `None`.
 ///
-/// Checked before anything touches the disk: the host arrives in a URL path.
+/// Read as every host the operator hands over is ([`crate::crumbs::as_host`]), then held to
+/// what a file name allows. Checked before anything touches the disk: the host arrives in
+/// a URL path.
 fn clean(host: &str) -> Option<String> {
-    let host = host.to_ascii_lowercase();
+    let host = crate::crumbs::as_host(host).ok()?;
     let first = host.chars().next()?;
     (host.len() <= 253
         && first.is_ascii_alphanumeric()
@@ -780,13 +724,17 @@ mod tests {
         assert!(!store.icons_dir().exists(), "a refusal leaves no record");
     }
 
-    /// A host a crumb names is known; one no crumb names is not. A crumb that points at an
+    /// A host a defined source's crumbs name is known; one no crumb names is not. A crumb that points at an
     /// address on this network is a page aiming the server inward, and is not.
     #[tokio::test]
     async fn a_host_a_crumb_names_is_known_and_an_internal_one_is_not() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
-        let ledger = Ledger::new(&store, SourceId::new("town").unwrap());
+        Sources::new(&store)
+            .add(&SourceConfig::site("town", "https://town.gov"))
+            .await
+            .unwrap();
+        let ledger = crate::crumbs::Ledger::new(&store, SourceId::new("town").unwrap());
         let page = crate::crumbs::scan_page(
             r#"<a href="https://portal.vendor.com/x">a</a><a href="http://169.254.169.254/latest">b</a>"#,
             crate::crumbs::Carrier::at_address("https://town.gov/"),

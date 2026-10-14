@@ -155,7 +155,7 @@ pub async fn ingest(
                     first_seen,
                 });
             }
-            Err(FetchFailure { state, detail }) => {
+            Err(FetchFailure { state, detail, .. }) => {
                 let entry = statuses
                     .entry(resource.clone())
                     .or_insert_with(|| ResourceStatus::new_live(resource.clone(), at));

@@ -1,7 +1,7 @@
 //! Building a [`Source`] from what is known about it.
 //!
 //! This module is the **only** place that decides which acquisition a source gets. Every
-//! other caller — `run`, `discover`, `collect`, `source list`, `source adopt` — asks for a
+//! other caller — `run`, `discover`, `collect`, `source list` — asks for a
 //! `Box<dyn Source>` and then talks to the trait.
 //!
 //! That is the whole point of the seam. Before, the site/channel distinction was made
@@ -46,7 +46,7 @@ pub struct Overrides {
     pub limit: Option<usize>,
 }
 
-/// Builds the Source a `[[source]]` block declares.
+/// Builds the Source a definition declares ([`crate::catalog`]).
 ///
 /// The one match on [`Acquisition`] outside the config module itself.
 pub fn from_config(
@@ -129,12 +129,12 @@ pub struct Inferred {
 }
 
 impl Inferred {
-    /// The `[[source]]` block this would be written as.
+    /// The definition this would be written as.
     pub fn to_config(&self, id: &SourceId) -> Option<SourceConfig> {
         let target = self.target.as_ref()?;
         Some(match self.kind {
             SourceKind::Site => SourceConfig {
-                // What the store says collected it last, so writing the block down does
+                // What the store says collected it last, so writing the definition down does
                 // not quietly change how the next run enumerates.
                 strategy: self.strategy.map(|s| s.name.to_string()),
                 ..SourceConfig::site(id.to_string(), target)

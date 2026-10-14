@@ -4,6 +4,7 @@
 //! <root>/
 //!   blobs/ab/cd/abcd1234…      TRUTH    immutable, content-addressed, pooled across Sources
 //!   log/<source>/YYYY-MM.jsonl TRUTH    append-only
+//!   log/<source>/source.toml   TRUTH    what the source is, and the only list of sources
 //!   runs/YYYY-MM.jsonl         TRUTH    what this machine attempted
 //!   decisions.jsonl            TRUTH    what the operator decided
 //!   workspace/questions.jsonl  TRUTH    saved classifier question sets
@@ -14,6 +15,7 @@
 //!   investigations/<id>/       RUNTIME  one web investigation: report.json and the bytes `check` saved
 //!   crumbs/<source>.jsonl      DERIVED  the off-host links each page dropped
 //!   summaries/<source>.json    DERIVED  what the log adds up to, keyed by its size
+//!   summaries/<source>.links.json DERIVED what the crumb ledger adds up to, per host
 //!   icons/<host>.<ext>         DERIVED  the favicon a host serves, fetched once on demand
 //!   icons/<host>.json          DERIVED  where it came from, or that the host has none (checked at T)
 //!   current/<source>/…         DERIVED  URL-mirroring tree. Regenerable.
@@ -134,6 +136,39 @@ fn io_at(path: impl Into<PathBuf>) -> impl FnOnce(std::io::Error) -> StoreError 
     move |source| StoreError::Io { path, source }
 }
 
+/// Writes a whole file or none of it: a sibling temp file, then a rename.
+///
+/// The one way this codebase replaces a file, so a crash or a second writer leaves the
+/// previous file or the new one and never half of either. The temp name is dotted, so
+/// [`Store::count_blobs`] and a directory listing both take it for a write in flight, and
+/// unique, so two writers of one path do not rename each other's file out from under them.
+/// Creates the parent directory.
+pub fn write_atomically(path: &Path, bytes: impl AsRef<[u8]>) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+
+    let name = path.file_name().ok_or_else(|| {
+        io_at(path)(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a path to write names a file",
+        ))
+    })?;
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(io_at(dir))?;
+    }
+    let tmp = path.with_file_name(format!(
+        ".{}.{}-{}.tmp",
+        name.to_string_lossy(),
+        std::process::id(),
+        WRITES.fetch_add(1, Ordering::Relaxed)
+    ));
+    let renamed = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
+    if renamed.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    renamed.map_err(io_at(path))
+}
+
 /// A handle on a Centinel store root.
 ///
 /// Cheap to clone — it is just a path.
@@ -148,11 +183,11 @@ impl Store {
         let root = root.into();
         // `chunks.lance/` is absent: Lance creates its own table directory, and an empty
         // one left here would be a database with a table that cannot be opened.
-        for sub in ["blobs", "log", "current"] {
-            let p = root.join(sub);
+        let store = Self { root };
+        for p in [store.blobs_dir(), store.logs_dir(), store.current_dir()] {
             tokio::fs::create_dir_all(&p).await.map_err(io_at(&p))?;
         }
-        Ok(Self { root })
+        Ok(store)
     }
 
     /// A handle on a store that already exists, creating nothing.
@@ -237,6 +272,33 @@ impl Store {
         let zoned = at.to_zoned(TimeZone::UTC);
         self.runs_dir()
             .join(format!("{:04}-{:02}.jsonl", zoned.year(), zoned.month()))
+    }
+
+    /// `log/` — one directory per Source. **Truth.**
+    pub fn logs_dir(&self) -> PathBuf {
+        self.root.join("log")
+    }
+
+    /// `log/<source>/` — the Source's month files and its definition.
+    pub fn log_dir(&self, source: &SourceId) -> PathBuf {
+        self.logs_dir().join(source.as_str())
+    }
+
+    /// `log/<source>/source.toml` — what the Source is. [`crate::catalog::Sources`] is the
+    /// one reader and writer; it sits beside the log it feeds so a store describes itself.
+    pub fn definition_path(&self, source: &SourceId) -> PathBuf {
+        self.log_dir(source).join("source.toml")
+    }
+
+    /// `investigations/` — one directory per web investigation. **Runtime**, and safe to
+    /// delete: nothing here is a Source or an Observation.
+    pub fn investigations_dir(&self) -> PathBuf {
+        self.root.join("investigations")
+    }
+
+    /// `investigations/<id>/` — `report.json`, and the bytes `check` saved beside it.
+    pub fn investigation_dir(&self, id: &str) -> PathBuf {
+        self.investigations_dir().join(id)
     }
 
     /// `crumbs/` — the off-host links each page dropped, written as it was collected.
@@ -418,8 +480,8 @@ impl Store {
 
     /// Counts blobs in the pool.
     ///
-    /// Knows that a `.<sha>.tmp` file is a write in flight rather than a blob, because
-    /// [`Self::put_blob`] is what creates them. A caller re-deriving that rule from the
+    /// Knows that a dotted file is a write in flight rather than a blob, because
+    /// [`write_atomically`] is what creates them. A caller re-deriving that rule from the
     /// other side of the module would silently mis-count rather than fail.
     ///
     /// **O(corpus)**, and the only count here that is. It answers a question about the
@@ -472,8 +534,7 @@ impl Store {
     /// corpus scale (GovScape indexed 10M PDFs; a flat directory would not survive it).
     fn blob_path(&self, sha: &BlobSha) -> PathBuf {
         let s = sha.as_str();
-        self.root
-            .join("blobs")
+        self.blobs_dir()
             .join(&s[0..2])
             .join(&s[2..4])
             .join(s)
@@ -491,13 +552,12 @@ impl Store {
             return Ok(sha);
         }
 
-        let dir = dest.parent().expect("blob path always has a parent");
-        tokio::fs::create_dir_all(dir).await.map_err(io_at(dir))?;
-
-        // Write-then-rename: a torn write must never be visible at a content address.
-        let tmp = dir.join(format!(".{}.tmp", sha.as_str()));
-        tokio::fs::write(&tmp, bytes).await.map_err(io_at(&tmp))?;
-        tokio::fs::rename(&tmp, &dest).await.map_err(io_at(&dest))?;
+        // A torn write must never be visible at a content address. Off the runtime's
+        // threads, because a blob can be megabytes.
+        let (to, owned) = (dest.clone(), bytes.to_vec());
+        tokio::task::spawn_blocking(move || write_atomically(&to, owned))
+            .await
+            .map_err(|e| io_at(&dest)(std::io::Error::other(e)))??;
 
         Ok(sha)
     }
@@ -614,10 +674,7 @@ impl Store {
     fn log_path(&self, source: &SourceId, at: Timestamp) -> PathBuf {
         let zoned = at.to_zoned(TimeZone::UTC);
         let month = format!("{:04}-{:02}", zoned.year(), zoned.month());
-        self.root
-            .join("log")
-            .join(source.as_str())
-            .join(format!("{month}.jsonl"))
+        self.log_dir(source).join(format!("{month}.jsonl"))
     }
 
     /// Appends one record. The file is opened, written, flushed and closed per call —
@@ -646,7 +703,7 @@ impl Store {
     /// Returns an empty vec for an unknown Source rather than erroring — "no log yet"
     /// is an ordinary state, not a fault.
     pub async fn read_log(&self, source: &SourceId) -> Result<Vec<LogRecord>> {
-        let dir = self.root.join("log").join(source.as_str());
+        let dir = self.log_dir(source);
         let mut months: Vec<PathBuf> = Vec::new();
 
         let mut entries = match tokio::fs::read_dir(&dir).await {
@@ -695,7 +752,7 @@ impl Store {
     /// read — the whole reason [`crate::summary`] can answer for a log without opening it.
     /// An unknown Source has no files, which is an empty map rather than an error.
     pub async fn log_sizes(&self, source: &SourceId) -> Result<BTreeMap<String, u64>> {
-        let dir = self.root.join("log").join(source.as_str());
+        let dir = self.log_dir(source);
         let mut sizes = BTreeMap::new();
         let mut entries = match tokio::fs::read_dir(&dir).await {
             Ok(e) => e,
@@ -720,7 +777,7 @@ impl Store {
 
     /// Lists every Source that has a log directory.
     pub async fn sources(&self) -> Result<Vec<SourceId>> {
-        let dir = self.root.join("log");
+        let dir = self.logs_dir();
         let mut out = Vec::new();
         let mut entries = match tokio::fs::read_dir(&dir).await {
             Ok(e) => e,
@@ -1228,7 +1285,7 @@ mod tests {
         assert!(matches!(err, StoreError::BlobNotFound(_)), "{err}");
     }
 
-    /// `put_blob` writes `.<sha>.tmp` and renames. The counter has to know that, and
+    /// `put_blob` writes a dotted temp file and renames. The counter has to know that, and
     /// `doctor` used to re-derive the rule from the other side of the module.
     #[tokio::test]
     async fn counting_blobs_ignores_a_write_in_flight() {
@@ -1265,6 +1322,12 @@ mod tests {
         assert!(s.blobs_dir().ends_with("blobs"));
         assert!(s.current_dir().ends_with("current"));
         assert!(s.runs_dir().ends_with("runs"));
+        assert!(s.logs_dir().ends_with("log"));
+        let tampa = SourceId::new("tampa").unwrap();
+        assert!(s.log_dir(&tampa).ends_with("log/tampa"));
+        assert!(s.definition_path(&tampa).ends_with("log/tampa/source.toml"));
+        assert!(s.investigation_dir("investigate-1").ends_with("investigations/investigate-1"));
+        assert!(s.icons_dir().ends_with("icons"));
         assert!(s.decisions_path().ends_with("decisions.jsonl"));
         assert!(s.workspace_dir().ends_with("workspace"));
         assert!(
@@ -1301,6 +1364,21 @@ mod tests {
             s.blob_path_of(&BlobSha::from_bytes(b"x"))
                 .starts_with(s.blobs_dir())
         );
+    }
+
+    /// A replaced file is whole, whoever wrote it last, and leaves no temp file behind.
+    #[tokio::test]
+    async fn an_atomic_write_replaces_the_file_and_leaves_nothing_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deeper/file.json");
+        write_atomically(&path, b"one").unwrap();
+        write_atomically(&path, b"two").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["file.json"]);
     }
 
     /// The two arms sit beside each other under the root, and neither is created up

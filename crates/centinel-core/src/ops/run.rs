@@ -1,8 +1,9 @@
-//! `run` — the whole pipeline, over every configured source.
+//! `run` — the whole pipeline, over every source the store defines.
 //!
 //! The other ops are the stages of one process, and typing them in order is a chore that
 //! also has to be got right: `index` before `extract` silently indexes nothing. This op
-//! is that order, written down once, driven by `centinel.toml`.
+//! is that order, written down once, over [`crate::catalog::Sources`], with `centinel.toml`
+//! supplying the defaults.
 //!
 //! ## Incremental is inherited, not implemented
 //!
@@ -409,9 +410,9 @@ impl RunReport {
     }
 }
 
-/// Collect everything new for every configured source, then index and embed it.
+/// Collect everything new for every enabled source, then index and embed it.
 ///
-/// Reads `centinel.toml`, and for each `[[source]]` runs discover and collect, then runs
+/// For each source the store defines — or those named — runs discover and collect, then runs
 /// extract, transcribe, index and embed once across the corpus. Every stage
 /// skips work it has already done, so running this on a schedule costs only what actually
 /// changed.

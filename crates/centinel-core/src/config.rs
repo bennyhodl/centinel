@@ -676,6 +676,21 @@ impl SourceConfig {
         }
     }
 
+    /// Refuses a definition no run could use: no `site` or `channel` (or both), or a rate
+    /// that is not positive. The one check, for a `[[source]]` block and for a definition
+    /// the store is about to write.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        self.acquisition()?;
+        if let Some(rps) = self.rps {
+            anyhow::ensure!(
+                rps > 0.0,
+                "source `{}`: rps must be greater than zero",
+                self.id
+            );
+        }
+        Ok(())
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.enabled.unwrap_or(true)
     }
@@ -684,6 +699,13 @@ impl SourceConfig {
     /// `www.youtube.com` for a channel. What the web shows an icon for.
     pub fn host(&self) -> Option<String> {
         crate::crumbs::host_of(self.acquisition().ok()?.target())
+    }
+
+    /// The host of the site this source collects, which a channel does not have:
+    /// `youtube.com` is not a channel's. What a crumb pointing there is answered by
+    /// ([`crate::crumbs::claimants`]).
+    pub fn site_host(&self) -> Option<String> {
+        self.site.as_deref().and_then(crate::crumbs::host_of)
     }
 }
 
@@ -866,17 +888,10 @@ impl Config {
         let mut seen = std::collections::BTreeSet::new();
         for source in &self.sources {
             crate::domain::SourceId::new(source.id.clone())?;
-            source.acquisition()?;
+            source.validate()?;
             if !seen.insert(source.id.as_str()) {
                 anyhow::bail!(
                     "source `{}` is defined twice; ids are directory names and must be unique",
-                    source.id
-                );
-            }
-            if let Some(rps) = source.rps {
-                anyhow::ensure!(
-                    rps > 0.0,
-                    "source `{}`: rps must be greater than zero",
                     source.id
                 );
             }
@@ -1104,7 +1119,7 @@ pub fn append_schedule(path: &Path, schedule: &ScheduleConfig) -> anyhow::Result
     let mut expected: Vec<String> = before.schedules.iter().map(|s| s.id.clone()).collect();
     expected.push(schedule.id.clone());
     verify_schedule_edit(path, &text, &expected)?;
-    write_atomically(path, &text)
+    crate::store::write_atomically(path, &text).map_err(Into::into)
 }
 
 /// Removes the `[[schedule]]` block with this id.
@@ -1152,7 +1167,7 @@ pub fn remove_schedule(path: &Path, id: &str) -> anyhow::Result<()> {
         .map(|s| s.id.clone())
         .collect();
     verify_schedule_edit(path, &out, &expected)?;
-    write_atomically(path, &out)
+    crate::store::write_atomically(path, &out).map_err(Into::into)
 }
 
 /// Re-parses an edited file and checks it holds exactly the schedules expected.
@@ -1174,21 +1189,7 @@ fn verify_schedule_edit(path: &Path, text: &str, expected: &[String]) -> anyhow:
     Ok(())
 }
 
-/// Writes via a sibling temp file and a rename, so an interrupted write cannot leave a
-/// half-written config where a whole one was.
-fn write_atomically(path: &Path, text: &str) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow::anyhow!("creating {}: {e}", parent.display()))?;
-    }
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text).map_err(|e| anyhow::anyhow!("writing {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| anyhow::anyhow!("replacing {}: {e}", path.display()))?;
-    Ok(())
-}
-
-/// Line ranges `[start, end)` of each top-level `[[source]]` block.
+/// Line ranges `[start, end)` of each top-level block under this header.
 fn block_ranges(lines: &[&str], header: &str) -> Vec<(usize, usize)> {
     let is_header = |l: &str| {
         let t = l.trim_start();
@@ -1211,17 +1212,12 @@ fn block_ranges(lines: &[&str], header: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
-/// Whether a block's lines declare this id, parsed as TOML rather than matched as text.
-///
-/// Asks both lists, because one function serves `[[source]]` and `[[schedule]]` and only
-/// one of them can be present in a single block's worth of lines.
+/// Whether a `[[schedule]]` block's lines declare this id, parsed as TOML rather than
+/// matched as text.
 fn block_declares(block: &[&str], id: &str) -> bool {
     let text = block.join("\n");
-    let Ok(parsed) = toml::from_str::<Config>(&text) else {
-        return false;
-    };
-    parsed.sources.first().is_some_and(|s| s.id == id)
-        || parsed.schedules.first().is_some_and(|s| s.id == id)
+    toml::from_str::<Config>(&text)
+        .is_ok_and(|parsed| parsed.schedules.first().is_some_and(|s| s.id == id))
 }
 
 #[cfg(test)]

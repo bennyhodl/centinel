@@ -52,6 +52,31 @@ pub async fn authenticate(
     next.run(request).await
 }
 
+/// Every write under `/workspace` must come from this server's own origin: the page it
+/// serves, not another site's script aimed at a loopback port. One rule on the router
+/// ([`crate::http::router`]), so no handler asks and a new route cannot forget to.
+///
+/// Reads are open to any origin, and so is everything outside `/workspace` — the ops API
+/// and MCP are authenticated by credential, not by where a browser stands.
+pub async fn require_same_origin(request: Request, next: Next) -> Response {
+    let write = !matches!(request.method().as_str(), "GET" | "HEAD");
+    if write
+        && request.uri().path().starts_with("/workspace/")
+        && !crate::http::same_origin(request.headers())
+    {
+        return forbidden_origin();
+    }
+    next.run(request).await
+}
+
+fn forbidden_origin() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "error": "workspace mutations require a same-origin Origin and Host" })),
+    )
+        .into_response()
+}
+
 /// The `/workspace` paths a user may GET. Everything else under it is the administrator's,
 /// and no user may write to any of it.
 fn user_may_read(path: &str) -> bool {
@@ -81,6 +106,39 @@ mod tests {
     use centinel_core::{op::Ctx, store::Store};
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    /// One rule for every write under `/workspace`, whichever handler it reaches: from
+    /// another origin it is refused before the handler runs, and a read is not asked.
+    #[tokio::test]
+    async fn a_workspace_write_from_another_origin_is_refused_for_every_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(Ctx::new(Store::open(dir.path()).await.unwrap()));
+        let app = crate::http::router(ctx).layer(axum::Extension(Role::Admin));
+        let send = |method: &str, path: &str, origin: &str| {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", "127.0.0.1:8787")
+                .header("origin", origin)
+                .header("content-type", "application/json")
+                .body(Body::from("{\"questions\":[]}"))
+                .unwrap();
+            app.clone().oneshot(request)
+        };
+        for (method, path) in [
+            ("PUT", "/workspace/questions"),
+            ("POST", "/workspace/jobs/anything/stop"),
+            ("POST", "/workspace/sources/tampa/enabled"),
+            ("POST", "/workspace/graph/host/x.com/refuse"),
+        ] {
+            let refused = send(method, path, "https://evil.example").await.unwrap();
+            assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+        let own = send("PUT", "/workspace/questions", "http://127.0.0.1:8787").await.unwrap();
+        assert_eq!(own.status(), StatusCode::OK);
+        let read = send("GET", "/workspace/questions", "https://evil.example").await.unwrap();
+        assert_eq!(read.status(), StatusCode::OK, "a read is not a write");
+    }
 
     #[tokio::test]
     async fn private_http_requires_gateway_credentials_and_enforces_roles() {

@@ -248,6 +248,7 @@ impl Source for ChannelSource {
                 return Err(Refusal {
                     state: crate::domain::Liveness::Error,
                     detail: format!("`{}` is not a video address", resource.natural_key),
+                    status: None,
                 });
             };
 
@@ -260,6 +261,7 @@ impl Source for ChannelSource {
             let work = tempfile::tempdir().map_err(|e| Refusal {
                 state: crate::domain::Liveness::Error,
                 detail: format!("cannot create a working directory: {e}"),
+                status: None,
             })?;
 
             let mut out = Vec::new();

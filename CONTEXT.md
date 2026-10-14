@@ -77,6 +77,12 @@ the corpus and an old `ignore` on it is stale rather than binding. `open` is the
 default: `investigate` reads no store, so every crumb it names is one nothing has said
 anything about yet.
 
+**Claimed host** — a host a defined Source answers for: its definition's site host, or any host
+its log has observed. One function, `crumbs::claimants`, walking the catalogue, answers it for
+`crumbs`, the graph and the host card, so a host cannot be a Source on one page and an open
+crumb on another. A channel claims none: `youtube.com` holds every channel there is, and
+marking it answered would hide the crumbs that point at a channel nobody has added.
+
 **Marker** — the address whose presence in the log proves a Resource was acquired. The
 page itself for a site; the *metadata* sub-resource for a video. The single line on which
 resumption varies. *Why it matters:* keying resumption on captions would re-fetch a whole
@@ -215,7 +221,10 @@ service is asked — it would learn every host the archive follows.
 
 **The layout** — where each thing lives under the store root is named in `store` and
 nowhere else. A path spelled out by a caller is a second, unenforced copy of this file's
-header.
+header: a source's definition is `Store::definition_path`, its log `Store::log_dir`, an
+investigation `Store::investigation_dir`. The same goes for how a file is replaced —
+`store::write_atomically` is the one write-then-rename, used by the catalogue, the config
+editor, the derived caches and the blob pool, so a crash leaves the old file or the new one.
 
 **Store root** — *which* store, and the one question `store` does not answer: it is
 handed a root. `config` decides it, from `--root`/`$CENTINEL_ROOT`, then `root` in the

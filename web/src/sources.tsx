@@ -27,7 +27,7 @@ export function Sources() {
   const [adding, setAdding] = useState<NewSource | null>(null)
   const [investigating, setInvestigating] = useState(false)
   const [tab, setTab] = useState<Tab>('all')
-  const rows = (data?.sources ?? []).map(source => ({ source, state: sourceState(source, data?.running) }))
+  const rows = (data?.sources ?? []).map(source => ({ source, state: sourceState(source) }))
   const shown = rows.filter(row => inTab(tab, row.state))
   return <>
     <PageHeader title="Sources" detail={listDetail}>
@@ -186,11 +186,9 @@ export function SourcePage({ id }: { id: string }) {
 
 function SourceView({ id, detail }: { id: string; detail: SourceDetail }) {
   const definition = detail.definition
-  const enabled = definition.enabled !== false
-  const target = definition.site ?? definition.channel ?? ''
-  const summary = detail.summary
-  const source = { id, enabled, resources: summary?.resources ?? 0, liveness: summary?.liveness ?? {}, last_run: detail.runs[0] }
-  const state = sourceState(source, detail.running)
+  const { source, summary } = detail
+  const target = source.target
+  const state = sourceState(source)
   const job = useLaneJob()
   const { run, enable } = useSourceControls(id)
   const investigate = useInvestigate()
@@ -198,15 +196,15 @@ function SourceView({ id, detail }: { id: string; detail: SourceDetail }) {
   const last = detail.runs[0]
   return <>
     <BackToSources />
-    <PageHeader eyebrow={<span className="inline-flex items-center gap-2"><SourceIcon source={id} size={16} />{definition.channel ? 'Channel' : 'Website'}</span>} title={id} detail={target}>
+    <PageHeader eyebrow={<span className="inline-flex items-center gap-2"><SourceIcon source={id} size={16} />{source.kind === 'channel' ? 'Channel' : 'Website'}</span>} title={id} detail={target}>
       <div className="flex shrink-0 flex-wrap gap-2">
-        <Button variant="outline" disabled={enable.isPending} onClick={() => enable.mutate(!enabled)}>{enabled ? 'Disable' : 'Enable'}</Button>
+        <Button variant="outline" disabled={enable.isPending} onClick={() => enable.mutate(!source.enabled)}>{source.enabled ? 'Disable' : 'Enable'}</Button>
         <SourceAction source={source} action={state === 'collecting' ? 'stop' : runAction(source)} lane={detail.running} />
         <DropdownMenu>
           <DropdownMenuTrigger asChild><Button variant="outline" size="icon" aria-label="More"><Ellipsis /></Button></DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuItem disabled={Boolean(detail.running) || run.isPending} onSelect={() => run.mutate(['embed'])}>Run without embedding</DropdownMenuItem>
-            <DropdownMenuItem disabled={!definition.site || investigate.isPending} onSelect={() => investigate.mutate(target)}>Investigate it again</DropdownMenuItem>
+            <DropdownMenuItem disabled={source.kind !== 'site' || investigate.isPending} onSelect={() => investigate.mutate(target)}>Investigate it again</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -214,7 +212,7 @@ function SourceView({ id, detail }: { id: string; detail: SourceDetail }) {
     <div className="grid max-w-5xl gap-10">
       {detail.running && !(state === 'collecting' && job) && <LaneBanner holder={detail.running} />}
       {[run.error, enable.error, investigate.error].map((error, i) => error && <ErrorBox key={i} error={error} />)}
-      {!enabled && <p className="text-sm text-muted-foreground">Disabled: a run over every source skips it. Run starts it anyway.</p>}
+      {!source.enabled && <p className="text-sm text-muted-foreground">Disabled: a run over every source skips it. Run starts it anyway.</p>}
 
       <section className="grid gap-4">
         <div className="grid grid-cols-4 border-y">
