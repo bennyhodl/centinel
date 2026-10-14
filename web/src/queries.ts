@@ -12,6 +12,7 @@ export const queries = {
   account: () => queryOptions({ queryKey: ['account'], queryFn: api.account, retry: false, refetchInterval: query => query.state.data ? 15_000 : false }),
   users: () => queryOptions({ queryKey: ['users'], queryFn: api.users, refetchInterval: 15_000 }),
   system: () => queryOptions({ queryKey: ['system'], queryFn: api.system, staleTime: 60_000 }),
+  systemHealth: () => queryOptions({ queryKey: ['system-health'], queryFn: api.systemHealth, staleTime: 30_000, refetchInterval: 60_000 }),
   ops: () => queryOptions({ queryKey: ['ops'], queryFn: api.ops, staleTime: Infinity }),
   questions: () => queryOptions({ queryKey: ['questions'], queryFn: api.questions }),
   presets: () => queryOptions({ queryKey: ['presets'], queryFn: api.presets, staleTime: Infinity }),

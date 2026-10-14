@@ -25,6 +25,7 @@ import { Route as WorkspaceAdminReviewRouteImport } from './routes/_workspace/_a
 import { Route as WorkspaceAdminRunsRouteImport } from './routes/_workspace/_admin/runs'
 import { Route as WorkspaceAdminSchedulesRouteImport } from './routes/_workspace/_admin/schedules'
 import { Route as WorkspaceAdminSpendRouteImport } from './routes/_workspace/_admin/spend'
+import { Route as WorkspaceAdminSystemRouteImport } from './routes/_workspace/_admin/system'
 import { Route as WorkspaceDocsSplatRouteImport } from './routes/_workspace/docs.$'
 import { Route as WorkspaceDocumentShaRouteImport } from './routes/_workspace/document.$sha'
 import { Route as WorkspaceAdminSourcesIndexRouteImport } from './routes/_workspace/_admin/sources.index'
@@ -110,6 +111,11 @@ const WorkspaceAdminSpendRoute = WorkspaceAdminSpendRouteImport.update({
   path: '/spend',
   getParentRoute: () => WorkspaceAdminRoute,
 } as any)
+const WorkspaceAdminSystemRoute = WorkspaceAdminSystemRouteImport.update({
+  id: '/system',
+  path: '/system',
+  getParentRoute: () => WorkspaceAdminRoute,
+} as any)
 const WorkspaceDocsSplatRoute = WorkspaceDocsSplatRouteImport.update({
   id: '/docs/$',
   path: '/docs/$',
@@ -152,6 +158,7 @@ export interface FileRoutesByFullPath {
   '/runs': typeof WorkspaceAdminRunsRoute
   '/schedules': typeof WorkspaceAdminSchedulesRoute
   '/spend': typeof WorkspaceAdminSpendRoute
+  '/system': typeof WorkspaceAdminSystemRoute
   '/docs/$': typeof WorkspaceDocsSplatRoute
   '/document/$sha': typeof WorkspaceDocumentShaRoute
   '/sources/$id': typeof WorkspaceAdminSourcesIdRoute
@@ -172,6 +179,7 @@ export interface FileRoutesByTo {
   '/runs': typeof WorkspaceAdminRunsRoute
   '/schedules': typeof WorkspaceAdminSchedulesRoute
   '/spend': typeof WorkspaceAdminSpendRoute
+  '/system': typeof WorkspaceAdminSystemRoute
   '/docs/$': typeof WorkspaceDocsSplatRoute
   '/document/$sha': typeof WorkspaceDocumentShaRoute
   '/sources/$id': typeof WorkspaceAdminSourcesIdRoute
@@ -196,6 +204,7 @@ export interface FileRoutesById {
   '/_workspace/_admin/runs': typeof WorkspaceAdminRunsRoute
   '/_workspace/_admin/schedules': typeof WorkspaceAdminSchedulesRoute
   '/_workspace/_admin/spend': typeof WorkspaceAdminSpendRoute
+  '/_workspace/_admin/system': typeof WorkspaceAdminSystemRoute
   '/_workspace/docs/$': typeof WorkspaceDocsSplatRoute
   '/_workspace/document/$sha': typeof WorkspaceDocumentShaRoute
   '/_workspace/_admin/sources/$id': typeof WorkspaceAdminSourcesIdRoute
@@ -218,6 +227,7 @@ export interface FileRouteTypes {
     | '/runs'
     | '/schedules'
     | '/spend'
+    | '/system'
     | '/docs/$'
     | '/document/$sha'
     | '/sources/$id'
@@ -238,6 +248,7 @@ export interface FileRouteTypes {
     | '/runs'
     | '/schedules'
     | '/spend'
+    | '/system'
     | '/docs/$'
     | '/document/$sha'
     | '/sources/$id'
@@ -261,6 +272,7 @@ export interface FileRouteTypes {
     | '/_workspace/_admin/runs'
     | '/_workspace/_admin/schedules'
     | '/_workspace/_admin/spend'
+    | '/_workspace/_admin/system'
     | '/_workspace/docs/$'
     | '/_workspace/document/$sha'
     | '/_workspace/_admin/sources/$id'
@@ -387,6 +399,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceAdminSpendRouteImport
       parentRoute: typeof WorkspaceAdminRoute
     }
+    '/_workspace/_admin/system': {
+      id: '/_workspace/_admin/system'
+      path: '/system'
+      fullPath: '/system'
+      preLoaderRoute: typeof WorkspaceAdminSystemRouteImport
+      parentRoute: typeof WorkspaceAdminRoute
+    }
     '/_workspace/docs/$': {
       id: '/_workspace/docs/$'
       path: '/docs/$'
@@ -446,6 +465,7 @@ interface WorkspaceAdminRouteChildren {
   WorkspaceAdminRunsRoute: typeof WorkspaceAdminRunsRoute
   WorkspaceAdminSchedulesRoute: typeof WorkspaceAdminSchedulesRoute
   WorkspaceAdminSpendRoute: typeof WorkspaceAdminSpendRoute
+  WorkspaceAdminSystemRoute: typeof WorkspaceAdminSystemRoute
   WorkspaceAdminSourcesIdRoute: typeof WorkspaceAdminSourcesIdRoute
   WorkspaceAdminSourcesIndexRoute: typeof WorkspaceAdminSourcesIndexRoute
   WorkspaceAdminSourcesInvestigateIdRoute: typeof WorkspaceAdminSourcesInvestigateIdRoute
@@ -460,6 +480,7 @@ const WorkspaceAdminRouteChildren: WorkspaceAdminRouteChildren = {
   WorkspaceAdminRunsRoute: WorkspaceAdminRunsRoute,
   WorkspaceAdminSchedulesRoute: WorkspaceAdminSchedulesRoute,
   WorkspaceAdminSpendRoute: WorkspaceAdminSpendRoute,
+  WorkspaceAdminSystemRoute: WorkspaceAdminSystemRoute,
   WorkspaceAdminSourcesIdRoute: WorkspaceAdminSourcesIdRoute,
   WorkspaceAdminSourcesIndexRoute: WorkspaceAdminSourcesIndexRoute,
   WorkspaceAdminSourcesInvestigateIdRoute:

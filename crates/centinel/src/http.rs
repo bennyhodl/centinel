@@ -18,6 +18,7 @@
 //! | `/workspace/sources…` | the Sources page: list, define, run; see [`sources`] |
 //! | `/workspace/investigations…` | investigate an address and read what it found; see [`investigate`] |
 //! | `/workspace/graph…` | the Graph page: sources, the hosts they link to, and how much; see [`graph`] |
+//! | `GET /workspace/admin/health` | read-only doctor, corpus usage and collection lane diagnostics; see [`health`] |
 //! | `GET /workspace/icons/{host}`, `GET /workspace/source-hosts` | the favicon beside each source and host, and the host each source collects from; see [`icons`] |
 //!
 //! ## Long-running operations
@@ -69,6 +70,7 @@ use serde_json::{Value, json};
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
 
 mod graph;
+mod health;
 mod history;
 mod icons;
 mod investigate;
@@ -252,8 +254,9 @@ pub(crate) fn router_with_schedules(
         .merge(schedules::routes())
         .merge(icons::routes())
         .merge(graph::routes())
-.merge(vectors::routes())
+        .merge(vectors::routes())
         .merge(history::routes())
+        .merge(health::routes())
         .route("/ops", get(list_ops))
         .route("/ops/{name}", post(invoke))
         .route("/ops/{name}/stream", post(invoke_streaming))

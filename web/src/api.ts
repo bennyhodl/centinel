@@ -440,6 +440,27 @@ export type SystemInfo = {
   store_root: string
 }
 
+/** Existing doctor/status reports, read through the administrator's browser session. */
+export type SystemHealth = {
+  checked_at: string
+  doctor: {
+    store_root: string
+    config?: string
+    config_searched?: string[]
+    config_error?: string
+    ready: boolean
+    binaries_ready: boolean
+    services_ready: boolean
+    binaries: Array<{ name: string; need: 'required' | 'optional' | 'planned'; purpose: string; path?: string; version?: string; stale?: string }>
+    services: Array<{ capability: string; gates: string; purpose: string; base_url: string; model: string; ready: boolean; problem?: string }>
+    gates: Array<{ gate: string; ready: boolean; blocks: string; missing?: string[] }>
+    vectors?: { path: string; ready: boolean; problem?: string }
+  }
+  corpus: { store_root: string; sources: Array<{ source: string; total: number; bytes: number }>; kinds: Record<string, number>; total: number; bytes: number; missing_blobs: number }
+  running: LaneHolder | null
+  scheduler: { status: 'unknown'; detail: string }
+}
+
 /** One op the registry offers a remote caller. `mcp` says whether agents see it as a tool. */
 export type RemoteOp = { name: string; about: string; mcp: boolean; long_running: boolean }
 
@@ -665,6 +686,7 @@ export const api = {
   users: () => request<{ users: Account[] }>('/api/admin/users').then(value => withArray(value, 'users', '/api/admin/users').users),
   setAccess: (id: string, access: Account['access']) => request<Account>('/api/admin/users', { method: 'POST', body: JSON.stringify({ id, access }) }),
   system: () => request<SystemInfo>('/workspace/system'),
+  systemHealth: () => request<SystemHealth>('/workspace/admin/health'),
   ops: () => request<{ ops: RemoteOp[] }>('/ops').then(value => withArray(value, 'ops', '/ops')),
   corpus: (params: URLSearchParams) => {
     const path = `/workspace/documents?${params}`
