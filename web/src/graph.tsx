@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi, Link, useNavigate } from '@tanstack/react-router'
-import { Ban, ExternalLink, FlaskConical, Search, Undo2 } from 'lucide-react'
+import { Ban, ExternalLink, Search, Undo2 } from 'lucide-react'
 import Graph from 'graphology'
 import { api, originalUrl, type GraphEdge, type GraphFilter, type GraphNode, type GraphView } from './api'
 import type { Canvas } from './graph-canvas'
 import { edgeTitle, labelOf, searchNodes, type Drawn, type EdgeAttributes, type Hover, type NodeAttributes, type Palette } from './graph-data'
 import { HostIcon, SourceIcon } from './host-icon'
+import { useInvestigate } from './investigate'
 import { queries } from './queries'
 import { useTheme } from './theme'
 import { compact, number, plural } from './format'
@@ -246,11 +247,7 @@ function HoverCard({ hover, nodes, edges }: { hover: Hover; nodes: Map<string, G
  * the source's own page.
  */
 function NodeDrawer({ node, view, nodes, onClose, onFocus }: { node: GraphNode; view: GraphView; nodes: Map<string, GraphNode>; onClose: () => void; onFocus: (id: string) => void }) {
-  const navigate = useNavigate()
-  const investigate = useMutation({
-    mutationFn: (url: string) => api.tryAddress(url),
-    onSuccess: ({ id }) => navigate({ to: '/sources/try/$id', params: { id } }),
-  })
+  const investigate = useInvestigate()
   const jump = (id: string) => { onClose(); onFocus(id) }
   return <Sheet open onOpenChange={open => !open && onClose()}>
     <SheetContent side="right" className="flex w-full flex-col gap-0 p-0 sm:max-w-[560px]">
@@ -297,7 +294,7 @@ function HostCard({ node, view, nodes, onJump, onInvestigate, investigating, err
       {refused
         ? <Button variant="outline" disabled={allow.isPending} onClick={() => allow.mutate()}>{allow.isPending ? <Spinner /> : <Undo2 />}Allow</Button>
         : standing === 'open' && <Button variant="outline" disabled={refuse.isPending} onClick={() => refuse.mutate()}>{refuse.isPending ? <Spinner /> : <Ban />}Refuse</Button>}
-      <Button disabled={investigating} onClick={onInvestigate}>{investigating ? <Spinner /> : <FlaskConical />}Investigate</Button>
+      <Button disabled={investigating} onClick={onInvestigate}>{investigating ? <Spinner /> : <Search />}Investigate</Button>
     </div>
   </>
 }

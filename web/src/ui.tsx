@@ -1,6 +1,6 @@
 import React from 'react'
 import { Link } from '@tanstack/react-router'
-import { CircleHelp } from 'lucide-react'
+import { ChevronLeft, CircleHelp } from 'lucide-react'
 import { nip19 } from 'nostr-tools'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -48,6 +48,10 @@ export function Portrait({ account, className }: { account: Pick<Account, 'name'
 export const handle = (account: Pick<Account, 'email' | 'publicKey'>) => account.publicKey ? nip19.npubEncode(account.publicKey) : account.email
 
 export const shortSha = (sha: string) => sha.slice(0, 7)
+/** The way back to the Sources list, from a source or an investigation. */
+export function BackToSources() {
+  return <Link to="/sources" className="mb-4 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground"><ChevronLeft className="size-3.5" />All sources</Link>
+}
 export function ErrorBox({ error }: { error: Error }) { return <Alert variant="destructive" className="my-3"><AlertDescription>{error.message}</AlertDescription></Alert> }
 export function Empty({ children }: { children: React.ReactNode }) { return <div className="grid place-items-center gap-3 p-12 text-center text-sm text-muted-foreground [&_svg]:size-6"><CircleHelp /><p>{children}</p></div> }
 
