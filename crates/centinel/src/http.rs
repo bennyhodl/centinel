@@ -71,7 +71,9 @@ include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
 mod graph;
 mod icons;
 mod investigate;
+mod maintenance;
 mod sources;
+mod vectors;
 
 /// Identifies the binary this process runs: the executable's size and modification
 /// time. Two `centinel web` invocations from the same build agree on it; a rebuild
@@ -226,6 +228,7 @@ pub(crate) fn router(ctx: Arc<Ctx>) -> Router {
         .merge(sources::routes())
         .merge(icons::routes())
         .merge(graph::routes())
+        .merge(vectors::routes())
         .route("/ops", get(list_ops))
         .route("/ops/{name}", post(invoke))
         .route("/ops/{name}/stream", post(invoke_streaming))

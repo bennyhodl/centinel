@@ -81,7 +81,7 @@ pub use transcribe::{
 pub use update::{
     Applied, InstalledFrom, Provenance, ReleaseCheck, RepoCheck, UpdateArgs, UpdateReport, update,
 };
-pub use verify::{VerifyReport, VerifyTableArgs, verify};
+pub use verify::{VerifyReport, VerifyTableArgs, repair_verified, verify};
 
 // ── shared plumbing ───────────────────────────────────────────────────────────
 

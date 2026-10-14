@@ -39,6 +39,9 @@ pub struct VerifyTableArgs {
 pub struct VerifyReport {
     /// `chunks.lance/`.
     pub vectors: PathBuf,
+    /// The audited table version. Missing when no table exists, or in older reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
     pub fragments: usize,
     pub readable: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -61,33 +64,82 @@ pub async fn verify(
     progress: &Progress,
     cancel: &Cancel,
 ) -> anyhow::Result<VerifyReport> {
+    verify_table(ctx, args.repair, None, progress, cancel).await
+}
+
+/// Repairs only the fragments an operator has reviewed. Re-audits under the vector
+/// writer lock and refuses a changed table or finding before committing anything.
+/// This is a library operation, not an additional registry or MCP capability.
+pub async fn repair_verified(
+    ctx: &Ctx,
+    reviewed: &VerifyReport,
+    progress: &Progress,
+    cancel: &Cancel,
+) -> anyhow::Result<VerifyReport> {
+    anyhow::ensure!(
+        reviewed.repaired.is_none(),
+        "run a new verification before repairing again"
+    );
+    anyhow::ensure!(
+        !reviewed.unreadable.is_empty(),
+        "the reviewed audit has no unreadable fragments"
+    );
+    verify_table(ctx, true, Some(reviewed), progress, cancel).await
+}
+
+async fn verify_table(
+    ctx: &Ctx,
+    repair: bool,
+    reviewed: Option<&VerifyReport>,
+    progress: &Progress,
+    cancel: &Cancel,
+) -> anyhow::Result<VerifyReport> {
+    // Open and audit after acquiring the lock: an embed/compaction cannot replace the
+    // fragments between approval validation and repair.
+    let lock = if repair {
+        Some(VectorLock::take(&ctx.store).await?)
+    } else {
+        None
+    };
+    cancel.check()?;
     let vectors = ctx.store.vectors_path();
 
     // Nothing to open is not a fault — `verify` before the first `embed` is a reasonable
     // thing to run — and the one thing this must not do about it is create a table to
     // report it empty. The rule `embed --dry-run` follows, for the same reason.
     if !vectors.exists() {
+        anyhow::ensure!(
+            reviewed.is_none(),
+            "the vector table changed; run verification again"
+        );
         return Ok(VerifyReport {
             vectors,
+            version: None,
             fragments: 0,
             readable: 0,
             unreadable: Vec::new(),
-            repaired: args.repair.then_some(VectorRepair::default()),
+            repaired: repair.then_some(VectorRepair::default()),
         });
     }
 
     let table = VectorTable::open_existing(&ctx.store.vectors_db()).await?;
     let audit = table.audit(progress, cancel).await?;
-    let repaired = match args.repair {
-        true => {
-            let lock = VectorLock::take(&ctx.store).await?;
-            Some(table.repair(&lock, &audit, cancel).await?)
-        }
-        false => None,
+    if let Some(reviewed) = reviewed {
+        anyhow::ensure!(
+            reviewed.version == Some(audit.version())
+                && reviewed.fragments == audit.fragments
+                && reviewed.unreadable == audit.unreadable,
+            "the vector table or unreadable fragments changed; run verification again"
+        );
+    }
+    let repaired = match lock.as_ref() {
+        Some(lock) => Some(table.repair(lock, &audit, cancel).await?),
+        None => None,
     };
 
     Ok(VerifyReport {
         vectors,
+        version: Some(audit.version()),
         fragments: audit.fragments,
         readable: audit.readable(),
         unreadable: audit.unreadable,

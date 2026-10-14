@@ -389,6 +389,15 @@ const devDelay = () => {
   return Number(import.meta.env.VITE_DEV_DELAY_MS || globalThis.localStorage?.getItem('centinel.delayMs') || 0)
 }
 
+export type VectorReport = {
+  vectors: string
+  version?: number
+  fragments: number
+  readable: number
+  unreadable?: { id: number; data_files: string[]; physical_rows?: number; error: string }[]
+  repaired?: { fragments_dropped: number; estimated_rows: number }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const delay = devDelay()
   if (delay) await new Promise(done => setTimeout(done, delay))
@@ -721,6 +730,10 @@ export const api = {
   runSource: (id: string, body: { skip?: string[]; limit?: number; refresh?: boolean } = {}) => request<{ run_id: string }>(`/workspace/sources/${encodeURIComponent(id)}/run`, { method: 'POST', body: JSON.stringify(body) }),
   /** Starts an investigation of an address, as a job. The answer is the job's id, which is also the report's. */
   investigate: (url: string) => request<{ id: string }>('/workspace/investigations', { method: 'POST', body: JSON.stringify({ url }) }),
+  verifyVectors: () => request<{ id: string }>('/workspace/vectors/verify', { method: 'POST' }),
+  repairVectors: (reportId: string) => request<{ id: string }>('/workspace/vectors/repair', { method: 'POST', body: JSON.stringify({ report_id: reportId }) }),
+  embedVectors: (reportId: string) => request<{ id: string }>('/workspace/vectors/embed', { method: 'POST', body: JSON.stringify({ report_id: reportId }) }),
+  vectorReport: (id: string) => request<{ id: string; report: VectorReport | null }>(`/workspace/vectors/reports/${encodeURIComponent(id)}`),
   investigation: (id: string) => request<InvestigationReport>(`/workspace/investigations/${encodeURIComponent(id)}`),
   /** The graph as a filter asks for it. Sources always come back; a host does while an edge reaches it. */
   graph: (filter: GraphFilter) => {

@@ -20,6 +20,7 @@ import { Route as WorkspaceSkillsRouteImport } from './routes/_workspace/skills'
 import { Route as WorkspaceAdminAdminRouteImport } from './routes/_workspace/_admin/admin'
 import { Route as WorkspaceAdminClassifiersRouteImport } from './routes/_workspace/_admin/classifiers'
 import { Route as WorkspaceAdminGraphRouteImport } from './routes/_workspace/_admin/graph'
+import { Route as WorkspaceAdminMaintenanceRouteImport } from './routes/_workspace/_admin/maintenance'
 import { Route as WorkspaceAdminReviewRouteImport } from './routes/_workspace/_admin/review'
 import { Route as WorkspaceAdminRunsRouteImport } from './routes/_workspace/_admin/runs'
 import { Route as WorkspaceAdminSpendRouteImport } from './routes/_workspace/_admin/spend'
@@ -82,6 +83,12 @@ const WorkspaceAdminGraphRoute = WorkspaceAdminGraphRouteImport.update({
   path: '/graph',
   getParentRoute: () => WorkspaceAdminRoute,
 } as any)
+const WorkspaceAdminMaintenanceRoute =
+  WorkspaceAdminMaintenanceRouteImport.update({
+    id: '/maintenance',
+    path: '/maintenance',
+    getParentRoute: () => WorkspaceAdminRoute,
+  } as any)
 const WorkspaceAdminReviewRoute = WorkspaceAdminReviewRouteImport.update({
   id: '/review',
   path: '/review',
@@ -134,6 +141,7 @@ export interface FileRoutesByFullPath {
   '/admin': typeof WorkspaceAdminAdminRoute
   '/classifiers': typeof WorkspaceAdminClassifiersRoute
   '/graph': typeof WorkspaceAdminGraphRoute
+  '/maintenance': typeof WorkspaceAdminMaintenanceRoute
   '/review': typeof WorkspaceAdminReviewRoute
   '/runs': typeof WorkspaceAdminRunsRoute
   '/spend': typeof WorkspaceAdminSpendRoute
@@ -152,6 +160,7 @@ export interface FileRoutesByTo {
   '/admin': typeof WorkspaceAdminAdminRoute
   '/classifiers': typeof WorkspaceAdminClassifiersRoute
   '/graph': typeof WorkspaceAdminGraphRoute
+  '/maintenance': typeof WorkspaceAdminMaintenanceRoute
   '/review': typeof WorkspaceAdminReviewRoute
   '/runs': typeof WorkspaceAdminRunsRoute
   '/spend': typeof WorkspaceAdminSpendRoute
@@ -174,6 +183,7 @@ export interface FileRoutesById {
   '/_workspace/_admin/admin': typeof WorkspaceAdminAdminRoute
   '/_workspace/_admin/classifiers': typeof WorkspaceAdminClassifiersRoute
   '/_workspace/_admin/graph': typeof WorkspaceAdminGraphRoute
+  '/_workspace/_admin/maintenance': typeof WorkspaceAdminMaintenanceRoute
   '/_workspace/_admin/review': typeof WorkspaceAdminReviewRoute
   '/_workspace/_admin/runs': typeof WorkspaceAdminRunsRoute
   '/_workspace/_admin/spend': typeof WorkspaceAdminSpendRoute
@@ -194,6 +204,7 @@ export interface FileRouteTypes {
     | '/admin'
     | '/classifiers'
     | '/graph'
+    | '/maintenance'
     | '/review'
     | '/runs'
     | '/spend'
@@ -212,6 +223,7 @@ export interface FileRouteTypes {
     | '/admin'
     | '/classifiers'
     | '/graph'
+    | '/maintenance'
     | '/review'
     | '/runs'
     | '/spend'
@@ -233,6 +245,7 @@ export interface FileRouteTypes {
     | '/_workspace/_admin/admin'
     | '/_workspace/_admin/classifiers'
     | '/_workspace/_admin/graph'
+    | '/_workspace/_admin/maintenance'
     | '/_workspace/_admin/review'
     | '/_workspace/_admin/runs'
     | '/_workspace/_admin/spend'
@@ -327,6 +340,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceAdminGraphRouteImport
       parentRoute: typeof WorkspaceAdminRoute
     }
+    '/_workspace/_admin/maintenance': {
+      id: '/_workspace/_admin/maintenance'
+      path: '/maintenance'
+      fullPath: '/maintenance'
+      preLoaderRoute: typeof WorkspaceAdminMaintenanceRouteImport
+      parentRoute: typeof WorkspaceAdminRoute
+    }
     '/_workspace/_admin/review': {
       id: '/_workspace/_admin/review'
       path: '/review'
@@ -402,6 +422,7 @@ interface WorkspaceAdminRouteChildren {
   WorkspaceAdminAdminRoute: typeof WorkspaceAdminAdminRoute
   WorkspaceAdminClassifiersRoute: typeof WorkspaceAdminClassifiersRoute
   WorkspaceAdminGraphRoute: typeof WorkspaceAdminGraphRoute
+  WorkspaceAdminMaintenanceRoute: typeof WorkspaceAdminMaintenanceRoute
   WorkspaceAdminReviewRoute: typeof WorkspaceAdminReviewRoute
   WorkspaceAdminRunsRoute: typeof WorkspaceAdminRunsRoute
   WorkspaceAdminSpendRoute: typeof WorkspaceAdminSpendRoute
@@ -414,6 +435,7 @@ const WorkspaceAdminRouteChildren: WorkspaceAdminRouteChildren = {
   WorkspaceAdminAdminRoute: WorkspaceAdminAdminRoute,
   WorkspaceAdminClassifiersRoute: WorkspaceAdminClassifiersRoute,
   WorkspaceAdminGraphRoute: WorkspaceAdminGraphRoute,
+  WorkspaceAdminMaintenanceRoute: WorkspaceAdminMaintenanceRoute,
   WorkspaceAdminReviewRoute: WorkspaceAdminReviewRoute,
   WorkspaceAdminRunsRoute: WorkspaceAdminRunsRoute,
   WorkspaceAdminSpendRoute: WorkspaceAdminSpendRoute,

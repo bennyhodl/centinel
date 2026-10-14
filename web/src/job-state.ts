@@ -53,6 +53,7 @@ export const activeJobs = (jobs: JobState[]) => jobs.filter(job => !job.outcome)
 
 const verbs: Record<string, string> = {
   discover: 'Discovering', collect: 'Collecting', extract: 'Extracting', transcribe: 'Transcribing',
+  'vectors-verify': 'Verifying vectors', 'vectors-repair': 'Repairing vectors', 'vectors-embed': 'Embedding missing chunks',
   index: 'Indexing', classify: 'Classifying', embed: 'Embedding', run: 'Running', done: 'Finishing',
 }
 

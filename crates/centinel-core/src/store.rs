@@ -301,6 +301,14 @@ impl Store {
         self.investigations_dir().join(id)
     }
 
+    /// Completed vector maintenance reports, outside the archive. The HTTP caller
+    /// validates the server-issued job id before using it as a path component.
+    pub fn vector_report_path(&self, id: &str) -> PathBuf {
+        self.workspace_dir()
+            .join("vector-reports")
+            .join(format!("{id}.json"))
+    }
+
     /// `crumbs/` — the off-host links each page dropped, written as it was collected.
     ///
     /// **Derived**, and safe to delete: every row is a link parsed out of a blob, and

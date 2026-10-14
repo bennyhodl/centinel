@@ -91,6 +91,12 @@ export const queries = {
   /** A source's off-host links. Reading them can take seconds on a large source, so they are asked once. */
   sourceCrumbs: (id: string) => queryOptions({ queryKey: ['source-crumbs', id], queryFn: () => api.sourceCrumbs(id), staleTime: 5 * 60_000 }),
 
+  vectorReport: (id: string) => queryOptions({
+    queryKey: ['vector-report', id], queryFn: () => api.vectorReport(id), enabled: Boolean(id),
+    staleTime: Infinity, retry: false,
+    refetchInterval: query => query.state.data?.report === null ? 1000 : false,
+  }),
+
   /** What an investigation found. One never changes once filed. */
   investigation: (id: string) => queryOptions({ queryKey: ['investigation', id], queryFn: () => api.investigation(id), staleTime: Infinity, retry: false }),
 
