@@ -349,7 +349,7 @@ impl<'a> Journal<'a> {
 
 // ── the lock ──────────────────────────────────────────────────────────────────
 
-/// What a held lock says about the run holding it.
+/// What a held lock says about the collection run or maintenance job holding it.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Holder {
     pub pid: u32,
@@ -363,11 +363,15 @@ pub struct Holder {
     /// The run's arguments, one line, for the message a refused second run prints.
     #[serde(default)]
     pub args: String,
+    /// A maintenance job sharing the collection lane. Absent for a full run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
 }
 
 impl Holder {
     /// How this reads when a second run is refused.
     pub fn describe(&self) -> String {
+        let work = self.operation.as_deref().unwrap_or("a run");
         let since = self
             .started_at
             .parse::<Timestamp>()
@@ -381,10 +385,10 @@ impl Holder {
             .unwrap_or_else(|_| self.started_at.clone());
         match &self.schedule {
             Some(id) => format!(
-                "a run has been in flight since {since} (pid {}, schedule `{id}`)",
+                "{work} has been in flight since {since} (pid {}, schedule `{id}`)",
                 self.pid
             ),
-            None => format!("a run has been in flight since {since} (pid {})", self.pid),
+            None => format!("{work} has been in flight since {since} (pid {})", self.pid),
         }
     }
 
@@ -393,6 +397,9 @@ impl Holder {
     /// is the caller's to say because a disabled source is skipped by a bare run and
     /// walked by one that names it.
     pub fn covers(&self, source: &str, enabled: bool) -> bool {
+        if self.operation.is_some() {
+            return false;
+        }
         match self.sources.is_empty() {
             true => enabled,
             false => self.sources.iter().any(|s| s == source),
@@ -423,7 +430,7 @@ impl Holder {
     }
 }
 
-/// The single lane, held for the length of one run.
+/// The single lane, held for the length of one collection run or maintenance job.
 ///
 /// Released on drop. A process that dies without dropping leaves the file behind, which is
 /// the case [`RunLock::acquire`] reclaims — and the evidence [`RunLock::take_stale`] turns
@@ -435,7 +442,7 @@ pub struct RunLock {
 
 /// Why the lane could not be taken.
 #[derive(Debug)]
-pub struct Held(pub Holder);
+pub struct Held(pub Box<Holder>);
 
 impl std::fmt::Display for Held {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -467,7 +474,7 @@ impl RunLock {
         }
     }
 
-    fn try_create(path: &Path, holder: &Holder) -> std::result::Result<Self, Holder> {
+    fn try_create(path: &Path, holder: &Holder) -> std::result::Result<Self, Box<Holder>> {
         use std::io::Write;
         match std::fs::OpenOptions::new()
             .write(true)
@@ -483,16 +490,17 @@ impl RunLock {
                     path: path.to_path_buf(),
                 })
             }
-            Err(_) => Err(Self::read(path).unwrap_or_else(|| Holder {
+            Err(_) => Err(Box::new(Self::read(path).unwrap_or_else(|| Holder {
                 // A lock file that exists but cannot be read is still a lock. Reporting it
                 // as unheld would let a second run start beside the first.
                 pid: 0,
+                operation: None,
                 sources: Vec::new(),
                 started_at: Timestamp::now().to_string(),
                 trigger: Trigger::Manual,
                 schedule: None,
                 args: "unreadable lock file".into(),
-            })),
+            }))),
         }
     }
 
@@ -548,6 +556,7 @@ mod tests {
     fn holder(schedule: Option<&str>) -> Holder {
         Holder {
             pid: std::process::id(),
+            operation: None,
             started_at: Timestamp::now().to_string(),
             trigger: Trigger::Schedule,
             schedule: schedule.map(str::to_string),

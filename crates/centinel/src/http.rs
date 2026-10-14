@@ -12,12 +12,13 @@
 //! | `GET /workspace/classify/plan?source=&resource=&derived_sha=&questions=&model=` | what a classify run over that scope would send, and its cost |
 //! | `GET /workspace/jobs` | what this process is working on, and what it just finished |
 //! | `GET /workspace/jobs/events` | the same, then every job event as it happens (SSE) |
-//! | `POST /workspace/jobs/{id}/stop` | ask a stoppable job — a run from the Sources page — to stop at its next item |
+//! | `POST /workspace/jobs/{id}/stop` | ask a stoppable job to stop at its next item |
 //! | `GET /workspace/spend?since=` | every model call since then, by hour and model |
 //! | `GET /workspace/prices` | what each model is priced at, and where the price came from |
 //! | `/workspace/sources…` | the Sources page: list, define, run; see [`sources`] |
 //! | `/workspace/investigations…` | investigate an address and read what it found; see [`investigate`] |
 //! | `/workspace/graph…` | the Graph page: sources, the hosts they link to, and how much; see [`graph`] |
+//! | `GET /workspace/admin/health` | read-only doctor, corpus usage and collection lane diagnostics; see [`health`] |
 //! | `GET /workspace/icons/{host}`, `GET /workspace/source-hosts` | the favicon beside each source and host, and the host each source collects from; see [`icons`] |
 //!
 //! ## Long-running operations
@@ -69,9 +70,16 @@ use serde_json::{Value, json};
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
 
 mod graph;
+mod health;
+mod history;
 mod icons;
+mod ingest;
 mod investigate;
+mod maintenance;
+mod schedules;
 mod sources;
+mod stages;
+mod vectors;
 
 /// Identifies the binary this process runs: the executable's size and modification
 /// time. Two `centinel web` invocations from the same build agree on it; a rebuild
@@ -182,9 +190,19 @@ pub async fn listen(bind: &str) -> Result<tokio::net::TcpListener> {
 pub async fn serve_until(
     ctx: Arc<Ctx>,
     listener: tokio::net::TcpListener,
+    config: Option<&str>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    crate::gateway::serve(ctx, listener, shutdown).await
+    crate::gateway::serve(ctx, listener, config, shutdown).await
+}
+
+pub async fn serve_until_with_schedules(
+    ctx: Arc<Ctx>,
+    listener: tokio::net::TcpListener,
+    schedules: Arc<crate::schedule_control::ScheduleControl>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    crate::gateway::serve_with_schedules(ctx, listener, schedules, shutdown).await
 }
 
 /// The workspace page and its assets — everything the browser loads before it calls the
@@ -197,7 +215,21 @@ pub fn page_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
         .route("/web/assets/{*path}", get(web_asset))
 }
 
+#[cfg(test)]
 pub(crate) fn router(ctx: Arc<Ctx>) -> Router {
+    let path = ctx.store.root().join("test-server.toml");
+    std::fs::write(&path, "").expect("temporary server config");
+    router_with_schedules(
+        ctx,
+        crate::schedule_control::ScheduleControl::load(path.to_str(), "disabled by centinel web")
+            .expect("valid config"),
+    )
+}
+
+pub(crate) fn router_with_schedules(
+    ctx: Arc<Ctx>,
+    schedules: Arc<crate::schedule_control::ScheduleControl>,
+) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .merge(page_routes())
@@ -224,12 +256,19 @@ pub(crate) fn router(ctx: Arc<Ctx>) -> Router {
         .route("/workspace/jobs/{id}/stop", post(workspace_stop_job))
         .merge(investigate::routes())
         .merge(sources::routes())
+        .merge(schedules::routes())
+        .merge(stages::routes())
+        .merge(ingest::routes())
         .merge(icons::routes())
         .merge(graph::routes())
+        .merge(vectors::routes())
+        .merge(history::routes())
+        .merge(health::routes())
         .route("/ops", get(list_ops))
         .route("/ops/{name}", post(invoke))
         .route("/ops/{name}/stream", post(invoke_streaming))
         .route("/mcp", post(mcp_over_http))
+        .layer(axum::Extension(schedules))
         .layer(axum::middleware::from_fn(
             crate::access::require_same_origin,
         ))
@@ -681,7 +720,7 @@ fn workspace_response<T: serde::Serialize>(result: anyhow::Result<T>) -> Respons
 /// Starts `work` as a stoppable job and answers `202 { "id" }`, the id the page follows on
 /// the job stream and hands to `POST /workspace/jobs/{id}/stop`.
 ///
-/// The id is `{kind}-{ms}`, the instant rather than the process's counter, so a result filed
+/// The id is `{kind}-{ns}`, the instant rather than the process's counter, so a result filed
 /// under it before a restart is not overwritten by the first job after one. The work is
 /// handed the context, its own id, the job's progress and the token Stop trips; how it ended
 /// is the job's record, written here once rather than at every route that starts one.
@@ -696,7 +735,7 @@ where
     Fut: std::future::Future<Output = Result<T>> + Send + 'static,
 {
     let (job, cancel) = ctx.jobs.start_stoppable(
-        format!("{kind}-{}", jiff::Timestamp::now().as_millisecond()),
+        format!("{kind}-{}", jiff::Timestamp::now().as_nanosecond()),
         kind,
         label,
     );

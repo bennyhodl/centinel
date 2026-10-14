@@ -389,6 +389,15 @@ const devDelay = () => {
   return Number(import.meta.env.VITE_DEV_DELAY_MS || globalThis.localStorage?.getItem('centinel.delayMs') || 0)
 }
 
+export type VectorReport = {
+  vectors: string
+  version?: number
+  fragments: number
+  readable: number
+  unreadable?: { id: number; data_files: string[]; physical_rows?: number; error: string }[]
+  repaired?: { fragments_dropped: number; estimated_rows: number }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const delay = devDelay()
   if (delay) await new Promise(done => setTimeout(done, delay))
@@ -431,6 +440,27 @@ export type SystemInfo = {
   store_root: string
 }
 
+/** Existing doctor/status reports, read through the administrator's browser session. */
+export type SystemHealth = {
+  checked_at: string
+  doctor: {
+    store_root: string
+    config?: string
+    config_searched?: string[]
+    config_error?: string
+    ready: boolean
+    binaries_ready: boolean
+    services_ready: boolean
+    binaries: Array<{ name: string; need: 'required' | 'optional' | 'planned'; purpose: string; path?: string; version?: string; stale?: string }>
+    services: Array<{ capability: string; gates: string; purpose: string; base_url: string; model: string; ready: boolean; problem?: string }>
+    gates: Array<{ gate: string; ready: boolean; blocks: string; missing?: string[] }>
+    vectors?: { path: string; ready: boolean; problem?: string }
+  }
+  corpus: { store_root: string; sources: Array<{ source: string; total: number; bytes: number }>; kinds: Record<string, number>; total: number; bytes: number; missing_blobs: number }
+  running: LaneHolder | null
+  scheduler: { status: 'running' | 'disabled'; detail: string }
+}
+
 /** One op the registry offers a remote caller. `mcp` says whether agents see it as a tool. */
 export type RemoteOp = { name: string; about: string; mcp: boolean; long_running: boolean }
 
@@ -465,7 +495,9 @@ export type ListedSource = {
 export type LastRun = { started_at: string; outcome: RunAttempt['outcome']; trigger: RunAttempt['trigger']; schedule?: string; documents: number }
 
 /** The run holding the store's one lane. `sources` is empty for a run over every enabled source. */
-export type LaneHolder = { pid: number; started_at: string; trigger: 'schedule' | 'manual' | 'catch-up'; schedule?: string; sources?: string[]; args: string }
+export type LaneHolder = { pid: number; started_at: string; trigger: 'schedule' | 'manual' | 'catch_up'; schedule?: string; sources?: string[]; args: string; operation?: string }
+
+export type SourceStage = 'extract' | 'transcribe' | 'index' | 'embed'
 
 /** `log/<id>/source.toml`. */
 export type SourceDefinition = {
@@ -480,6 +512,17 @@ export type SourceDefinition = {
   lang?: string
   strategy?: string
 }
+
+/** Replaces editable settings. Null removes an override; other definition fields stay intact. */
+export type SourceSettings = {
+  rps: number | null
+  matches: string[]
+  strategy: string | null
+  lang: string | null
+  audio_if_no_captions: boolean | null
+}
+
+export type SourceSettingsOptions = { strategies: string[]; defaults: { rps: number; lang: string } }
 
 export type SourceProblem = { natural_key: string; state: string; since: string; consecutive_failures: number; detail?: string }
 
@@ -499,7 +542,7 @@ export type SourceSummary = {
 export type RunAttempt = {
   run_id: string
   schedule?: string
-  trigger: 'schedule' | 'manual' | 'catch-up'
+  trigger: 'schedule' | 'manual' | 'catch_up'
   started_at: string
   finished_at: string
   outcome: 'ok' | 'partial' | 'failed' | 'skipped' | 'interrupted'
@@ -510,8 +553,11 @@ export type RunAttempt = {
   sources?: string[]
 }
 
+export type CollectionHistoryFilters = { source: string; schedule: string; outcome: string; page: number }
+export type CollectionHistoryPage = { attempts: RunAttempt[]; total: number; page: number; page_size: number; running: LaneHolder | null }
+
 /** One source: its row as the list has it, its definition, what its log says, its runs. */
-export type SourceDetail = { source: ListedSource; definition: SourceDefinition; summary?: SourceSummary; runs: RunAttempt[]; running: LaneHolder | null }
+export type SourceDetail = { source: ListedSource; definition: SourceDefinition; settings_options: SourceSettingsOptions; summary?: SourceSummary; runs: RunAttempt[]; running: LaneHolder | null }
 
 export type CrumbStanding = 'open' | 'ignored' | 'promoted'
 export type Crumb = { host: string; links: number; pages: number; example: string; standing?: CrumbStanding }
@@ -629,13 +675,31 @@ export type HostDetail = {
 /** What a refusal or an allow answers with: the ruling as `crumbs ignore` reports it. */
 export type Ruled = { action: 'ruled'; host: string; ruling: 'ignore' | 'allow'; at: string; note?: string; previous?: string }
 
+export type ScheduleDefinition = {
+  id: string; cron: string; tz?: string | null; sources?: string[]; skip?: string[];
+  limit?: number | null; refresh?: boolean; jitter_secs?: number | null;
+  enabled?: boolean | null; catch_up?: boolean | null
+}
+export type ScheduleRow = {
+  definition: ScheduleDefinition
+  status: { id: string; tz: string; enabled: boolean; running: boolean; last_fire?: string; last_outcome?: string; problem?: string }
+  next: string[]
+}
+export type ScheduleList = { schedules: ScheduleRow[]; running: LaneHolder | null; scheduler: { enabled: boolean; disabled_reason: string | null } }
+
 export const api = {
+  schedules: () => request<ScheduleList>('/workspace/schedules'),
+  saveSchedule: (schedule: ScheduleDefinition, creating: boolean) => request<unknown>(creating ? '/workspace/schedules' : `/workspace/schedules/${encodeURIComponent(schedule.id)}`, { method: creating ? 'POST' : 'PUT', body: JSON.stringify(schedule) }),
+  setScheduleEnabled: (id: string, enabled: boolean) => request<unknown>(`/workspace/schedules/${encodeURIComponent(id)}/enabled`, { method: 'POST', body: JSON.stringify({ enabled }) }),
+  removeSchedule: (id: string) => request<unknown>(`/workspace/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  runSchedule: (id: string) => request<{ run_id: string }>(`/workspace/schedules/${encodeURIComponent(id)}/run`, { method: 'POST' }),
   /** The signed-in account, or null when nobody is. */
   account: () => request<{ account: Account | null }>('/api/account').then(value => value.account),
   /** Every account, newest first. The administrator only. */
   users: () => request<{ users: Account[] }>('/api/admin/users').then(value => withArray(value, 'users', '/api/admin/users').users),
   setAccess: (id: string, access: Account['access']) => request<Account>('/api/admin/users', { method: 'POST', body: JSON.stringify({ id, access }) }),
   system: () => request<SystemInfo>('/workspace/system'),
+  systemHealth: () => request<SystemHealth>('/workspace/admin/health'),
   ops: () => request<{ ops: RemoteOp[] }>('/ops').then(value => withArray(value, 'ops', '/ops')),
   corpus: (params: URLSearchParams) => {
     const path = `/workspace/documents?${params}`
@@ -708,19 +772,32 @@ export const api = {
   prices: () => request<{ prices: SpendPrice[] }>('/workspace/prices').then(value => withArray(value, 'prices', '/workspace/prices')),
   /** The host each source collects from, by source id. Readable by any approved user, unlike `sources`. */
   sourceHosts: () => request<Record<string, string>>('/workspace/source-hosts'),
+  collectionHistory: (filters: CollectionHistoryFilters) => {
+    const params = new URLSearchParams({ ...filters, page: String(filters.page) })
+    return request<CollectionHistoryPage>(`/workspace/history?${params}`)
+  },
+  collectionAttempt: (id: string) => request<{ attempt: RunAttempt & { due_at?: string; report?: unknown } }>(`/workspace/history/${encodeURIComponent(id)}`),
+  rerunCollection: (id: string) => request<{ run_id: string }>(`/workspace/history/${encodeURIComponent(id)}/rerun`, { method: 'POST' }),
+  ingest: (body: { source: string; urls: string[] }) => request<{ id: string }>('/workspace/ingest', { method: 'POST', body: JSON.stringify(body) }),
   sources: () => request<{ sources: ListedSource[]; running: LaneHolder | null }>('/workspace/sources').then(value => withArray(value, 'sources', '/workspace/sources')),
   source: (id: string) => request<SourceDetail>(`/workspace/sources/${encodeURIComponent(id)}`),
+  startSourceStage: (id: string, stage: SourceStage, refresh = false) => request<{ id: string }>(`/workspace/sources/${encodeURIComponent(id)}/stages/${stage}`, { method: 'POST', body: JSON.stringify({ refresh }) }),
   sourceCrumbs: (id: string) => request<CrumbsList>(`/workspace/sources/${encodeURIComponent(id)}/crumbs`).then(value => withArray(value, 'crumbs', 'crumbs')),
   /** Reads every blob of the source once and writes its crumb rows, as a job. The answer is the job's id. */
   rescanCrumbs: (id: string) => request<{ id: string }>(`/workspace/sources/${encodeURIComponent(id)}/crumbs/rescan`, { method: 'POST' }),
   /** Asks a stoppable job to stop at its next item. A run so stopped is journaled `interrupted`. */
   stopJob: (id: string) => request<{ stopped: string }>(`/workspace/jobs/${encodeURIComponent(id)}/stop`, { method: 'POST' }),
   addSource: (source: NewSource) => request<unknown>('/workspace/sources', { method: 'POST', body: JSON.stringify(source) }),
+  updateSource: (id: string, settings: SourceSettings) => request<{ action: 'update'; source: string }>(`/workspace/sources/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(settings) }),
   setSourceEnabled: (id: string, enabled: boolean) => request<unknown>(`/workspace/sources/${encodeURIComponent(id)}/enabled`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   /** Starts a run in the store's one lane. `run_id` is the journal's handle and the job's id, so the page opens the drawer on it. */
   runSource: (id: string, body: { skip?: string[]; limit?: number; refresh?: boolean } = {}) => request<{ run_id: string }>(`/workspace/sources/${encodeURIComponent(id)}/run`, { method: 'POST', body: JSON.stringify(body) }),
   /** Starts an investigation of an address, as a job. The answer is the job's id, which is also the report's. */
   investigate: (url: string) => request<{ id: string }>('/workspace/investigations', { method: 'POST', body: JSON.stringify({ url }) }),
+  verifyVectors: () => request<{ id: string }>('/workspace/vectors/verify', { method: 'POST' }),
+  repairVectors: (reportId: string) => request<{ id: string }>('/workspace/vectors/repair', { method: 'POST', body: JSON.stringify({ report_id: reportId }) }),
+  embedVectors: (reportId: string) => request<{ id: string }>('/workspace/vectors/embed', { method: 'POST', body: JSON.stringify({ report_id: reportId }) }),
+  vectorReport: (id: string) => request<{ id: string; report: VectorReport | null }>(`/workspace/vectors/reports/${encodeURIComponent(id)}`),
   investigation: (id: string) => request<InvestigationReport>(`/workspace/investigations/${encodeURIComponent(id)}`),
   /** The graph as a filter asks for it. Sources always come back; a host does while an edge reaches it. */
   graph: (filter: GraphFilter) => {

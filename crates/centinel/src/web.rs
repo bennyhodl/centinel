@@ -9,8 +9,8 @@
 //! `serve` arms the scheduler; `web` must not. A person opening the workspace to review
 //! documents did not ask for a collection run, and a command named for *looking* that
 //! *collects* would be the second meaning hiding in one verb. So this is its own
-//! subcommand with the scheduler always off. Its writes are limited to classifier truth
-//! and reversible usage decisions; it never starts acquisition.
+//! subcommand with the scheduler always off. Administrators can save schedules here
+//! for a later `serve` invocation, or explicitly start a manual collection.
 //!
 //! ## `--server`: this page, another machine's corpus
 //!
@@ -27,7 +27,7 @@ use centinel_core::op::Ctx;
 /// nothing it could switch back on. An occupied port is reused only when its product,
 /// API version, binary version, and canonical store root all match. Every other occupant
 /// is refused before a browser opens.
-pub async fn open(ctx: Arc<Ctx>, bind: &str, rebuilt: bool) -> Result<()> {
+pub async fn open(ctx: Arc<Ctx>, bind: &str, rebuilt: bool, config: Option<&str>) -> Result<()> {
     check_bundle()?;
     let url = format!(
         "{}/web",
@@ -78,7 +78,13 @@ pub async fn open(ctx: Arc<Ctx>, bind: &str, rebuilt: bool) -> Result<()> {
         return Ok(());
     }
     spawn_browser(url);
-    super::http::serve_until(ctx, super::http::listen(bind).await?, crate::terminate()).await
+    super::http::serve_until(
+        ctx,
+        super::http::listen(bind).await?,
+        config,
+        crate::terminate(),
+    )
+    .await
 }
 
 /// The workspace page must carry this binary's version. It is checked before a port is

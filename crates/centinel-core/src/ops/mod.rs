@@ -69,10 +69,12 @@ pub use run::{RunArgs, RunReport, SourceRun, Stage, StageRun, StageStatus, run};
 pub use schedule::{RmArgs, ScheduleAction, ScheduleArgs, ScheduleReport, SetArgs, schedule};
 pub use schedules::{
     HistoryArgs, HistoryReport, ScheduleStatus, SchedulesArgs, SchedulesReport, history, schedules,
+    schedules_for,
 };
 pub use search::{AlsoAt, SearchArgs, SearchReport, SearchResult, search};
 pub use source::{
-    AddArgs, IdArgs, ListedSource, SourceAction, SourceArgs, SourceReport, listed, source,
+    AddArgs, IdArgs, ListedSource, SourceAction, SourceArgs, SourceReport, SourceUpdateArgs,
+    listed, source,
 };
 pub use status::{SourceCount, StatusArgs, StatusReport, status};
 pub use transcribe::{
@@ -81,7 +83,7 @@ pub use transcribe::{
 pub use update::{
     Applied, InstalledFrom, Provenance, ReleaseCheck, RepoCheck, UpdateArgs, UpdateReport, update,
 };
-pub use verify::{VerifyReport, VerifyTableArgs, verify};
+pub use verify::{VerifyReport, VerifyTableArgs, repair_verified, verify};
 
 // ── shared plumbing ───────────────────────────────────────────────────────────
 

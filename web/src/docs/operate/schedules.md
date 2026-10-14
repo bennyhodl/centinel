@@ -13,6 +13,16 @@ centinel serve
 `centinel serve` is what fires them. `--no-schedule` serves the read API without firing
 anything, which is what a machine that serves a corpus somebody else collects wants.
 
+Administrators can also open **Schedules** at `/schedules` in the workspace. Create or edit
+an id, cron expression, timezone and source selection, preview the next three fire times,
+and pause, resume or remove a schedule. **Run now** starts a manual collection in the
+same lane as scheduled and CLI runs and opens its job log.
+
+Workspace changes use the server's active config, including `serve --config`, and apply
+to the running scheduler before its next fire. `serve --no-schedule` and `centinel web`
+save edits without enabling automatic collection. The page says when scheduling is off.
+CLI edits still require SIGHUP or a restart to reload a running server.
+
 ## Writing one
 
 ```bash

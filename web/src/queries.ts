@@ -1,5 +1,5 @@
 import { keepPreviousData, queryOptions, skipToken } from '@tanstack/react-query'
-import { api, corpusParams, type CorpusFilters, type DocumentIdentity, type GraphFilter, type JobState, type RunDetailQuery } from './api'
+import { api, corpusParams, type CollectionHistoryFilters, type CorpusFilters, type DocumentIdentity, type GraphFilter, type JobState, type RunDetailQuery } from './api'
 
 /**
  * Every read the workspace makes, one builder each. A route's loader warms the cache
@@ -7,10 +7,12 @@ import { api, corpusParams, type CorpusFilters, type DocumentIdentity, type Grap
  * one prefix per kind (`corpus`, `runs`, `run`, …) for invalidation to aim at.
  */
 export const queries = {
+  schedules: () => queryOptions({ queryKey: ['schedules'], queryFn: api.schedules, refetchInterval: query => query.state.data?.running ? 3000 : 30_000 }),
   /** Who is signed in. Re-read every 15 s while someone is, so a revocation lands within that. */
   account: () => queryOptions({ queryKey: ['account'], queryFn: api.account, retry: false, refetchInterval: query => query.state.data ? 15_000 : false }),
   users: () => queryOptions({ queryKey: ['users'], queryFn: api.users, refetchInterval: 15_000 }),
   system: () => queryOptions({ queryKey: ['system'], queryFn: api.system, staleTime: 60_000 }),
+  systemHealth: () => queryOptions({ queryKey: ['system-health'], queryFn: api.systemHealth, staleTime: 30_000, refetchInterval: 60_000 }),
   ops: () => queryOptions({ queryKey: ['ops'], queryFn: api.ops, staleTime: Infinity }),
   questions: () => queryOptions({ queryKey: ['questions'], queryFn: api.questions }),
   presets: () => queryOptions({ queryKey: ['presets'], queryFn: api.presets, staleTime: Infinity }),
@@ -26,6 +28,15 @@ export const queries = {
     const params = corpusParams({ ...noFilters, ...filters }, page, pageSize)
     return queryOptions({ queryKey: ['corpus', params.toString()], queryFn: () => api.corpus(params), placeholderData: keepPreviousData })
   },
+
+  collectionHistory: ({ source, schedule, outcome, page }: CollectionHistoryFilters) => queryOptions({
+    queryKey: ['collection-history', { source, schedule, outcome, page }], queryFn: () => api.collectionHistory({ source, schedule, outcome, page }),
+    // CLI and scheduled collections can change the journal without a browser action.
+    placeholderData: keepPreviousData, refetchInterval: 5000,
+  }),
+  collectionAttempt: (id: string) => queryOptions({
+    queryKey: ['collection-history', 'attempt', id], queryFn: () => api.collectionAttempt(id), enabled: Boolean(id),
+  }),
 
   /** A page of the run ledger. Polls while one of its runs is scoring. */
   runs: (page: number, pageSize = 25) => queryOptions({
@@ -90,6 +101,12 @@ export const queries = {
 
   /** A source's off-host links. Reading them can take seconds on a large source, so they are asked once. */
   sourceCrumbs: (id: string) => queryOptions({ queryKey: ['source-crumbs', id], queryFn: () => api.sourceCrumbs(id), staleTime: 5 * 60_000 }),
+
+  vectorReport: (id: string) => queryOptions({
+    queryKey: ['vector-report', id], queryFn: () => api.vectorReport(id), enabled: Boolean(id),
+    staleTime: Infinity, retry: false,
+    refetchInterval: query => query.state.data?.report === null ? 1000 : false,
+  }),
 
   /** What an investigation found. One never changes once filed. */
   investigation: (id: string) => queryOptions({ queryKey: ['investigation', id], queryFn: () => api.investigation(id), staleTime: Infinity, retry: false }),

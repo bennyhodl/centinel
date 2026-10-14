@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { createFileRoute, Link, Navigate, Outlet, redirect, useLocation } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { BookOpen, ChevronsUpDown, CircleDollarSign, Eye, FlaskConical, Globe, History, LogOut, Moon, Plug, Search, ShieldCheck, Sparkles, Sun, Users, Waypoints } from 'lucide-react'
+import { Activity, BookOpen, CalendarClock, ChevronsUpDown, CircleDollarSign, Download, Eye, FlaskConical, Globe, History, LogOut, Moon, Plug, Search, ShieldCheck, Sparkles, Sun, Users, Waypoints, Wrench } from 'lucide-react'
 import { signOut } from '../auth'
 import { queries } from '../queries'
 import { JobDrawerProvider, WorkingNow, useJobEvents } from '../jobs'
@@ -66,22 +66,43 @@ function Shell({ account }: { account: Account }) {
         <NavItem active={at('/')} label="Search" count={corpus.data && number(corpus.data.total)}>
           <Link to="/" search={{}}><Search /><span>Search</span></Link>
         </NavItem>
-        {admin && <NavItem active={pathname.startsWith('/sources')} label="Sources" count={sources.data && number(sources.data.sources.length)}>
-          <Link to="/sources"><Globe /><span>Sources</span></Link>
-        </NavItem>}
-        {admin && <NavItem active={at('/graph')} label="Graph">
+        <NavItem active={at('/graph')} label="Graph">
           <Link to="/graph" search={{}}><Waypoints /><span>Graph</span></Link>
-        </NavItem>}
+        </NavItem>
       </NavGroup>
-      {admin && <NavGroup label="Classifiers">
+      {admin && <NavGroup label="Admin">
+        <NavItem active={pathname.startsWith('/sources')} label="Sources" count={sources.data && number(sources.data.sources.length)}>
+          <Link to="/sources"><Globe /><span>Sources</span></Link>
+        </NavItem>
+        <NavItem active={at('/schedules')} label="Schedules">
+          <Link to="/schedules"><CalendarClock /><span>Schedules</span></Link>
+        </NavItem>
+        <NavItem active={at('/history')} label="Collection history">
+          <Link to="/history" search={{ source: '', schedule: '', outcome: '', page: 1, run: '' }}><History /><span>Collection history</span></Link>
+        </NavItem>
+        <NavItem active={at('/ingest')} label="Ingest URLs">
+          <Link to="/ingest"><Download /><span>Ingest URLs</span></Link>
+        </NavItem>
         <NavItem active={at('/classifiers')} label="Classify" count={questions.data && number(questions.data.questions.length)}>
           <Link to="/classifiers"><FlaskConical /><span>Classify</span></Link>
         </NavItem>
-        <NavItem active={at('/runs')} label="Runs" count={running.length ? <LivePill>{running.length} live</LivePill> : recent.data && number(recent.data.total)}>
-          <Link to="/runs" search={{ run: '', page: 1, outcome: '' }}><History /><span>Runs</span></Link>
+        <NavItem active={at('/runs')} label="Classifier runs" count={running.length ? <LivePill>{running.length} live</LivePill> : recent.data && number(recent.data.total)}>
+          <Link to="/runs" search={{ run: '', page: 1, outcome: '' }}><History /><span>Classifier runs</span></Link>
         </NavItem>
         <NavItem active={at('/review')} label="Review" count={review.data?.in_review_band ? <span className="font-semibold text-flame-ink">{number(review.data.in_review_band)}</span> : undefined}>
           <Link to="/review"><Eye /><span>Review</span></Link>
+        </NavItem>
+        <NavItem active={at('/system')} label="Health">
+          <Link to="/system"><Activity /><span>Health</span></Link>
+        </NavItem>
+        <NavItem active={at('/maintenance')} label="Maintenance">
+          <Link to="/maintenance" search={{}}><Wrench /><span>Maintenance</span></Link>
+        </NavItem>
+        <NavItem active={at('/spend')} label="Spend">
+          <Link to="/spend" search={{ metric: 'cost', days: 30 }}><CircleDollarSign /><span>Spend</span></Link>
+        </NavItem>
+        <NavItem active={at('/admin')} label="Accounts">
+          <Link to="/admin"><Users /><span>Accounts</span></Link>
         </NavItem>
       </NavGroup>}
       <NavGroup label="Agent">
@@ -164,12 +185,11 @@ function NavItem({ active, label, count, children }: { active: boolean; label: s
 
 /**
  * Who is signed in, and behind it everything about the workspace rather than the archive:
- * spend, documentation, colour mode, the admin page and signing out.
+ * documentation, colour mode and signing out.
  */
 function AccountMenu({ account }: { account: Account }) {
   const { isMobile } = useSidebar()
   const [theme, toggleTheme] = useTheme()
-  const admin = account.role === 'admin'
   const who = <>
     <Portrait account={account} className="size-8 text-base" />
     <div className="grid flex-1 text-left leading-tight">
@@ -188,13 +208,11 @@ function AccountMenu({ account }: { account: Account }) {
         <DropdownMenuLabel className="p-0 font-normal"><div className="flex items-center gap-2 px-1 py-1.5 text-sm">{who}</div></DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuGroup>
-          {admin && <DropdownMenuItem asChild><Link to="/spend" search={{ metric: 'cost', days: 30 }}><CircleDollarSign />Spend</Link></DropdownMenuItem>}
           <DropdownMenuItem asChild><Link to="/docs/$" params={{ _splat: '' }}><BookOpen />Documentation</Link></DropdownMenuItem>
           {/* Kept open, so the page changes colour under the menu. */}
           <DropdownMenuItem onSelect={event => { event.preventDefault(); toggleTheme() }}>
             {theme === 'dark' ? <Sun /> : <Moon />}{theme === 'dark' ? 'Light mode' : 'Dark mode'}
           </DropdownMenuItem>
-          {admin && <DropdownMenuItem asChild><Link to="/admin"><Users />Admin</Link></DropdownMenuItem>}
         </DropdownMenuGroup>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={signOut}><LogOut />Sign out</DropdownMenuItem>

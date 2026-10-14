@@ -201,6 +201,15 @@ pub async fn collect(
     // No `--site`/`--channel` here: collection works from the addresses the DiscoveryRun
     // already holds, so the address a source was enumerated from is not needed again.
     let source = super::resolve_source(ctx, &config, &args.source, None, None, &over).await?;
+    let matches = if args.matches.is_empty() {
+        crate::catalog::Sources::new(&ctx.store)
+            .get(&args.source)
+            .await?
+            .map(|s| s.matches)
+            .unwrap_or_default()
+    } else {
+        args.matches.clone()
+    };
 
     let out = acquire::collect(
         &ctx.store,
@@ -208,7 +217,7 @@ pub async fn collect(
         &CollectOpts {
             limit: args.limit,
             refresh: args.refresh,
-            matches: args.matches.clone(),
+            matches,
             max_bytes: args.max_mb.saturating_mul(1024 * 1024),
             max_failures: args.max_failures,
             cancel: cancel.clone(),

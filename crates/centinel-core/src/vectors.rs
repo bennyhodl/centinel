@@ -290,6 +290,11 @@ pub struct VectorAudit {
 }
 
 impl VectorAudit {
+    /// The table version these fragments were read at.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     pub fn readable(&self) -> usize {
         self.fragments - self.unreadable.len()
     }

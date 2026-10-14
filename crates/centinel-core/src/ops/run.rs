@@ -452,6 +452,14 @@ pub async fn run(
         return Ok(report);
     }
 
+    // The unscoped tail also handles previously collected, disabled sources. Capture
+    // their settings before collection so edits during a run apply to the next one.
+    let definitions = if args.sources.is_empty() {
+        crate::catalog::Sources::new(&ctx.store).list().await?
+    } else {
+        selected.clone()
+    };
+
     let skip = |stage: Stage| args.skip.contains(&stage);
 
     // Built before anything runs. A source that cannot be constructed is a config error,
@@ -485,7 +493,7 @@ pub async fn run(
     let mut done = 0u64;
 
     // ── acquire, per source ───────────────────────────────────────────────────
-    for source in &built {
+    for (definition, source) in selected.iter().zip(&built) {
         // Between sources as well as inside them. A source whose stages all finished is
         // wholly recorded, so this is the cleanest place a shutdown can land.
         cancel.check()?;
@@ -516,9 +524,17 @@ pub async fn run(
             } else {
                 // A span per stage, so every line a crawl writes says which source and
                 // which stage it belongs to without each site repeating it.
-                run_acquisition(ctx, source.as_ref(), &args, stage, progress, cancel)
-                    .instrument(tracing::info_span!("stage", source = %id, stage = stage.name()))
-                    .await?
+                run_acquisition(
+                    ctx,
+                    source.as_ref(),
+                    &args,
+                    stage,
+                    &definition.matches,
+                    progress,
+                    cancel,
+                )
+                .instrument(tracing::info_span!("stage", source = %id, stage = stage.name()))
+                .await?
             };
             stages.push(outcome);
         }
@@ -539,12 +555,6 @@ pub async fn run(
     // Scoped to the named sources when the caller named some, and to the whole store
     // otherwise. `embed` has no source axis at all — the vector table is keyed by chunk
     // hash, which is corpus-wide by construction.
-    let scope: Vec<String> = if args.sources.is_empty() {
-        Vec::new()
-    } else {
-        selected.iter().map(|s| s.id.clone()).collect()
-    };
-
     for stage in derive_stages {
         cancel.check()?;
 
@@ -557,7 +567,7 @@ pub async fn run(
         } else if args.dry_run {
             StageRun::skipped(stage, "--dry-run")
         } else {
-            run_derivation(ctx, &config, &args, stage, &scope, progress, cancel)
+            run_derivation(ctx, &config, &args, stage, &definitions, progress, cancel)
                 .instrument(tracing::info_span!("stage", stage = stage.name()))
                 .await?
         };
@@ -594,6 +604,7 @@ async fn run_acquisition(
     source: &dyn Source,
     args: &RunArgs,
     stage: Stage,
+    matches: &[String],
     progress: &Progress,
     cancel: &Cancel,
 ) -> anyhow::Result<StageRun> {
@@ -652,7 +663,7 @@ async fn run_acquisition(
             let opts = CollectOpts {
                 limit: args.limit,
                 refresh: args.refresh,
-                matches: Vec::new(),
+                matches: matches.to_vec(),
                 // The finest boundary a run has. A paced crawl spends hours between
                 // addresses, so a shutdown that only checked between *stages* would
                 // wait out the whole source.
@@ -787,16 +798,16 @@ async fn run_derivation(
     config: &Config,
     args: &RunArgs,
     stage: Stage,
-    scope: &[String],
+    definitions: &[crate::config::SourceConfig],
     progress: &Progress,
     cancel: &Cancel,
 ) -> anyhow::Result<StageRun> {
     // One call per named source, or one unscoped call covering the store. Folding the
     // results keeps the report shape identical either way.
-    let targets: Vec<Option<String>> = if scope.is_empty() {
+    let targets: Vec<Option<String>> = if args.sources.is_empty() {
         vec![None]
     } else {
-        scope.iter().cloned().map(Some).collect()
+        definitions.iter().map(|s| Some(s.id.clone())).collect()
     };
 
     match stage {
@@ -856,15 +867,32 @@ async fn run_derivation(
             if let Some(reason) = unserved(&config.inference, Capability::Transcribe).await {
                 return Ok(StageRun::skipped(stage, reason));
             }
+            // Language belongs to each source. Even an unscoped run must transcribe
+            // sources separately so a channel override reaches the transcription server.
+            let targets = if args.sources.is_empty() {
+                ctx.store
+                    .sources()
+                    .await?
+                    .into_iter()
+                    .map(|id| Some(id.to_string()))
+                    .collect()
+            } else {
+                targets
+            };
             fold_targets(
                 stage,
                 targets,
                 |source| async move {
+                    let language = definitions
+                        .iter()
+                        .find(|s| Some(s.id.as_str()) == source.as_deref())
+                        .and_then(|s| s.lang.clone())
+                        .unwrap_or_else(|| config.defaults.lang.clone());
                     let r = super::transcribe::transcribe_with(
                         ctx,
                         TranscribeArgs {
                             source,
-                            language: Some(config.defaults.lang.clone()),
+                            language: Some(language),
                             // No `limit`: see `RunArgs::limit`. Collection is already
                             // capped, so there is nothing extra here to bound — and a
                             // second cap over a backlog only hides it.

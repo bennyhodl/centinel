@@ -9,8 +9,9 @@
 //! ## `Operator`, because this is the file authority comes from
 //!
 //! A scheduled run is the operator's instruction, executed later. This op writes those
-//! instructions, so reachable over HTTP it would be privilege escalation with extra
-//! steps — an unauthenticated caller adding a block that a server then fires forever.
+//! instructions, so it stays unavailable through the public ops API and MCP. The
+//! workspace calls it directly after requiring an administrator browser session and
+//! chooses the server config path itself.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -99,6 +100,24 @@ pub struct SetArgs {
     pub config: Option<String>,
 }
 
+impl From<ScheduleConfig> for SetArgs {
+    fn from(schedule: ScheduleConfig) -> Self {
+        Self {
+            id: Some(schedule.id),
+            cron: Some(schedule.cron),
+            tz: schedule.tz,
+            sources: schedule.sources,
+            skip: schedule.skip,
+            limit: schedule.limit,
+            refresh: schedule.refresh,
+            jitter_secs: schedule.jitter_secs,
+            disabled: !schedule.enabled.unwrap_or(true),
+            no_catch_up: !schedule.catch_up.unwrap_or(true),
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct RmArgs {
     /// Schedule id to remove.
@@ -185,16 +204,7 @@ async fn set(ctx: &Ctx, args: SetArgs) -> anyhow::Result<ScheduleReport> {
         );
     }
 
-    // Replacing is remove-then-append rather than an in-place rewrite, so the one code
-    // path that validates an addition is the one that runs.
-    if args.replace && path.exists() {
-        let existing = Config::from_file(&path)?;
-        if existing.schedule(&id).is_some() {
-            config::remove_schedule(&path, &id)?;
-        }
-    }
-
-    config::append_schedule(&path, &block)?;
+    config::save_schedule(&path, &block, args.replace)?;
 
     // Read back out of the file rather than off the struct: what the operator will get is
     // what the file says, and the two have now been through a parser.
@@ -433,6 +443,39 @@ mod tests {
         let parsed = Config::from_file(std::path::Path::new(&config)).unwrap();
         assert_eq!(parsed.schedules.len(), 1);
         assert_eq!(parsed.schedules[0].cron, "@weekly");
+    }
+
+    /// A rejected replacement must leave the working schedule byte-for-byte intact.
+    #[tokio::test]
+    async fn invalid_replacement_preserves_the_existing_config() {
+        let (_d, ctx) = ctx().await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_file(&dir);
+        schedule(
+            &ctx,
+            ScheduleArgs {
+                action: ScheduleAction::Set(set_args(&config)),
+            },
+        )
+        .await
+        .unwrap();
+        let before = std::fs::read(&config).unwrap();
+        for (cron, zone) in [("99 3 * * *", "UTC"), ("@daily", "Not/AZone")] {
+            let result = schedule(
+                &ctx,
+                ScheduleArgs {
+                    action: ScheduleAction::Set(SetArgs {
+                        cron: Some(cron.into()),
+                        tz: Some(zone.into()),
+                        replace: true,
+                        ..set_args(&config)
+                    }),
+                },
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&config).unwrap(), before);
+        }
     }
 
     /// The relational mistake this op exists to catch, checked before anything is written.

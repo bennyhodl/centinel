@@ -36,6 +36,24 @@ a host you have not collected before, investigate it — see
 [Investigate and check](investigate.md). Nothing here is expensive to undo except the hour
 a wrong strategy spends.
 
+## Editing collection settings
+
+On a source's page, **Settings** edits its request rate, URL substring filters and
+discovery strategy. Channels also have a caption and transcription language and an
+audio fallback for videos without captions. Empty overrides inherit the defaults;
+empty filters collect every URL. Changes apply to the next run.
+
+The CLI replaces the same collection settings:
+
+```bash
+centinel source update agartha --rps 0.5 --match /agenda/ --strategy listing
+centinel source update agartha-council --lang es --audio-if-no-captions true
+```
+
+Include every override you want to keep. Omitted options remove their overrides, and
+omitting `--match` clears the filters. The source id, website or channel address,
+enabled state and existing yt-dlp arguments stay intact. Invalid settings change nothing.
+
 ## From the web
 
 The **Sources** page does the same, for an administrator signed in to the workspace:

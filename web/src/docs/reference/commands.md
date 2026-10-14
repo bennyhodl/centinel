@@ -11,7 +11,7 @@ HTTP at `POST /ops/<name>`, and from MCP — except where **reach** forbids it. 
 | Command | What it does |
 |---|---|
 | `run` | Collect everything new for every configured source, then index and embed it. |
-| `source` | Add, list and remove the sources `centinel run` walks. |
+| `source` | Add, list, update, enable and disable the sources `centinel run` walks. |
 | `schedule` | Write and remove the cadences `centinel serve` fires runs on. |
 
 ## Stages

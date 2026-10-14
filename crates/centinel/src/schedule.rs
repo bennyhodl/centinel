@@ -16,7 +16,8 @@
 //!
 //! It fires ops whose `Reach` is `Operator` — the ones no HTTP or MCP caller can reach.
 //! That is not a privilege this module holds; it is the operator's, delegated by a
-//! `[[schedule]]` block in a file only they can write. Nothing here reads a request.
+//! `[[schedule]]` block managed by the operator, including through an admin browser
+//! session. Public ops and MCP cannot change these instructions.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,7 +46,7 @@ const REFUSING: &str = "refusing to serve with a schedule that cannot run";
 pub struct Scheduler {
     ctx: Arc<Ctx>,
     config: Config,
-    config_path: Option<std::path::PathBuf>,
+    control: Arc<crate::schedule_control::ScheduleControl>,
     /// Seeds the per-install jitter. The store root: the one string that identifies this
     /// corpus on this machine and survives a restart.
     node_seed: String,
@@ -86,14 +87,10 @@ impl Scheduler {
         // config already validates it, so a `validate_schedules()` call here would be a
         // check that can never fire — and the operator would get the bare parse error with
         // no clue which command refused.
-        let (config, path) = match config_path {
-            Some(p) => {
-                let path = std::path::PathBuf::from(p);
-                let config = Config::from_file(&path).context(REFUSING)?;
-                (config, Some(path))
-            }
-            None => (Config::load().context(REFUSING)?, Config::locate()),
-        };
+        let control =
+            crate::schedule_control::ScheduleControl::load(config_path, "scheduler stopped")
+                .context(REFUSING)?;
+        let config = control.snapshot();
         // Which sources exist is the store's to say, so it is asked here rather than by
         // the config's own validation.
         centinel_core::catalog::Sources::new(&ctx.store)
@@ -105,11 +102,25 @@ impl Scheduler {
         Ok(Self {
             ctx,
             config,
-            config_path: path,
+            control,
             node_seed,
             last_fire: HashMap::new(),
             started: Timestamp::now(),
         })
+    }
+
+    pub fn control(&self) -> Arc<crate::schedule_control::ScheduleControl> {
+        Arc::clone(&self.control)
+    }
+
+    fn sync_config(&mut self) {
+        let config = self.control.snapshot();
+        for schedule in &config.schedules {
+            if self.config.schedule(&schedule.id).is_none() {
+                self.last_fire.insert(schedule.id.clone(), Timestamp::now());
+            }
+        }
+        self.config = config;
     }
 
     /// Seeds [`Self::last_fire`] from the journal.
@@ -146,15 +157,8 @@ impl Scheduler {
     /// is always correct and always sufficient; this exists so that `schedule set` against
     /// a live server is not one.
     pub async fn reload(&mut self) -> Result<()> {
-        let config = match &self.config_path {
-            Some(path) => Config::from_file(path)?,
-            None => Config::load()?,
-        };
-        config.validate_schedules()?;
-        centinel_core::catalog::Sources::new(&self.ctx.store)
-            .check_schedules(&config)
-            .await?;
-        self.config = config;
+        self.control.reload(&self.ctx).await?;
+        self.sync_config();
         Ok(())
     }
 
@@ -170,6 +174,7 @@ impl Scheduler {
                 return Ok(());
             }
 
+            self.sync_config();
             let now = Timestamp::now();
             let due: Vec<String> = self
                 .due_at(now)
@@ -181,7 +186,13 @@ impl Scheduler {
                 // Re-resolved by id rather than held across the loop, because `fire` needs
                 // `&mut self` to record the fire and a borrow of `self.config` would
                 // outlive it.
-                let Some(schedule) = self.config.schedule(&id).cloned() else {
+                self.sync_config();
+                let Some(schedule) = self
+                    .due_at(Timestamp::now())
+                    .into_iter()
+                    .find(|due| due.schedule.id == id)
+                    .map(|due| due.schedule.clone())
+                else {
                     continue;
                 };
                 self.fire(
@@ -216,6 +227,10 @@ impl Scheduler {
         let Some(holder) = RunLock::take_stale(&self.ctx.store) else {
             return;
         };
+        if let Some(operation) = &holder.operation {
+            tracing::warn!(%operation, pid = holder.pid, "reclaimed a dead maintenance job");
+            return;
+        }
         tracing::warn!(
             pid = holder.pid,
             schedule = holder.schedule.as_deref().unwrap_or("-"),
@@ -276,7 +291,13 @@ impl Scheduler {
             .collect();
 
         for id in overdue {
-            let Some(schedule) = self.config.schedule(&id).cloned() else {
+            self.sync_config();
+            let Some(schedule) = self
+                .config
+                .schedule(&id)
+                .filter(|s| s.is_enabled())
+                .cloned()
+            else {
                 continue;
             };
             tracing::info!(schedule = %id, "catching up a missed fire");
@@ -351,6 +372,7 @@ impl Scheduler {
         let nap = tokio::time::sleep(std::time::Duration::from_secs_f64(secs));
 
         tokio::select! {
+            _ = self.control.changed.notified() => { self.sync_config(); }
             _ = nap => {}
             _ = cancel.cancelled() => {}
             _ = reload.recv() => {
@@ -504,9 +526,19 @@ pub fn spawn(
         "scheduler started on its own runtime"
     );
 
+    let control = scheduler.control();
+    control.set_running(true);
+    struct Running(Arc<crate::schedule_control::ScheduleControl>);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.0.set_running(false);
+        }
+    }
+    let running = Running(control);
     let handle = std::thread::Builder::new()
         .name("centinel-sched".into())
         .spawn(move || {
+            let _running = running;
             runtime.block_on(async move {
                 if let Err(e) = scheduler.run(cancel, reload).await {
                     tracing::error!(error = %format!("{e:#}"), "scheduler stopped");
@@ -713,6 +745,7 @@ mod tests {
             &sched.ctx.store,
             &Holder {
                 pid: std::process::id(),
+                operation: None,
                 started_at: Timestamp::now().to_string(),
                 trigger: Trigger::Manual,
                 schedule: None,
@@ -753,6 +786,7 @@ mod tests {
             &sched.ctx.store,
             &Holder {
                 pid: std::process::id(),
+                operation: None,
                 started_at: Timestamp::now().to_string(),
                 trigger: Trigger::Manual,
                 schedule: None,
@@ -795,6 +829,7 @@ mod tests {
             sched.ctx.store.lock_path(),
             serde_json::to_vec_pretty(&Holder {
                 pid: 0x00ff_fffe,
+                operation: None,
                 started_at: "2026-08-06T03:00:00Z".into(),
                 trigger: Trigger::Schedule,
                 schedule: Some("daily".into()),
@@ -817,6 +852,49 @@ mod tests {
         );
     }
 
+    /// A stage sharing the lane is reclaimed after a crash without inventing a collection
+    /// attempt. The next scheduled collection can acquire the released lane.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dead_maintenance_job_releases_the_lane_without_a_collection_record() {
+        let (_s, _c, sched) = scheduler("[[schedule]]\nid = \"daily\"\ncron = \"@daily\"\n").await;
+        std::fs::write(
+            sched.ctx.store.lock_path(),
+            serde_json::to_vec(&Holder {
+                pid: 0x00ff_fffe,
+                operation: Some("extract".into()),
+                started_at: "2026-08-06T03:00:00Z".into(),
+                trigger: Trigger::Manual,
+                schedule: None,
+                sources: vec!["tampa".into()],
+                args: "extract".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        sched.recover_interrupted().await;
+        assert!(
+            Journal::new(&sched.ctx.store)
+                .read()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(RunLock::current(&sched.ctx.store).is_none());
+        let lane = Lane::acquire(
+            &sched.ctx,
+            centinel_core::ops::RunArgs::default(),
+            Launch {
+                surface: "schedule",
+                trigger: Trigger::Schedule,
+                schedule: Some("daily".into()),
+                due_at: None,
+            },
+        )
+        .expect("scheduled collection can take the lane");
+        drop(lane);
+    }
+
     /// Adding a schedule must not start a crawl. Catch-up is for a fire that was *missed*,
     /// and a schedule created a minute ago has missed nothing.
     #[tokio::test]
@@ -834,6 +912,37 @@ mod tests {
                 .is_empty(),
             "a brand-new schedule fired at startup"
         );
+    }
+
+    /// A saved resume must reach the loop, even though the process started with
+    /// this schedule paused. No stage touches a network.
+    #[tokio::test]
+    async fn a_saved_resume_reaches_the_running_scheduler() {
+        let (_store, _config, mut scheduler) = scheduler(
+            "[[schedule]]\nid = 'minutely'\ncron = '* * * * *'\ntz = 'UTC'\njitter_secs = 0\nenabled = false\nskip = ['discover', 'collect', 'extract', 'transcribe', 'index', 'embed']\n"
+        ).await;
+        scheduler.started = Timestamp::now() - jiff::Span::new().minutes(5);
+        let ctx = scheduler.ctx.clone();
+        let control = scheduler.control();
+        let (tx, reload) = ReloadSignal::channel();
+        let (cancel, thread) = spawn(scheduler, reload).unwrap();
+        control.set_enabled(&ctx, "minutely", true).await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(attempt) = Journal::new(&ctx.store).last_for("minutely").await.unwrap()
+                {
+                    assert_eq!(attempt.trigger, Trigger::Schedule);
+                    assert_eq!(attempt.outcome, Outcome::Ok);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        cancel.cancel();
+        drop(tx);
+        thread.join().unwrap();
+        result.unwrap();
     }
 
     /// A reload that does not validate keeps the running configuration. The alternative is
