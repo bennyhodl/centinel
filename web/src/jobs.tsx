@@ -28,11 +28,17 @@ export function useJobEvents(enabled = true) {
     stream.addEventListener('job', message => {
       const event = JSON.parse(message.data) as JobEvent
       client.setQueryData(key, jobs => foldJob(jobs ?? [], event))
+      const kind = event.type === 'finished' ? client.getQueryData(key)?.find(job => job.id === event.job)?.kind : undefined
       // A classifier run that ends has changed the corpus.
-      if (event.type === 'finished' && client.getQueryData(key)?.find(job => job.id === event.job)?.kind === 'classify') {
+      if (kind === 'classify') {
         client.invalidateQueries({ queryKey: ['runs'] })
         client.invalidateQueries({ queryKey: ['run', event.job] })
         client.invalidateQueries({ queryKey: ['corpus'] })
+      }
+      // A collection run that ends, finished or stopped, is in the journal: every source's state moved.
+      if (kind === 'run') {
+        client.invalidateQueries({ queryKey: ['sources'] })
+        client.invalidateQueries({ queryKey: ['source'] })
       }
     })
     // Every answer a running classifier writes is live in the corpus at once, so a page
