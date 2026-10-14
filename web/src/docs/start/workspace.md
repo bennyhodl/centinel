@@ -20,8 +20,8 @@ and each entry carries a count once it does.
 | Group | Page | What it is for |
 |---|---|---|
 | Archive | **Search** | Find documents by their words, narrowed by source, usage, classifier score and address. [Searching](../use/search.md) |
-| Admin | **Sources** | What the archive collects: investigate an address, add it, edit its settings, run it, see what each source holds and where it links off-site. [Sources](../operate/sources.md) |
 | | **Graph** | Explore sources and the hosts their pages link to. |
+| Admin | **Sources** | What the archive collects: investigate an address, add it, edit its settings, run it, see what each source holds and where it links off-site. [Sources](../operate/sources.md) |
 | | **Schedules** | Create, edit, pause and run collection schedules. [Schedules](../operate/schedules.md) |
 | | **Collection history** | Inspect collection attempts across sources and schedules, and repeat their source scope. |
 | | **Ingest URLs** | Archive specific URLs under an existing source. Extract and index them afterwards from the source page. |
@@ -35,7 +35,8 @@ and each entry carries a count once it does.
 | Agent | **Connect** | The command that gives Claude, Cursor or another client this corpus. [Agents and programs](../use/agents.md) |
 | | **Skills** | Jobs an agent can do end to end, installed with one command. |
 
-The Admin section appears only for administrators. Opening a result takes you to the reader, which shows the document as it was collected
+The Admin section appears only for administrators. Graph is available to every approved
+user; its Refuse, Allow and Investigate controls require an administrator. Opening a result takes you to the reader, which shows the document as it was collected
 beside the text that was extracted from it. [Reading a document](../use/read.md)
 
 At the foot of the sidebar, **Working now** lists whatever the server is doing, such as a

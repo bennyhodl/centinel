@@ -18,7 +18,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
 import { Skeleton } from '@/components/ui/skeleton'
 
-const route = getRouteApi('/_workspace/_admin/graph')
+const route = getRouteApi('/_workspace/graph')
 
 /** The page's frame: the canvas takes the whole card, as the Classify page does. */
 const frame = 'relative -mx-5 -my-6 h-[calc(100svh-3rem)] overflow-hidden bg-canvas bg-[radial-gradient(var(--dot)_1.4px,transparent_1.4px)] [background-size:18px_18px] md:-mx-10 md:-my-8 md:h-[calc(100svh-1.25rem-2px)] md:rounded-2xl'
@@ -259,6 +259,7 @@ function NodeDrawer({ node, view, nodes, onClose, onFocus }: { node: GraphNode; 
 }
 
 function HostCard({ node, view, nodes, onJump, onInvestigate, investigating, error }: { node: Extract<GraphNode, { kind: 'host' }>; view: GraphView; nodes: Map<string, GraphNode>; onJump: (id: string) => void; onInvestigate: () => void; investigating: boolean; error: Error | null }) {
+  const admin = route.useRouteContext().account.role === 'admin'
   const client = useQueryClient()
   const detail = useQuery(queries.graphHost(node.host))
   const refresh = () => Promise.all([client.invalidateQueries({ queryKey: ['graph'] }), client.invalidateQueries({ queryKey: ['graph-host', node.host] }), client.invalidateQueries({ queryKey: ['source-crumbs'] })])
@@ -291,15 +292,16 @@ function HostCard({ node, view, nodes, onJump, onInvestigate, investigating, err
     </div>
     <div className="flex items-center gap-2 border-t px-6 py-4">
       <span className="flex-1 text-[13px] text-muted-foreground">{refused ? 'Refused: no pass offers it again.' : standing === 'promoted' ? 'A source collects this host.' : 'Open: nothing has been decided.'}</span>
-      {refused
+      {admin && (refused
         ? <Button variant="outline" disabled={allow.isPending} onClick={() => allow.mutate()}>{allow.isPending ? <Spinner /> : <Undo2 />}Allow</Button>
-        : standing === 'open' && <Button variant="outline" disabled={refuse.isPending} onClick={() => refuse.mutate()}>{refuse.isPending ? <Spinner /> : <Ban />}Refuse</Button>}
-      <Button disabled={investigating} onClick={onInvestigate}>{investigating ? <Spinner /> : <Search />}Investigate</Button>
+        : standing === 'open' && <Button variant="outline" disabled={refuse.isPending} onClick={() => refuse.mutate()}>{refuse.isPending ? <Spinner /> : <Ban />}Refuse</Button>)}
+      {admin && <Button disabled={investigating} onClick={onInvestigate}>{investigating ? <Spinner /> : <Search />}Investigate</Button>}
     </div>
   </>
 }
 
 function SourceCard({ node, view, nodes, onJump }: { node: Extract<GraphNode, { kind: 'source' }>; view: GraphView; nodes: Map<string, GraphNode>; onJump: (id: string) => void }) {
+  const admin = route.useRouteContext().account.role === 'admin'
   const out = view.edges.filter(edge => edge.from === node.id)
   const into = view.edges.filter(edge => edge.to === node.id)
   const name = (id: string) => { const other = nodes.get(id); return other ? labelOf(other) : id }
@@ -321,7 +323,7 @@ function SourceCard({ node, view, nodes, onJump }: { node: Extract<GraphNode, { 
     </div>
     <div className="flex items-center gap-2 border-t px-6 py-4">
       <span className="flex-1 text-[13px] text-muted-foreground">{node.host ?? node.target}</span>
-      <Link to="/sources/$id" params={{ id: node.source }} className="inline-flex h-[34px] items-center gap-2 rounded-lg bg-foreground px-3.5 text-[13px] font-medium text-parchment">Open source</Link>
+      {admin && <Link to="/sources/$id" params={{ id: node.source }} className="inline-flex h-[34px] items-center gap-2 rounded-lg bg-foreground px-3.5 text-[13px] font-medium text-parchment">Open source</Link>}
     </div>
   </>
 }

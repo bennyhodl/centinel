@@ -66,13 +66,13 @@ function Shell({ account }: { account: Account }) {
         <NavItem active={at('/')} label="Search" count={corpus.data && number(corpus.data.total)}>
           <Link to="/" search={{}}><Search /><span>Search</span></Link>
         </NavItem>
+        <NavItem active={at('/graph')} label="Graph">
+          <Link to="/graph" search={{}}><Waypoints /><span>Graph</span></Link>
+        </NavItem>
       </NavGroup>
       {admin && <NavGroup label="Admin">
         <NavItem active={pathname.startsWith('/sources')} label="Sources" count={sources.data && number(sources.data.sources.length)}>
           <Link to="/sources"><Globe /><span>Sources</span></Link>
-        </NavItem>
-        <NavItem active={at('/graph')} label="Graph">
-          <Link to="/graph" search={{}}><Waypoints /><span>Graph</span></Link>
         </NavItem>
         <NavItem active={at('/schedules')} label="Schedules">
           <Link to="/schedules"><CalendarClock /><span>Schedules</span></Link>

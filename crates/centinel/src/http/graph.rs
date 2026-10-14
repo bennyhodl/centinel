@@ -7,8 +7,8 @@
 //! | `POST /workspace/graph/host/{host}/refuse` | `{ "note"? }`: the ruling `crumbs ignore` writes |
 //! | `POST /workspace/graph/host/{host}/allow` | take it back |
 //!
-//! Who may call these is the Sources page's rule ([`super::sources`]): an administrator in
-//! the browser, and no agent. A refusal is the same corpus-wide ruling the CLI and the
+//! Approved browser users may read the graph and host cards. Mutations require an
+//! administrator's browser session. A refusal is the same corpus-wide ruling the CLI and the
 //! Sources page write — one `decisions.jsonl`, one op — so the three can never disagree
 //! about what the corpus will not look at.
 

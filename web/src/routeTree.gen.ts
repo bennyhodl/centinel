@@ -16,10 +16,10 @@ import { Route as EntryLoginRouteImport } from './routes/_entry/login'
 import { Route as WorkspaceIndexRouteImport } from './routes/_workspace/index'
 import { Route as WorkspaceAdminRouteImport } from './routes/_workspace/_admin'
 import { Route as WorkspaceConnectRouteImport } from './routes/_workspace/connect'
+import { Route as WorkspaceGraphRouteImport } from './routes/_workspace/graph'
 import { Route as WorkspaceSkillsRouteImport } from './routes/_workspace/skills'
 import { Route as WorkspaceAdminAdminRouteImport } from './routes/_workspace/_admin/admin'
 import { Route as WorkspaceAdminClassifiersRouteImport } from './routes/_workspace/_admin/classifiers'
-import { Route as WorkspaceAdminGraphRouteImport } from './routes/_workspace/_admin/graph'
 import { Route as WorkspaceAdminHistoryRouteImport } from './routes/_workspace/_admin/history'
 import { Route as WorkspaceAdminIngestRouteImport } from './routes/_workspace/_admin/ingest'
 import { Route as WorkspaceAdminMaintenanceRouteImport } from './routes/_workspace/_admin/maintenance'
@@ -66,6 +66,11 @@ const WorkspaceConnectRoute = WorkspaceConnectRouteImport.update({
   path: '/connect',
   getParentRoute: () => WorkspaceRoute,
 } as any)
+const WorkspaceGraphRoute = WorkspaceGraphRouteImport.update({
+  id: '/graph',
+  path: '/graph',
+  getParentRoute: () => WorkspaceRoute,
+} as any)
 const WorkspaceSkillsRoute = WorkspaceSkillsRouteImport.update({
   id: '/skills',
   path: '/skills',
@@ -82,11 +87,6 @@ const WorkspaceAdminClassifiersRoute =
     path: '/classifiers',
     getParentRoute: () => WorkspaceAdminRoute,
   } as any)
-const WorkspaceAdminGraphRoute = WorkspaceAdminGraphRouteImport.update({
-  id: '/graph',
-  path: '/graph',
-  getParentRoute: () => WorkspaceAdminRoute,
-} as any)
 const WorkspaceAdminHistoryRoute = WorkspaceAdminHistoryRouteImport.update({
   id: '/history',
   path: '/history',
@@ -161,10 +161,10 @@ export interface FileRoutesByFullPath {
   '/consent': typeof EntryConsentRoute
   '/login': typeof EntryLoginRoute
   '/connect': typeof WorkspaceConnectRoute
+  '/graph': typeof WorkspaceGraphRoute
   '/skills': typeof WorkspaceSkillsRoute
   '/admin': typeof WorkspaceAdminAdminRoute
   '/classifiers': typeof WorkspaceAdminClassifiersRoute
-  '/graph': typeof WorkspaceAdminGraphRoute
   '/history': typeof WorkspaceAdminHistoryRoute
   '/ingest': typeof WorkspaceAdminIngestRoute
   '/maintenance': typeof WorkspaceAdminMaintenanceRoute
@@ -184,10 +184,10 @@ export interface FileRoutesByTo {
   '/consent': typeof EntryConsentRoute
   '/login': typeof EntryLoginRoute
   '/connect': typeof WorkspaceConnectRoute
+  '/graph': typeof WorkspaceGraphRoute
   '/skills': typeof WorkspaceSkillsRoute
   '/admin': typeof WorkspaceAdminAdminRoute
   '/classifiers': typeof WorkspaceAdminClassifiersRoute
-  '/graph': typeof WorkspaceAdminGraphRoute
   '/history': typeof WorkspaceAdminHistoryRoute
   '/ingest': typeof WorkspaceAdminIngestRoute
   '/maintenance': typeof WorkspaceAdminMaintenanceRoute
@@ -210,11 +210,11 @@ export interface FileRoutesById {
   '/_entry/login': typeof EntryLoginRoute
   '/_workspace/_admin': typeof WorkspaceAdminRouteWithChildren
   '/_workspace/connect': typeof WorkspaceConnectRoute
+  '/_workspace/graph': typeof WorkspaceGraphRoute
   '/_workspace/skills': typeof WorkspaceSkillsRoute
   '/_workspace/': typeof WorkspaceIndexRoute
   '/_workspace/_admin/admin': typeof WorkspaceAdminAdminRoute
   '/_workspace/_admin/classifiers': typeof WorkspaceAdminClassifiersRoute
-  '/_workspace/_admin/graph': typeof WorkspaceAdminGraphRoute
   '/_workspace/_admin/history': typeof WorkspaceAdminHistoryRoute
   '/_workspace/_admin/ingest': typeof WorkspaceAdminIngestRoute
   '/_workspace/_admin/maintenance': typeof WorkspaceAdminMaintenanceRoute
@@ -236,10 +236,10 @@ export interface FileRouteTypes {
     | '/consent'
     | '/login'
     | '/connect'
+    | '/graph'
     | '/skills'
     | '/admin'
     | '/classifiers'
-    | '/graph'
     | '/history'
     | '/ingest'
     | '/maintenance'
@@ -259,10 +259,10 @@ export interface FileRouteTypes {
     | '/consent'
     | '/login'
     | '/connect'
+    | '/graph'
     | '/skills'
     | '/admin'
     | '/classifiers'
-    | '/graph'
     | '/history'
     | '/ingest'
     | '/maintenance'
@@ -284,11 +284,11 @@ export interface FileRouteTypes {
     | '/_entry/login'
     | '/_workspace/_admin'
     | '/_workspace/connect'
+    | '/_workspace/graph'
     | '/_workspace/skills'
     | '/_workspace/'
     | '/_workspace/_admin/admin'
     | '/_workspace/_admin/classifiers'
-    | '/_workspace/_admin/graph'
     | '/_workspace/_admin/history'
     | '/_workspace/_admin/ingest'
     | '/_workspace/_admin/maintenance'
@@ -360,6 +360,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceConnectRouteImport
       parentRoute: typeof WorkspaceRoute
     }
+    '/_workspace/graph': {
+      id: '/_workspace/graph'
+      path: '/graph'
+      fullPath: '/graph'
+      preLoaderRoute: typeof WorkspaceGraphRouteImport
+      parentRoute: typeof WorkspaceRoute
+    }
     '/_workspace/skills': {
       id: '/_workspace/skills'
       path: '/skills'
@@ -379,13 +386,6 @@ declare module '@tanstack/react-router' {
       path: '/classifiers'
       fullPath: '/classifiers'
       preLoaderRoute: typeof WorkspaceAdminClassifiersRouteImport
-      parentRoute: typeof WorkspaceAdminRoute
-    }
-    '/_workspace/_admin/graph': {
-      id: '/_workspace/_admin/graph'
-      path: '/graph'
-      fullPath: '/graph'
-      preLoaderRoute: typeof WorkspaceAdminGraphRouteImport
       parentRoute: typeof WorkspaceAdminRoute
     }
     '/_workspace/_admin/history': {
@@ -497,7 +497,6 @@ const EntryRouteWithChildren = EntryRoute._addFileChildren(EntryRouteChildren)
 interface WorkspaceAdminRouteChildren {
   WorkspaceAdminAdminRoute: typeof WorkspaceAdminAdminRoute
   WorkspaceAdminClassifiersRoute: typeof WorkspaceAdminClassifiersRoute
-  WorkspaceAdminGraphRoute: typeof WorkspaceAdminGraphRoute
   WorkspaceAdminHistoryRoute: typeof WorkspaceAdminHistoryRoute
   WorkspaceAdminIngestRoute: typeof WorkspaceAdminIngestRoute
   WorkspaceAdminMaintenanceRoute: typeof WorkspaceAdminMaintenanceRoute
@@ -514,7 +513,6 @@ interface WorkspaceAdminRouteChildren {
 const WorkspaceAdminRouteChildren: WorkspaceAdminRouteChildren = {
   WorkspaceAdminAdminRoute: WorkspaceAdminAdminRoute,
   WorkspaceAdminClassifiersRoute: WorkspaceAdminClassifiersRoute,
-  WorkspaceAdminGraphRoute: WorkspaceAdminGraphRoute,
   WorkspaceAdminHistoryRoute: WorkspaceAdminHistoryRoute,
   WorkspaceAdminIngestRoute: WorkspaceAdminIngestRoute,
   WorkspaceAdminMaintenanceRoute: WorkspaceAdminMaintenanceRoute,
@@ -536,6 +534,7 @@ const WorkspaceAdminRouteWithChildren = WorkspaceAdminRoute._addFileChildren(
 interface WorkspaceRouteChildren {
   WorkspaceAdminRoute: typeof WorkspaceAdminRouteWithChildren
   WorkspaceConnectRoute: typeof WorkspaceConnectRoute
+  WorkspaceGraphRoute: typeof WorkspaceGraphRoute
   WorkspaceSkillsRoute: typeof WorkspaceSkillsRoute
   WorkspaceIndexRoute: typeof WorkspaceIndexRoute
   WorkspaceDocsSplatRoute: typeof WorkspaceDocsSplatRoute
@@ -545,6 +544,7 @@ interface WorkspaceRouteChildren {
 const WorkspaceRouteChildren: WorkspaceRouteChildren = {
   WorkspaceAdminRoute: WorkspaceAdminRouteWithChildren,
   WorkspaceConnectRoute: WorkspaceConnectRoute,
+  WorkspaceGraphRoute: WorkspaceGraphRoute,
   WorkspaceSkillsRoute: WorkspaceSkillsRoute,
   WorkspaceIndexRoute: WorkspaceIndexRoute,
   WorkspaceDocsSplatRoute: WorkspaceDocsSplatRoute,

@@ -88,7 +88,11 @@ fn user_may_read(path: &str) -> bool {
             | "/workspace/questions"
             | "/workspace/system"
             | "/workspace/source-hosts"
+            | "/workspace/graph"
     ) || path.starts_with("/workspace/icons/")
+        || path
+            .strip_prefix("/workspace/graph/host/")
+            .is_some_and(|host| !host.is_empty() && !host.contains('/'))
 }
 
 pub fn forbidden() -> Response {
@@ -164,6 +168,28 @@ mod tests {
             // so may read these. A 404 is the route answering, which is past the role check.
             ("secret", "user", "/workspace/icons/tampa.gov", "GET", 404),
             ("secret", "user", "/workspace/source-hosts", "GET", 200),
+            ("secret", "user", "/workspace/graph", "GET", 200),
+            (
+                "secret",
+                "user",
+                "/workspace/graph/host/example.com",
+                "GET",
+                200,
+            ),
+            (
+                "secret",
+                "user",
+                "/workspace/graph/host/example.com/refuse",
+                "POST",
+                403,
+            ),
+            (
+                "secret",
+                "user",
+                "/workspace/graph/host/example.com/allow",
+                "POST",
+                403,
+            ),
             ("secret", "user", "/workspace/icons/tampa.gov", "POST", 403),
             ("secret", "user", "/workspace/icons/tampa.gov", "PUT", 403),
             ("secret", "user", "/workspace/sources", "GET", 403),
