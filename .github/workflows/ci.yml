@@ -30,8 +30,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Debug info is most of what a debug build weighs, and this one carries llama.cpp,
-  # whisper.cpp, arrow, datafusion and lance. Dropping it keeps the saved cache inside
+  # Debug info is most of what a debug build weighs, and this one carries arrow,
+  # datafusion and lance. Dropping it keeps the saved cache inside
   # the 10 GB a repository gets. The cost is line numbers in a backtrace; the function
   # names survive, which is what a failing test is read for.
   CARGO_PROFILE_DEV_DEBUG: 0
@@ -50,15 +50,13 @@ jobs:
   check:
     name: clippy and tests
     runs-on: ubuntu-latest
-    # A cold build compiles two C++ libraries from source before a single test runs.
+    # A cold build compiles arrow, datafusion and lance before a single test runs.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
 
-      # cmake builds the vendored llama.cpp and whisper.cpp. libclang is what bindgen
-      # reads their headers with. protoc is lance's, through prost-build — no crate in
-      # the tree vendors it, so a missing protoc is a failure a few hundred lines into
-      # a build script's output. OpenMP comes from gcc's libgomp, which the image has.
+      # protoc is lance's, through prost-build — no crate in the tree vendors it, so a
+      # missing protoc is a failure a few hundred lines into a build script's output.
       #
       # Both protobuf packages, and the second is not redundant: `protobuf-compiler` is
       # the protoc binary alone, while the well-known types it resolves imports against
@@ -69,14 +67,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake clang libclang-dev protobuf-compiler libprotobuf-dev
+            protobuf-compiler libprotobuf-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
 
       # clippy and the tests run in one job on purpose: both use the dev profile, so the
-      # second reuses the first's C++ build output instead of compiling llama.cpp twice.
+      # second reuses the first's build output instead of compiling lance twice.
       - uses: Swatinem/rust-cache@v2
 
       # The client assets and Start server are embedded in the binary. Node is required
@@ -92,15 +90,13 @@ jobs:
           npm test
           npm run build
 
-      # Not `--all-features`. cuda, vulkan and rocm each need a toolchain (nvcc, hipcc,
-      # glslc) this runner does not have, so enabling them here only fails the build.
-      #
       # `--locked` because the release job rewrites Cargo.lock from the manifest, and a
       # lockfile that had already drifted would land that drift in a tagged release.
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      # The suite is offline — every host in it is a `.test` name served by a fake — so
-      # nothing here needs ffmpeg, yt-dlp, or a network the runner might not reach.
+      # The suite is offline — every host in it is a `.test` name or a model server
+      # faked on a loopback port — so nothing here needs ffmpeg, yt-dlp, a running model
+      # server, or a network the runner might not reach.
       - name: tests
         run: cargo test --workspace --locked

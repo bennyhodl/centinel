@@ -55,13 +55,18 @@
 //!
 //! ## The guard
 //!
-//! A query vector and the vectors it searches must come from the same model (SPEC §6.2).
-//! Two models produce plausible, silently incomparable results, so the model id lives in
-//! the table's schema metadata and a mismatch is refused at [`VectorTable::open`] rather
-//! than discovered in bad rankings. The layout is recorded beside it: a store that holds
-//! only the older `vectors` table — one row per chunk, no document, no filter columns — is
-//! told to run `centinel embed --limit 0`, which fills this table from that one with
-//! nothing sent to a model. [`LegacyVectors`] is how `embed` reads it.
+//! A query vector and the vectors it searches must come from the same space (SPEC §6.2).
+//! Two models produce plausible, silently incomparable results, so the [`Space`] — the
+//! model, and the server that ran it — lives in the table's schema metadata and a mismatch
+//! is refused at [`VectorTable::open`] rather than discovered in bad rankings. The one way
+//! to move a table to another space without re-embedding it is to measure that the new one
+//! reproduces it: [`VectorTable::vectors_of`] gives the stored vectors to compare against,
+//! and [`VectorTable::adopt`] rewrites the record once they agree. The layout is recorded
+//! beside it. A store that holds only the older `vectors` table — one row per chunk, no
+//! document, no filter columns — is refused with the way forward ([`refuse_old_layout`]):
+//! the release before `[inference]` upgrades it with nothing sent to a model, and this one
+//! no longer reads it, because a copy matched on a model name alone would skip the
+//! measurement `--adopt` exists for.
 //!
 //! Width is guarded by the schema itself: the column is a `FixedSizeList` of exactly
 //! `dims` floats, so a wrong width cannot be written at all.
@@ -86,8 +91,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::stream::BoxStream;
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 use lance::dataset::fragment::FileFragment;
 use lance::dataset::transaction::{Operation, Transaction};
 use lance::dataset::write::CommitBuilder;
@@ -106,6 +110,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::index::Filter;
+use crate::inference::Endpoint;
 use crate::op::{Cancel, Progress};
 use crate::store::Store;
 use crate::workspace::{DocState, DocumentId};
@@ -114,8 +119,8 @@ use crate::workspace::{DocState, DocumentId};
 pub const TABLE: &str = "chunks";
 
 /// The table the layout before this one wrote: `(chunk_hash, vector)`, one row per chunk.
-/// Never written again; read by [`LegacyVectors`] so `embed` can fill [`TABLE`] from it.
-pub const LEGACY_TABLE: &str = "vectors";
+/// Never read or written; named so a store holding only it is told what to do.
+const LEGACY_TABLE: &str = "vectors";
 
 const KEY_COLUMN: &str = "key";
 const HASH_COLUMN: &str = "chunk_hash";
@@ -139,8 +144,10 @@ const ALL_COLUMNS: [&str; 8] = [
 /// Where the model id is recorded. Namespaced, because the schema metadata is a shared
 /// map and Lance writes its own keys into it.
 const MODEL_KEY: &str = "centinel.model_id";
-/// Where the layout is recorded. `2` is this one; a table without the key is the one
-/// [`LegacyVectors`] reads.
+/// Where the server that ran the model is recorded — its `base_url`. Absent on a table
+/// written before `[inference]`, when the model id alone said where it ran.
+const ENDPOINT_KEY: &str = "centinel.endpoint";
+/// Where the layout is recorded. `2` is this one.
 const LAYOUT_KEY: &str = "centinel.layout";
 const LAYOUT: &str = "2";
 /// Lance's name for the column a vector query scores into.
@@ -302,23 +309,67 @@ pub struct VectorRepair {
     pub estimated_rows: usize,
 }
 
-/// A LanceDB table of chunk placements and their vectors, for one model.
+/// Which space a table's vectors are in: the model that wrote them, and where it ran.
+///
+/// Where it ran is part of it because the space is a property of the model *as served* —
+/// the same weights at two quantizations, or behind two servers' pooling, are close and
+/// not identical, and the difference shows up only as worse rankings. Two spaces are
+/// treated as one only once `centinel embed --adopt` has measured that they agree.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Space {
+    /// The model, as the server was asked for it.
+    pub model: String,
+    /// The server's `base_url`. `None` on a table written before `[inference]` existed,
+    /// when `qwen3-embedding-4b` meant weights in this process and `openrouter/…` meant
+    /// OpenRouter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+}
+
+impl Space {
+    /// The space an endpoint's vectors are in.
+    pub fn of(endpoint: &Endpoint) -> Self {
+        Self {
+            model: endpoint.model.clone(),
+            endpoint: Some(endpoint.base_url.clone()),
+        }
+    }
+
+    fn read(schema: &Schema) -> Option<Self> {
+        Some(Self {
+            model: schema.metadata().get(MODEL_KEY)?.clone(),
+            endpoint: schema.metadata().get(ENDPOINT_KEY).cloned(),
+        })
+    }
+}
+
+impl std::fmt::Display for Space {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.endpoint {
+            Some(endpoint) => write!(f, "{} at {endpoint}", self.model),
+            None if self.model.starts_with("openrouter/") => f.write_str(&self.model),
+            None => write!(f, "{} (run in-process, before [inference])", self.model),
+        }
+    }
+}
+
+/// A LanceDB table of chunk placements and their vectors, for one space.
 ///
 /// Cheap to clone — a `Table` is a handle.
 #[derive(Clone)]
 pub struct VectorTable {
     table: Table,
     schema: SchemaRef,
-    model_id: String,
+    space: Space,
     dims: usize,
 }
 
-/// Names the model and the width, not the Lance handle — which is a connection pool and
+/// Names the space and the width, not the Lance handle — which is a connection pool and
 /// has nothing a reader of a test failure wants.
 impl std::fmt::Debug for VectorTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VectorTable")
-            .field("model_id", &self.model_id)
+            .field("space", &self.space)
             .field("dims", &self.dims)
             .finish_non_exhaustive()
     }
@@ -365,16 +416,16 @@ async fn has_table(db: &lancedb::Connection, name: &str) -> anyhow::Result<bool>
 }
 
 impl VectorTable {
-    /// Opens or creates the table for a model, validating an existing one.
+    /// Opens or creates the table for a space, validating an existing one.
     ///
     /// Takes the database directory rather than the store root: where the table lives
     /// under a store is [`crate::store::Store::vectors_path`]'s business, and this module
     /// knowing that layout is how a path ends up spelled out in two places.
-    pub async fn open(dir: &Path, model_id: &str, dims: usize) -> anyhow::Result<Self> {
+    pub async fn open(dir: &Path, space: &Space, dims: usize) -> anyhow::Result<Self> {
         anyhow::ensure!(dims > 0, "a model with zero dimensions cannot be stored");
 
         let db = connect(dir).await?;
-        let schema = schema_for(model_id, dims);
+        let schema = schema_for(space, dims);
 
         let table = if has_table(&db, TABLE).await? {
             db.open_table(TABLE).execute().await?
@@ -388,17 +439,17 @@ impl VectorTable {
                 Err(error) => return Err(error.into()),
             }
         };
-        validate(table.schema().await?.as_ref(), model_id, dims)?;
+        validate(table.schema().await?.as_ref(), space, dims)?;
 
         Ok(Self {
             table,
             schema,
-            model_id: model_id.to_string(),
+            space: space.clone(),
             dims,
         })
     }
 
-    /// Opens an existing table, taking the model and the width **from it**.
+    /// Opens an existing table, taking the space and the width **from it**.
     ///
     /// For readers. `search` has no business being told which embedder to use: the answer
     /// is a property of the table, and a reader that was configured differently would
@@ -407,14 +458,7 @@ impl VectorTable {
     pub async fn open_existing(dir: &Path) -> anyhow::Result<Self> {
         let db = connect(dir).await?;
         if !has_table(&db, TABLE).await? {
-            if has_table(&db, LEGACY_TABLE).await? {
-                anyhow::bail!(
-                    "the vectors at {} are in the older one-row-per-chunk layout — run \
-                     `centinel embed --limit 0` to upgrade the vector table; nothing is \
-                     sent to a model",
-                    dir.join(format!("{LEGACY_TABLE}.lance")).display()
-                );
-            }
+            refuse_old_layout(dir).await?;
             anyhow::bail!(
                 "no vectors at {} — run `centinel embed` first",
                 dir.join(format!("{TABLE}.lance")).display()
@@ -424,21 +468,17 @@ impl VectorTable {
         let table = db.open_table(TABLE).execute().await?;
         let schema = table.schema().await?;
         let dims = vector_width(&schema)?;
-        let model_id = schema
-            .metadata()
-            .get(MODEL_KEY)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "`{TABLE}` does not record which model wrote it — \
-                     delete it and re-run `centinel embed`"
-                )
-            })?
-            .clone();
+        let space = Space::read(&schema).ok_or_else(|| {
+            anyhow::anyhow!(
+                "`{TABLE}` does not record which model wrote it — \
+                 delete it and re-run `centinel embed`"
+            )
+        })?;
 
         Ok(Self {
             table,
             schema,
-            model_id,
+            space,
             dims,
         })
     }
@@ -447,8 +487,33 @@ impl VectorTable {
         self.dims
     }
 
-    pub fn model_id(&self) -> &str {
-        &self.model_id
+    pub fn space(&self) -> &Space {
+        &self.space
+    }
+
+    /// Records that this table's vectors are in `space` from now on. One manifest commit;
+    /// no row is touched.
+    ///
+    /// Only for a space measured to reproduce this one — see `centinel embed --adopt`,
+    /// which is the one caller. The rest of the schema metadata is carried over, because
+    /// the write replaces the whole map and Lance keeps its own keys in it.
+    pub async fn adopt(&mut self, _lock: &VectorLock, space: &Space) -> anyhow::Result<()> {
+        self.table.checkout_latest().await?;
+        let mut metadata = self.table.schema().await?.metadata().clone();
+        metadata.insert(MODEL_KEY.to_string(), space.model.clone());
+        match &space.endpoint {
+            Some(endpoint) => metadata.insert(ENDPOINT_KEY.to_string(), endpoint.clone()),
+            None => metadata.remove(ENDPOINT_KEY),
+        };
+        self.table
+            .as_native()
+            .ok_or_else(not_a_local_table)?
+            .replace_schema_metadata(metadata)
+            .await?;
+        tracing::info!(from = %self.space, to = %space, "vector table adopted");
+        self.space = space.clone();
+        self.schema = schema_for(space, self.dims);
+        Ok(())
     }
 
     /// How many rows are stored.
@@ -1001,66 +1066,34 @@ impl VectorTable {
     }
 }
 
-/// The table the layout before this one wrote, opened read-only for one model.
+/// Refuses a store whose only vectors are in the layout before this one — `vectors.lance`,
+/// one row per chunk — naming the two ways forward. `Ok` when there is no such table.
 ///
-/// `embed` fills [`TABLE`] from it: every chunk here that the index still places somewhere
-/// gets its rows without a model being asked. The operator deletes the directory by hand
-/// once satisfied; nothing here ever writes to it.
-pub struct LegacyVectors {
-    table: Table,
-    dims: usize,
+/// For `embed` as much as for `search`: without it, `embed` would start the whole corpus
+/// over beside the old table, which on a paid server is a bill nobody chose.
+pub async fn refuse_old_layout(dir: &Path) -> anyhow::Result<()> {
+    let db = connect(dir).await?;
+    if has_table(&db, TABLE).await? || !has_table(&db, LEGACY_TABLE).await? {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "the vectors at {} are in the one-row-per-chunk layout, which this release no longer \
+         reads. Upgrade them with the release before this one — its `centinel embed --limit \
+         0` fills chunks.lance with nothing sent to a model — or delete {0} and run \
+         `centinel embed` to embed again",
+        dir.join(format!("{LEGACY_TABLE}.lance")).display()
+    )
 }
 
-impl LegacyVectors {
-    /// The legacy table, when there is one written by `model_id`. `None` when there is
-    /// none, or when it holds another model's vectors, which are no use to this one.
-    pub async fn open(dir: &Path, model_id: &str) -> anyhow::Result<Option<Self>> {
-        let db = connect(dir).await?;
-        if !has_table(&db, LEGACY_TABLE).await? {
-            return Ok(None);
-        }
-        let table = db.open_table(LEGACY_TABLE).execute().await?;
-        let schema = table.schema().await?;
-        let found = schema.metadata().get(MODEL_KEY).map(String::as_str);
-        if found != Some(model_id) {
-            tracing::debug!(
-                found = found.unwrap_or("an unrecorded model"),
-                wanted = model_id,
-                "the legacy vector table was written by another model; not copied"
-            );
-            return Ok(None);
-        }
-        let dims = vector_width(&schema)?;
-        Ok(Some(Self { table, dims }))
-    }
-
-    pub fn dims(&self) -> usize {
-        self.dims
-    }
-
-    /// Every stored `(chunk_hash, vector)`, a batch at a time, never held whole.
-    pub async fn rows(
-        &self,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<Vec<(String, Vec<f32>)>>>> {
-        let stream = self
-            .table
-            .query()
-            .select(Select::Columns(vec![
-                HASH_COLUMN.to_string(),
-                VECTOR_COLUMN.to_string(),
-            ]))
-            .execute()
-            .await?;
-        Ok(stream.map(|batch| hash_vectors(&batch?)).boxed())
-    }
-}
-
-/// The schema, and the one place the model id and layout are written into it.
-fn schema_for(model_id: &str, dims: usize) -> SchemaRef {
-    let metadata = HashMap::from([
-        (MODEL_KEY.to_string(), model_id.to_string()),
+/// The schema, and the one place the space and layout are written into it.
+fn schema_for(space: &Space, dims: usize) -> SchemaRef {
+    let mut metadata = HashMap::from([
+        (MODEL_KEY.to_string(), space.model.clone()),
         (LAYOUT_KEY.to_string(), LAYOUT.to_string()),
     ]);
+    if let Some(endpoint) = &space.endpoint {
+        metadata.insert(ENDPOINT_KEY.to_string(), endpoint.clone());
+    }
     Arc::new(Schema::new_with_metadata(
         vec![
             Field::new(KEY_COLUMN, DataType::Utf8, false),
@@ -1132,13 +1165,13 @@ fn vector_width(schema: &Schema) -> anyhow::Result<usize> {
     }
 }
 
-/// Refuses a table that was written by another model, at another width, or in another
+/// Refuses a table that was written in another space, at another width, or in another
 /// layout.
 ///
 /// All three are silent failures otherwise: vectors from two models are in different
 /// spaces and still return a ranked list, and a table without the filter columns answers
 /// no filtered query.
-fn validate(found: &Schema, model_id: &str, dims: usize) -> anyhow::Result<()> {
+fn validate(found: &Schema, space: &Space, dims: usize) -> anyhow::Result<()> {
     let width = vector_width(found)?;
     anyhow::ensure!(
         width == dims,
@@ -1146,13 +1179,10 @@ fn validate(found: &Schema, model_id: &str, dims: usize) -> anyhow::Result<()> {
          delete it and re-run `centinel embed`"
     );
 
-    let found_id = found.metadata().get(MODEL_KEY).map(String::as_str);
-    anyhow::ensure!(
-        found_id == Some(model_id),
-        "`{TABLE}` was written by `{}`, not `{model_id}` — vectors from two models are \
-         not comparable; delete it and re-run `centinel embed`",
-        found_id.unwrap_or("an unrecorded model"),
-    );
+    let found_space = Space::read(found);
+    if found_space.as_ref() != Some(space) {
+        anyhow::bail!("{}", mismatch(found_space.as_ref(), space));
+    }
     let layout = found.metadata().get(LAYOUT_KEY).map(String::as_str);
     anyhow::ensure!(
         layout == Some(LAYOUT),
@@ -1160,6 +1190,25 @@ fn validate(found: &Schema, model_id: &str, dims: usize) -> anyhow::Result<()> {
         layout.unwrap_or("none"),
     );
     Ok(())
+}
+
+/// Why a table in one space cannot take vectors from another, and the two ways forward.
+///
+/// One sentence for `embed` and `search` alike, so both name the same command.
+pub fn mismatch(found: Option<&Space>, wanted: &Space) -> String {
+    match found {
+        Some(found) => format!(
+            "`{TABLE}` was written by {found}, and [inference.embed] names {wanted} — vectors \
+             from two spaces are not comparable. If the new server runs the same model, \
+             `centinel embed --adopt` measures whether it reproduces the stored vectors and \
+             adopts the table if it does; otherwise delete {TABLE}.lance and re-run \
+             `centinel embed`"
+        ),
+        None => format!(
+            "`{TABLE}` does not record which model wrote it — delete it and re-run \
+             `centinel embed`"
+        ),
+    }
 }
 
 /// The filter as the SQL Lance applies before distance. Exclusion first, always; the
@@ -1293,8 +1342,18 @@ pub(crate) mod tests {
         }
     }
 
+    /// The space every table here is written in.
+    pub(crate) fn space(model: &str) -> Space {
+        Space {
+            model: model.to_string(),
+            endpoint: Some("http://127.0.0.1:8080/v1".to_string()),
+        }
+    }
+
     async fn table(dir: &Path) -> VectorTable {
-        VectorTable::open(dir, "test-model", DIMS).await.unwrap()
+        VectorTable::open(dir, &space("test-model"), DIMS)
+            .await
+            .unwrap()
     }
 
     /// The write lock for the table under `dir`, taken for one statement at a time.
@@ -1569,10 +1628,10 @@ pub(crate) mod tests {
         let t = table(dir.path()).await;
         assert!(t.is_empty().await.unwrap());
         assert_eq!(t.dims(), DIMS);
-        assert_eq!(t.model_id(), "test-model");
+        assert_eq!(t.space(), &space("test-model"));
         // Reopening validates the schema it just wrote.
         assert!(
-            VectorTable::open(dir.path(), "test-model", DIMS)
+            VectorTable::open(dir.path(), &space("test-model"), DIMS)
                 .await
                 .is_ok()
         );
@@ -1889,7 +1948,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let found = VectorTable::open_existing(dir.path()).await.unwrap();
-        assert_eq!(found.model_id(), "test-model");
+        assert_eq!(found.space(), &space("test-model"));
         assert_eq!(found.dims(), DIMS);
         assert_eq!(found.len().await.unwrap(), 1);
     }
@@ -1907,92 +1966,37 @@ pub(crate) mod tests {
         assert!(err.contains("chunks.lance"), "and where it looked: {err}");
     }
 
-    /// A store from before this layout holds a `vectors` table and no `chunks`. A reader
-    /// is told the one command that upgrades it, and the legacy table opens for `embed`
-    /// to copy from — for the model that wrote it, and no other.
+    /// A store from before this layout holds a `vectors` table and no `chunks`. Its reader
+    /// is told the two ways forward, and so is `embed`, which would otherwise embed the
+    /// corpus again beside it.
     #[tokio::test]
-    async fn a_legacy_table_names_the_upgrade_and_opens_for_copying() {
+    async fn an_old_layout_is_refused_with_the_way_forward() {
         let dir = tempfile::tempdir().unwrap();
-        legacy_table(
-            dir.path(),
-            "test-model",
-            &[(hash(1), unit([1.0, 0.0, 0.0, 0.0]))],
-        )
-        .await;
+        let db = connect(dir.path()).await.unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            HASH_COLUMN,
+            DataType::Utf8,
+            false,
+        )]));
+        db.create_empty_table(LEGACY_TABLE, schema)
+            .execute()
+            .await
+            .unwrap();
 
         let err = VectorTable::open_existing(dir.path())
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("embed --limit 0"), "{err}");
         assert!(err.contains("vectors.lance"), "{err}");
+        assert!(err.contains("release before this one"), "{err}");
+        assert!(err.contains("centinel embed"), "{err}");
+        assert!(refuse_old_layout(dir.path()).await.is_err());
 
-        let legacy = LegacyVectors::open(dir.path(), "test-model")
-            .await
-            .unwrap()
-            .expect("the model matches");
-        assert_eq!(legacy.dims(), DIMS);
-        let mut rows = Vec::new();
-        let mut stream = legacy.rows().await.unwrap();
-        while let Some(batch) = stream.try_next().await.unwrap() {
-            rows.extend(batch);
-        }
-        assert_eq!(rows, [(hash(1), unit([1.0, 0.0, 0.0, 0.0]))]);
+        let fresh = tempfile::tempdir().unwrap();
         assert!(
-            LegacyVectors::open(dir.path(), "other-model")
-                .await
-                .unwrap()
-                .is_none(),
-            "another model's vectors are no use"
+            refuse_old_layout(fresh.path()).await.is_ok(),
+            "no table at all"
         );
-        assert!(
-            LegacyVectors::open(tempfile::tempdir().unwrap().path(), "test-model")
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    /// Writes the table the layout before this one wrote: `(chunk_hash, vector)` under
-    /// the legacy name, with the model id and no layout key.
-    pub(crate) async fn legacy_table(dir: &Path, model_id: &str, entries: &[(String, Vec<f32>)]) {
-        let dims = entries.first().map_or(DIMS, |(_, v)| v.len());
-        let metadata = HashMap::from([(MODEL_KEY.to_string(), model_id.to_string())]);
-        let schema = Arc::new(Schema::new_with_metadata(
-            vec![
-                Field::new(HASH_COLUMN, DataType::Utf8, false),
-                Field::new(
-                    VECTOR_COLUMN,
-                    DataType::FixedSizeList(
-                        Arc::new(Field::new("item", DataType::Float32, true)),
-                        dims as i32,
-                    ),
-                    true,
-                ),
-            ],
-            metadata,
-        ));
-        let db = connect(dir).await.unwrap();
-        let table = db
-            .create_empty_table(LEGACY_TABLE, schema.clone())
-            .execute()
-            .await
-            .unwrap();
-        if entries.is_empty() {
-            return;
-        }
-        let hashes = StringArray::from_iter_values(entries.iter().map(|(h, _)| h.as_str()));
-        let vectors = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-            entries
-                .iter()
-                .map(|(_, v)| Some(v.iter().copied().map(Some).collect::<Vec<_>>())),
-            dims as i32,
-        );
-        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(hashes), Arc::new(vectors)])
-            .unwrap();
-        let reader = Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema))
-            as Box<dyn RecordBatchReader + Send>;
-        table.add(reader).execute().await.unwrap();
     }
 
     /// Vectors from two models share no space. Reading one as the other returns a ranked
@@ -2001,19 +2005,72 @@ pub(crate) mod tests {
     async fn a_different_model_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         table(dir.path()).await;
-        let err = VectorTable::open(dir.path(), "other-model", DIMS)
+        let err = VectorTable::open(dir.path(), &space("other-model"), DIMS)
             .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("not comparable"), "{err}");
-        assert!(err.contains("centinel embed"), "names the fix: {err}");
+        assert!(
+            err.contains("centinel embed --adopt"),
+            "names the fix: {err}"
+        );
+
+        // The same model behind another server is another space until measured.
+        let elsewhere = Space {
+            endpoint: Some("https://openrouter.ai/api/v1".into()),
+            ..space("test-model")
+        };
+        assert!(
+            VectorTable::open(dir.path(), &elsewhere, DIMS)
+                .await
+                .is_err()
+        );
+    }
+
+    /// Adoption rewrites the record and nothing else: the rows stay, the next open in the
+    /// new space succeeds, and the old space is refused from then on.
+    #[tokio::test]
+    async fn an_adopted_table_keeps_its_rows_and_answers_to_the_new_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = Space {
+            model: "qwen3-embedding-4b".into(),
+            endpoint: None,
+        };
+        let mut t = VectorTable::open(dir.path(), &legacy, DIMS).await.unwrap();
+        t.append(
+            &lock(dir.path()).await,
+            &[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))],
+        )
+        .await
+        .unwrap();
+
+        t.adopt(&lock(dir.path()).await, &space("qwen3-embedding-4b"))
+            .await
+            .unwrap();
+        assert_eq!(t.space(), &space("qwen3-embedding-4b"));
+        t.append(
+            &lock(dir.path()).await,
+            &[row(2, 0, unit([0.0, 1.0, 0.0, 0.0]))],
+        )
+        .await
+        .unwrap();
+
+        let reopened = VectorTable::open_existing(dir.path()).await.unwrap();
+        assert_eq!(reopened.space(), &space("qwen3-embedding-4b"));
+        assert_eq!(reopened.len().await.unwrap(), 2);
+        assert!(
+            VectorTable::open(dir.path(), &space("qwen3-embedding-4b"), DIMS)
+                .await
+                .is_ok()
+        );
+        assert!(VectorTable::open(dir.path(), &legacy, DIMS).await.is_err());
     }
 
     #[tokio::test]
     async fn a_different_width_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         table(dir.path()).await;
-        let err = VectorTable::open(dir.path(), "test-model", DIMS + 1)
+        let err = VectorTable::open(dir.path(), &space("test-model"), DIMS + 1)
             .await
             .unwrap_err()
             .to_string();

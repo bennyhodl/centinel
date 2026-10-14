@@ -49,9 +49,10 @@ the corpus having changed.
 
 ## Reranking, always on
 
-**`Qwen3-Reranker-0.6B`**, Q8_0 GGUF, 32K context, Apache-2.0. The weights are a community
-conversion by `ggml-org` — the llama.cpp organisation — because Qwen publish GGUF for the
-embedder only. Digests pin exactly what is fetched.
+**`Qwen3-Reranker-0.6B`**, Q8_0 GGUF, 32K context, Apache-2.0, run by the server
+`[inference.rerank]` names — `llama-server --reranking` is the recommended one. The
+recommended weights are a community conversion by `ggml-org` — the llama.cpp organisation —
+because Qwen publish GGUF for the embedder only.
 
 One command, one answer, and **no fast path that silently returns worse results**. The
 measured gap is why: BM25 goes from **14.8 to 33.4** nDCG@10 when reranked, and reranked
@@ -76,31 +77,23 @@ position:
 score = softmax([logit(no), logit(yes)])[1]     →  P(yes), in [0, 1]
 ```
 
-So it runs pooling `None` and reads logits, where the embedder runs pooling `Last` and
-reads embeddings. They share a runtime and nothing else.
+The chat template, the single-token `yes` and `no`, and the softmax over exactly those two
+logits are the server's to get right — `llama-server` applies the template the GGUF carries
+under `--reranking`. What Centinel sends is the Cohere/Jina request OpenAI never published
+an equivalent of:
 
-Three things must be exactly right, and none of them errors when wrong:
+```text
+POST {base_url}/rerank   {"model", "query", "documents": [...], "top_n"}
+→                        {"results": [{"index", "relevance_score"}, ...]}
+```
 
-1. **The chat template, verbatim** — the system line included. A hand-rolled prompt gets a
-   fluent answer to a different question.
-2. **`yes` and `no` as single tokens.** More than one piece and the logit being read
-   belongs to a fragment. Checked at load, because a model that fails this cannot be
-   scored at all.
-3. **Softmax over exactly those two logits**, not over the vocabulary. The absolute logits
-   drift with document length; their difference does not.
+Scores come back keyed by `index` and in whatever range the server uses; only their order is
+relied on. Every document must be scored exactly once, or the response is refused and the
+first stage's order stands.
 
-The softmax is written as a difference, `1 / (1 + exp(no - yes))`, rather than two `exp`
-calls over a shared denominator. Raw logits can be large enough to overflow to infinity,
-which yields `NaN` and an order that depends on the sort's tie-breaking.
-
-### Refused versus truncated
-
-Unlike `embed`, an over-long document **is truncated, not refused**.
-
-A passage is one candidate among many, and a shortened judgement is still a judgement,
-where refusing would drop a result the first stage chose. Nothing here is stored, so
-nothing can lie about what it covers. That is the entire difference: `embed` writes a
-record, and a record must not claim to cover text that was never read.
+When the reranker ran in-process, an over-long passage was truncated rather than refused —
+a shortened judgement is still a judgement, and nothing here is stored. A server decides that
+for itself now.
 
 ## `--source` and `--tag`
 
@@ -152,9 +145,9 @@ shape. Coverage is a set difference, and `centinel embed --dry-run` computes exa
 that: `indexed`, `already_embedded`, `remaining`, `stale`.
 
 **Always on is not the same as always available.** The rule forbids a *flag* that silently
-returns worse results. It does not promise that a machine with no reranker weights refuses
-to search. Missing weights degrade the answer and say so; they never turn a query into an
-error a reader cannot act on. The same holds for an unbuilt vector table: a corpus is
+returns worse results. It does not promise that a machine whose rerank server is down
+refuses to search. A missing server degrades the answer and says so, in `no_rerank`; it
+never turns a query into an error a reader cannot act on. The same holds for an unbuilt vector table: a corpus is
 keyword-searchable long before it is embedded.
 
 ## The handle
@@ -169,7 +162,7 @@ prefix.
 |---|---|
 | **embedder** | `Qwen3-Embedding-4B` Q8_0 GGUF · 2,560-dim · Apache-2.0 · first-party |
 | **reranker** | `Qwen3-Reranker-0.6B` Q8_0 GGUF · Apache-2.0 · `ggml-org` conversion |
-| **runtime** | `llama-cpp-2` in-process · Metal on macOS, CUDA/Vulkan/ROCm opt-in |
+| **runtime** | the servers `[inference]` names — see [Inference](inference.md) |
 | **vectors** | `lancedb` 0.33, no default features |
 | **keywords** | SQLite FTS5, bundled |
 | **fusion** | ours — a few dozen lines |
@@ -181,13 +174,12 @@ network path out of a machine that nothing is supposed to leave.
 
 | | |
 |---|---|
-| a query, warm process | ~1 second (the reranker) |
-| a query, cold CLI | **11 s measured** with the reranker alone; the embedder adds its own load |
+| a query | two round trips — the query embedding, then the rerank of 40 passages |
 
-The last row is worth knowing, and the measurement is honest about what it covers: 11.35 s
-on the Agartha corpus with no vector table, so only the 0.6B reranker was loaded. A query
-that also builds the 4B embedder pays more. `centinel serve` and `centinel mcp` load both
-once; a short CLI invocation pays on every query.
+With the models in-process, a cold CLI query measured **11 s**, nearly all of it loading the
+reranker's weights; a long-running `serve` paid that once. A server keeps its weights loaded,
+so a CLI query and a served one cost the same: what the two requests take on the server, which
+for the 0.6B reranker on a GPU is well under a second.
 
 Next: [Ops](ops.md).
 
@@ -202,7 +194,7 @@ representative questions when comparing versions. Use `centinel search --exact "
 to bypass the ANN index for a recall comparison. Small tables use exact search.
 Newly appended vectors remain searchable before maintenance completes.
 
-Existing stores can compact files without loading weights or re-embedding:
+Existing stores can compact files without sending anything to a model or re-embedding:
 
 ```sh
 centinel embed --limit 0
@@ -211,14 +203,12 @@ centinel embed --limit 0
 To also build an approximate index, use `centinel embed --limit 0 --ann-index`.
 Indexing is opt-in because speed and recall depend on the corpus.
 
-Use the same embedding model setting that originally wrote the store. Maintenance
+`--limit 0` still checks the configured server against the space the table records, so
+`[inference.embed]` must name the server that wrote it — or adopt it first. Maintenance
 runs after ingestion, never on the query path, and retains historical Lance versions.
 It needs additional disk space for compacted files and the full precision index.
 `--dry-run` performs no maintenance.
 
-The persistent MCP/HTTP context retains one query embedding model and one reranker, and
-serializes inference calls for each model, avoiding repeated weight loads and concurrent copies on the GPU.
-A separate CLI invocation still pays model startup cost.
 
 A reproducible synthetic benchmark reports warm exact/indexed latency and recall@10:
 

@@ -3,7 +3,7 @@
 The expensive stage. About a day, once, on a 400,000-chunk corpus.
 
 ```bash
-centinel embed --dry-run          # what would be embedded, without loading a model
+centinel embed --dry-run          # what would be embedded, without sending anything
 centinel embed --limit 100        # sample before committing hours
 centinel embed                    # the rest; re-run to resume
 ```
@@ -11,11 +11,12 @@ centinel embed                    # the rest; re-run to resume
 ## The model
 
 **`Qwen3-Embedding-4B`**, Q8_0 GGUF, **2,560 dimensions**, 32K context, Apache-2.0, and
-published by Qwen themselves. Run in-process through `llama-cpp-2` — no server, no
-sidecar, no second language runtime.
+published by Qwen themselves — run by whatever server `[inference.embed]` names.
+`llama-server --embedding --pooling last` is the recommended one; see [Inference
+servers](../reference/inference.md).
 
-Licence decided the family. Centinel auto-downloads weights and forks redistribute them,
-which rules out EmbeddingGemma (Gemma licence) and Jina's reranker (CC-BY-NC).
+Licence decided the family: forks redistribute what Centinel recommends, which rules out
+EmbeddingGemma (Gemma licence) and Jina's reranker (CC-BY-NC).
 
 Size is decided by **where the cost lands**. The embedder is paid once per corpus in
 hours; the reranker is paid per query in milliseconds. On MTEB English Retrieval, 0.6B
@@ -26,71 +27,58 @@ embedder once and into the reranker freely.
 Q8_0 over Q4_K_M for the same reason: quantization here is amortised over hours of work
 rather than paid per query.
 
-### Remote, by choice
+### Where it runs
 
-The embedder is local unless you say otherwise. Set `embed_model` under `[defaults]` in the
-config to an `openrouter/…` id, such as `openrouter/qwen/qwen3-embedding-8b`, and the stage embeds through
-OpenRouter instead. That is a bigger model than most laptops run, at roughly a cent per
-million tokens, and it needs `OPENROUTER_API_KEY`.
+Wherever `base_url` points. On `127.0.0.1` nothing leaves the machine. Pointed at
+OpenRouter — `base_url = "https://openrouter.ai/api/v1"`, `api_key_env =
+"OPENROUTER_API_KEY"`, `model = "qwen/qwen3-embedding-8b"` — the stage runs a bigger model
+than most laptops can, at roughly a cent per million tokens.
 
-This is one of the two places text leaves the machine, and it is never silent. **Chunk text
-is sent to openrouter.ai**, the run says so before the first byte moves, and a search against
-that corpus embeds its query there too. Nothing else leaves: blobs, the log and the record
-stay put. The other place is a [classifier run](../use/classify.md).
+Anywhere but this machine, it is never silent. **Chunk text is sent to that server**, the
+run names it before the first byte moves, and a search against that corpus embeds its query
+there too. Nothing else leaves: blobs, the log and the record stay put. The other place
+text can leave is a [classifier run](../use/classify.md).
 
-A remote id keys **its own vector table**. Even `openrouter/qwen/qwen3-embedding-4b`, which is
-the local default's weights, is a separate space, because quantization and serving differ.
-Switching between local and remote is a full re-embed, exactly like switching models. What the
-calls cost lands in [Spend](../use/spend.md), where a local model is priced as the cloud one.
+What the calls cost lands in [Spend](../use/spend.md), where a model on your own server is
+priced as the cloud one.
 
 ## The recipe, and why it is written down
 
-Three things a generic embedding wrapper would get wrong, and **none of them errors**:
+Three things a generic embedding setup gets wrong for Qwen3-Embedding, and **none of them
+errors**:
 
-1. **Last-token pooling**, not mean pooling.
+1. **Last-token pooling**, not mean pooling. The server's: `--pooling last`.
 2. **An instruction prefix on queries only.** A query is wrapped as
    `Instruct: {task}\nQuery:{q}`; a document is embedded bare. The asymmetry is the
-   model's — it was trained to treat the relationship as directional.
-3. **L2 normalization**, so cosine similarity is a dot product.
+   model's — it was trained to treat the relationship as directional. No server can say
+   which models want this, so `[inference.embed] query_prefix` does, and a written
+   `[inference.embed]` table must state it — `""` for a symmetric model.
+3. **L2 normalization**, so cosine similarity is a dot product. Done here, on every vector,
+   whatever the server sends.
 
 Each one produces *plausible* vectors when wrong: slightly worse retrieval, no error
-anywhere, no symptom. So the code carries a test that asserts on **semantics** rather than
-on shapes.
+anywhere, no symptom. An opt-in test — `CENTINEL_TEST_INFERENCE=1`, against the servers
+your config names — asserts on **semantics** rather than on shapes: the passage that
+answers a query must win while sharing no word with it.
 
-## Batching is not optional
+## Requests, not passes
 
-A batch is **one forward pass over many chunks**: one `llama.cpp` context, one `decode`,
-every chunk in it as its own `seq_id`. Two costs collapse into that.
+A request carries **`batch` chunks** (64 unless `[inference.embed] batch` or `--batch` says
+otherwise), and **`concurrency` requests** are in flight at once (4 unless set). A reader
+thread keeps the next windows of text coming off SQLite and a writer task appends what has
+come back, so the server waits on neither SQLite nor Lance.
 
-The context and its KV cache are built per **call**, not per text:
+How the server turns a request into passes on its GPU — physical batch, context, flash
+attention — is its own tuning, set once on the machine it runs on. That used to be
+Centinel's, as `embed_batch = "auto"` sized from the GPU's free memory, and it was a
+different number on every machine.
 
-| | chunks/sec (M1 Max, Metal) |
-|---|---|
-| one chunk per call | 6.1 |
-| batches of 32 | **18.5** (0.6B) / **3.8** (4B) |
-
-And a single ~300-token chunk leaves a GPU almost entirely idle, which is what packing the
-whole group into one pass claims. The table above measured only the first of the two — it
-predates the packed decode and has not been re-run against it.
-
-So the batch is the unit of work, not the chunk. A batch that fails as a unit — an
-over-long chunk, or a group the machine cannot hold — is retried individually, so one bad
-chunk cannot cost the other 31.
-
-How wide is a property of the machine rather than of the corpus. `[defaults] embed_batch`
-in the config states it, `--batch N` overrides it for one run, and `auto` — the default —
-sizes it from the free memory the backend reports once the weights are loaded, capped at
-128. The context is sized to the group in hand, so a batch costs what its chunks actually
-need rather than a fixed reservation.
-
-An over-long text is **refused, not truncated.** A silently shortened chunk would be
-stored under a `chunk_hash` covering text that was never embedded, which makes the record
-lie about what it holds. (The reranker does the opposite, for a reason that is
-[explained there](search.md#refused-versus-truncated).)
-
-The whole run goes into a single `spawn_blocking`. Inference would otherwise stall the
-async runtime, which matters because an HTTP caller's connection has to survive a
-multi-hour run.
+A window the server will not take — a 4xx, a timeout after three attempts, a response that
+fails verification — is **split in half** and each half sent again, so one chunk the server
+will not take costs a dozen requests rather than sixty-four, and is reported as skipped. A
+failure about the server rather than the input is the exception: nothing listening, a
+refused key, a width the table does not hold, or 5xx and 429 after three attempts. Every
+later request would fail the same way, so the run stops on it and the next run resumes.
 
 ## Resumability is a consequence, not a feature
 
@@ -144,26 +132,47 @@ chunks.lance/     one table, one row per chunk placed in a document
 No text: `centinel.db` holds that. The row carries its document and what the classifier
 workspace decided about it, so a search's filter runs inside the vector query. The work
 list is placements, not chunks, and a placement's vector comes from the cheapest place that
-has it — another document's row for the same chunk, the `vectors.lance/` table a store from
-before this layout still holds, and only then the model. `centinel embed --limit 0` on such
-a store fills `chunks.lance/` with nothing sent to a model. When the workspace changes a
+has it — another document's row for the same chunk, and only then the model. A store from
+before this layout holds `vectors.lance/`, one row per chunk, which this release refuses
+rather than reads: upgrade it with the release before this one (`centinel embed --limit 0`
+there, nothing sent to a model), or delete it and embed again. When the workspace changes a
 document's tags or exclusion, a sync rewrites those two columns on its rows in place.
 
-**The model is a property of the table.** Its id lives in the schema metadata, and a query
-vector from any other model is refused at open, naming the fix. Vectors from two models
-are in different spaces and still return a confident ranked list — there is no symptom but
-a worse ordering.
+**The space is a property of the table.** Its schema metadata records the model and the
+server that ran it, and a row or a query vector from any other space is refused, naming the
+fix. Vectors from two models are in different spaces and still return a confident ranked
+list — there is no symptom but a worse ordering. The server is part of it because the space
+is a property of the model *as served*: the same weights at two quantizations, or behind
+two servers' pooling, are close and not identical.
 
 Width is guarded by the schema itself: the column is a fixed-size list of exactly `dims`
-floats, so a wrong width cannot be written at all. The two registry embedders have
-different widths (2,560 and 1,024) on purpose.
+floats, so a wrong width cannot be written at all. A new table takes its width from the
+server, with one short request.
 
-This also means `search` is never *told* which embedder to use. **It asks the table.** A
-reader configured differently would otherwise have its query refused and quietly fall back
-to one arm.
+This also means `search` is never *told* which embedder to use. **It asks the table**, and
+checks the configured server against it. A server that does not match is named in
+`no_vectors`, not queried.
 
-**One table, not one per model.** Changing the embedder is already a full re-embed rather
-than a config edit, so a second model is a rebuild.
+**One table, not one per model.** Changing the embedder is a new space, so a second model is
+a rebuild — unless the new server reproduces the old one.
+
+### Moving to another server
+
+```bash
+centinel embed --adopt --dry-run   # measure, change nothing
+centinel embed --adopt             # measure, and take the table over if it matches
+```
+
+`--adopt` takes up to 32 stored vectors whose chunks the index still has, embeds those
+chunks on the configured server, and compares. When every pair agrees past a cosine of
+**0.99**, it records the new server as the table's own — one manifest commit, no row
+touched — and the run carries on into the same table. Otherwise it refuses with the worst
+and mean agreement and what to run instead.
+
+The same weights behind a new server land at 0.999 and above. That is how a table written
+by an earlier release's in-process embedder moves to `llama-server` running the same Q8_0
+GGUF, and how a table embedded through OpenRouter moves to a box that serves the same
+model.
 
 ## There is no embedding cache
 
@@ -201,34 +210,15 @@ rows, which is a threshold to measure rather than a number to trust.
 of a stored vector rather than a re-embed. A reversible decision, deferred until something
 measures a need for it.
 
-Next: [Models](models.md).
+Next: [Inference](inference.md).
 
-## Diagnosing slow embedding on DGX Spark
+## When embedding is slow
 
-A rate such as 0.2 chunks/sec does not by itself establish GPU use. Embedding now
-prints available accelerator backends, or explicitly reports CPU fallback. Run
-`nvidia-smi` during inference and use `centinel --verbose embed --limit 200` to inspect
-llama.cpp's actual layer placement. The installer discovers CUDA under `CUDA_PATH`
-or `/usr/local/cuda*` before choosing its backend.
+The rate is the server's. A rate such as 0.2 chunks/sec usually means the model is running
+on the CPU: check the server's own log for where it put the layers (`llama-server` prints
+its offload at start-up), and `nvidia-smi` or Activity Monitor while a run is going. GPU
+offload, batch and ubatch sizes, and flash attention are the server's flags.
 
-Spark is Linux ARM64 with a GB10 GPU; the x86_64 CUDA release asset does not apply.
-Build from the clone with a compatible CUDA toolkit and a GB10 target, following
-[NVIDIA's Spark build guidance](https://build.nvidia.com/spark/llama-cpp/instructions):
-
-```sh
-CMAKE_CUDA_ARCHITECTURES=121a-real ./install.sh --build --accel cuda --force
-```
-
-Measure batch widths on that machine before selecting a larger batch:
-
-```sh
-CMAKE_CUDA_ARCHITECTURES=121a-real cargo run --release --locked -p centinel-core \
-  --features cuda --example embed_bench -- --sweep
-```
-
-The benchmark compares throughput and vector parity. Keep the same model and
-quantization when comparing runs. A failed batch is now split into halves until
-healthy groups succeed and bad individual chunks can be reported; cancellation is
-checked between retries. This preserves batching when one chunk is invalid or a
-whole group exceeds backend capacity. The first failure in each batch is visible
-in progress output.
+On Centinel's side, `--batch` and `[inference.embed] concurrency` decide how much work is in
+flight. A server with one slot gains nothing from more than one request at a time; one with
+several (`llama-server --parallel`) can take as many as it has slots.

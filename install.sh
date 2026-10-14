@@ -11,31 +11,24 @@
 # contributor testing a change installs the change, not master. The check is whether this
 # script is a file on disk beside a workspace, because `$0` is the shell when it is piped.
 #
-# There are two ways to end up with the binaries, and this script picks one:
+# There are two ways to end up with the binary, and this script picks one:
 #
 #   download   a release asset, when a release carries one this host can run
 #   build      from source, which is every other host and the fallback for every failure
 #
-# A release carries three assets, and all are GPU builds. Embedding is the stage measured
-# in days and it is what the whole tool is for, so a CPU-only download would hand somebody
-# the slow half of Centinel and call it an install:
+# A release carries one asset per platform, and none of them carries a GPU backend:
+# Centinel runs no model itself. Embedding, reranking and transcription are requests to the
+# servers `[inference]` names in the config file, and the GPU is theirs.
 #
-#   aarch64-apple-darwin                 Metal, which is built into any macOS build
-#   x86_64-unknown-linux-gnu, CUDA 12    wants an NVIDIA driver and the CUDA 12 runtime
-#   aarch64-unknown-linux-gnu, CUDA 13   the DGX Spark and other arm64 hosts with a GPU
+#   aarch64-apple-darwin
+#   x86_64-unknown-linux-gnu    x86-64-v3, so AVX2 — any x86_64 since about 2013
+#   aarch64-unknown-linux-gnu
 #
 # Nothing about the download is load-bearing. No asset for this host, no release yet, a
 # checksum that does not match, a binary that will not start — each falls back to the build
 # this script did before it could download anything, so the worst a broken release does is
 # cost one HTTP request. That is also why the download is tried before Rust is checked for:
 # a host that downloads does not need a toolchain at all.
-#
-# Centinel is TWO executables and needs both. `centinel` links llama.cpp and
-# `centinel-whisper` links whisper.cpp; linked into one binary they resolve to one copy of
-# ggml and transcription silently returns nothing (README, "Why two"). `centinel` finds the
-# worker beside itself first, so the one thing this script must not get wrong is putting
-# both in the same directory — which is why it installs them itself rather than printing two
-# commands and trusting the reader to run both.
 #
 # Nothing is prompted, so an unattended run behaves the same as an attended one. Every
 # choice is a flag or an environment variable.
@@ -46,7 +39,11 @@ set -eu
 MSRV="1.91"
 
 PKG_MAIN="centinel"
-PKG_WORKER="centinel-whisper"
+
+# What releases before the inference servers installed beside `centinel`, and where they
+# kept model weights. Neither is used any more; the install says so and leaves the
+# deleting to the operator.
+OLD_WORKER="centinel-whisper"
 
 REPO="https://github.com/bennyhodl/centinel"
 
@@ -54,13 +51,13 @@ REPO="https://github.com/bennyhodl/centinel"
 # `releases/latest/download/<name>` a fixed URL, so updating is the same command as
 # installing rather than a second thing to remember.
 ASSET_MACOS_ARM64="centinel-aarch64-apple-darwin.tar.gz"
-ASSET_LINUX_CUDA="centinel-x86_64-unknown-linux-gnu-cuda.tar.gz"
-ASSET_LINUX_ARM64_CUDA="centinel-aarch64-unknown-linux-gnu-cuda.tar.gz"
+ASSET_LINUX_X86_64="centinel-x86_64-unknown-linux-gnu.tar.gz"
+ASSET_LINUX_ARM64="centinel-aarch64-unknown-linux-gnu.tar.gz"
 
-# A cold build unpacks and compiles llama.cpp, whisper.cpp, arrow, datafusion and lance.
-# Below this it is close enough that "no space left on device" is a real way to lose half
-# an hour, and cargo does not check first.
-DISK_WANT_GB=15
+# A cold build unpacks and compiles arrow, datafusion and lance. Below this it is close
+# enough that "no space left on device" is a real way to lose twenty minutes, and cargo
+# does not check first.
+DISK_WANT_GB=10
 
 # The clone this script was run from, not the working directory — `../centinel/install.sh`
 # has to install the same thing `./install.sh` does. Empty when there is no clone, which
@@ -105,12 +102,12 @@ version_ge() {
 
 usage() {
     cat >&2 <<EOF
-${B}Centinel installer${N} — puts both binaries in one directory, downloading a release
-binary when this host can run one and building from source when it cannot.
+${B}Centinel installer${N} — downloads a release binary when this host can run one and
+builds from source when it cannot.
 
   curl --proto '=https' --tlsv1.2 -sSf $REPO/raw/master/install.sh | sh
-  curl ... | sh -s -- --accel cuda --deps      ${D}flags, through the pipe${N}
-  ./install.sh --accel cuda --deps             ${D}from a clone${N}
+  curl ... | sh -s -- --deps      ${D}flags, through the pipe${N}
+  ./install.sh --deps             ${D}from a clone${N}
 
 Re-run the same command to update. It reads the version off the latest release and stops
 early when that is the one already installed.
@@ -122,35 +119,35 @@ ${B}Options${N}
                      when this host has no asset. Works from a clone too.
   --force            Install again even when the release is the version already here.
   --tag <tag>        A released tag rather than the latest release or the default branch.
-  --accel <auto|none|cuda|vulkan|rocm>
-                     GPU backend. Default auto: Metal on macOS (built in, no flag),
-                     CUDA or ROCm on Linux when the toolchain is on PATH, else none.
-  --bin-dir <dir>    Where the two binaries go. A source build must end in \`bin\` —
+  --bin-dir <dir>    Where the binary goes. A source build must end in \`bin\` —
                      cargo owns the layout under its install root.
   --portable         Build for the baseline CPU of this architecture instead of this
                      host's. Slower — it is what makes the binary copyable to another
                      machine. Default is to tune for the CPU that is building. Downloaded
                      binaries are built this way already.
   --deps             Also install what is missing, using the package manager found on
-                     this host: ffmpeg and yt-dlp, and the C++ toolchain when building.
+                     this host: ffmpeg and yt-dlp, and the toolchain when building.
                      Without it they are only reported.
   --no-doctor        Skip the closing \`centinel doctor\` run.
   -h, --help         This text.
 
 ${B}Environment${N}
-  CENTINEL_ACCEL, CENTINEL_BIN_DIR, CENTINEL_TAG — same as the flags above.
+  CENTINEL_BIN_DIR, CENTINEL_TAG — same as the flags above.
   CENTINEL_METHOD=auto|download|build — same as --download and --build.
   CENTINEL_NATIVE=0 — same as --portable.
 
 ${B}What it does not do${N}
   Install Rust. A download does not need it. If a build does and \`cargo\` is missing, it
   prints the one command that fixes that and stops.
+
+  Run a model. Embedding, reranking and transcription go to the servers \`[inference]\`
+  names in centinel.toml — llama-server, whisper.cpp's server, or anything that speaks
+  the OpenAI API. \`centinel doctor\` says which are answering.
 EOF
 }
 
 # ---------------------------------------------------------------- arguments
 
-ACCEL="${CENTINEL_ACCEL:-auto}"
 BIN_DIR="${CENTINEL_BIN_DIR:-}"
 METHOD="${CENTINEL_METHOD:-auto}"
 NATIVE="${CENTINEL_NATIVE:-1}"
@@ -161,7 +158,10 @@ RUN_DOCTOR=1
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --accel)   [ $# -ge 2 ] || die "--accel needs a value"; ACCEL=$2; shift 2 ;;
+        # Gone with the in-process models. Named rather than "unknown", because the
+        # person typing it has a GPU and needs to know where it went.
+        --accel)   die "--accel is gone: Centinel runs no model itself. Give the GPU to the
+      server [inference] names — llama-server, whisper.cpp's server — and run this without it." ;;
         --bin-dir) [ $# -ge 2 ] || die "--bin-dir needs a value"; BIN_DIR=$2; shift 2 ;;
         --tag)     [ $# -ge 2 ] || die "--tag needs a value"; TAG=$2; shift 2 ;;
         --build)     METHOD=build; shift ;;
@@ -186,8 +186,8 @@ case "$(uname -s)" in
     Darwin) OS=macos ;;
     Linux)  OS=linux ;;
     MINGW*|MSYS*|CYGWIN*)
-        die "this script needs a POSIX shell. On Windows, run the two \`cargo install\`
-      commands from the README by hand — into the same directory." ;;
+        die "this script needs a POSIX shell. On Windows, run the \`cargo install\` command
+      from the README by hand." ;;
     *) die "unsupported system: $(uname -s)" ;;
 esac
 
@@ -196,18 +196,6 @@ case "$ARCH" in
     arm64|aarch64) ARCH=arm64 ;;
     x86_64|amd64)  ARCH=x86_64 ;;
     *) warn "untested architecture $ARCH — the build decides whether it works" ;;
-esac
-
-# Rejected here rather than in the accelerator block below, because an impossible pair is
-# an error about the command that was typed, and it should not wait behind a download.
-case "$ACCEL" in
-    auto|none|cuda|vulkan|rocm) ;;
-    metal) [ "$OS" = macos ] || die "metal is macOS only" ;;
-    *) die "unknown --accel value: $ACCEL" ;;
-esac
-case "$OS/$ACCEL" in
-    macos/cuda|macos/vulkan|macos/rocm)
-        die "$ACCEL is not available on macOS — use --accel metal, or leave it to auto" ;;
 esac
 
 # ---------------------------------------------------------------- package manager
@@ -226,36 +214,25 @@ elif have apk;     then PM=apk;    PM_INSTALL="sudo apk add"
 fi
 
 # What each gap is called in each manager. Empty means the manager has no such package:
-# on macOS the compilers and libclang come from the Xcode command line tools, which is a
-# different command and is checked separately.
+# on macOS the compiler comes from the Xcode command line tools, which is a different
+# command and is checked separately.
 pkg_for() {
     case "$PM:$1" in
-        brew:cmake)              echo cmake ;;
         brew:protoc)             echo protobuf ;;
         brew:node)               echo node ;;
-        apt:cmake)               echo cmake ;;
-        apt:cc|apt:c++)          echo build-essential ;;
-        apt:libclang)            echo libclang-dev ;;
+        apt:cc)                  echo build-essential ;;
         apt:protoc)              echo "protobuf-compiler libprotobuf-dev" ;;
         apt:node)                echo "nodejs npm" ;;
-        dnf:cmake)               echo cmake ;;
-        dnf:cc|dnf:c++)          echo "gcc gcc-c++ make" ;;
-        dnf:libclang)            echo clang-devel ;;
+        dnf:cc)                  echo "gcc make" ;;
         dnf:protoc)              echo "protobuf-compiler protobuf-devel" ;;
         dnf:node)                echo "nodejs npm" ;;
-        pacman:cmake)            echo cmake ;;
-        pacman:cc|pacman:c++)    echo base-devel ;;
-        pacman:libclang)         echo clang ;;
+        pacman:cc)               echo base-devel ;;
         pacman:protoc)           echo protobuf ;;
         pacman:node)             echo "nodejs npm" ;;
-        zypper:cmake)            echo cmake ;;
-        zypper:cc|zypper:c++)    echo "gcc gcc-c++ make" ;;
-        zypper:libclang)         echo clang-devel ;;
+        zypper:cc)               echo "gcc make" ;;
         zypper:protoc)           echo "protobuf-devel" ;;
         zypper:node)             echo "nodejs npm" ;;
-        apk:cmake)               echo cmake ;;
-        apk:cc|apk:c++)          echo build-base ;;
-        apk:libclang)            echo clang-dev ;;
+        apk:cc)                  echo build-base ;;
         apk:protoc)              echo protobuf-dev ;;
         apk:node)                echo "nodejs npm" ;;
     esac
@@ -265,10 +242,7 @@ pkg_for() {
 # somebody's word deserves to know which dependency asked for them.
 why_for() {
     case "$1" in
-        cmake)    echo "builds the vendored llama.cpp and whisper.cpp" ;;
-        cc)       echo "a C compiler" ;;
-        c++)      echo "a C++ compiler" ;;
-        libclang) echo "bindgen reads llama.cpp's and whisper.cpp's headers with it" ;;
+        cc)       echo "a C compiler, for SQLite, zstd and lz4" ;;
         protoc)   echo "six lance crates run prost-build, and none of them vendor it" ;;
         node)     echo "builds and runs the authenticated TanStack Start web server" ;;
     esac
@@ -283,8 +257,8 @@ add_pkgs() {
 
 # ---------------------------------------------------------------- destination
 
-# Where a previous install put them, when there was one. A download that lands somewhere
-# else does not replace the old binaries, it shadows them — and then PATH order decides
+# Where a previous install put it, when there was one. A download that lands somewhere
+# else does not replace the old binary, it shadows it — and then PATH order decides
 # which version runs, which is a bad way to find out an update did nothing.
 if [ -z "$BIN_DIR" ]; then
     _cargo_bin="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin"
@@ -298,40 +272,7 @@ fi
 
 # ---------------------------------------------------------------- what a download offers
 
-# This asks a different question from the accelerator block further down, and the
-# difference is the point. A release binary needs the NVIDIA *driver*; building CUDA needs
-# the *toolkit*. A host with a card and no nvcc is exactly the host a download serves
-# best, and `auto` would otherwise send it to a CPU build.
-
 cpu_has() { grep -qw "$1" /proc/cpuinfo 2>/dev/null; }
-
-nvidia_driver() {
-    if [ -e /proc/driver/nvidia/version ]; then return 0; fi
-    if have nvidia-smi; then return 0; fi
-    return 1
-}
-
-# `centinel` links cuBLAS statically, so it needs nothing but the driver. `centinel-whisper`
-# does not — whisper-rs-sys links `-lcudart -lcublas -lcublasLt` — so the host needs the
-# CUDA runtime, and the *major* it was built against: a 12.x binary loads any 12.x
-# runtime and no 13.x one. Shipping those in the asset would be most of a gigabyte, which
-# is why this is a check and not a bundle. Takes the major to look for.
-cuda_runtime() {
-    _major=$1
-    for _d in /usr/local/cuda/lib64 /usr/local/cuda-"$_major"*/lib64 \
-              /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/lib64 \
-              /opt/cuda/lib64; do
-        for _f in "$_d"/libcublas.so."$_major"*; do
-            if [ -e "$_f" ]; then return 0; fi
-        done
-    done
-    for _ldconfig in ldconfig /sbin/ldconfig; do
-        if command -v "$_ldconfig" >/dev/null 2>&1; then
-            if "$_ldconfig" -p 2>/dev/null | grep -q "libcublas\.so\.$_major"; then return 0; fi
-        fi
-    done
-    return 1
-}
 
 # The asset for this host, or empty with a reason on stderr. Empty is not a failure: it
 # is the answer "build", which is what this script did for every host before releases
@@ -339,16 +280,8 @@ cuda_runtime() {
 asset_for_host() {
     case "$OS/$ARCH" in
         macos/arm64)
-            case "$ACCEL" in
-                auto|metal) printf '%s' "$ASSET_MACOS_ARM64" ;;
-                *) note "no release binary for --accel $ACCEL on macOS" ;;
-            esac ;;
+            printf '%s' "$ASSET_MACOS_ARM64" ;;
         linux/x86_64)
-            case "$ACCEL" in
-                auto|cuda) ;;
-                *) note "the Linux release binary is a CUDA build; --accel $ACCEL builds"
-                   return 0 ;;
-            esac
             # Built for x86-64-v3, which is AVX2 and FMA — any x86_64 since about 2013.
             # Older than that and the binary faults on an instruction rather than saying
             # anything useful, so it is not offered.
@@ -356,36 +289,9 @@ asset_for_host() {
                 note "this CPU has no AVX2, and the release binary is built for it"
                 return 0
             fi
-            if ! nvidia_driver; then
-                note "no NVIDIA driver here, and the Linux release binary is a CUDA build"
-                return 0
-            fi
-            if ! cuda_runtime 12; then
-                note "the CUDA runtime is not installed, and centinel-whisper links it"
-                note "  ${PM_INSTALL:-your package manager} cuda-runtime-12-4  ${D}(~150 MB, no compiler)${N}"
-                return 0
-            fi
-            printf '%s' "$ASSET_LINUX_CUDA" ;;
+            printf '%s' "$ASSET_LINUX_X86_64" ;;
         linux/arm64)
-            # The DGX Spark and its kin. A CUDA 13 build, because the GB10 is sm_121 and no
-            # CUDA 12.4 compiler can target it — and because DGX OS ships the 13.0 runtime
-            # and nothing older. No CPU-feature check: ggml's kernels in this asset are
-            # armv8-a, the baseline of the architecture, so there is nothing to fault on.
-            case "$ACCEL" in
-                auto|cuda) ;;
-                *) note "the Linux release binary is a CUDA build; --accel $ACCEL builds"
-                   return 0 ;;
-            esac
-            if ! nvidia_driver; then
-                note "no NVIDIA driver here, and the Linux release binary is a CUDA build"
-                return 0
-            fi
-            if ! cuda_runtime 13; then
-                note "the CUDA 13 runtime is not installed, and centinel-whisper links it"
-                note "  ${PM_INSTALL:-your package manager} cuda-runtime-13-0  ${D}(~150 MB, no compiler)${N}"
-                return 0
-            fi
-            printf '%s' "$ASSET_LINUX_ARM64_CUDA" ;;
+            printf '%s' "$ASSET_LINUX_ARM64" ;;
         *)
             note "no release binary for $OS/$ARCH" ;;
     esac
@@ -488,26 +394,23 @@ try_download() {
         return 1
     fi
 
-    for _b in "$PKG_MAIN" "$PKG_WORKER"; do
-        if [ ! -f "$TMP/$_b" ]; then
-            warn "$_asset does not contain $_b, and both are needed"
-            return 1
-        fi
-        chmod +x "$TMP/$_b"
-    done
+    if [ ! -f "$TMP/$PKG_MAIN" ]; then
+        warn "$_asset does not contain $PKG_MAIN"
+        return 1
+    fi
+    chmod +x "$TMP/$PKG_MAIN"
 
     # curl sets no quarantine attribute, but a browser download does, and clearing one
     # that is not there costs nothing.
     if [ "$OS" = macos ] && have xattr; then
-        xattr -d com.apple.quarantine "$TMP/$PKG_MAIN" "$TMP/$PKG_WORKER" 2>/dev/null || true
+        xattr -d com.apple.quarantine "$TMP/$PKG_MAIN" 2>/dev/null || true
     fi
 
-    # The check that catches what the checks above cannot: a glibc too old, a CUDA runtime
-    # that is present but wrong, a macOS older than the one that built it. The process
-    # starts, the dynamic linker resolves everything, and it prints a version — and if it
-    # does not, a build is still on the table and nothing has been written yet.
-    if ! "$TMP/$PKG_MAIN" --version >/dev/null 2>&1 \
-    || ! "$TMP/$PKG_WORKER" --version >/dev/null 2>&1; then
+    # The check that catches what the checks above cannot: a glibc too old, a macOS older
+    # than the one that built it. The process starts, the dynamic linker resolves
+    # everything, and it prints a version — and if it does not, a build is still on the
+    # table and nothing has been written yet.
+    if ! "$TMP/$PKG_MAIN" --version >/dev/null 2>&1; then
         warn "the release binary does not run on this host"
         return 1
     fi
@@ -516,11 +419,9 @@ try_download() {
 
     # Into place by rename, which is atomic within a directory and, unlike writing over
     # the file, does not fail on a binary that is running right now.
-    for _b in "$PKG_MAIN" "$PKG_WORKER"; do
-        cp "$TMP/$_b" "$BIN_DIR/.$_b.new" || return 1
-        chmod 755 "$BIN_DIR/.$_b.new"
-        mv "$BIN_DIR/.$_b.new" "$BIN_DIR/$_b" || return 1
-    done
+    cp "$TMP/$PKG_MAIN" "$BIN_DIR/.$PKG_MAIN.new" || return 1
+    chmod 755 "$BIN_DIR/.$PKG_MAIN.new"
+    mv "$BIN_DIR/.$PKG_MAIN.new" "$BIN_DIR/$PKG_MAIN" || return 1
 
     return 0
 }
@@ -539,26 +440,6 @@ check_rust() {
     note "rust $rustc_version"
 }
 
-# bindgen wants the shared library, not the `clang` binary — a host can have gcc and clang
-# and still be missing libclang.so, which is `libclang-dev` on Debian and its relatives.
-have_libclang() {
-    if [ -n "${LIBCLANG_PATH:-}" ]; then return 0; fi
-    # Answered by the Xcode command line tools, which are checked as one thing below.
-    if [ "$OS" = macos ]; then return 0; fi
-    for _d in /usr/lib /usr/lib64 /usr/local/lib /usr/lib/x86_64-linux-gnu \
-              /usr/lib/aarch64-linux-gnu /usr/lib/llvm-*/lib; do
-        for _f in "$_d"/libclang.so*; do
-            if [ -e "$_f" ]; then return 0; fi
-        done
-    done
-    for _ldconfig in ldconfig /sbin/ldconfig; do
-        if command -v "$_ldconfig" >/dev/null 2>&1; then
-            if "$_ldconfig" -p 2>/dev/null | grep -q libclang; then return 0; fi
-        fi
-    done
-    return 1
-}
-
 # protoc, and the well-known types it resolves imports against — two packages on Debian and
 # only the first is obvious. `protobuf-compiler` is the binary; `google/protobuf/empty.proto`
 # and the rest live in `libprotobuf-dev`, and lance imports it. With the compiler alone,
@@ -575,10 +456,7 @@ have_protoc() {
 
 missing_build_tools() {
     _m=""
-    have cmake || _m="$_m cmake"
     have cc || have gcc || have clang || _m="$_m cc"
-    have c++ || have g++ || have clang++ || _m="$_m c++"
-    have_libclang || _m="$_m libclang"
     have_protoc || _m="$_m protoc"
     { have node && have npm; } || _m="$_m node"
     printf '%s' "$_m"
@@ -592,7 +470,7 @@ check_disk() {
     _gb=$((_kb / 1024 / 1024))
     if [ "$_gb" -lt "$DISK_WANT_GB" ]; then
         warn "$_gb GB free on $_dir, and a cold build wants about $DISK_WANT_GB GB.
-       It compiles llama.cpp, whisper.cpp, arrow, datafusion and lance."
+       It compiles arrow, datafusion and lance."
     fi
 }
 
@@ -663,7 +541,6 @@ install_pkg() {
         set -- "$@" "$pkg"
     fi
     if [ -n "$CARGO_ROOT" ]; then set -- "$@" --root "$CARGO_ROOT"; fi
-    if [ -n "$FEATURE" ]; then set -- "$@" --features "$FEATURE"; fi
 
     step "building $pkg"
     cargo "$@" || die "$pkg failed to build"
@@ -694,81 +571,15 @@ build_from_source() {
     check_build_tools
     note "$OS/$ARCH"
 
-    # ------------------------------------------------------------ accelerator
-
-    # The feature name, empty when nothing is passed to cargo. Metal is empty on purpose:
-    # centinel-core enables it per-target on macOS, so asking for it by flag is an error.
-    FEATURE=""
-    ACCEL_NOTE=""
-
-    # CUDA is often installed outside PATH on Linux, including DGX Spark. Discover
-    # the compiler before auto-selection can silently choose a CPU-only build.
-    if [ "$OS" = linux ] && { [ "$ACCEL" = auto ] || [ "$ACCEL" = cuda ]; } && ! have nvcc; then
-        for _nvcc in "${CUDA_PATH:-/usr/local/cuda}/bin/nvcc" /usr/local/cuda-*/bin/nvcc; do
-            if [ -x "$_nvcc" ]; then
-                PATH="$(dirname "$_nvcc"):$PATH"
-                export PATH
-                break
-            fi
-        done
-    fi
-
-    case "$ACCEL" in
-        auto)
-            if [ "$OS" = macos ]; then
-                ACCEL=metal
-            elif have nvcc; then
-                ACCEL=cuda
-            elif have hipcc; then
-                ACCEL=rocm
-            else
-                ACCEL=none
-            fi ;;
-    esac
-
-    case "$ACCEL" in
-        metal)
-            ACCEL_NOTE="metal (built in on macOS, no feature flag)" ;;
-        cuda|rocm|vulkan)
-            FEATURE=$ACCEL
-            ACCEL_NOTE=$ACCEL
-            # Named rather than fatal: a CUDA install with nvcc outside PATH is common, and
-            # refusing here would be wrong about a machine that builds fine.
-            case "$ACCEL" in
-                cuda)   have nvcc  || warn "nvcc is not on PATH; the CUDA build will need it" ;;
-                rocm)   have hipcc || warn "hipcc is not on PATH; the ROCm build will need it" ;;
-                vulkan) have glslc || warn "glslc is not on PATH; the Vulkan build will need it" ;;
-            esac ;;
-        none)
-            ACCEL_NOTE="none (CPU)"
-            if [ "$OS" = linux ] && have nvidia-smi; then
-                warn "NVIDIA tools detected, but this build will use CPU inference. For GPU acceleration install a compatible CUDA toolkit and use --accel cuda."
-            fi ;;
-    esac
-
     # ------------------------------------------------------------ cpu tuning
 
-    # `target-cpu=native` is not only a Rust codegen flag here. llama-cpp-sys-2 reads
-    # target-cpu back out of CARGO_ENCODED_RUSTFLAGS, and without it sets GGML_NATIVE=OFF and
-    # derives ggml's instruction-set flags from the *baseline* target features instead — which
-    # on x86_64-unknown-linux-gnu are `fxsr,sse,sse2,x87`. That compiles llama.cpp's CPU kernels
-    # with no AVX, no AVX2 and no FMA, and nothing recovers it at runtime, because the runtime
-    # dispatch (GGML_CPU_ALL_VARIANTS) only comes with a feature this build does not enable. On
-    # Linux aarch64 the same build script forces GGML_CPU_ARM_ARCH=armv8-a, dropping dotprod.
-    #
-    # whisper.cpp is already built this way — whisper-rs-sys passes no target-cpu handling, so
-    # ggml's own GGML_NATIVE default (ON for a non-cross build) applies. So the untuned case is
-    # not "both a little slow"; it is the transcriber tuned and the embedder not, and embedding
-    # is the stage measured in days.
-    #
-    # Default on because this script installs to the machine it just built on, which is the one
-    # situation where native is unambiguously right. --portable is for the other one, and it is
+    # Tuned for this CPU by default, because this script installs to the machine it just
+    # built on — the one situation where native is unambiguously right, and it lets rustc
+    # use every instruction this CPU has. --portable is for the other situation, and it is
     # how the release binaries are built.
     case "${RUSTFLAGS:-}" in
         *target-cpu=*)
-            # Left alone rather than appended to. rustc takes the last target-cpu it is given
-            # and llama-cpp-sys takes the first, so adding a second one is how the Rust code and
-            # ggml end up tuned for different CPUs with nothing saying so.
+            # Left alone rather than appended to: somebody who set one meant it.
             TUNING="$(printf '%s' "$RUSTFLAGS" | sed 's/.*target-cpu=\([^ ]*\).*/\1/') — from your RUSTFLAGS" ;;
         *)
             if [ "$NATIVE" = 1 ]; then
@@ -793,14 +604,10 @@ build_from_source() {
     say ""
     step "building centinel"
     note "from         $SOURCE_NOTE"
-    note "accelerator  $ACCEL_NOTE"
     note "cpu tuning   $TUNING"
     note "into         $BIN_DIR"
     say ""
 
-    # The worker first. It is the cheaper of the two C++ builds, so a toolchain that cannot
-    # compile whisper.cpp says so in a few minutes rather than after llama.cpp and LanceDB.
-    install_pkg "$PKG_WORKER"
     install_pkg "$PKG_MAIN"
 }
 
@@ -838,11 +645,27 @@ fi
 say ""
 step "checking the install"
 
-for bin in "$PKG_MAIN" "$PKG_WORKER"; do
-    [ -x "$BIN_DIR/$bin" ] || die "$bin is not in $BIN_DIR after an install that reported
-      success. Transcription needs both binaries in one directory."
-done
-note "both binaries in $BIN_DIR"
+[ -x "$BIN_DIR/$PKG_MAIN" ] || die "$PKG_MAIN is not in $BIN_DIR after an install that
+      reported success."
+note "$PKG_MAIN in $BIN_DIR"
+
+# What an install before the inference servers left behind. Named rather than deleted: the
+# weights are gigabytes somebody may want to hand to llama-server, and this script removes
+# nothing it did not put there this run.
+if [ -e "$BIN_DIR/$OLD_WORKER" ]; then
+    note "$BIN_DIR/$OLD_WORKER is no longer used — transcription goes to a server now"
+    note "  rm $BIN_DIR/$OLD_WORKER"
+fi
+if [ "$OS" = macos ]; then
+    OLD_MODELS="${CENTINEL_MODELS:-$HOME/Library/Caches/centinel/models}"
+else
+    OLD_MODELS="${CENTINEL_MODELS:-${XDG_CACHE_HOME:-$HOME/.cache}/centinel/models}"
+fi
+if [ -d "$OLD_MODELS" ]; then
+    _size=$(du -sh "$OLD_MODELS" 2>/dev/null | awk '{print $1}')
+    note "the model weights in $OLD_MODELS (${_size:-?}) are no longer read by centinel"
+    note "  serve them with llama-server or whisper.cpp's server, or: rm -r $OLD_MODELS"
+fi
 
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
@@ -913,6 +736,7 @@ fi
 
 say "  Web and remote MCP serving requires Node.js 22.13+ on this host."
 say "  ${G}Next${N}"
-say "    centinel models pull    ${D}weights for search and transcription${N}"
+say "    start the servers [inference] names in centinel.toml"
+say "      ${D}llama-server for embed and rerank, whisper.cpp's server for transcription${N}"
 say "    centinel doctor         ${D}what is still missing, and the fix for each gap${N}"
 say ""

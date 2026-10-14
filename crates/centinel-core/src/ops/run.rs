@@ -16,7 +16,7 @@
 //! one was resumable. That is what makes this the cron command: twice a day costs one
 //! sitemap walk per source plus whatever genuinely changed.
 //!
-//! ## Two phases, because model loads dominate
+//! ## Two phases, because the corpus-wide stages cost per call
 //!
 //! ```text
 //!   per source   discover → collect          (network-bound, per-host paced)
@@ -28,9 +28,11 @@
 //! live in search as it lands.
 //!
 //! Acquisition is per source because politeness is per host and a 403 on one site must
-//! not stop the next. Derivation is corpus-wide because `transcribe` and `embed` each
-//! build a multi-gigabyte model, and doing that once beats doing it per source — with
-//! twenty sources the naive chaining spends more time loading weights than embedding.
+//! not stop the next. Derivation is corpus-wide because `embed` costs per call what no
+//! source pays for alone — a scan of every stored key to work out what is missing, and a
+//! compaction of the table afterwards — and doing that once beats doing it per source:
+//! with twenty sources the naive chaining spends more time maintaining the table than
+//! embedding.
 //!
 //! It also fixes an ordering hazard for free: `index` runs after *every* source has
 //! extracted, so a chunk that appears in two sources is placed against both.
@@ -44,7 +46,8 @@ use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
 use crate::acquire::{self, CollectOpts, DiscoverOpts};
-use crate::config::Config;
+use crate::config::{Config, InferenceConfig};
+use crate::inference::Capability;
 use crate::op::TOTAL_TRACK;
 use crate::prelude::*;
 use crate::sources::{self, Overrides};
@@ -847,19 +850,17 @@ async fn run_derivation(
         }
 
         Stage::Transcribe => {
-            let model = &config.defaults.transcribe_model;
-            if let Some(reason) = missing_model(model, crate::models::ModelRole::Transcription) {
+            if let Some(reason) = unserved(&config.inference, Capability::Transcribe).await {
                 return Ok(StageRun::skipped(stage, reason));
             }
             fold_targets(
                 stage,
                 targets,
                 |source| async move {
-                    let r = super::transcribe(
+                    let r = super::transcribe::transcribe_with(
                         ctx,
                         TranscribeArgs {
                             source,
-                            model: Some(model.clone()),
                             language: Some(config.defaults.lang.clone()),
                             // No `limit`: see `RunArgs::limit`. Collection is already
                             // capped, so there is nothing extra here to bound — and a
@@ -867,6 +868,7 @@ async fn run_derivation(
                             refresh: args.refresh,
                             ..Default::default()
                         },
+                        &config.inference,
                         progress,
                         cancel,
                     )
@@ -955,11 +957,7 @@ async fn run_derivation(
         )),
 
         Stage::Embed => {
-            let model = &config.defaults.embed_model;
-            // Read out here, beside the model, so the closure below carries the value
-            // rather than the whole config.
-            let batch = config.defaults.embed_batch;
-            if let Some(reason) = missing_embedder(model) {
+            if let Some(reason) = unserved(&config.inference, Capability::Embed).await {
                 return Ok(StageRun::skipped(stage, reason));
             }
             // One call, whatever the scope: the vector table is keyed by chunk hash, which
@@ -968,19 +966,14 @@ async fn run_derivation(
                 stage,
                 vec![None],
                 |_| async move {
-                    let r = super::embed(
+                    let r = super::embed::embed_with(
                         ctx,
-                        EmbedArgs {
-                            // Passed rather than left unset: the config is already open
-                            // here, and `embed` would otherwise read the same file again
-                            // to find the same values.
-                            model: Some(model.clone()),
-                            batch: Some(batch),
-                            // No `limit`: see `RunArgs::limit`. `--skip embed` is how a run
-                            // stops short of this stage, and `centinel embed --limit` is
-                            // how it is bounded deliberately.
-                            ..Default::default()
-                        },
+                        // No `limit`: see `RunArgs::limit`. `--skip embed` is how a run
+                        // stops short of this stage, and `centinel embed --limit` is how it
+                        // is bounded deliberately.
+                        EmbedArgs::default(),
+                        // The config already open here, rather than the file read again.
+                        &config.inference,
                         progress,
                         cancel,
                     )
@@ -1012,38 +1005,18 @@ async fn run_derivation(
     }
 }
 
-/// Why a model-backed stage cannot run, or `None` when it can.
+/// Why a stage's server cannot be used, or `None` when it can.
 ///
 /// Checked before the stage rather than inside it, because the alternative is failing an
-/// hour of crawling at the last step over a download that was never started. A missing
-/// model is a **skip**, not a failure: what was collected is collected, and the stage
-/// resumes on the next run once the weights are there.
-/// Why the embed stage cannot run, or `None` when it can.
-///
-/// A local model is missing when its weights are; a remote one when its key is. Asked
-/// through [`crate::remote::backend_for`] so this check and `embed` itself read the
-/// model id the same way — a skip reason must name the thing the stage would actually
-/// have failed on.
-fn missing_embedder(id: &str) -> Option<String> {
-    use crate::remote::EmbeddingBackend;
-    match crate::remote::backend_for(id) {
-        Err(e) => Some(format!("{e:#}")),
-        Ok(EmbeddingBackend::Local(_)) => missing_model(id, crate::models::ModelRole::Embedding),
-        Ok(EmbeddingBackend::Remote(spec)) => {
-            crate::remote::api_key(spec).err().map(|e| format!("{e:#}"))
-        }
+/// hour of crawling at the last step over a server that was never started. A server that
+/// is not answering is a **skip**, not a failure: what was collected is collected, and the
+/// stage resumes on the next run once the server is up.
+async fn unserved(inference: &InferenceConfig, capability: Capability) -> Option<String> {
+    let endpoint = inference.endpoint(capability);
+    if let Err(e) = endpoint.key() {
+        return Some(format!("{e:#}"));
     }
-}
-
-fn missing_model(id: &str, role: crate::models::ModelRole) -> Option<String> {
-    let dir = match crate::models::models_dir() {
-        Ok(dir) => dir,
-        Err(e) => return Some(format!("model directory unavailable: {e}")),
-    };
-    // The error already carries the command that fixes it, in the one spelling there is.
-    crate::models::resolve(id, role, None, &dir)
-        .err()
-        .map(|e| e.to_string())
+    endpoint.reachable().await.err()
 }
 
 // ── rendering ─────────────────────────────────────────────────────────────────

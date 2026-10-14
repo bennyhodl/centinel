@@ -8,7 +8,7 @@
 
 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — How it is built. The store, the domain model, and how one function definition becomes a CLI command, an MCP tool, and an HTTP route. Includes the quickstart.
 
-**[docs/RETRIEVAL.md](docs/RETRIEVAL.md)** — How a question becomes a cited passage. Chunking, the two stores, the local embedder and reranker, and what a result tells you about how much of the corpus it could actually see.
+**[docs/RETRIEVAL.md](docs/RETRIEVAL.md)** — How a question becomes a cited passage. Chunking, the two stores, the embedder and reranker, and what a result tells you about how much of the corpus it could actually see.
 
 **[docs/SPEC.md](docs/SPEC.md)** — The settled specification. Every locked decision with its reasoning and its accepted costs, plus the six that are still open.
 
@@ -53,7 +53,7 @@ It is built on three principles drawn directly from Bryan's playbook.
 
 Centinel is a library, a CLI, a server, and an MCP endpoint. The agents come later and sit **on top** — they are clients of the record, never its author. What is collected does not depend on what any model happened to think that day.
 
-Everything runs locally. No document, no transcript, no page ever leaves the machine for a third-party API.
+Everything runs where you point it. No document, no transcript, no page leaves the machine for a third-party API unless your config file sends it to a model server you chose — and by default that server is on `127.0.0.1`.
 
 Bryan lost the immediate fight. Pennsylvania ratified the Constitution in December 1787. But the pressure he and his fellow dissenters generated forced the **Bill of Rights** into existence — protections the powerful had not wanted to grant.
 
@@ -69,24 +69,16 @@ Light the candle.
 curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/bennyhodl/centinel/master/install.sh | sh
 ```
 
-The same command installs and updates. It downloads a release binary when the latest release carries one this host can run, and builds from source when it does not — which is most hosts, and every host until binary releases are switched on. A download needs no Rust and no C++ toolchain; a build checks for both, plus `libclang` and `protoc`, and names the command for whatever is missing rather than installing a toolchain behind your back.
+The same command installs and updates. It downloads a release binary when the latest release carries one this host can run, and builds from source when it does not. A download needs no Rust and no toolchain; a build checks for Rust, a C compiler and `protoc`, and names the command for whatever is missing rather than installing a toolchain behind your back.
 
-A release carries three assets, and all are GPU builds. Embedding is the stage measured in days, so a CPU-only download would be the slow half of Centinel handed over as an install:
-
-| Asset | Wants |
-|---|---|
-| `aarch64-apple-darwin` | an Apple Silicon Mac. Metal is compiled in, shaders and all |
-| `x86_64-unknown-linux-gnu`, CUDA 12 | an NVIDIA driver, the CUDA 12 runtime, and AVX2 |
-| `aarch64-unknown-linux-gnu`, CUDA 13 | an arm64 host with an NVIDIA GPU — the DGX Spark — and the CUDA 13 runtime |
+A release carries one asset per platform — `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu` (AVX2) and `aarch64-unknown-linux-gnu` — and none carries a GPU backend, because Centinel runs no model itself. Embedding, reranking and transcription are requests to servers you run; see [Models run on servers](#models-run-on-servers) below.
 
 Nothing about the download is load-bearing. No asset, no release, a checksum that does not match, a binary that will not start on this host — each falls back to the build, so the worst a bad release does is cost one request. The one exception is a checksum that is published and wrong, which stops instead: that is somebody handing you a different file.
-
-Three things the script does that a `cargo install` line cannot. It selects the GPU backend for the host — Metal on macOS, CUDA or ROCm on Linux when their toolchains are present. It tunes a build for the CPU it is building on, which matters more than it sounds like (below). And it puts **both** binaries in one directory, which is the thing transcription does not work without.
 
 Flags go after `-s --`:
 
 ```bash
-curl -sSf https://raw.githubusercontent.com/bennyhodl/centinel/master/install.sh | sh -s -- --accel cuda --deps
+curl -sSf https://raw.githubusercontent.com/bennyhodl/centinel/master/install.sh | sh -s -- --deps
 ```
 
 | | |
@@ -94,11 +86,10 @@ curl -sSf https://raw.githubusercontent.com/bennyhodl/centinel/master/install.sh
 | `--build` | build from source even where a release binary would fit |
 | `--download` | download, and fail rather than quietly build when this host has no asset |
 | `--force` | install again when the release is the version already here |
-| `--accel auto\|none\|cuda\|vulkan\|rocm` | override the detected backend |
-| `--portable` | build for the baseline CPU, so the binary can be copied to another machine |
+| `--portable` | build for the baseline CPU rather than this one's, so the binary can be copied to another machine |
 | `--bin-dir <dir>` | somewhere other than `~/.cargo/bin` |
 | `--tag <tag>` | a released tag rather than the latest release or the default branch |
-| `--deps` | install what is missing with this host's package manager: `ffmpeg` and `yt-dlp`, and the C++ toolchain when building |
+| `--deps` | install what is missing with this host's package manager: `ffmpeg` and `yt-dlp`, and the toolchain when building |
 | `--no-doctor` | skip the closing `centinel doctor` |
 
 From a clone it installs **the clone**, so a contributor testing a change installs the change:
@@ -113,49 +104,38 @@ Afterwards, `centinel update` is the same decision run backwards: it asks the cl
 binary was built from, then GitHub's latest release, and installs through `install.sh`
 whichever way you installed. `--check` reports and stops.
 
-### Why it tunes for your CPU
-
-`llama-cpp-sys-2` reads `target-cpu` back out of the Rust flags and, when it is not `native`, sets `GGML_NATIVE=OFF` and derives ggml's instruction-set flags from the *baseline* target features instead. On `x86_64-unknown-linux-gnu` those are `fxsr,sse,sse2,x87` — so a plain `cargo install` compiles llama.cpp's CPU kernels with **no AVX, no AVX2 and no FMA**, and nothing recovers it at runtime, because the runtime dispatch that would (`GGML_CPU_ALL_VARIANTS`) ships with a feature this build does not enable. On Linux `aarch64` the same build script pins `GGML_CPU_ARM_ARCH=armv8-a` and drops dotprod.
-
-`whisper.cpp` has none of this — `whisper-rs-sys` passes no `target-cpu` handling, so ggml's own default applies and it builds native already. So the untuned case is not "both a little slow". It is the transcriber tuned and the embedder not, and embedding is the stage measured in days.
-
-The cost is that the binary is then built for the CPU that built it and must not be copied to an older one. `--portable` is the way out, and it leaves `RUSTFLAGS` alone — so a middle tier that still carries AVX2 and FMA but runs on anything since about 2013 is:
-
-```bash
-RUSTFLAGS="-C target-cpu=x86-64-v3" ./install.sh --portable
-```
-
-The release binaries are built exactly that way: `x86-64-v3` on Linux, and on macOS the apple-m1 baseline every Apple Silicon Mac already shares. Both are hosts where the GPU does the embedding, so what a native build would win back lands on stages that were never the slow ones. On a CPU-only host it is the other way round, which is why no release carries a CPU-only binary.
-
 ### By hand
 
-**Centinel is two binaries, and you need both.** Without a clone, one command does both:
-
 ```bash
-cargo install --git https://github.com/bennyhodl/centinel centinel centinel-whisper
-```
-
-From a clone it is two commands — cargo cannot take two `--path` arguments, and the workspace root is a virtual manifest:
-
-```bash
+cargo install --git https://github.com/bennyhodl/centinel centinel   # or, from a clone:
 cargo install --path crates/centinel
-cargo install --path crates/centinel-whisper
 ```
 
-Both packages compile a C++ library from source, so the first build is long either way. Any GPU backend other than Metal is a `--features` flag on **each** of the two commands: passing `--features cuda` to one binary and not the other leaves half the pipeline on the CPU.
+### Models run on servers
 
-### Why two
+Centinel sends embedding, reranking and transcription to servers named in the `[inference]` block of `centinel.toml`, and stores what comes back. The tuning that makes a model fast on a given machine — GPU offload, batch shape, threads, VAD — belongs to the server, set once for that machine. Any server that speaks OpenAI's `/embeddings` and `/audio/transcriptions`, and the Cohere/Jina `/rerank`, will do:
 
-`whisper.cpp` and `llama.cpp` each vendor their own copy of **`ggml`**, and both export the same ~534 `ggml_*` symbols. Linked into one binary the linker keeps one copy and silently resolves the other library's calls to it. The two versions are not the same. Measured on identical audio and model, the linked crates the only variable:
+```bash
+llama-server -hf Qwen/Qwen3-Embedding-4B-GGUF:Q8_0 --embedding --pooling last --port 8080
+llama-server -hf ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF --reranking --port 8081
+whisper-server -m ggml-large-v3-turbo-q8_0.bin --port 8178 \
+  --inference-path /v1/audio/transcriptions --vad --vad-model ggml-silero-v5.1.2.bin
+```
 
-| binary | result |
-|---|---|
-| `whisper-rs` alone | 2 segments — *"The council meeting will come to order."* |
-| `whisper-rs` + `llama-cpp-2` | **0 segments**, every token at `p=0.000` |
+```toml
+[inference]
+base_url = "http://127.0.0.1:8080/v1"
 
-It links without a warning, runs without a crash, and transcribes nothing. There is no error to catch. So `centinel` links `llama.cpp`, `centinel-whisper` links `whisper.cpp`, and the two meet over a pipe. [`docs/SPEC.md`](docs/SPEC.md) §3.6 has the full reasoning and the alternatives it rejected.
+[inference.rerank]
+model = "qwen3-reranker-0.6b"
+base_url = "http://127.0.0.1:8081/v1"
 
-`centinel` finds the worker beside itself first, then `$CENTINEL_WHISPER_BIN`, then `PATH`. Installing both with the same command puts them in the same directory, which is all it needs — and the install script checks they landed there rather than trusting that they did.
+[inference.transcribe]
+model = "whisper-large-v3-turbo"
+base_url = "http://127.0.0.1:8178/v1"
+```
+
+A corpus is keyword-searchable with no server at all; the vector arm, the reranker and transcription each wait for theirs, and `centinel doctor` says which are answering. OpenRouter, or a team's shared GPU box, is a `base_url` and an `api_key_env`. [Inference servers](web/src/docs/reference/inference.md) has every key, and how to move a corpus embedded by an earlier release onto a server without re-embedding it (`centinel embed --adopt`).
 
 ### External tools
 
@@ -164,7 +144,7 @@ Corpus processing shells out to standalone tools. Serving the web app and remote
 | Binary | Needed for | Required |
 |---|---|---|
 | `yt-dlp` | YouTube acquisition | yes |
-| `ffmpeg` | decodes audio to 16 kHz mono PCM for transcription | yes |
+| `ffmpeg` | decodes audio to the 16 kHz WAV a transcription server is sent | yes |
 | `pdftoppm` (poppler), `tesseract` | OCR | not yet — nothing calls them |
 
 ```bash
@@ -179,8 +159,7 @@ Keep `yt-dlp` current. It ships releases in emergency clusters when YouTube chan
 ### Then
 
 ```bash
-centinel doctor         # what this machine is missing, and the command for each gap
-centinel models pull    # weights for search and transcription
+centinel doctor         # what this machine is missing, and which model servers answer
 ```
 
 `doctor` is the check to run first and after every step. It names the fix beside each gap it finds.

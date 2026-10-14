@@ -41,14 +41,14 @@
 - [Transcription](internals/transcribe.md)
 - [Chunking and the index](internals/index.md)
 - [Embeddings](internals/embed.md)
-- [Models](internals/models.md)
+- [Inference](internals/inference.md)
 - [Search](internals/search.md)
 - [Ops](internals/ops.md)
 
 # Reference
 
 - [Commands](reference/commands.md)
-- [Models in the registry](reference/models.md)
+- [Inference servers](reference/inference.md)
 - [Glossary](reference/glossary.md)
 - [The deeper docs](reference/further-reading.md)
 

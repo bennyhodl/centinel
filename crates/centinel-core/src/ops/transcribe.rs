@@ -1,8 +1,9 @@
 //! `transcribe` — turn stored audio into timestamped text.
 //!
-//! The local-inference twin of [`crate::ops::embed`], and it inherits that op's shape:
-//! read the pool, never the network; write a `Blob → Blob` derivation; make resumability
-//! a consequence of the log rather than a checkpoint file.
+//! The twin of [`crate::ops::embed`], and it inherits that op's shape: read the pool, send
+//! the work to the server `[inference.transcribe]` names, write a `Blob → Blob`
+//! derivation, and make resumability a consequence of the log rather than a checkpoint
+//! file.
 //!
 //! ## Resumability, again for free
 //!
@@ -10,30 +11,39 @@
 //! There is no progress file, because the log already answers the question:
 //!
 //! ```text
-//! audio blobs observed  −  blobs that already have a whisper derivation
+//! audio blobs observed  −  blobs that already have a transcript derivation
 //! ```
 //!
-//! Kill it after four meetings and re-run; it starts at the fifth.
+//! Kill it after four meetings and re-run; it starts at the fifth. A transcript written by
+//! the in-process `whisper.cpp` worker this replaced counts as one: the audio has not
+//! changed, and re-transcribing a backlog to change who did it is hours for nothing.
 //!
 //! ## Why the tier is on every derivation
 //!
 //! SPEC §4.6: recording `tool`, `version` **and** `model_tier` is what makes *"the source
-//! changed"* mechanically distinguishable from *"this ran on a weaker machine with a
-//! smaller whisper tier"*. Transcription is the case that argument was written for — the
-//! same audio through `whisper-tiny` and `whisper-large-v3-turbo` yields materially
-//! different text, and without the tier a re-run would look like the recording changed.
+//! changed"* mechanically distinguishable from *"this ran on a weaker model"*.
+//! Transcription is the case that argument was written for — the same audio through
+//! `whisper-tiny` and `whisper-large-v3-turbo` yields materially different text, and
+//! without the tier a re-run would look like the recording changed. The tier is the model
+//! as the server was asked for it, with the server's `host:port` where a quantization used
+//! to be.
 
 use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::config::InferenceConfig;
 use crate::content::{ContentKind, SNIFF_BYTES};
+use crate::inference::Capability;
 use crate::prelude::*;
 use crate::store::LogRecord;
-use crate::transcribe::{Transcriber, WORKER};
+use crate::transcribe::Transcriber;
 
 /// The tool name recorded on every derivation this op writes.
-const TOOL: &str = "whisper.cpp";
+const TOOL: &str = "transcription";
+
+/// The tool name the in-process worker recorded. Its transcripts are transcripts.
+const LEGACY_TOOL: &str = "whisper.cpp";
 
 #[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct TranscribeArgs {
@@ -42,21 +52,15 @@ pub struct TranscribeArgs {
     #[serde(default)]
     pub source: Option<String>,
 
-    /// Whisper model id.
+    /// The model to ask the transcription server for.
     ///
-    /// Unset means "nobody said here", which falls through to `[defaults]
-    /// transcribe_model` in the config file and from there to `whisper-large-v3-turbo`
-    /// — the route `embed --batch` documents. A clap default here would make a typed
-    /// model indistinguishable from an absent one, and the file's standing preference
-    /// would be read and never used.
+    /// Unset means "nobody said here", which falls through to `[inference.transcribe]
+    /// model` in the config file. A clap default here would make a typed model
+    /// indistinguishable from an absent one, and the file's standing preference would be
+    /// read and never used.
     #[arg(long)]
     #[serde(default)]
     pub model: Option<String>,
-
-    /// Quantization. Defaults to whichever is installed.
-    #[arg(long)]
-    #[serde(default)]
-    pub variant: Option<String>,
 
     /// Spoken language, e.g. `en`. Omit to let Whisper detect it per recording.
     #[arg(long)]
@@ -73,34 +77,22 @@ pub struct TranscribeArgs {
     #[serde(default)]
     pub refresh: bool,
 
-    /// Transcribe without VAD.
-    ///
-    /// Off by default and deliberately awkward to reach: VAD is the documented mitigation
-    /// for Whisper hallucinating over the dead air a council recording is full of.
-    #[arg(long)]
-    #[serde(default)]
-    pub allow_no_vad: bool,
-
-    /// Report the work without loading a model or running inference.
+    /// Report the work without sending anything to the server.
     #[arg(long)]
     #[serde(default)]
     pub dry_run: bool,
 }
 
-/// So [`crate::ops::run`] inherits the CLI's defaults — including `allow_no_vad: false`,
-/// which is the documented mitigation for Whisper hallucinating over dead air and must
-/// not become opt-out by way of a second default. `model: None` is "nobody said", which
-/// resolves through the config file to `[defaults] transcribe_model`.
+/// So [`crate::ops::run`] inherits the CLI's defaults. `model: None` is "nobody said",
+/// which resolves through the config file to `[inference.transcribe] model`.
 impl Default for TranscribeArgs {
     fn default() -> Self {
         Self {
             source: None,
             model: None,
-            variant: None,
             language: None,
             limit: None,
             refresh: false,
-            allow_no_vad: false,
             dry_run: false,
         }
     }
@@ -130,10 +122,8 @@ pub struct TranscribeFailure {
 pub struct TranscribeReport {
     pub sources: Vec<String>,
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub variant: Option<String>,
-    /// False when no VAD was installed and `--allow-no-vad` permitted the run anyway.
-    pub vad: bool,
+    /// The server's `base_url`.
+    pub server: String,
     /// Audio blobs found in the pool.
     pub audio_found: usize,
     /// Skipped because a transcript already existed.
@@ -152,7 +142,7 @@ pub struct TranscribeReport {
     pub failures: Vec<TranscribeFailure>,
 }
 
-/// Transcribe collected audio with a local Whisper model.
+/// Transcribe collected audio on the configured transcription server.
 #[op(long_running, reach = "operator", group = "stage")]
 pub async fn transcribe(
     ctx: &Ctx,
@@ -160,13 +150,24 @@ pub async fn transcribe(
     progress: &Progress,
     cancel: &Cancel,
 ) -> anyhow::Result<TranscribeReport> {
-    // The flag, else the config file's standing preference — resolved here so
-    // `centinel transcribe` typed by hand uses the model the file names. `run` reads
-    // the file once and passes its value down.
-    let model = match args.model.clone() {
-        Some(typed) => typed,
-        None => crate::config::Config::load()?.defaults.transcribe_model,
-    };
+    let inference = crate::config::Config::load()?.inference;
+    transcribe_with(ctx, args, &inference, progress, cancel).await
+}
+
+/// [`transcribe`], against the servers `inference` names — `run` passes the config it has
+/// open rather than have the file read twice.
+pub(crate) async fn transcribe_with(
+    ctx: &Ctx,
+    args: TranscribeArgs,
+    inference: &InferenceConfig,
+    progress: &Progress,
+    cancel: &Cancel,
+) -> anyhow::Result<TranscribeReport> {
+    // The flag, else the config file's standing preference.
+    let mut endpoint = inference.endpoint(Capability::Transcribe);
+    if let Some(model) = &args.model {
+        endpoint = endpoint.with_model(model);
+    }
 
     let sources = match &args.source {
         Some(s) => vec![SourceId::new(s.clone())?],
@@ -175,9 +176,8 @@ pub async fn transcribe(
 
     let mut report = TranscribeReport {
         sources: sources.iter().map(|s| s.to_string()).collect(),
-        model: model.clone(),
-        variant: args.variant.clone(),
-        vad: false,
+        model: endpoint.model.clone(),
+        server: endpoint.base_url.clone(),
         audio_found: 0,
         already_transcribed: 0,
         attempted: 0,
@@ -191,15 +191,15 @@ pub async fn transcribe(
     };
 
     // ---- work list -----------------------------------------------------------------
-    // Built before any model is loaded, so `--dry-run` costs nothing and a run with no
-    // work never pays the multi-second weight load.
+    // Built before anything is sent, so `--dry-run` costs nothing.
     let mut todo: Vec<(SourceId, Resource, Observation)> = Vec::new();
 
     for source in &sources {
         let replay = ctx.store.replay(source).await?;
         // Keyed by tool: a text derivation of a video's *metadata* must not be mistaken
         // for a transcript of its audio.
-        let transcribed = replay.derived_by(TOOL);
+        let mut transcribed = replay.derived_by(TOOL);
+        transcribed.extend(replay.derived_by(LEGACY_TOOL));
 
         for (resource, obs) in replay.latest_observations() {
             // The head, and only the head. This asks "is this audio?" of every blob in
@@ -241,49 +241,15 @@ pub async fn transcribe(
         return Ok(report);
     }
 
-    // ---- resolve the model ---------------------------------------------------------
-    let root = crate::models::models_dir()?;
-    let transcriber = Transcriber::resolve(
-        &root,
-        &model,
-        args.variant.as_deref(),
-        args.language.clone(),
-    )?;
-
-    // A missing VAD is refused rather than silently downgraded. Whisper fabricates
-    // sentences in proportion to non-vocal duration, and a council recording is mostly
-    // non-vocal — a transcript produced without VAD is a different artifact, not a
-    // slightly worse one.
-    if !transcriber.has_vad() && !args.allow_no_vad {
-        // The command comes from `models::resolve`, so it names the VAD the registry
-        // actually pins rather than the one that was current when this was written.
-        let fix = crate::models::REGISTRY
-            .iter()
-            .find(|s| s.role == crate::models::ModelRole::VoiceActivity)
-            .and_then(|s| {
-                crate::models::resolve(s.id, crate::models::ModelRole::VoiceActivity, None, &root)
-                    .err()
-                    .and_then(|e| e.fix().map(str::to_string))
-            })
-            .unwrap_or_else(|| "centinel models pull".to_string());
-
-        anyhow::bail!(
-            "no VAD weights installed. Whisper hallucinates over the dead air a council \
-             recording is full of, so transcription without VAD is refused by default.\n  \
-             fix:      {fix}\n  \
-             override: --allow-no-vad (recorded on every derivation)"
-        );
-    }
-    report.vad = transcriber.has_vad();
-    report.variant = Some(transcriber.variant.clone());
+    let transcriber = Transcriber::new(endpoint, args.language.clone())?;
 
     // ---- transcribe ----------------------------------------------------------------
     let tier = transcriber.tier();
     let total = todo.len() as u64;
 
     for (i, (source, resource, obs)) in todo.into_iter().enumerate() {
-        // The coarsest boundary in the pipeline — one recording can be four hours. The
-        // child process itself is what shutdown has to reach; see `Tool`.
+        // The coarsest boundary in the pipeline — one recording can be four hours on the
+        // server. Dropping the request is what shutdown has to reach.
         cancel.check()?;
         progress.step(
             format!("{}/{} {}", i + 1, total, short(&resource.natural_key)),
@@ -297,6 +263,9 @@ pub async fn transcribe(
 
         let transcript = match transcriber.transcribe(&audio, progress).await {
             Ok(t) => t,
+            // A server that is not there, refuses the key or answers without timestamps
+            // will do the same for every recording after this one.
+            Err(e) if crate::inference::is_fatal(&e) => return Err(e),
             Err(e) => {
                 report.failed += 1;
                 report.failures.push(TranscribeFailure {
@@ -319,7 +288,7 @@ pub async fn transcribe(
                     from_sha: obs.blob_sha.clone(),
                     to_sha: to_sha.clone(),
                     tool: TOOL.to_string(),
-                    version: transcript.whisper_version.clone(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
                     model_tier: Some(tier.clone()),
                     at: Timestamp::now(),
                     // The structured twin of the timestamps in the markdown. §4.3 puts
@@ -370,26 +339,14 @@ fn short(url: &str) -> String {
         .collect()
 }
 
-/// Present so a reader grepping for the worker binary finds it named here too.
-#[allow(dead_code)]
-const _WORKER: &str = WORKER;
-
 // -----------------------------------------------------------------------------------------
 // Rendering
 // -----------------------------------------------------------------------------------------
 
-/// The counters, the realtime factor, and whether VAD was actually in the loop.
-///
-/// `vad: false` is rendered as a warning rather than a field. A run that skipped voice
-/// activity detection under `--allow-no-vad` produces transcripts that are real but worse
-/// — Whisper hallucinates into silence — and six months later the only record of *why* a
-/// transcript is poor is this flag. It should be impossible to miss on the run that made it.
+/// The counters and the realtime factor, under the model and the server that ran it.
 impl Render for TranscribeReport {
     fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
-        let model = match &self.variant {
-            Some(v) => format!("{} · {v}", self.model),
-            None => self.model.clone(),
-        };
+        let model = format!("{} · {}", self.model, self.server);
         p.title(&self.sources.join(", "), &model)?;
         p.nest(|p| {
             p.figures(&[
@@ -407,13 +364,6 @@ impl Render for TranscribeReport {
                 render::count(self.transcribed_chars as u64),
             );
             p.line(p.paint(&totals, Ink::Dim))?;
-
-            if !self.vad {
-                p.marked(
-                    Mark::Warn,
-                    p.paint("no VAD — Whisper saw the silence too", Ink::Dim),
-                )?;
-            }
 
             // The one figure here that is an instruction. Said on the line a person
             // reads, because a `--limit` nobody is told about reads as a finished corpus.
@@ -488,17 +438,24 @@ mod tests {
 
     fn args() -> TranscribeArgs {
         TranscribeArgs {
-            source: None,
-            // Typed explicitly: `None` reads whatever config file the machine running
-            // the tests happens to keep.
-            model: Some("whisper-large-v3-turbo".to_string()),
-            variant: None,
-            language: None,
-            limit: None,
-            refresh: false,
-            allow_no_vad: false,
             dry_run: true,
+            ..TranscribeArgs::default()
         }
+    }
+
+    /// The op against the default `[inference]`, never the config file of whatever
+    /// machine runs the tests. Nothing here reaches the server: the runs are dry or have
+    /// nothing to send.
+    async fn run(ctx: &Ctx, args: TranscribeArgs) -> TranscribeReport {
+        transcribe_with(
+            ctx,
+            args,
+            &InferenceConfig::default(),
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap()
     }
 
     /// A 12-byte ISO-BMFF header is enough for [`content_kind`] to call it audio, which
@@ -519,10 +476,10 @@ mod tests {
             .unwrap()
     }
 
-    /// The whole point of `--dry-run`: plan the work without a multi-gigabyte load. It
-    /// must therefore not touch the model registry at all.
+    /// The whole point of `--dry-run`: plan the work without sending any of it. The
+    /// default server is not running in a test, so reaching for it would fail here.
     #[tokio::test]
-    async fn a_dry_run_finds_the_audio_without_loading_a_model() {
+    async fn a_dry_run_finds_the_audio_without_reaching_the_server() {
         let (_d, ctx) = ctx().await;
         observe(&ctx, "tampa", "https://youtube.com/watch?v=a", &m4a()).await;
         observe(
@@ -533,9 +490,7 @@ mod tests {
         )
         .await;
 
-        let report = transcribe(&ctx, args(), &Progress::none(), &Cancel::none())
-            .await
-            .unwrap();
+        let report = run(&ctx, args()).await;
         assert_eq!(report.audio_found, 1, "the PDF must not be queued");
         assert_eq!(report.attempted, 1);
         assert_eq!(report.transcribed, 0, "a dry run transcribes nothing");
@@ -564,25 +519,48 @@ mod tests {
             .await
             .unwrap();
 
-        let report = transcribe(&ctx, args(), &Progress::none(), &Cancel::none())
-            .await
-            .unwrap();
+        let report = run(&ctx, args()).await;
         assert_eq!(report.already_transcribed, 1);
         assert_eq!(report.attempted, 0);
 
         // `--refresh` is the path after a tier change.
-        let report = transcribe(
+        let report = run(
             &ctx,
             TranscribeArgs {
                 refresh: true,
                 ..args()
             },
-            &Progress::none(),
-            &Cancel::none(),
         )
-        .await
-        .unwrap();
+        .await;
         assert_eq!(report.attempted, 1);
+    }
+
+    /// A transcript the in-process worker wrote is a transcript. Moving to a server must
+    /// not re-transcribe a backlog that is already searchable.
+    #[tokio::test]
+    async fn a_transcript_from_the_old_worker_still_counts() {
+        let (_d, ctx) = ctx().await;
+        let obs = observe(&ctx, "tampa", "https://youtube.com/watch?v=a", &m4a()).await;
+        let text = ctx.store.put_blob(b"[00:00:00] hello").await.unwrap();
+        ctx.store
+            .append(
+                &SourceId::new("tampa").unwrap(),
+                &LogRecord::Derivation(Derivation {
+                    from_sha: obs.blob_sha.clone(),
+                    to_sha: text,
+                    tool: LEGACY_TOOL.to_string(),
+                    version: "1.8.3".into(),
+                    model_tier: None,
+                    at: Timestamp::now(),
+                    anchors: vec![],
+                }),
+            )
+            .await
+            .unwrap();
+
+        let report = run(&ctx, args()).await;
+        assert_eq!(report.already_transcribed, 1);
+        assert_eq!(report.attempted, 0);
     }
 
     /// A derivation of the *metadata* for the same video must not be read as a transcript
@@ -613,44 +591,22 @@ mod tests {
             .await
             .unwrap();
 
-        let report = transcribe(&ctx, args(), &Progress::none(), &Cancel::none())
-            .await
-            .unwrap();
+        let report = run(&ctx, args()).await;
         assert_eq!(report.already_transcribed, 0);
         assert_eq!(report.attempted, 1);
     }
 
-    // There is no test here for the VAD refusal, and that is deliberate.
-    //
-    // The guard is real and worth keeping — `transcribe` refuses without VAD weights
-    // unless `--allow-no-vad`, because Whisper hallucinates over the dead air a council
-    // recording is mostly made of. What could not be written was a test of it. The only
-    // way in was to run the real op and assert it returned *some* error, which made the
-    // answer depend on what the machine happened to have installed: no weights, no
-    // worker, neither, or all three. The assertion drifted to accept any missing
-    // dependency, so it stopped saying anything about VAD, and on a fully equipped box it
-    // reached inference and failed on ffmpeg instead.
-    //
-    // A test of this wants the same seam `SiteSource` now has for fetching: a transcriber
-    // handed in rather than constructed, so `has_vad() == false` is a fixture instead of a
-    // fact about the developer's laptop. Until then the guard is exercised by using the
-    // tool, and a machine-dependent test is worse than none — it fails for reasons that
-    // have nothing to do with the change in front of it.
-
     #[tokio::test]
-    async fn an_empty_store_needs_no_weights_at_all() {
+    async fn an_empty_store_needs_no_server_at_all() {
         let (_d, ctx) = ctx().await;
-        let report = transcribe(
+        let report = run(
             &ctx,
             TranscribeArgs {
                 dry_run: false,
                 ..args()
             },
-            &Progress::none(),
-            &Cancel::none(),
         )
-        .await
-        .unwrap();
+        .await;
         assert_eq!(report.attempted, 0);
     }
 }

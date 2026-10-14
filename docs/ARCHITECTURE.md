@@ -156,16 +156,16 @@ Those addresses are **read back out of the log, not guessed**. `DiscoveryRun::me
 
 `centinel source adopt` writes every recoverable one into the config; `centinel source add <id>` with no `--site`/`--channel` does the same for one. A source whose address cannot be recovered is **named and skipped** rather than written as a block that would fail on the next run.
 
-### Two phases, because model loads dominate
+### Two phases
 
 ```
   per source   discover → collect                      network-bound, per-host paced
-  then once    extract → transcribe → index → embed    CPU-bound, model-backed
+  then once    extract → transcribe → index → embed    corpus-wide, server-backed
 ```
 
-Acquisition is per source because politeness is per host and a 403 on one site must not stop the next. Derivation is corpus-wide because `transcribe` and `embed` each build a multi-gigabyte model — with twenty sources, naive per-source chaining spends more time loading weights than embedding. It also fixes an ordering hazard for free: `index` runs after *every* source has extracted, so a chunk appearing in two sources is placed against both.
+Acquisition is per source because politeness is per host and a 403 on one site must not stop the next. Derivation is corpus-wide. The first reason was model loads: when `transcribe` and `embed` each built a multi-gigabyte model in-process, naive per-source chaining over twenty sources spent more time loading weights than embedding. The models now live in servers that load them once, and the shape stays for the second reason, which it fixes for free: `index` runs after *every* source has extracted, so a chunk appearing in two sources is placed against both.
 
-A stage whose model is not installed is **skipped, not failed** — an hour of crawling must not be thrown away over a download that was never started, and the stage resumes on the next run once the weights are there. A source that fails is isolated: its remaining stages are skipped, every other source still runs, and the report says which broke.
+A stage whose server is not answering — one TCP connect to its `base_url`, before the stage starts — or whose named API key is not set is **skipped, not failed**: an hour of crawling must not be thrown away over a server that was never started, and the stage resumes on the next run once it is up. A server that goes away mid-stage, or refuses the key, ends that stage on the first such answer rather than skipping the corpus one chunk at a time. A source that fails is isolated: its remaining stages are skipped, every other source still runs, and the report says which broke.
 
 ### Incremental is inherited, not implemented
 
@@ -254,9 +254,8 @@ Which event becomes which line, and at which level, is decided once, in
 `centinel_core::op::log_event`: info is what happened — a page fetched, a document
 extracted, a batch embedded, a stage's summary — and debug is what is in flight: the item a
 step is about to work on, each tick of a download, the aggregate counter. Beneath that the
-internals say what they did at debug — which request was made and what came back, the
-device and batch shape an embedding session opened with, how long a decode or a Lance
-append took. `-v` selects debug, `-q` keeps only warnings, and `RUST_LOG` overrides both.
+internals say what they did at debug — which request was made and what came back, how
+long an inference request, a decode or a Lance append took. `-v` selects debug, `-q` keeps only warnings, and `RUST_LOG` overrides both.
 The server logs every request at info: method, path and query, status, duration; a search
 adds its query, filters, result count and timing; an op invocation adds its arguments, its
 outcome and its elapsed time, under a span naming the op and the surface it arrived on.
@@ -337,89 +336,92 @@ not count as changed.
 
 ## Requirements
 
-Rust 1.85+. Corpus processing shells out to standalone binaries. The authenticated web gateway separately runs Node.js. Every call goes through `tool`, the module that owns child processes: each child is killed when its caller is dropped, carries a deadline sized for what it is doing, and never inherits our stdin. `open`'s launcher is the stated exception — it may be somebody's editor, so it takes the terminal and waits.
+Rust 1.85+, a C compiler and `protoc` to build. Corpus processing shells out to standalone binaries. The authenticated web gateway separately runs Node.js. Every call goes through `tool`, the module that owns child processes: each child is killed when its caller is dropped, carries a deadline sized for what it is doing, and never inherits our stdin. `open`'s launcher is the stated exception — it may be somebody's editor, so it takes the terminal and waits.
 
 | Binary | Needed for | Required |
 |---|---|---|
 | `pdftoppm` (poppler) | rasterising PDF pages for OCR — Rust cannot do this natively | not yet — nothing calls it |
 | `tesseract` | OCR | not yet — nothing calls it |
 | `yt-dlp` | YouTube acquisition | yes |
-| `ffmpeg` | audio extraction | no |
+| `ffmpeg` | decoding audio for the transcription server | no |
 
-`centinel doctor` reports what is missing. Everything runs locally — no OCR, transcription, embedding or reranking leaves the machine. A consequence the whole design carries: **output quality varies by machine**, so the model tier that produced an artifact is part of its provenance.
-
-## Model weights
-
-```bash
-centinel models list                    # registry + what is on disk
-centinel models pull                    # ~5.2 GB: embedder + reranker
-centinel models pull qwen3-embedding-4b --variant q4_k_m
-centinel models verify                  # re-hash against the pinned digests
-centinel models prune                   # preview weights the registry dropped
-centinel models prune --delete
-```
-
-Weights are fetched by an **explicit** `models pull` and never as a side effect
-([`SPEC.md`](SPEC.md) §3.2), so a scheduled 3am crawl can fail on a missing model but can
-never decide to download a gigabyte on its own.
-
-| | model | default | why this size |
-|---|---|---|---|
-| Embedding | `qwen3-embedding-4b` | `q8_0` (3.99 GiB) | cost paid **once per corpus**, in hours |
-| Reranker | `qwen3-reranker-0.6b` | `q8_0` (0.60 GiB) | cost paid **once per query**, in milliseconds |
-
-**Where the cost lands decides the size** (§6.2). MTEB English Retrieval runs 0.6B
-**61.83** → 4B **68.46** → 8B **69.44**: nearly the whole gain is 0.6B→4B, and 8B buys
-+1.0 point for roughly double the embedding time. So the embedder stops at 4B and the
-reranker is where extra hardware should go, because it never writes a stored artifact.
-
-`qwen3-embedding-0.6b` stays in the registry as a fast smoke-test path, **not** as a
-hardware tier — its vectors are 1024-wide against 4B's 2560, a different space entirely,
-so switching costs a full re-embed.
-
-**Everything is pinned** — repository, commit revision, and a SHA-256 per file. Pinning
-the revision is what makes the digests meaningful: `main` moves, and a digest checked
-against a moving target is theatre. GGUF files are self-contained, so a variant is one
-file: no sidecar tokenizer, no ONNX external-data pairing.
-
-**Interruption is expected, not exceptional.** Bytes land in `<name>.part` and an
-interrupted transfer resumes with `Range: bytes=<n>-` rather than restarting — the same
-argument that makes `collect` resumable, for the same reason. Three rules follow:
-
-- a **network error keeps** the `.part`; that retention *is* the resume point
-- a **digest mismatch deletes** it, because resuming from known-bad bytes would fail
-  identically forever
-- a server that **ignores the `Range`** (answers 200 instead of 206) restarts cleanly,
-  rather than appending a duplicate prefix that a size check would not catch
-
-The digest is computed from the completed file **on disk**, not from the byte stream —
-a stream hash cannot span a resume, because the prefix was written by an earlier process.
-
-Bumping a pin downloads alongside the old revision rather than clobbering it, so an
-interrupted upgrade never leaves a half-new model. `models prune` collects what that
-leaves behind, and previews by default.
-
-`models` is **host-local**: excluded from MCP and HTTP entirely. It writes outside the
-store and can be made to pull gigabytes, which would allow remote callers to exhaust disk and
-bandwidth. Weight *status* is reported by `doctor` instead, beside the binary
-probes — §3.2 says missing weights are fatal "exactly like a missing binary", and `doctor`
-is remotely reachable by administrators, so an operator’s agent can learn that search is about to fail for want of a
-model without being able to trigger a download.
-
-Readiness is split — `binaries_ready`, `models_ready`, `ready` as the conjunction —
-because a machine can crawl and extract with no weights at all; it simply cannot search.
-`doctor` judges presence **by file size**, so it stays instant; re-hashing 5 GB is
-`models verify`'s job.
-
-Weights live in the OS cache directory (`$CENTINEL_MODELS`, else
-`~/Library/Caches/centinel/models`), **not** in the store: they are neither corpus nor
-provenance, and an `rsync`-able store (§5.4) should not carry gigabytes of GGUF.
+`centinel doctor` reports what is missing, binaries and servers both. OCR runs locally. Transcription, embedding and reranking are requests to the servers `[inference]` names (below); with the default, a server on this machine, nothing leaves it. A consequence the whole design carries: **output quality varies by machine and by server**, so the model tier that produced an artifact — the model, and where it ran — is part of its provenance.
 
 ## Inference
 
-`llama.cpp` in-process via `llama-cpp-2`. No server, no sidecar. Metal is on by default
-on macOS; `--features cuda` / `vulkan` / `rocm` elsewhere, opt-in because they need a
-toolchain a plain `cargo build` cannot assume.
+Centinel runs no model itself. Embedding, reranking and transcription are each a request
+to a server the operator runs, or one they pay for (SPEC §2.1 as amended):
+
+| capability | request | served by |
+|---|---|---|
+| embed | OpenAI `POST {base_url}/embeddings` | llama-server `--embedding`, Ollama, vLLM, LM Studio, OpenRouter |
+| rerank | Cohere/Jina `POST {base_url}/rerank` — OpenAI has none | llama-server `--reranking`, vLLM, TEI, Infinity, LocalAI |
+| transcribe | OpenAI `POST {base_url}/audio/transcriptions`, `verbose_json` | `whisper-server --inference-path /v1/audio/transcriptions`, faster-whisper/speaches, LocalAI, OpenAI |
+
+```toml
+[inference]
+base_url = "http://127.0.0.1:8080/v1"   # default; llama-server's default port
+# api_key_env = "OPENROUTER_API_KEY"    # name of the env var, never the key
+[inference.embed]
+model = "qwen3-embedding-4b"
+query_prefix = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
+batch = 64          # chunks per request
+concurrency = 4     # requests in flight, 1..=32
+[inference.rerank]
+model = "qwen3-reranker-0.6b"
+[inference.transcribe]
+model = "whisper-large-v3-turbo"
+```
+
+Each capability may name its own `base_url` and `api_key_env`. The file names the
+variable that holds a key, never the key: this file is committed, pasted into issues and
+printed by `doctor`. A server on `localhost` keeps §2.1's promise that nothing leaves the
+machine; a `base_url` elsewhere sends chunk text, queries and audio there, and the config
+is the one place that says so — nothing falls back to a server the operator did not
+name. The old `[defaults] embed_model`, `embed_batch` and `transcribe_model` keys are
+refused with a message saying what to write instead.
+
+The tuning that makes a model fast on one machine — GPU layers, physical batch, flash
+attention, threads, VAD — belongs to the server, set once for that machine, and never to
+this binary's flags. So there is no GPU build and no model download here: a release is
+one plain CPU binary per platform (`centinel-aarch64-apple-darwin`,
+`centinel-x86_64-unknown-linux-gnu` built for x86-64-v3,
+`centinel-aarch64-unknown-linux-gnu`).
+
+**One failure ends a stage; the rest skip a chunk.** All three go through one HTTP
+client: three attempts, the pause doubling from one second, which covers a 429 or a
+wobble on the wire. A server that is not listening, a 401 or 403, a 404, a transcription
+answer with no timed segments, or 5xx and 429 that outlast the attempts will be answered
+the same way by every later request, so those are `Fatal` and stop the stage rather than
+skipping a corpus one chunk at a time for hours. Any other 4xx is not retried; a timeout is
+retried; neither is fatal, and like a response that fails verification each is left to the
+caller, which splits the batch to find the chunk.
+
+**Readiness is a TCP connect.** `Endpoint::reachable()` opens a connection to the
+server's host and port and sends nothing, because a request would cost a model call.
+`run` uses it to skip a stage whose server is down; `doctor` uses it to report one
+`services` row per capability — `base_url`, `model`, `ready`, `problem` — beside the
+binary probes, and gates Search on embed and rerank and Transcription on transcribe. A
+server not answering stops a stage exactly like a missing binary does, which is why they
+sit side by side. Readiness is split — `binaries_ready`, `services_ready`, and `ready` as
+their conjunction with a config that loads — because a machine can crawl and extract with
+no server at all; it simply cannot search. A config that fails to load is reported as
+`config_error` rather than failing the op — over HTTP and MCP, and on the CLI under
+`--root`. Without `--root` the CLI reads the config to find the store before any op runs,
+so a config that does not load stops every command there, `doctor` included, with the
+same message.
+
+The spend ledger files OpenRouter's models under `openrouter/<model>`, the name it has
+always used, and every other server's under its own model name with the provider `local`.
+
+### When models ran in-process
+
+Until the `[inference]` block, `llama.cpp` ran in-process through `llama-cpp-2` and
+whisper.cpp ran in a second binary, `centinel-whisper`, because the two vendored ggml
+copies clashed at link time. Weights came from a pinned registry through
+`centinel models pull`, GPU support was a build feature, and `embed --batch auto` sized
+batches from the backend's free memory. All of it is gone; the evidence that chose it is
+kept here because the default servers still run the same files.
 
 **ONNX was measured and rejected** (§6.2.1). The `onnx-community` exports are decoder
 graphs carrying a KV cache, and CoreML refuses them:
@@ -437,32 +439,34 @@ That made ONNX permanently CPU-only on Apple Silicon. Measured on an M1 Max with
 | ONNX `ort`, 0.6B int8 | CPU, 10 threads | 5.5 |
 | `llama.cpp`, 0.6B Q8_0 | Metal, batch 32 | **18.5** |
 
-**Batching is where the win lives.** Unbatched, the same path gives 6.1 chunks/sec —
-a context and its KV cache are built per *call*, not per text, so embedding one chunk at
-a time measures allocation rather than inference. `cargo run --release --example
-embed_bench` reproduces this on any host, which is how a CUDA or DGX Spark box gets
-compared without re-deriving a benchmark.
+**Batching is where the win lived.** Unbatched, the same path gave 6.1 chunks/sec — a
+context and its KV cache were built per *call*, not per text, so embedding one chunk at a
+time measured allocation rather than inference.
 
-*Accepted cost:* a C++ build enters `cargo build`. Same question ticket
-[#11](https://github.com/bennyhodl/centinel/issues/11) already tracks for `whisper-rs`.
+**Where the cost lands decides the size** (§6.2), and that still picks the defaults.
+MTEB English Retrieval runs 0.6B **61.83** → 4B **68.46** → 8B **69.44**: nearly the whole
+gain is 0.6B→4B, and 8B buys +1.0 point for roughly double the embedding time. So the
+default embedder stops at 4B (paid **once per corpus**, in hours) and the reranker is
+where extra hardware should go (paid **once per query**, in milliseconds), because it
+never writes a stored artifact.
 
 **The Qwen3 recipe is not obvious and gets no error when wrong.** Three things a generic
-embedding wrapper would not do:
+embedding setup would not do:
 
-1. **Last-token pooling**, not mean pooling
+1. **Last-token pooling**, not mean pooling — the server's, `--pooling last`
 2. **An instruction prefix on queries only** — documents are embedded bare; the asymmetry
-   is the model's
-3. **L2 normalization**, so cosine similarity is a dot product
+   is the model's, and the server cannot know it, so `[inference.embed] query_prefix`
+   states it
+3. **L2 normalization**, so cosine similarity is a dot product — done client-side, never
+   trusted
 
 Each produces plausible unit vectors when wrong — slightly worse retrieval, nothing to
-catch in a test that checks shapes. So `embed`'s test asserts on *meaning*: a query about
-lobbying spend must land measurably closer to a lobbying document than to one about bin
-collection.
+catch in a test that checks shapes.
 
 ## Embedding
 
 ```bash
-centinel embed --dry-run          # what would be embedded, without loading a model
+centinel embed --dry-run          # what would be embedded, without asking the server
 centinel embed --limit 100        # sample before committing hours
 centinel embed                    # the rest; re-run to resume
 ```
@@ -475,9 +479,15 @@ chunks.lance/           LanceDB, one table: one row per chunk placed in a docume
 No text: that stays in `centinel.db`, and a second copy goes out of date the first time
 the corpus changes. The row carries its document and what the workspace decided about it,
 so a search's filter runs inside the vector query; `embed` copies a chunk's vector to each
-document that holds it rather than embedding it again. The model id lives in the table's schema metadata, and a query vector from any other
-model is **refused at open** — vectors from two models are in different spaces and still
-return a confident ranked list.
+document that holds it rather than embedding it again. The table's schema metadata
+records its **space** — the model, and the `base_url` of the server that ran it — and rows
+or a query vector from any other space are **refused** — vectors from two spaces still
+return a confident ranked list. `search` checks the configured embed server against the
+table and, on a mismatch, reports `no_vectors` pointing at `centinel embed --adopt`. That
+re-embeds a sample of up to 32 stored chunks on the configured server and adopts it —
+one metadata commit, no row touched — only if every pair agrees at cosine ≥ 0.99;
+otherwise it refuses with what it measured and what to run instead. A new table takes its
+width from one probe request.
 
 There is no separate embedding cache. [`SPEC.md`](SPEC.md) §5.2 specified one and then
 reversed it: a `.lance` dataset is an ordinary directory, so `cp -R` backs it up and a
@@ -502,21 +512,14 @@ is a conflict rather than a wrong deletion. The dropped hashes fall back onto th
 subtraction above and the next `embed` re-embeds them. `VectorTable` owns both halves;
 the op asks, and `embed` only points at it when its scan fails.
 
-**Batching is not optional.** A batch is one forward pass over many chunks: one context,
-one `decode`, every chunk as its own `seq_id`. Two costs collapse into it. A `llama.cpp`
-context and its KV cache are built per *call*, not per text — one chunk per call gave 6.1
-chunks/sec on an M1 Max against 18.5 for batches of 32, when that amortisation was all a
-batch bought. And one ~300-token chunk leaves a GPU almost entirely idle, which is what
-the packed pass claims. The batch is the unit of work here, not the chunk. A batch that
-fails as a unit — an over-long chunk, or a group the machine cannot hold — is retried
-individually, so one bad chunk cannot cost the other 31.
-
-How wide is a property of the machine: `[defaults] embed_batch`, `--batch N` for one run,
-or `auto` from the backend's free memory once the weights are on it.
-
-The whole run goes into a single `spawn_blocking`. Inference would otherwise stall the
-async runtime, which matters more than usual here because an HTTP caller's connection has
-to survive a multi-hour run.
+**The pipeline is three parts.** A reader thread keeps windows of chunk text coming off
+SQLite, `concurrency` requests of `batch` chunks each are in flight to hide the round trip
+(`[inference.embed]`, `--batch N` for one run), and a writer task appends what comes back
+— so the server waits on neither SQLite nor Lance, and the async runtime is never
+blocked, which matters more than usual here because an HTTP caller's connection has to
+survive a multi-hour run. A batch that fails is **bisected**, so one chunk the server
+will not take costs a dozen requests rather than 64 and is reported as skipped; a `Fatal`
+failure is not bisected, because every half would be refused the same way.
 
 ## Why the vector arm exists
 
@@ -528,24 +531,26 @@ behaving correctly and is still useless.
 That is the case hybrid retrieval is for, and the reason §6.4 makes it the default rather
 than an option. It is asserted as a test rather than described:
 `ops::search::tests::a_query_reaches_the_passage_that_answers_it` indexes that passage
-beside two irrelevant ones, embeds all three, and requires the query to reach it.
+beside two irrelevant ones, embeds all three, and requires the query to reach it. It
+needs real servers, so it is opt-in: `CENTINEL_TEST_INFERENCE=1 cargo test`. Without
+it, the search tests run against a bag-of-words fake server in `inference/fake.rs`.
 
 ## What retrieval reports about itself
 
 ```
 query
-  ├─ BM25   (SQLite FTS5)     → top 100
-  └─ vector (Qwen3 + Lance)   → top 100
-        └─ RRF fuse (k=60)    → top 40
-              └─ Qwen3-Reranker → top n
+  ├─ BM25   (SQLite FTS5)            → top 100
+  └─ vector (embed server + Lance)   → top 100
+        └─ RRF fuse (k=60)           → top 40
+              └─ rerank server       → top n
 ```
 
 RRF weights by **rank**, and a rank says nothing about the size of the pool it came from —
 so a corpus that is 0.6% embedded returns confident results that look exactly like a
 complete one's. `search` therefore names in `method` exactly which stages ran (`bm25`,
 `bm25→rerank`, `bm25+vector→rrf`, `bm25+vector→rrf→rerank`), and a stage that did not
-run says why, in `no_vectors` or `no_rerank`. Missing weights degrade the answer; they
-never turn a query into an error. How much of the corpus the vector arm can see is
+run says why, in `no_vectors` or `no_rerank`. A server that is down degrades the answer;
+it never turns a query into an error. How much of the corpus the vector arm can see is
 `centinel embed --dry-run`'s answer, not the search report's: a per-query chunk count was
 99 s cold at 21.7 million chunks, and wrong besides (it ignored the filters and counted
 stale vectors).

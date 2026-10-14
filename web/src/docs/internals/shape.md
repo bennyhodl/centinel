@@ -8,7 +8,6 @@ crates/
   centinel-core/    domain model · store · config · op registry · ops · rendering
   centinel-macros/  the #[op] attribute
   centinel/         the binary: CLI, HTTP, MCP
-  centinel-whisper/ the transcription worker — links whisper.cpp, and nothing else may
 docs/
   SPEC.md           the settled specification
   research/         ~3,850 lines, ~450 primary-source citations
@@ -20,7 +19,7 @@ centinel.toml       what to collect, and where to keep it
 
 ```
   per source   discover → collect                      network-bound, per-host paced
-  then once    extract → transcribe → index → embed    CPU-bound, model-backed
+  then once    extract → transcribe → index → embed    CPU-bound, and server-backed
 ```
 
 Each stage is a chapter in this part of the book, in that order.

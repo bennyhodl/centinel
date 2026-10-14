@@ -18,10 +18,9 @@
 //!
 //! `centinel update` installs unless `--check` says otherwise, and what it runs is
 //! `install.sh` — the same script for a clone as for a pipe, because everything an
-//! install decides is decided there: a release binary or a build, the accelerator, the
-//! CPU tuning, and Centinel's **two binaries into one directory**. Reproducing any of
-//! that here would be a second copy of the installer, wrong the first time the real one
-//! changed. So this op decides *which* sources and *where*, and the script decides
+//! install decides is decided there: a release binary or a build, which target's binary,
+//! and where it goes. Reproducing any of that here would be a second copy of the
+//! installer, wrong the first time the real one changed. So this op decides *which* sources and *where*, and the script decides
 //! everything else.
 //!
 //! The clone case runs the script that is already on disk. The pipe case fetches the one
@@ -193,9 +192,9 @@ pub struct UpdateArgs {
 
 /// Check the repo and GitHub for a newer Centinel, and install it.
 ///
-/// `reach = "host"` for the same reason as `models`: this op replaces the binaries on the
-/// machine it runs on. Nothing arriving on a socket may cause that, and neither may the
-/// scheduler — an update that lands at 3am mid-collection is the definition of an ambush.
+/// `reach = "host"` because this op replaces the binary on the machine it runs on. Nothing
+/// arriving on a socket may cause that, and neither may the scheduler — an update that
+/// lands at 3am mid-collection is the definition of an ambush.
 #[op(reach = "host", group = "host")]
 pub async fn update(_ctx: &Ctx, args: UpdateArgs) -> anyhow::Result<UpdateReport> {
     let build = Build::current();

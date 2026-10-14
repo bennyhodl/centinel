@@ -1,7 +1,8 @@
 //! Spend — every model call, its tokens, and what it cost.
 //!
 //! One line per call in `spend/YYYY-MM.jsonl`: a document Jev scored (every level of its
-//! chain), an OpenRouter embedding batch, a local embedding batch, a query vector. The page
+//! chain), an embedding batch from OpenRouter or the operator's own server, a query
+//! vector. The page
 //! that reads it shows one series per model, so the ledger keeps the model as it was
 //! called and nothing coarser.
 //!
@@ -18,7 +19,8 @@
 //!
 //! ## Local models are priced as the cloud
 //!
-//! A local model is its own model on the page — `qwen3-embedding-4b` is never filed under
+//! A model on the operator's own server is "local" here, wherever that server is — it is
+//! not a bill. It is its own model on the page — `qwen3-embedding-4b` is never filed under
 //! OpenRouter — but it is priced at the cloud model with the same weights ([`PRICED_AS`]),
 //! so the page can say what running it here would have cost there. The token counts are
 //! exact: the weights are the same, and so is the tokenizer. A local model with no cloud
@@ -46,17 +48,20 @@ use crate::store::Store;
 pub enum Provider {
     /// TypeSafe's Jev, through its API.
     Jev,
-    /// An `openrouter/…` model.
+    /// An `openrouter/…` model — see [`crate::inference::Endpoint::ledger_model`].
     OpenRouter,
-    /// Weights on this machine.
+    /// A model on a server the operator runs.
     Local,
 }
+
+/// What [`crate::inference::Endpoint::ledger_model`] puts before an OpenRouter model.
+const OPENROUTER_PREFIX: &str = "openrouter/";
 
 impl Provider {
     pub fn of(model: &str) -> Self {
         if model.starts_with(JEV_PREFIX) {
             Self::Jev
-        } else if model.starts_with(crate::remote::PREFIX) {
+        } else if model.starts_with(OPENROUTER_PREFIX) {
             Self::OpenRouter
         } else {
             Self::Local
@@ -387,13 +392,6 @@ pub fn summary(store: &Store, since: Timestamp) -> anyhow::Result<Summary> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_remote_embedding_model_has_a_price() {
-        for spec in crate::remote::REMOTE_REGISTRY {
-            assert!(price(spec.id).is_some(), "{} has no price", spec.id);
-        }
-    }
 
     /// Every cloud model a local one is priced as must itself have a price, or the local
     /// model would silently read as unpriced.

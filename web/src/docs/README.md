@@ -41,7 +41,7 @@ It is built on three principles drawn directly from Bryan's playbook.
 
 Centinel is a library, a CLI, a server, an MCP endpoint, and a web workspace where most people will use it. The agents come later and sit **on top** — they are clients of the record, never its author. What is collected does not depend on what any model happened to think that day.
 
-Collecting, reading, indexing, embedding and searching all run on your machine, and nothing leaves it by default. There are two things you can choose that send text to a third party, and each says so before it does. Starting a classifier run sends the documents it covers to the model that answers it. Pointing the embedder at an `openrouter/…` model sends chunk text and search queries to OpenRouter. Collected bytes, the log and the record never leave.
+Collecting, reading, indexing, embedding and searching all run on your machine, and nothing leaves it by default. Embedding, reranking and transcription are requests to model servers the `[inference]` block of your config names, on `127.0.0.1` unless you say otherwise. There are two things you can choose that send text to a third party, and each says so before it does. Starting a classifier run sends the documents it covers to the model that answers it. Pointing `[inference]` at a server elsewhere — OpenRouter, a shared GPU box — sends chunk text, search queries and audio there. Collected bytes, the log and the record never leave.
 
 Bryan lost the immediate fight. Pennsylvania ratified the Constitution in December 1787. But the pressure he and his fellow dissenters generated forced the **Bill of Rights** into existence — protections the powerful had not wanted to grant.
 

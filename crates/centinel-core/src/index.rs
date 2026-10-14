@@ -548,29 +548,7 @@ impl Index {
     /// Batched deliberately — `embed` walks the corpus a batch at a time so that only a
     /// batch's worth of text is resident, however large the corpus.
     pub fn chunk_texts(&self, hashes: &[String]) -> anyhow::Result<Vec<String>> {
-        if hashes.is_empty() {
-            return Ok(Vec::new());
-        }
-        // One `IN (…)`, then reordered here — a statement per hash was the shape this
-        // batched signature existed to avoid, and `fuse` calls it with a single hash per
-        // vector-only survivor, which made it a round trip each.
-        let holes = std::iter::repeat_n("?", hashes.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!("SELECT chunk_hash, text FROM chunk WHERE chunk_hash IN ({holes})");
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> =
-            hashes.iter().map(|h| h as &dyn rusqlite::ToSql).collect();
-        let rows = stmt.query_map(params.as_slice(), |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
-
-        let mut found: HashMap<String, String> = HashMap::new();
-        for row in rows {
-            let (hash, text) = row?;
-            found.insert(hash, text);
-        }
+        let mut found = self.texts_of(hashes)?;
         // In the order requested, and still an error rather than a gap: `embed` pairs
         // these with the hashes it asked for, so a silent hole would attach a vector to
         // the wrong chunk.
@@ -582,6 +560,35 @@ impl Index {
                     .ok_or_else(|| anyhow::anyhow!("chunk {h} is not in the index"))
             })
             .collect()
+    }
+
+    /// The text of whichever of `hashes` the index holds, by hash. A hash it does not hold
+    /// is simply absent — for `embed --adopt`, which samples stored vectors and has no way
+    /// to know which of them belong to chunks the index has since dropped.
+    pub fn texts_of(&self, hashes: &[String]) -> anyhow::Result<HashMap<String, String>> {
+        let mut found: HashMap<String, String> = HashMap::new();
+        if hashes.is_empty() {
+            return Ok(found);
+        }
+        // One `IN (…)` — a statement per hash was the shape this batched signature existed
+        // to avoid, and `fuse` calls `chunk_texts` with a single hash per vector-only
+        // survivor, which made it a round trip each.
+        let holes = std::iter::repeat_n("?", hashes.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT chunk_hash, text FROM chunk WHERE chunk_hash IN ({holes})");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            hashes.iter().map(|h| h as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (hash, text) = row?;
+            found.insert(hash, text);
+        }
+        Ok(found)
     }
 
     /// The tags on one document, for the result that cites it.

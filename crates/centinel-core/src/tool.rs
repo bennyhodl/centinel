@@ -1,7 +1,7 @@
 //! Running an external program.
 //!
-//! SPEC §3 accepts that Centinel shells out — to `yt-dlp`, `ffmpeg`, the whisper worker,
-//! and whichever application opens a PDF. It does not accept that each caller should
+//! SPEC §3 accepts that Centinel shells out — to `yt-dlp`, `ffmpeg`, and whichever
+//! application opens a PDF. It does not accept that each caller should
 //! invent its own way of doing it, and until this module existed each one did: seven call
 //! sites, three error conventions, two different `Command` types, and between them **no
 //! timeout and no `kill_on_drop` anywhere**.
@@ -35,17 +35,12 @@
 //! should not be cut off at two minutes. So there is no single right number here and no
 //! attempt to invent one — [`DEFAULT_TIMEOUT`] suits a probe, and anything longer states
 //! its own.
-//!
-//! For a *stream*, the useful guard is inactivity rather than total time: a transcription
-//! that is still emitting progress after four hours is working, not stuck. That is the
-//! same distinction [`crate::models::download`] makes about HTTP reads, and [`Tool::spawn`]
-//! leaves it to the caller because only the caller knows what a heartbeat looks like.
 
 use std::ffi::{OsStr, OsString};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 
 /// The deadline a probe gets when nothing says otherwise.
 ///
@@ -150,38 +145,6 @@ impl Output {
     }
 }
 
-/// Which of a child's streams the caller wants to hold.
-///
-/// A closed set rather than a `Command` handed back, so the guarantees above cannot be
-/// undone by a caller reaching past them.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Pipes {
-    /// Give the caller the child's stdin. Off means the child gets nothing, ever.
-    pub stdin: bool,
-    pub stdout: bool,
-    pub stderr: bool,
-}
-
-impl Pipes {
-    /// Read both output streams; write nothing.
-    pub fn read() -> Self {
-        Self {
-            stdin: false,
-            stdout: true,
-            stderr: true,
-        }
-    }
-
-    /// Feed the child and read both output streams.
-    pub fn duplex() -> Self {
-        Self {
-            stdin: true,
-            stdout: true,
-            stderr: true,
-        }
-    }
-}
-
 /// One external program, and how to run it.
 #[derive(Clone, Debug)]
 pub struct Tool {
@@ -238,7 +201,7 @@ impl Tool {
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args)
             // The one that turns a cancelled future into a dead process rather than an
-            // orphan holding a multi-gigabyte model.
+            // orphan still downloading a meeting.
             .kill_on_drop(true)
             // Never inherit a terminal. A child that can read our stdin can swallow
             // keystrokes or block on a prompt nobody can see — measured with ffmpeg.
@@ -290,31 +253,6 @@ impl Tool {
             });
         }
         Ok(out.stdout)
-    }
-
-    /// Starts the program and hands back the running child.
-    ///
-    /// For the streaming case, where the output is too large to buffer — a three-hour
-    /// meeting is ~691 MB of PCM. The child is already `kill_on_drop`, so dropping it is
-    /// enough to stop it; **the deadline is the caller's**, because a stream's useful
-    /// guard is inactivity rather than total time and only the caller knows what a
-    /// heartbeat from this program looks like.
-    pub fn spawn(&self, pipes: Pipes) -> Result<Child, ToolError> {
-        let mut cmd = self.command();
-        if pipes.stdin {
-            cmd.stdin(Stdio::piped());
-        }
-        cmd.stdout(if pipes.stdout {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-        cmd.stderr(if pipes.stderr {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-        cmd.spawn().map_err(|e| self.spawn_error(e))
     }
 
     /// Runs the program **in the foreground**, attached to this process's terminal.
@@ -453,40 +391,6 @@ mod tests {
             .unwrap();
         assert!(out.status.success());
         assert!(out.stdout.is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_spawned_child_streams_rather_than_buffers() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let mut child = sh("cat").spawn(Pipes::duplex()).unwrap();
-        let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(b"through the pipe").await.unwrap();
-        drop(stdin);
-
-        let mut buf = String::new();
-        child
-            .stdout
-            .take()
-            .unwrap()
-            .read_to_string(&mut buf)
-            .await
-            .unwrap();
-        assert_eq!(buf, "through the pipe");
-        assert!(child.wait().await.unwrap().success());
-    }
-
-    #[tokio::test]
-    async fn a_spawned_child_is_also_killed_when_it_is_dropped() {
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("survived");
-        let child = sh(&format!("sleep 1; touch {}", marker.display()))
-            .spawn(Pipes::read())
-            .unwrap();
-        drop(child);
-
-        tokio::time::sleep(Duration::from_millis(1_800)).await;
-        assert!(!marker.exists(), "a dropped child kept running");
     }
 
     #[test]

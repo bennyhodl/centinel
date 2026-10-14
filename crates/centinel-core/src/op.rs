@@ -38,9 +38,6 @@ use crate::store::Store;
 #[derive(Clone, Debug)]
 pub struct Ctx {
     pub store: Store,
-    /// One model per role, shared across requests to bound GPU residency.
-    pub(crate) query_reranker: Arc<std::sync::Mutex<Option<crate::rerank::Reranker>>>,
-    pub(crate) query_embedder: Arc<std::sync::Mutex<Option<crate::embed::Embedder>>>,
     /// What this process is working on, for whoever is watching. See [`crate::jobs`].
     pub jobs: crate::jobs::Jobs,
 }
@@ -49,8 +46,6 @@ impl Ctx {
     pub fn new(store: Store) -> Self {
         Self {
             store,
-            query_reranker: Arc::new(std::sync::Mutex::new(None)),
-            query_embedder: Arc::new(std::sync::Mutex::new(None)),
             jobs: crate::jobs::Jobs::default(),
         }
     }
@@ -646,8 +641,8 @@ pub enum Reach {
     /// Never HTTP, never MCP.
     Operator,
     /// The CLI alone — this op acts on the host it runs on. Not even the scheduler:
-    /// `open` launches a configured command, and `models` pulls gigabytes into a cache,
-    /// which must never ambush a 3am run (SPEC §3.6).
+    /// `open` launches a configured command, and `update` replaces the binary, which must
+    /// never ambush a 3am run.
     Host,
 }
 

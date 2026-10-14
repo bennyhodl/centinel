@@ -4,8 +4,6 @@ members = [
     "crates/centinel-core",
     "crates/centinel-macros",
     "crates/centinel",
-    # Links whisper.cpp, and must never link llama.cpp — see the crate's Cargo.toml.
-    "crates/centinel-whisper",
 ]
 
 [workspace.package]
@@ -23,9 +21,8 @@ repository = "https://github.com/bennyhodl/centinel"
 # Two things are deliberately absent. `panic = "abort"` would be wrong in a tool whose run
 # report distinguishes a stage that failed from a corpus that had nothing: a process that
 # aborts cannot unwind to record its Underivables, and work that was attempted and not
-# recorded is work every later run attempts again. `strip` would buy little on a binary
-# already dominated by two vendored C++ libraries, and it costs the function names in the
-# one backtrace somebody eventually sends us.
+# recorded is work every later run attempts again. `strip` would buy little, and it costs
+# the function names in the one backtrace somebody eventually sends us.
 [profile.release]
 # Thin rather than fat. The win is in this workspace's own whole-corpus loops — chunking,
 # hashing, the FTS5 write path — and fat LTO pays for that across arrow, datafusion and
@@ -47,7 +44,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", 
 futures = "0.3"
 sha2 = "0.10"
 hex = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "stream"] }
+# `multipart` for the transcription upload; already compiled in through another crate's
+# use of reqwest, so it adds nothing to the build.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "stream", "multipart"] }
 axum = "0.8"
 tokio-stream = "0.1"
 jiff = { version = "0.2", features = ["serde"] }

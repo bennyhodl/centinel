@@ -3,9 +3,10 @@
 //! The expensive stage. Separate from `index` for the same reason `collect` is separate
 //! from `extract`: `index` is minutes and rebuildable, this is hours.
 //!
-//! Vectors are written straight to [`crate::vectors`], which is where `search` reads
-//! them. There is no intermediate cache — see that module for why the one there used to
-//! be did not survive being measured.
+//! Vectors come from the server `[inference.embed]` names (see [`crate::embed`]) and are
+//! written straight to [`crate::vectors`], which is where `search` reads them. There is no
+//! intermediate cache — see that module for why the one there used to be did not survive
+//! being measured.
 //!
 //! ## Resumability is a consequence, not a feature
 //!
@@ -27,12 +28,10 @@
 //! document's source, tags and exclusion so a search can filter inside the vector query
 //! (see [`crate::vectors`]). The work list is therefore placements, not chunks, and a
 //! placement's vector comes from the cheapest place that has it: another document's row
-//! for the same chunk, the `vectors` table a store from before this layout still holds,
-//! and only then the model. A recrawl that changes a page gives it a new derived text and
-//! so new placements, nearly all of them for passages the table already has under the
-//! old text; those are copied, and the model sees only what is actually new. Upgrading a
-//! store is the same loop with nothing new: `centinel embed --limit 0` fills the table
-//! from `vectors` with nothing sent to a model, resumably, by the same set difference.
+//! for the same chunk, and only then the model. A recrawl that changes a page gives it a
+//! new derived text and so new placements, nearly all of them for passages the table
+//! already has under the old text; those are copied, and the model sees only what is
+//! actually new.
 //!
 //! Each row is written with what the workspace says about its document at that moment,
 //! read under the lock every writer of the table takes, and the workspace's own queue of
@@ -61,179 +60,86 @@
 //! Only one `embed` runs on a store at a time (`workspace/embed.lock`), so two runs never
 //! work out the same missing rows and append them twice.
 //!
-//! ## Batching is not optional
+//! ## The pipeline
 //!
-//! A batch is one `decode` call over many chunks: one `llama.cpp` context, every chunk
-//! its own sequence, the call run as bounded physical passes (see
-//! [`crate::embed::EmbedSession`]). Two costs collapse into it. The context and its KV
-//! cache are built per call rather than per text — measured on an M1 Max, one chunk per
-//! call gave 6.1 chunks/sec against 18.5 for groups of 32, when that amortisation was
-//! all a group bought. And a single ~300-token chunk leaves a GPU almost entirely idle,
-//! which is what the packed call now claims.
+//! A reader thread keeps windows of chunk text coming off SQLite, `concurrency` requests
+//! are in flight at once to hide the round trip, and a writer task appends what has come
+//! back — so the server waits on neither SQLite nor Lance. How wide a request is and how
+//! many are in flight are `[inference.embed] batch` and `concurrency`; how the server
+//! packs the work onto its GPU is the server's tuning, not this binary's.
 //!
-//! So the batch is the unit of work here rather than the chunk, and how wide it should be
-//! is a property of the *machine* rather than of the corpus — see [`BatchSize`].
+//! ## Moving a table to another server
 //!
-//! The context stands for the whole run, and I/O rides beside the decode rather than
-//! between decodes: a reader thread keeps the next batch's text ready and a writer task
-//! appends the last batch's vectors, so the GPU waits on neither SQLite nor Lance — see
-//! [`run`].
-//!
-//! ## Remote is the same loop with the decode swapped out
-//!
-//! An `openrouter/…` model routes this stage through [`crate::remote`] instead of local
-//! weights — the work list, the resume subtraction, the writer and the skip accounting
-//! are unchanged, and the remote model id keys its own vector table, so the two kinds of
-//! run cannot touch each other's spaces. What changes is the middle of the pipeline:
-//! HTTP requests in flight instead of a standing `llama.cpp` context ([`run_remote`]),
-//! and a batch that is a request body rather than a KV-cache reservation.
+//! The table records the [`Space`] its vectors are in — the model, and the server that ran
+//! it — and refuses rows from any other. `--adopt` is the one way across without
+//! re-embedding: it sends a sample of stored chunks to the configured server, compares
+//! what comes back with what is stored, and rewrites the record only when every pair
+//! agrees past [`ADOPT_MIN_COSINE`]. The same weights behind a new server reproduce their
+//! vectors to within rounding; a different model, or the same one at a coarser
+//! quantization, does not, and the refusal says what was measured and what to run instead.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context as _;
-use futures::TryStreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::embed::{Embedder, SessionOptions};
+use crate::config::InferenceConfig;
+use crate::embed::Embedder;
 use crate::index::Index;
-use crate::models;
+use crate::inference::{Capability, is_fatal};
 use crate::prelude::*;
-use crate::remote::{self, EmbeddingBackend, RemoteEmbedder};
-use crate::vectors::{LegacyVectors, Row, VectorLock, VectorTable, parse_key};
+use crate::vectors::{Row, Space, VectorLock, VectorTable, parse_key};
 use crate::workspace::classifications::Classifications;
 use crate::workspace::{DocState, DocumentId};
-
-/// The batch to fall back on when the machine will not say what it can hold. Measured,
-/// on an M1 Max, back when a group only amortised context creation.
-const DEFAULT_BATCH: usize = 32;
 
 /// Chunks per lookup when a placement's vector is copied from another row of the table.
 /// One `IN (…)` predicate each, served by the hash index once `maintain` has built it.
 const COPY_WINDOW: usize = 256;
 
-/// The word for "size it to this machine", in the config file and on the flag alike.
-pub const AUTO: &str = "auto";
+/// Stored chunks `--adopt` asks the new server to reproduce. Enough to catch a different
+/// model — which disagrees on every chunk — at the price of one request.
+const ADOPT_SAMPLE: usize = 32;
 
-/// How wide a batch to embed in: a count of chunks, or [`AUTO`].
+/// Chunks drawn evenly across the index for `--adopt` to look up in the table, of which the
+/// first [`ADOPT_SAMPLE`] with a stored vector are sent. Wide, so a partly embedded corpus
+/// still yields a full sample; one `IN (…)` lookup, so it costs nothing to be wide.
+const ADOPT_CANDIDATES: usize = 1024;
+
+/// The agreement `--adopt` requires on **every** sampled chunk, as cosine similarity.
 ///
-/// A sentinel beside the real values, as [`crate::config::SYSTEM_DEFAULT`] already does
-/// for "let something else decide" — one idiom for that question rather than two. It
-/// reads the same in either place it is written:
-///
-/// ```toml
-/// embed_batch = "auto"   # or embed_batch = 64
-/// ```
-/// ```console
-/// centinel embed --batch auto   # or --batch 64
-/// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BatchSize {
-    /// Settled when the model loads, from the free memory the backend reports.
-    Auto,
-    /// Exactly this many chunks per forward pass.
-    Fixed(usize),
-}
+/// The same weights behind another server land at 0.999 and above: pooling, quantization
+/// and normalization are the same, and what differs is the order floating-point sums run
+/// in. A different model, or the same one at a coarser quantization, lands well under this
+/// on most chunks — and a table that ranks 1% of its chunks against the wrong space is
+/// worse than one re-embedded.
+pub const ADOPT_MIN_COSINE: f32 = 0.99;
 
-impl BatchSize {
-    /// The one parse, so the flag and the config file cannot disagree about what is legal.
-    ///
-    /// Zero is refused here rather than clamped: `--batch 0` and `embed_batch = 0` are
-    /// both somebody meaning something, and neither means "one".
-    fn parse(text: &str) -> Result<Self, String> {
-        if text.eq_ignore_ascii_case(AUTO) {
-            return Ok(Self::Auto);
-        }
-        match text.parse::<usize>() {
-            Ok(0) => Err("a batch of 0 embeds nothing; give a count or `auto`".into()),
-            Ok(n) => Ok(Self::Fixed(n)),
-            Err(_) => Err(format!(
-                "expected a count of chunks or `{AUTO}`, got `{text}`"
-            )),
-        }
-    }
-}
-
-/// Written back as it was written: a number stays a number, so a config file this tool
-/// prints is a config file it would accept.
-impl Serialize for BatchSize {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Auto => s.serialize_str(AUTO),
-            Self::Fixed(n) => s.serialize_u64(*n as u64),
-        }
-    }
-}
-
-/// Both TOML spellings, and both JSON ones. TOML hands integers over as `i64` and JSON as
-/// `u64`, so a field that accepts `64` has to answer to both or accept it in only one of
-/// the two places it can be written.
-impl<'de> Deserialize<'de> for BatchSize {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Either;
-
-        impl serde::de::Visitor<'_> for Either {
-            type Value = BatchSize;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "a count of chunks or `{AUTO}`")
-            }
-
-            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<BatchSize, E> {
-                BatchSize::parse(text).map_err(E::custom)
-            }
-
-            fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<BatchSize, E> {
-                BatchSize::parse(&n.to_string()).map_err(E::custom)
-            }
-
-            fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<BatchSize, E> {
-                BatchSize::parse(&n.to_string()).map_err(E::custom)
-            }
-        }
-
-        d.deserialize_any(Either)
-    }
-}
-
-#[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct EmbedArgs {
-    /// Embedding model. Changing this is a full re-embed into a separate cache, not an
-    /// upgrade — vectors from two models share no space (SPEC §6.2). An `openrouter/…`
-    /// id embeds remotely: chunk text goes to openrouter.ai, and $OPENROUTER_API_KEY
-    /// must be set.
+    /// The model to ask the embedding server for, for this run.
     ///
-    /// Unset means "nobody said here", which falls through to `[defaults] embed_model`
-    /// in the config file and from there to `qwen3-embedding-4b` — `--batch`'s route
-    /// exactly. A clap default here would make a typed model indistinguishable from an
-    /// absent one, and the file's standing preference would be read and never used.
+    /// Unset means "nobody said here", which falls through to `[inference.embed] model`.
+    /// Changing it is a new vector space, not an upgrade (SPEC §6.2): the table refuses
+    /// the new model's vectors until `--adopt` has measured that they match.
     #[arg(long)]
     #[serde(default)]
     pub model: Option<String>,
 
-    /// Quantization. Defaults to the registry's choice for the model.
-    #[arg(long)]
+    /// Chunks per request. Unset falls through to `[inference.embed] batch`.
+    #[arg(long, value_name = "N")]
     #[serde(default)]
-    pub variant: Option<String>,
-
-    /// Chunks per forward pass — a count, or `auto` for what this machine can hold.
-    ///
-    /// Unset means "nobody said here", which falls through to `[defaults] embed_batch` in
-    /// the config file and from there to `auto`. Typing it is how one run departs from a
-    /// machine's standing preference, not how the preference gets stated.
-    #[arg(long, value_name = "N|auto", value_parser = BatchSize::parse)]
-    #[serde(default)]
-    #[schemars(with = "Option<String>")]
-    pub batch: Option<BatchSize>,
+    pub batch: Option<usize>,
 
     /// Stop after this many chunks. The way to sample a corpus before committing hours.
     #[arg(long)]
     #[serde(default)]
     pub limit: Option<usize>,
 
-    /// Report what would be embedded and exit.
+    /// Report what would be embedded and exit. With `--adopt`, measure and report without
+    /// rewriting anything.
     #[arg(long)]
     #[serde(default)]
     pub dry_run: bool,
@@ -243,23 +149,13 @@ pub struct EmbedArgs {
     #[arg(long)]
     #[serde(default)]
     pub ann_index: bool,
-}
 
-/// `model: None` and `batch: None` are not "no model" and "do not batch" — both mean
-/// "nobody said", which resolves through the config file to `[defaults] embed_model` and
-/// `embed_batch`. Keeping [`crate::ops::run`] and the CLI on the same unset value is what
-/// stops a second default from quietly shadowing the file's standing preference.
-impl Default for EmbedArgs {
-    fn default() -> Self {
-        Self {
-            model: None,
-            variant: None,
-            batch: None,
-            limit: None,
-            dry_run: false,
-            ann_index: false,
-        }
-    }
+    /// Take the stored vectors over to the configured server: embed a sample of stored
+    /// chunks there, and record the server as the table's own if every one matches what is
+    /// stored. Refused, with what was measured, if they do not.
+    #[arg(long)]
+    #[serde(default)]
+    pub adopt: bool,
 }
 
 /// A chunk that could not be embedded. One failure does not abandon the run.
@@ -269,20 +165,38 @@ pub struct Skipped {
     pub reason: String,
 }
 
+/// What `--adopt` measured.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Adoption {
+    /// The space the table recorded.
+    pub from: Space,
+    /// The configured server's.
+    pub to: Space,
+    /// Stored chunks the server was asked to reproduce.
+    pub sampled: usize,
+    pub min_cosine: f32,
+    pub mean_cosine: f32,
+    /// Whether the table now records `to`. False on a dry run, and when it already did.
+    pub adopted: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct EmbedReport {
     pub model: String,
-    pub variant: String,
-    pub dims: usize,
+    /// The embedding server's `base_url`.
+    pub server: String,
+    /// The table's width. Absent on a dry run before any table exists: only the server
+    /// knows, and a dry run does not ask it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dims: Option<usize>,
     /// Where the vectors went — `chunks.lance/`.
     pub vectors: std::path::PathBuf,
     /// Chunk placements in the index: one for each chunk in each document that holds it.
     pub indexed: usize,
     /// Placements that already had a row when the run started — the resumed-past portion.
     pub already_embedded: usize,
-    /// Placements written this run from a vector the store already held: another
-    /// document's row for the same chunk, or the `vectors` table from before this layout.
-    /// Nothing was sent to a model for them.
+    /// Placements written this run from a vector the table already held under another
+    /// document. Nothing was sent to a model for them.
     #[serde(default)]
     pub filled: usize,
     /// Chunks the model embedded this run; their placements were written with them.
@@ -302,20 +216,19 @@ pub struct EmbedReport {
     pub elapsed_secs: f64,
     /// Sustained rate of the model, for planning the rest of a corpus.
     pub chunks_per_sec: f64,
-    /// Chunks per forward pass, once the three tiers settled it. Reported because it is
-    /// what makes `chunks_per_sec` mean anything — the same corpus and the same model
-    /// give different rates at different widths.
-    ///
-    /// Absent on a dry run, which never loads the weights `auto` reads the machine
-    /// through, and so never chooses; and on a run the copies finished.
+    /// Chunks per request. Reported because it is what makes `chunks_per_sec` mean
+    /// anything — the same corpus and the same server give different rates at different
+    /// widths. Absent on a dry run and on a run the copies finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adoption: Option<Adoption>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<Skipped>,
 }
 
 /// A chunk's hash as 32 bytes and its document as a position in the index's document
-/// list: a placement, small enough that a million and a half of them sit beside a model.
+/// list: a placement, small enough that a million and a half of them sit in memory.
 type Pair = ([u8; 32], u32);
 
 fn hash_bytes(hex: &str) -> anyhow::Result<[u8; 32]> {
@@ -333,63 +246,93 @@ pub async fn embed(
     progress: &Progress,
     cancel: &Cancel,
 ) -> anyhow::Result<EmbedReport> {
-    // `BatchSize::parse` refuses a zero typed on the flag or written in the config, so
-    // this catches only the third way in: a caller building `EmbedArgs` in code.
-    let zero = Some(BatchSize::Fixed(0));
-    anyhow::ensure!(args.batch != zero, "--batch must be at least 1");
+    let inference = crate::config::Config::load()?.inference;
+    embed_with(ctx, args, &inference, progress, cancel).await
+}
+
+/// [`embed`], against the server `inference` names — `run` passes the config it has open
+/// rather than have the file read twice.
+pub(crate) async fn embed_with(
+    ctx: &Ctx,
+    args: EmbedArgs,
+    inference: &InferenceConfig,
+    progress: &Progress,
+    cancel: &Cancel,
+) -> anyhow::Result<EmbedReport> {
+    anyhow::ensure!(args.batch != Some(0), "--batch must be at least 1");
     // Before the work list is worked out, so a second run cannot work out the same one.
     let _run = match args.dry_run {
         true => None,
         false => Some(hold_embed_lock(&ctx.store)?),
     };
 
-    // Shortest first, so batches carry texts of one kind and the oversized tail — the
-    // chunks that force a bespoke context — arrives together at the end of the run.
-    // Said before it runs, not after: on a large corpus it is the first thing a caller
-    // waits on.
+    let mut endpoint = inference.endpoint(Capability::Embed);
+    if let Some(model) = &args.model {
+        endpoint = endpoint.with_model(model);
+    }
+    let wanted = Space::of(&endpoint);
+    // Built only where something will be sent, because building one reads the key, and a
+    // run that sends nothing — a plan, a copy-only `--limit 0`, a corpus already embedded —
+    // must not fail for want of one.
+    let embedder = || {
+        Embedder::new(
+            endpoint.clone(),
+            &inference.embed.query_prefix,
+            crate::spend::Ledger::new(&ctx.store),
+        )
+    };
+
+    // Shortest first, so a request carries texts of one size and the long tail arrives
+    // together at the end of the run. Said before it runs, not after: on a large corpus it
+    // is the first thing a caller waits on.
     progress.say("reading the index");
     let index = Index::open(ctx.store.require_index()?)?;
     let placements = index.placements_by_length()?;
 
-    // The flag, else the config file's standing preference — [`resolve_batch`]'s first
-    // two tiers, resolved here so `centinel embed` typed by hand embeds with the model
-    // the file names. `run` reads the file once and passes its value down.
-    let model = match args.model.clone() {
-        Some(typed) => typed,
-        None => crate::config::Config::load()?.defaults.embed_model,
+    // Chunks for `--adopt` to compare, drawn from the index — the side that knows which
+    // chunks are current — and read now, while the index is to hand: `adopt` awaits, and a
+    // SQLite connection is not `Sync`.
+    let candidates = match args.adopt {
+        true => adoption_candidates(&index, &placements.pairs)?,
+        false => Vec::new(),
     };
 
-    // Dimensions come from a registry — local or remote — so the table can be opened,
-    // and the outstanding work computed, before a multi-gigabyte model is loaded or a
-    // key is read. A dry run touches neither.
-    let backend = remote::backend_for(&model)?;
-    let (model_id, dims): (&'static str, usize) = match backend {
-        EmbeddingBackend::Local(spec) => (
-            spec.id,
-            spec.dims
-                .ok_or_else(|| anyhow::anyhow!("`{}` is not an embedding model", model))?
-                as usize,
-        ),
-        EmbeddingBackend::Remote(spec) => {
-            // A quantization is a fact about weights on this machine. A remote model
-            // keeps none here, and accepting the flag would record a variant that
-            // names nothing.
-            anyhow::ensure!(
-                args.variant.is_none(),
-                "`{}` runs remotely and has no quantization variant — drop --variant",
-                spec.id
-            );
-            (spec.id, spec.dims as usize)
+    // The table says what space it is in. `--adopt` is the one way to change its mind;
+    // otherwise another space is refused before anything is sent or written.
+    let mut adoption = None;
+    let table = match ctx.store.vectors_path().exists() {
+        true => {
+            let mut existing = VectorTable::open_existing(&ctx.store.vectors_db()).await?;
+            if args.adopt {
+                let measured = adopt(
+                    ctx,
+                    &mut existing,
+                    &embedder()?,
+                    &candidates,
+                    args.dry_run,
+                    progress,
+                )
+                .await?;
+                adoption = Some(measured);
+            }
+            // Opened again in the space the table now records, which is what checks the
+            // width and the layout too — and refuses another space with the way forward.
+            let space = match &adoption {
+                Some(a) if !a.adopted => existing.space().clone(),
+                _ => wanted.clone(),
+            };
+            Some(VectorTable::open(&ctx.store.vectors_db(), &space, existing.dims()).await?)
         }
-    };
-
-    // Opening creates the table, and `--dry-run` must leave nothing behind — so an
-    // absent table is read as "nothing stored" rather than created to be asked. An
-    // existing one is opened either way, because that is what checks the model.
-    let table = if ctx.store.vectors_path().exists() {
-        Some(VectorTable::open(&ctx.store.vectors_db(), model_id, dims).await?)
-    } else {
-        None
+        false => {
+            // Before anything is embedded beside it, a store whose vectors are in the old
+            // layout is told what to do with them.
+            crate::vectors::refuse_old_layout(&ctx.store.vectors_db()).await?;
+            anyhow::ensure!(
+                !args.adopt,
+                "there are no stored vectors to adopt — run `centinel embed` without --adopt"
+            );
+            None
+        }
     };
 
     // The work list is a set difference over placements. The table's keys are streamed
@@ -460,17 +403,9 @@ pub async fn embed(
     drop(todo);
 
     let base = EmbedReport {
-        model: model_id.to_string(),
-        variant: match backend {
-            EmbeddingBackend::Local(spec) => args
-                .variant
-                .clone()
-                .unwrap_or_else(|| spec.default_variant.to_string()),
-            // The provider stands where the quantization would: it is the honest
-            // answer a remote run can give to "what produced these vectors".
-            EmbeddingBackend::Remote(_) => "openrouter".to_string(),
-        },
-        dims,
+        model: endpoint.model.clone(),
+        server: endpoint.base_url.clone(),
+        dims: table.as_ref().map(VectorTable::dims),
         vectors: ctx.store.vectors_path(),
         indexed: placements.pairs.len(),
         already_embedded,
@@ -483,6 +418,7 @@ pub async fn embed(
         elapsed_secs: 0.0,
         chunks_per_sec: 0.0,
         batch: None,
+        adoption,
         skipped: Vec::new(),
     };
 
@@ -494,7 +430,17 @@ pub async fn embed(
     let table = match table {
         Some(table) => table,
         None if order.is_empty() => return Ok(base),
-        None => VectorTable::open(&ctx.store.vectors_db(), model_id, dims).await?,
+        None => {
+            // A new table needs a width before its first row, and only the server knows it.
+            progress.say(format!("asking {endpoint} for its width"));
+            let dims = embedder()?.probe_dims().await?;
+            VectorTable::open(&ctx.store.vectors_db(), &wanted, dims).await?
+        }
+    };
+    let dims = table.dims();
+    let base = EmbedReport {
+        dims: Some(dims),
+        ..base
     };
 
     // What the workspace changed since the last drain lands first, so no row written
@@ -509,8 +455,8 @@ pub async fn embed(
         pending,
     )?;
 
-    // Copies first: a chunk the table already holds under another document, then the
-    // table from before this layout. Neither asks a model anything.
+    // Copies first: a chunk the table already holds under another document. No model is
+    // asked anything for them.
     let copyable: Vec<String> = order
         .iter()
         .filter(|hash| hash_bytes(hash).is_ok_and(|bytes| known.contains(&bytes)))
@@ -532,28 +478,6 @@ pub async fn embed(
                 ((i + 1) * COPY_WINDOW).min(copyable.len()) as u64,
                 copyable.len() as u64,
             );
-        }
-    }
-    if writer.has_pending()
-        && let Some(legacy) = LegacyVectors::open(&ctx.store.vectors_db(), model_id).await?
-    {
-        anyhow::ensure!(
-            legacy.dims() == dims,
-            "the `vectors` table holds {}-dimensional vectors, not {dims}",
-            legacy.dims()
-        );
-        progress.say("copying vectors from the vectors table");
-        let mut rows = legacy.rows().await?;
-        while let Some(batch) = rows.try_next().await? {
-            cancel.check()?;
-            let wanted: Vec<_> = batch
-                .into_iter()
-                .filter(|(hash, _)| writer.wants(hash))
-                .collect();
-            writer.write(wanted).await?;
-            if !writer.has_pending() {
-                break;
-            }
         }
     }
     let filled = writer.rows;
@@ -606,65 +530,26 @@ pub async fn embed(
         return Ok(finish(&writer, 0, Vec::new(), None, done));
     }
 
+    let batch = args.batch.unwrap_or(inference.embed.batch);
+    // Said before the first byte moves: where chunk text is going, and how.
+    progress.say(format!(
+        "{endpoint} — {batch} chunks per request, {} in flight",
+        inference.embed.concurrency
+    ));
     let chunks_before = writer.chunks;
-    let (writer, skipped, batch_size) = match backend {
-        EmbeddingBackend::Local(spec) => {
-            progress.say(format!(
-                "loading {} ({})",
-                spec.id,
-                args.variant.as_deref().unwrap_or(spec.default_variant)
-            ));
-            let embedder =
-                load_embedder(&args, spec.id, crate::spend::Ledger::new(&ctx.store)).await?;
-            progress.say(embedder.device_summary());
-            anyhow::ensure!(
-                embedder.dims() == dims,
-                "{} reports {} dimensions, the registry pins {dims}",
-                spec.id,
-                embedder.dims()
-            );
-
-            // After the load, not before it: `auto` asks the loaded model what a
-            // sequence costs and asks the backend how much memory is left once the
-            // weights are on it.
-            let batch_size = resolve_batch(args.batch, &embedder)?;
-            progress.say(format!("{batch_size} chunks per pass"));
-
-            // The whole run goes into one blocking task rather than one per batch.
-            // Inference is CPU/GPU-bound and would stall the async runtime — which
-            // matters here more than usual, because an HTTP caller's connection has to
-            // stay responsive across hours. One task also means the model is moved once
-            // instead of round-tripping per batch.
-            let (writer, skipped) = {
-                let host = Host {
-                    progress: progress.clone(),
-                    cancel: cancel.clone(),
-                    // The table's API is async and the loop is not. A handle captured
-                    // here lets the blocking thread drive an append to completion
-                    // without a runtime of its own — safe precisely because a
-                    // `spawn_blocking` thread is not a runtime worker, so parking it
-                    // starves nothing.
-                    handle: tokio::runtime::Handle::current(),
-                };
-                tokio::task::spawn_blocking(move || {
-                    run(embedder, index, writer, todo, batch_size, host)
-                })
-                .await??
-            };
-            (writer, skipped, batch_size)
-        }
-        EmbeddingBackend::Remote(spec) => {
-            // Said before the first byte moves, because it is the run's one departure
-            // from §2.1: this stage, this model, chunk text to openrouter.ai.
-            progress.say(format!("{} — chunk text is sent to openrouter.ai", spec.id));
-            let embedder = RemoteEmbedder::new(spec, crate::spend::Ledger::new(&ctx.store))?;
-            let batch_size = resolve_remote_batch(args.batch)?;
-            progress.say(format!("{batch_size} chunks per request"));
-            let (writer, skipped) =
-                run_remote(embedder, index, writer, todo, batch_size, progress, cancel).await?;
-            (writer, skipped, batch_size)
-        }
-    };
+    let (writer, skipped) = run(
+        embedder()?.with_dims(dims),
+        index,
+        writer,
+        todo,
+        Pipeline {
+            batch,
+            in_flight: inference.embed.concurrency,
+        },
+        progress,
+        cancel,
+    )
+    .await?;
 
     cancel.check()?;
     progress.say("maintaining the vector table");
@@ -674,9 +559,188 @@ pub async fn embed(
         &writer,
         writer.chunks - chunks_before,
         skipped,
-        Some(batch_size),
+        Some(batch),
         done,
     ))
+}
+
+/// Measures whether `embedder` reproduces the stored vectors, and when every sampled pair
+/// agrees past [`ADOPT_MIN_COSINE`], records its space as the table's — unless this is a
+/// dry run, which measures and reports and writes nothing.
+///
+/// Refused with the figures and with what to run instead, because a refusal here is the
+/// moment somebody decides between starting the right server and re-embedding for hours.
+/// Up to [`ADOPT_CANDIDATES`] distinct chunks, evenly spaced through the index's work order
+/// — which runs shortest first, so the sample spans every length — with their text.
+fn adoption_candidates(
+    index: &Index,
+    pairs: &[(String, u32)],
+) -> anyhow::Result<Vec<(String, String)>> {
+    let step = (pairs.len() / ADOPT_CANDIDATES).max(1);
+    let mut seen = HashSet::new();
+    let hashes: Vec<String> = pairs
+        .iter()
+        .step_by(step)
+        .map(|(hash, _)| hash.clone())
+        .filter(|hash| seen.insert(hash.clone()))
+        .take(ADOPT_CANDIDATES)
+        .collect();
+    let mut texts = index.texts_of(&hashes)?;
+    Ok(hashes
+        .into_iter()
+        .filter_map(|hash| texts.remove(&hash).map(|text| (hash, text)))
+        .collect())
+}
+
+async fn adopt(
+    ctx: &Ctx,
+    table: &mut VectorTable,
+    embedder: &Embedder,
+    candidates: &[(String, String)],
+    dry_run: bool,
+    progress: &Progress,
+) -> anyhow::Result<Adoption> {
+    let from = table.space().clone();
+    let to = embedder.space();
+    if from == to {
+        progress.say(format!("the table already records {to}"));
+        return Ok(Adoption {
+            from,
+            to,
+            sampled: 0,
+            min_cosine: 1.0,
+            mean_cosine: 1.0,
+            adopted: false,
+        });
+    }
+
+    // The current chunks the table holds a vector for, in candidate order.
+    let hashes: Vec<String> = candidates.iter().map(|(hash, _)| hash.clone()).collect();
+    let stored = table.vectors_of(&hashes).await?;
+    let pairs: Vec<(String, Vec<f32>)> = candidates
+        .iter()
+        .filter_map(|(hash, text)| stored.get(hash).map(|v| (text.clone(), v.clone())))
+        .take(ADOPT_SAMPLE)
+        .collect();
+    anyhow::ensure!(
+        !pairs.is_empty(),
+        "none of {} chunks drawn across the index has a stored vector, so there is nothing \
+         to compare — delete {} and re-run `centinel embed`",
+        candidates.len(),
+        ctx.store.vectors_path().display()
+    );
+
+    progress.say(format!(
+        "asking {} to reproduce {} stored chunks",
+        embedder.endpoint(),
+        pairs.len()
+    ));
+    let texts: Vec<&str> = pairs.iter().map(|(text, _)| text.as_str()).collect();
+    let fresh = embedder
+        .embed_documents(&texts)
+        .await
+        .map_err(|e| e.context(adopt_refusal(&from, &to, None)))?;
+    anyhow::ensure!(
+        fresh.len() == pairs.len(),
+        "the server answered {} vectors for {} chunks",
+        fresh.len(),
+        pairs.len()
+    );
+    if let Some(vector) = fresh.first()
+        && vector.len() != table.dims()
+    {
+        anyhow::bail!(
+            "{} answers {}-dimensional vectors and the table holds {} — {}",
+            embedder.endpoint(),
+            vector.len(),
+            table.dims(),
+            adopt_refusal(&from, &to, None)
+        );
+    }
+
+    let cosines: Vec<f32> = pairs
+        .iter()
+        .zip(&fresh)
+        .map(|((_, stored), fresh)| crate::embed::cosine(stored, fresh))
+        .collect();
+    let min_cosine = cosines.iter().copied().fold(f32::INFINITY, f32::min);
+    let mean_cosine = cosines.iter().sum::<f32>() / cosines.len() as f32;
+    if min_cosine < ADOPT_MIN_COSINE {
+        anyhow::bail!(
+            "{}",
+            adopt_refusal(&from, &to, Some((pairs.len(), min_cosine, mean_cosine)))
+        );
+    }
+
+    let adopted = !dry_run;
+    if adopted {
+        let lock = VectorLock::take(&ctx.store).await?;
+        table.adopt(&lock, &to).await?;
+    }
+    Ok(Adoption {
+        from,
+        to,
+        sampled: pairs.len(),
+        min_cosine,
+        mean_cosine,
+        adopted,
+    })
+}
+
+/// Why `--adopt` said no, and what would have it say yes.
+///
+/// The way forward depends on where the stored vectors came from, and the table says:
+/// a server it names can be pointed at again; an `openrouter/…` id is OpenRouter's API;
+/// a bare id is weights the in-process embedder ran, which llama-server runs the same way.
+fn adopt_refusal(from: &Space, to: &Space, measured: Option<(usize, f32, f32)>) -> String {
+    let mut out = match measured {
+        Some((n, min, mean)) => format!(
+            "{to} does not reproduce the vectors {from} wrote: across {n} stored chunks the \
+             agreement was {min:.4} at worst and {mean:.4} on average, and adopting needs \
+             {ADOPT_MIN_COSINE} on every one."
+        ),
+        None => format!("{to} cannot stand in for {from}."),
+    };
+    let way = match (&from.endpoint, from.model.strip_prefix("openrouter/")) {
+        (Some(endpoint), _) => format!(
+            "Point [inference.embed] back at the server that wrote them:\n\n{}",
+            crate::config::embed_table(Some(endpoint), None, &from.model)
+        ),
+        (None, Some(slug)) => format!(
+            "They came from OpenRouter. To keep searching them there:\n\n{}",
+            crate::config::embed_table(
+                Some(crate::config::OPENROUTER_BASE_URL),
+                Some(crate::config::OPENROUTER_KEY),
+                slug,
+            )
+        ),
+        (None, None) => match from.model.as_str() {
+            "qwen3-embedding-4b" | "qwen3-embedding-0.6b" => {
+                let size = if from.model.ends_with("4b") {
+                    "4B"
+                } else {
+                    "0.6B"
+                };
+                format!(
+                    "They came from the in-process embedder, which ran the Q8_0 GGUF with \
+                     last-token pooling. llama-server runs the same weights the same way:\n\n\
+                     llama-server -hf Qwen/Qwen3-Embedding-{size}-GGUF:Q8_0 --embedding \
+                     --pooling last --ubatch-size 2048 --batch-size 2048\n\n\
+                     then point [inference.embed] at it and run `centinel embed --adopt` again."
+                )
+            }
+            other => format!(
+                "They came from `{other}`, run in-process. Serve those weights with last-token \
+                 pooling and run `centinel embed --adopt` again."
+            ),
+        },
+    };
+    out.push_str("\n\n");
+    out.push_str(&way);
+    out.push_str(
+        "\n\nOr start over in the new space: delete chunks.lance and run `centinel embed`.",
+    );
+    out
 }
 
 /// The one writer of rows for a run: it knows which documents still owe a row for each
@@ -717,10 +781,6 @@ impl Writer {
     /// Whether some document still owes a row for this chunk.
     fn wants(&self, hash: &str) -> bool {
         hash_bytes(hash).is_ok_and(|bytes| self.pending.contains_key(&bytes))
-    }
-
-    fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
     }
 
     /// Placements still without a row.
@@ -818,76 +878,33 @@ fn verify_hint(doing: &str) -> String {
     )
 }
 
-/// The flag, else the config file's standing preference, else what the machine affords.
-///
-/// Three tiers because the right batch size is a property of the *machine*: a laptop and
-/// a box with 128 GB of unified memory want different numbers for the same corpus, and
-/// neither operator should have to remember theirs on every invocation. So the config
-/// file is where it is stated, the flag is how one run departs from it, and `auto` is what
-/// a machine that has never said anything gets — a number read off it, rather than the
-/// same 32 as everything else.
-fn resolve_batch(flag: Option<BatchSize>, embedder: &Embedder) -> anyhow::Result<usize> {
-    let chosen = match flag {
-        Some(explicit) => explicit,
-        // Read here rather than passed in, so `centinel embed` typed by hand honours the
-        // preference too. `run` has the file open already and passes its value down.
-        None => crate::config::Config::load()?.defaults.embed_batch,
-    };
-    Ok(match chosen {
-        BatchSize::Fixed(n) => n,
-        // A backend that will not say how much memory it has gets the measured default
-        // rather than a guess built on nothing.
-        BatchSize::Auto => embedder.auto_batch().unwrap_or(DEFAULT_BATCH),
-    })
+/// How a run's requests are shaped: chunks per request, and requests in flight.
+struct Pipeline {
+    batch: usize,
+    in_flight: usize,
 }
 
-/// Chunks per request when the operator and the config both said `auto`.
-///
-/// The local `auto` reads the machine because the KV cache is the cost; a request has no
-/// KV cache, and its costs pull mildly in both directions — fewer round trips against
-/// more lost to one failed batch's one-at-a-time retry. 128 chunks is ~40K tokens,
-/// comfortably inside every curated model's request ceiling.
-const REMOTE_DEFAULT_BATCH: usize = 128;
+/// Windows either side of the requests may run ahead: the reader keeps this many read,
+/// the writer this many not yet committed. One would do; two absorbs jitter. More buys
+/// nothing and widens the gap between the progress count and the table.
+const PIPELINE_SLACK: usize = 2;
 
-/// Requests in flight at once. What hides the network's latency, as the reader thread
-/// hides SQLite's: while one batch is on the wire, three more are being answered. More
-/// would mostly exercise the provider's rate limiter.
-const REMOTE_IN_FLIGHT: usize = 4;
-
-/// The flag, else the config file's standing preference, else [`REMOTE_DEFAULT_BATCH`].
+/// The pipeline: read → request → write.
 ///
-/// [`resolve_batch`]'s three tiers, with one difference: `auto` is a question about the
-/// machine, no machine is involved, and so it resolves to a constant rather than to a
-/// memory reading.
-fn resolve_remote_batch(flag: Option<BatchSize>) -> anyhow::Result<usize> {
-    let chosen = match flag {
-        Some(explicit) => explicit,
-        None => crate::config::Config::load()?.defaults.embed_batch,
-    };
-    Ok(match chosen {
-        BatchSize::Fixed(n) => n,
-        BatchSize::Auto => REMOTE_DEFAULT_BATCH,
-    })
-}
-
-/// The remote pipeline: read → request → write, with [`REMOTE_IN_FLIGHT`] requests on
-/// the wire at once.
+/// The reader thread keeps windows of text coming off SQLite, `in_flight` requests overlap
+/// the server's latency, and the writer task writes what has come back. `buffered`
+/// completes in submission order, so the writer receives windows in work-list order.
 ///
-/// [`run`]'s shape with the decode swapped for HTTP: the reader thread keeps windows of
-/// text coming off SQLite, in-flight requests overlap the network's latency, and the
-/// writer task writes what has come back. `buffered` completes in submission order, so
-/// the writer receives windows in work-list order and the durable count means what it
-/// does locally: everything before it landed.
-///
-/// Failure handling is [`run`]'s, plus one distinction the local path never needed: a
-/// refused key fails every chunk identically, so it ends the run ([`remote::is_fatal`])
-/// instead of skipping a corpus one round trip at a time.
-async fn run_remote(
-    embedder: RemoteEmbedder,
+/// The durable count is the writer's. Lance commits a version per append, a row's
+/// identity is its chunk and document, and the next run subtracts what is stored — so
+/// stopping mid-corpus costs nothing but what was in flight. The progress count runs at
+/// most a few windows ahead of the table; the report's figures are what actually landed.
+async fn run(
+    embedder: Embedder,
     index: Index,
     writer: Writer,
     todo: Vec<String>,
-    batch_size: usize,
+    shape: Pipeline,
     progress: &Progress,
     cancel: &Cancel,
 ) -> anyhow::Result<(Writer, Vec<Skipped>)> {
@@ -897,14 +914,17 @@ async fn run_remote(
     let started = Instant::now();
     progress.step("embedding", 0, total);
 
-    // The reader owns the index, exactly as in `run`: a SQLite connection does not
-    // share across threads, and nothing else needs it once the work list exists.
+    // The reader owns the index: a SQLite connection does not share across threads, and
+    // nothing else needs it once the work list exists.
     let (feed_tx, feed_rx) =
         tokio::sync::mpsc::channel::<anyhow::Result<(Vec<String>, Vec<String>)>>(PIPELINE_SLACK);
+    let batch = shape.batch;
     let reader = std::thread::spawn(move || {
-        for window in todo.chunks(batch_size) {
+        for window in todo.chunks(batch) {
             let texts = index.chunk_texts(window);
             let failed = texts.is_err();
+            // A send fails only when the request side hung up, and that side already
+            // carries whatever error stopped it.
             if feed_tx
                 .blocking_send(texts.map(|t| (window.to_vec(), t)))
                 .is_err()
@@ -928,7 +948,7 @@ async fn run_remote(
     let mut sent = 0usize;
     let mut skipped: Vec<Skipped> = Vec::new();
 
-    let decoded: anyhow::Result<()> = {
+    let requested: anyhow::Result<()> = {
         let embedder = &embedder;
         let windows = futures::stream::unfold(feed_rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))
@@ -937,9 +957,16 @@ async fn run_remote(
             windows
                 .map(move |item| async move {
                     let (window, texts) = item?;
-                    embed_window(embedder, window, texts).await
+                    embed_with_recovery(
+                        &window,
+                        &texts,
+                        |group| async move { embedder.embed_documents(&group).await },
+                        cancel,
+                        progress,
+                    )
+                    .await
                 })
-                .buffered(REMOTE_IN_FLIGHT)
+                .buffered(shape.in_flight)
         );
 
         let writer_gone = || anyhow::anyhow!("the writer stopped; its error follows");
@@ -963,195 +990,48 @@ async fn run_remote(
         // dropped, which is what unhooks a reader still mid-send.
     };
 
-    // Wind down in dependency order, as `run` does: hang up on the writer, let it drain
-    // what is in flight, then ask it what landed.
+    // Wind down in dependency order: hang up on the writer, let it drain what is in
+    // flight, then ask it what landed. Every window it confirms is durable however this
+    // run ended.
     drop(write_tx);
     let written = writer.await?;
     let _ = reader.join();
 
     // The writer's error outranks the request error, because a dead writer is *why* the
     // request side's send failed.
-    match (written, decoded) {
+    match (written, requested) {
         (Err(append_error), _) => Err(append_error),
-        (_, Err(decode_error)) => Err(decode_error),
-        (Ok(writer), Ok(())) => Ok((writer, skipped)),
-    }
-}
-
-/// One window through the remote embedder: the batch, then chunk-at-a-time for a batch
-/// that failed — [`run`]'s recovery, one network hop up.
-///
-/// The failures that arrive here: a text the provider will not take, a request that
-/// outlived its retries, a response that failed verification. One chunk at a time
-/// isolates the first kind; a chunk that still fails alone is skipped with its reason
-/// on the report rather than allowed to end the run. A refused key is the exception —
-/// see [`run_remote`].
-async fn embed_window(
-    embedder: &RemoteEmbedder,
-    window: Vec<String>,
-    texts: Vec<String>,
-) -> anyhow::Result<EmbeddedWindow> {
-    match embedder.embed_documents(&texts).await {
-        Ok(vectors) => Ok((window.into_iter().zip(vectors).collect(), Vec::new())),
-        Err(batch_error) if remote::is_fatal(&batch_error) => Err(batch_error),
-        Err(batch_error) => {
-            tracing::debug!(%batch_error, "batch failed; retrying individually");
-            let mut entries = Vec::new();
-            let mut misses = Vec::new();
-            for (hash, text) in window.into_iter().zip(&texts) {
-                match embedder.embed_documents(std::slice::from_ref(text)).await {
-                    Ok(mut v) => entries.push((hash, v.remove(0))),
-                    Err(e) if remote::is_fatal(&e) => return Err(e),
-                    Err(e) => misses.push(Skipped {
-                        chunk_hash: hash,
-                        reason: format!("{e:#}"),
-                    }),
-                }
-            }
-            Ok((entries, misses))
-        }
-    }
-}
-
-/// What the blocking loop needs from the async world it was spawned out of.
-///
-/// One struct rather than three parameters because they are one thing: the loop runs on a
-/// thread with no runtime and no caller, and these are its three ways back to both.
-struct Host {
-    progress: Progress,
-    cancel: Cancel,
-    handle: tokio::runtime::Handle,
-}
-
-/// Batches either side of the decode may run ahead: the reader keeps this many read,
-/// the writer this many not yet committed. One would do; two absorbs jitter. More buys
-/// nothing and widens the gap between the progress count and the table.
-const PIPELINE_SLACK: usize = 2;
-
-/// The pipeline: read → decode → write, each on its own thread.
-///
-/// The GPU must never wait on SQLite or on Lance. A reader thread keeps the next
-/// window's text ready, this thread decodes through one standing session, and a writer
-/// task writes what the last decode produced — the seconds of inference overlap the
-/// milliseconds of I/O instead of following them.
-///
-/// The durable count is the writer's. Lance commits a version per append, a row's
-/// identity is its chunk and document, and the next run subtracts what is stored — so
-/// stopping mid-corpus costs nothing but what was in flight. The progress count runs at
-/// most [`PIPELINE_SLACK`] batches ahead of the table; the report's figures are what
-/// actually landed.
-fn run(
-    embedder: Embedder,
-    index: Index,
-    writer: Writer,
-    todo: Vec<String>,
-    batch_size: usize,
-    host: Host,
-) -> anyhow::Result<(Writer, Vec<Skipped>)> {
-    let Host {
-        progress,
-        cancel,
-        handle,
-    } = host;
-    // Create the GPU context before starting threads that would otherwise survive
-    // a failed allocation without being joined.
-    let mut session = embedder.session(SessionOptions {
-        batch: batch_size,
-        ..SessionOptions::default()
-    })?;
-    let total = todo.len() as u64;
-    let started = Instant::now();
-    progress.step("embedding", 0, total);
-
-    // The reader owns the index: a SQLite connection does not share across threads, and
-    // nothing else needs it once the work list exists.
-    let (feed_tx, feed_rx) =
-        std::sync::mpsc::sync_channel::<anyhow::Result<(Vec<String>, Vec<String>)>>(PIPELINE_SLACK);
-    let reader = std::thread::spawn(move || {
-        for window in todo.chunks(batch_size) {
-            let texts = index.chunk_texts(window);
-            let failed = texts.is_err();
-            // A send fails only when the decode side hung up, and that side already
-            // carries whatever error stopped it.
-            if feed_tx.send(texts.map(|t| (window.to_vec(), t))).is_err() || failed {
-                return;
-            }
-        }
-    });
-
-    let (write_tx, mut write_rx) =
-        tokio::sync::mpsc::channel::<Vec<(String, Vec<f32>)>>(PIPELINE_SLACK);
-    let writer = handle.spawn(async move {
-        let mut writer = writer;
-        while let Some(entries) = write_rx.recv().await {
-            writer.write(entries).await?;
-        }
-        anyhow::Ok(writer)
-    });
-
-    let mut sent = 0usize;
-    let mut skipped: Vec<Skipped> = Vec::new();
-    let decoded: anyhow::Result<()> = (|| {
-        let writer_gone = || anyhow::anyhow!("the writer stopped; its error follows");
-        for item in feed_rx.iter() {
-            cancel.check()?;
-            let (window, texts) = item?;
-
-            let (entries, misses) = embed_with_recovery(
-                &window,
-                &texts,
-                &mut |texts| session.embed(texts),
-                &cancel,
-                &progress,
-            )?;
-            sent += entries.len();
-            skipped.extend(misses);
-            if !entries.is_empty() {
-                write_tx.blocking_send(entries).map_err(|_| writer_gone())?;
-            }
-
-            let done = (sent + skipped.len()) as u64;
-            let rate = sent as f64 / started.elapsed().as_secs_f64().max(f64::EPSILON);
-            progress.step(format!("embedding ({rate:.1}/sec)"), done, total);
-        }
-        Ok(())
-    })();
-
-    // Wind down in dependency order: hang up on the reader, let the writer drain what
-    // is in flight, then ask it what landed. Every batch it confirms is durable however
-    // this run ended.
-    drop(feed_rx);
-    drop(write_tx);
-    let written = handle.block_on(writer)?;
-    let _ = reader.join();
-
-    // The writer's error outranks the decode error, because a dead writer is *why* the
-    // decode side's `blocking_send` failed.
-    match (written, decoded) {
-        (Err(append_error), _) => Err(append_error),
-        (_, Err(decode_error)) => Err(decode_error),
+        (_, Err(request_error)) => Err(request_error),
         (Ok(writer), Ok(())) => Ok((writer, skipped)),
     }
 }
 
 type EmbeddedWindow = (Vec<(String, Vec<f32>)>, Vec<Skipped>);
 
-/// Bisect failed batches so healthy chunks still run together. The explicit stack
+/// Bisects a failed window so healthy chunks still go in groups: a window of 64 with one
+/// chunk the server will not take costs a dozen requests, not 64. The explicit stack
 /// preserves input order, bounds memory, and checks cancellation between retries.
-fn embed_with_recovery(
+///
+/// A [`crate::inference::Fatal`] failure is not bisected: a server that is not there, or
+/// that refuses the key, refuses every half the same way, and the run ends on it.
+async fn embed_with_recovery<F, Fut>(
     hashes: &[String],
     texts: &[String],
-    embed: &mut impl FnMut(&[String]) -> anyhow::Result<Vec<Vec<f32>>>,
+    embed: F,
     cancel: &Cancel,
     progress: &Progress,
-) -> anyhow::Result<EmbeddedWindow> {
+) -> anyhow::Result<EmbeddedWindow>
+where
+    F: Fn(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Vec<Vec<f32>>>>,
+{
     let mut pending: Vec<_> = std::iter::once(0..texts.len()).collect();
     let mut entries = Vec::with_capacity(texts.len());
     let mut skipped = Vec::new();
     let mut reported = false;
     while let Some(range) = pending.pop() {
         cancel.check()?;
-        match embed(&texts[range.clone()]) {
+        match embed(texts[range.clone()].to_vec()).await {
             Ok(vectors) => {
                 anyhow::ensure!(
                     vectors.len() == range.len(),
@@ -1159,6 +1039,7 @@ fn embed_with_recovery(
                 );
                 entries.extend(hashes[range].iter().cloned().zip(vectors));
             }
+            Err(error) if is_fatal(&error) => return Err(error),
             Err(error) if range.len() > 1 => {
                 if !reported {
                     progress.say(format!("batch failed; retrying smaller groups: {error:#}"));
@@ -1177,20 +1058,6 @@ fn embed_with_recovery(
     Ok((entries, skipped))
 }
 
-/// Loads the model off the async runtime — it is seconds of blocking file and GPU work.
-async fn load_embedder(
-    args: &EmbedArgs,
-    model_id: &'static str,
-    ledger: crate::spend::Ledger,
-) -> anyhow::Result<Embedder> {
-    let variant = args.variant.clone();
-    tokio::task::spawn_blocking(move || {
-        let root = models::models_dir()?;
-        Embedder::load(&root, model_id, variant.as_deref(), ledger)
-    })
-    .await?
-}
-
 // -----------------------------------------------------------------------------------------
 // Rendering
 // -----------------------------------------------------------------------------------------
@@ -1202,11 +1069,27 @@ async fn load_embedder(
 /// estimate is computed and printed rather than left as two numbers to divide.
 impl Render for EmbedReport {
     fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
-        p.title(
-            &self.model,
-            &format!("{} · {} dims", self.variant, self.dims),
-        )?;
+        let detail = match self.dims {
+            Some(dims) => format!("{} · {dims} dims", self.server),
+            None => self.server.clone(),
+        };
+        p.title(&self.model, &detail)?;
         p.nest(|p| {
+            // First, because it decides whether anything below happened in the space the
+            // reader thinks it did.
+            if let Some(a) = &self.adoption {
+                let measured = format!(
+                    "{} chunks agree {:.4} at worst, {:.4} on average",
+                    a.sampled, a.min_cosine, a.mean_cosine
+                );
+                let line = match (a.adopted, a.sampled) {
+                    (_, 0) => format!("the table already records {}", a.to),
+                    (true, _) => format!("adopted from {} — {measured}", a.from),
+                    (false, _) => format!("would adopt from {} — {measured}", a.from),
+                };
+                p.marked(Mark::Ok, line)?;
+                p.blank()?;
+            }
             let mut figures = vec![
                 (self.indexed as u64, "placements indexed"),
                 (self.already_embedded as u64, "already stored"),
@@ -1233,7 +1116,7 @@ impl Render for EmbedReport {
                 self.chunks_per_sec,
             );
             if let Some(batch) = self.batch {
-                rate.push_str(&format!(" \u{00b7} {batch} per pass"));
+                rate.push_str(&format!(" \u{00b7} {batch} per request"));
             }
             p.line(p.paint(&rate, Ink::Dim))?;
 
@@ -1269,26 +1152,41 @@ mod tests {
     use crate::store::Store;
     use crate::vectors::key_of;
 
-    #[test]
-    fn a_bad_chunk_does_not_serialize_the_healthy_batch() {
+    /// A request answered at once with what `answer` says of the group.
+    fn ready(
+        answer: anyhow::Result<Vec<Vec<f32>>>,
+    ) -> std::future::Ready<anyhow::Result<Vec<Vec<f32>>>> {
+        std::future::ready(answer)
+    }
+
+    #[tokio::test]
+    async fn a_bad_chunk_does_not_serialize_the_healthy_batch() {
         let texts: Vec<_> = (0..64).map(|i| i.to_string()).collect();
-        let mut calls = 0;
+        let calls = std::cell::Cell::new(0);
         let (entries, skipped) = embed_with_recovery(
             &texts,
             &texts,
-            &mut |group| {
-                calls += 1;
-                anyhow::ensure!(!group.iter().any(|text| text == "17"), "bad chunk");
-                Ok(group
-                    .iter()
-                    .map(|text| vec![text.parse::<f32>().unwrap()])
-                    .collect())
+            |group| {
+                calls.set(calls.get() + 1);
+                ready(if group.iter().any(|text| text == "17") {
+                    Err(anyhow::anyhow!("bad chunk"))
+                } else {
+                    Ok(group
+                        .iter()
+                        .map(|text| vec![text.parse::<f32>().unwrap()])
+                        .collect())
+                })
             },
             &Cancel::none(),
             &Progress::none(),
         )
+        .await
         .unwrap();
-        assert_eq!(calls, 13, "only the failing half is split at each level");
+        assert_eq!(
+            calls.get(),
+            13,
+            "only the failing half is split at each level"
+        );
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].chunk_hash, "17");
         let expected: Vec<_> = texts.iter().filter(|text| *text != "17").cloned().collect();
@@ -1304,48 +1202,104 @@ mod tests {
         }
     }
 
-    #[test]
-    fn smaller_groups_recover_a_batch_that_exceeds_capacity() {
+    #[tokio::test]
+    async fn smaller_groups_recover_a_batch_that_exceeds_capacity() {
         let texts: Vec<_> = (0..40).map(|i| i.to_string()).collect();
         let (entries, skipped) = embed_with_recovery(
             &texts,
             &texts,
-            &mut |group| {
-                anyhow::ensure!(group.len() <= 10, "capacity exceeded");
-                Ok(vec![vec![1.0]; group.len()])
+            |group| {
+                ready(if group.len() <= 10 {
+                    Ok(vec![vec![1.0]; group.len()])
+                } else {
+                    Err(anyhow::anyhow!("capacity exceeded"))
+                })
             },
             &Cancel::none(),
             &Progress::none(),
         )
+        .await
         .unwrap();
         assert_eq!(entries.len(), 40);
         assert!(skipped.is_empty());
     }
 
-    #[test]
-    fn cancellation_stops_retries_after_a_failed_batch() {
+    #[tokio::test]
+    async fn cancellation_stops_retries_after_a_failed_batch() {
         let texts = vec!["a".to_string(), "b".to_string()];
         let (canceller, cancel) = Cancel::channel();
-        let mut calls = 0;
+        let calls = std::cell::Cell::new(0);
         let result = embed_with_recovery(
             &texts,
             &texts,
-            &mut |_| {
-                calls += 1;
+            |_| {
+                calls.set(calls.get() + 1);
                 canceller.cancel();
-                anyhow::bail!("capacity exceeded")
+                ready(Err(anyhow::anyhow!("capacity exceeded")))
             },
             &cancel,
             &Progress::none(),
-        );
+        )
+        .await;
         assert!(result.is_err());
-        assert_eq!(calls, 1);
+        assert_eq!(calls.get(), 1);
     }
 
-    /// Typed explicitly in every test, because `None` reads whatever config file the
-    /// machine running the tests happens to keep.
-    fn default_model() -> Option<String> {
-        Some("qwen3-embedding-4b".to_string())
+    /// A server that is not there refuses every half the same way. Bisecting it would be
+    /// a request per chunk before the run admitted it; it ends on the first.
+    #[tokio::test]
+    async fn a_fatal_failure_is_not_bisected() {
+        let texts: Vec<_> = (0..64).map(|i| i.to_string()).collect();
+        let calls = std::cell::Cell::new(0);
+        let err = embed_with_recovery(
+            &texts,
+            &texts,
+            |_| {
+                calls.set(calls.get() + 1);
+                ready(Err(
+                    crate::inference::Fatal("connection refused".into()).into()
+                ))
+            },
+            &Cancel::none(),
+            &Progress::none(),
+        )
+        .await
+        .unwrap_err();
+        assert!(is_fatal(&err));
+        assert_eq!(calls.get(), 1);
+    }
+
+    /// The op against the default `[inference]`, never the config file of whatever
+    /// machine runs the tests. Shadows [`super::embed`] so every test below reads the
+    /// same; the ones that reach a server use [`embed_on`].
+    async fn embed(
+        ctx: &Ctx,
+        args: EmbedArgs,
+        progress: &Progress,
+        cancel: &Cancel,
+    ) -> anyhow::Result<EmbedReport> {
+        embed_with(ctx, args, &InferenceConfig::default(), progress, cancel).await
+    }
+
+    /// The op against `server`.
+    async fn embed_on(
+        ctx: &Ctx,
+        server: &crate::inference::fake::FakeServer,
+        args: EmbedArgs,
+    ) -> anyhow::Result<EmbedReport> {
+        embed_with(
+            ctx,
+            args,
+            &server.config(),
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+    }
+
+    /// The space the default `[inference]` embeds in, which the tables below are seeded in.
+    fn space() -> Space {
+        Space::of(&InferenceConfig::default().endpoint(Capability::Embed))
     }
 
     /// The one derived text every test document here is cut from, so an exclusion can
@@ -1412,17 +1366,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dry_run_reports_the_work_without_loading_a_model() {
+    async fn a_dry_run_reports_the_work_without_reaching_the_server() {
         let (_d, ctx) = indexed_store(7).await;
         let report = embed(
             &ctx,
             EmbedArgs {
-                model: default_model(),
-                variant: None,
                 batch: None,
                 limit: None,
                 dry_run: true,
                 ann_index: false,
+                ..Default::default()
             },
             &Progress::none(),
             &Cancel::none(),
@@ -1434,24 +1387,25 @@ mod tests {
         assert_eq!(report.already_embedded, 0);
         assert_eq!(report.remaining, 7);
         assert_eq!(report.embedded, 0);
-        assert_eq!(report.dims, 2560);
+        assert_eq!(
+            report.dims, None,
+            "only the server knows, and a plan does not ask"
+        );
     }
 
-    /// The dry run must work on a machine with no weights at all — it exists to plan a
-    /// run before committing to one.
+    /// The dry run must work with no server at all — it exists to plan a run before
+    /// committing to one.
     #[tokio::test]
-    async fn a_dry_run_needs_no_weights() {
+    async fn a_dry_run_needs_no_server() {
         let (_d, ctx) = indexed_store(3).await;
-        let report = embed(
+        let report = embed_with(
             &ctx,
             EmbedArgs {
-                model: default_model(),
-                variant: None,
-                batch: Some(BatchSize::Fixed(8)),
-                limit: None,
+                batch: Some(8),
                 dry_run: true,
-                ann_index: false,
+                ..Default::default()
             },
+            &crate::inference::fake::nothing_listening(),
             &Progress::none(),
             &Cancel::none(),
         )
@@ -1465,12 +1419,11 @@ mod tests {
         let report = embed(
             &ctx,
             EmbedArgs {
-                model: default_model(),
-                variant: None,
                 batch: None,
                 limit: None,
                 dry_run: false,
                 ann_index: false,
+                ..Default::default()
             },
             &Progress::none(),
             &Cancel::none(),
@@ -1515,7 +1468,7 @@ mod tests {
 
         // Stored: five passages in their documents, the shared one under its first
         // address, and a row for a document the index never had.
-        let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
+        let table = VectorTable::open(&ctx.store.vectors_db(), &space(), 2560)
             .await
             .unwrap();
         let mut seeded: Vec<Row> = (0..=4).map(stored).collect();
@@ -1536,7 +1489,6 @@ mod tests {
         let report = embed(
             &ctx,
             EmbedArgs {
-                model: default_model(),
                 dry_run: true,
                 ..Default::default()
             },
@@ -1562,7 +1514,6 @@ mod tests {
         let report = embed(
             &ctx,
             EmbedArgs {
-                model: default_model(),
                 limit: Some(0),
                 ..Default::default()
             },
@@ -1598,7 +1549,7 @@ mod tests {
         let (_dir, ctx) = indexed_store(3).await;
 
         // Every placement stored, in two fragments; then one fragment's file goes bad.
-        let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
+        let table = VectorTable::open(&ctx.store.vectors_db(), &space(), 2560)
             .await
             .unwrap();
         let lock = VectorLock::take(&ctx.store).await.unwrap();
@@ -1608,7 +1559,6 @@ mod tests {
         super::super::verify::tests::damage_a_data_file(&ctx);
 
         let plan = || EmbedArgs {
-            model: default_model(),
             dry_run: true,
             ..Default::default()
         };
@@ -1649,7 +1599,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_index_prunes_nothing() {
         let (_dir, ctx) = indexed_store(0).await;
-        let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
+        let table = VectorTable::open(&ctx.store.vectors_db(), &space(), 2560)
             .await
             .unwrap();
         let lock = VectorLock::take(&ctx.store).await.unwrap();
@@ -1659,7 +1609,6 @@ mod tests {
         let report = embed(
             &ctx,
             EmbedArgs {
-                model: default_model(),
                 ..Default::default()
             },
             &Progress::none(),
@@ -1681,7 +1630,7 @@ mod tests {
     #[tokio::test]
     async fn a_rederived_page_copies_its_unchanged_chunks_before_the_old_rows_go() {
         let (_dir, ctx) = indexed_store(2).await;
-        let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
+        let table = VectorTable::open(&ctx.store.vectors_db(), &space(), 2560)
             .await
             .unwrap();
         let previous = |i: usize| Row {
@@ -1701,7 +1650,6 @@ mod tests {
         let report = embed(
             &ctx,
             EmbedArgs {
-                model: default_model(),
                 limit: Some(0),
                 ..Default::default()
             },
@@ -1720,12 +1668,12 @@ mod tests {
     /// The subtraction the other way. A rebuilt index or a cleared source leaves rows
     /// no placement claims: a dry run counts them, a run removes them once nothing is left
     /// to copy off them — and with every placement already stored, the run needs no
-    /// weights to show it.
+    /// server to show it.
     #[tokio::test]
     async fn stale_vectors_are_counted_by_a_plan_and_pruned_by_a_run() {
         let (_dir, ctx) = indexed_store(3).await;
 
-        let table = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
+        let table = VectorTable::open(&ctx.store.vectors_db(), &space(), 2560)
             .await
             .unwrap();
         let mut seeded: Vec<Row> = (0..3).map(stored).collect();
@@ -1749,7 +1697,6 @@ mod tests {
         let plan = embed(
             &ctx,
             EmbedArgs {
-                model: default_model(),
                 dry_run: true,
                 ..Default::default()
             },
@@ -1765,7 +1712,6 @@ mod tests {
         let report = embed(
             &ctx,
             EmbedArgs {
-                model: default_model(),
                 ..Default::default()
             },
             &Progress::none(),
@@ -1778,7 +1724,7 @@ mod tests {
         assert_eq!(report.already_embedded, 3);
         assert_eq!(report.embedded, 0);
 
-        let reopened = VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
+        let reopened = VectorTable::open(&ctx.store.vectors_db(), &space(), 2560)
             .await
             .unwrap();
         let mut keys = HashSet::new();
@@ -1797,68 +1743,6 @@ mod tests {
         );
     }
 
-    /// Upgrading a store is `embed --limit 0`: every placement whose chunk the `vectors`
-    /// table from before this layout holds is written from it, nothing is sent to a model,
-    /// the legacy table is left as it was, and each row carries what the workspace says
-    /// about its document — here, one the operator took out of search.
-    #[tokio::test]
-    async fn a_legacy_table_fills_the_new_one_without_a_model() {
-        let (_dir, ctx) = indexed_store(3).await;
-        let legacy: Vec<(String, Vec<f32>)> = (0..3)
-            .map(|i| {
-                let mut vector = vec![0.0; 2560];
-                vector[i] = 1.0;
-                (passage(i).chunk_hash, vector)
-            })
-            .collect();
-        crate::vectors::tests::legacy_table(&ctx.store.vectors_db(), "qwen3-embedding-4b", &legacy)
-            .await;
-        Classifications::open(&ctx.store)
-            .unwrap()
-            .set_usage(&document(1), true, "review")
-            .unwrap();
-
-        let report = embed(
-            &ctx,
-            EmbedArgs {
-                model: default_model(),
-                limit: Some(0),
-                ..Default::default()
-            },
-            &Progress::none(),
-            &Cancel::none(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(report.filled, 3);
-        assert_eq!(report.embedded, 0);
-        assert_eq!(report.remaining, 0);
-        assert!(!ctx.store.spend_dir().exists(), "no model ran");
-
-        let table = VectorTable::open_existing(&ctx.store.vectors_db())
-            .await
-            .unwrap();
-        assert_eq!(table.len().await.unwrap(), 3);
-        let mut query = vec![0.0; 2560];
-        query[1] = 1.0;
-        let hits = table
-            .nearest(&query, 3, &crate::index::Filter::default())
-            .await
-            .unwrap();
-        assert!(
-            hits.iter().all(|h| h.document != document(1)),
-            "the excluded document's row was written excluded: {hits:?}"
-        );
-        assert_eq!(hits.len(), 2);
-        assert!(
-            crate::vectors::LegacyVectors::open(&ctx.store.vectors_db(), "qwen3-embedding-4b")
-                .await
-                .unwrap()
-                .is_some(),
-            "the legacy table is left for the operator to delete"
-        );
-    }
-
     /// A dry run is a plan, so it must not leave a table behind on a store that had
     /// none — the same rule `doctor` follows for the models directory.
     #[tokio::test]
@@ -1867,12 +1751,11 @@ mod tests {
         embed(
             &ctx,
             EmbedArgs {
-                model: default_model(),
-                variant: None,
-                batch: Some(BatchSize::Fixed(8)),
+                batch: Some(8),
                 limit: None,
                 dry_run: true,
                 ann_index: false,
+                ..Default::default()
             },
             &Progress::none(),
             &Cancel::none(),
@@ -1888,12 +1771,11 @@ mod tests {
         let err = embed(
             &ctx,
             EmbedArgs {
-                model: default_model(),
-                variant: None,
-                batch: Some(BatchSize::Fixed(0)),
+                batch: Some(0),
                 limit: None,
                 dry_run: true,
                 ann_index: false,
+                ..Default::default()
             },
             &Progress::none(),
             &Cancel::none(),
@@ -1904,31 +1786,17 @@ mod tests {
         assert!(err.contains("--batch"), "{err}");
     }
 
-    /// The two spellings, and the three ways of writing neither.
+    /// The MCP path, where args arrive as JSON rather than as typed words.
     #[test]
-    fn a_batch_size_is_a_count_or_the_word_auto() {
-        assert_eq!(BatchSize::parse(AUTO), Ok(BatchSize::Auto));
-        assert_eq!(BatchSize::parse("AUTO"), Ok(BatchSize::Auto));
-        assert_eq!(BatchSize::parse("64"), Ok(BatchSize::Fixed(64)));
-        assert!(BatchSize::parse("0").is_err(), "0 embeds nothing");
-        assert!(BatchSize::parse("-8").is_err());
-        assert!(BatchSize::parse("lots").is_err());
-    }
-
-    /// The MCP path, where args arrive as JSON rather than as typed words. A client
-    /// following the schema sends a string; one reading the TOML sends a number. Both are
-    /// the same request and neither should be the one that fails.
-    #[test]
-    fn args_accept_the_batch_as_a_string_or_a_number() {
+    fn args_take_the_batch_as_a_number_and_leave_it_unset_otherwise() {
         let parse = |json: &str| serde_json::from_str::<EmbedArgs>(json).unwrap().batch;
-        assert_eq!(parse(r#"{"batch": "auto"}"#), Some(BatchSize::Auto));
-        assert_eq!(parse(r#"{"batch": 64}"#), Some(BatchSize::Fixed(64)));
+        assert_eq!(parse(r#"{"batch": 64}"#), Some(64));
         assert_eq!(parse("{}"), None, "unset falls through to the config");
     }
 
     /// The model takes `batch`'s route: absent stays absent until the op asks the config.
-    /// A serde default here would resurrect the bug where `[defaults] embed_model` was
-    /// read and never used, one surface over.
+    /// A serde default here would resurrect the bug where the config's model was read and
+    /// never used, one surface over.
     #[test]
     fn an_absent_model_stays_absent_until_the_config_answers() {
         let parse = |json: &str| serde_json::from_str::<EmbedArgs>(json).unwrap().model;
@@ -1939,95 +1807,13 @@ mod tests {
         );
     }
 
-    /// Round-tripped as it was written, so a number survives as a number — `run` and the
-    /// scheduler both serialize their args and read them back.
-    #[test]
-    fn a_batch_size_survives_a_round_trip() {
-        for size in [BatchSize::Auto, BatchSize::Fixed(64)] {
-            let json = serde_json::to_string(&size).unwrap();
-            assert_eq!(serde_json::from_str::<BatchSize>(&json).unwrap(), size);
-        }
-        assert_eq!(
-            serde_json::to_string(&BatchSize::Auto).unwrap(),
-            r#""auto""#
-        );
-        assert_eq!(serde_json::to_string(&BatchSize::Fixed(64)).unwrap(), "64");
-    }
-
-    /// The remote registry pins dimensions exactly so this works: a dry run plans a
-    /// remote embed with no key, no network and no weights.
-    #[tokio::test]
-    async fn a_remote_dry_run_needs_no_key_and_no_network() {
-        let (_d, ctx) = indexed_store(5).await;
-        let report = embed(
-            &ctx,
-            EmbedArgs {
-                model: Some("openrouter/qwen/qwen3-embedding-8b".into()),
-                dry_run: true,
-                ann_index: false,
-                ..EmbedArgs::default()
-            },
-            &Progress::none(),
-            &Cancel::none(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(report.dims, 4096);
-        assert_eq!(report.remaining, 5);
-        assert_eq!(report.variant, "openrouter");
-    }
-
-    /// A quantization names weights on this machine; a remote model keeps none here.
-    #[tokio::test]
-    async fn a_variant_on_a_remote_model_is_refused() {
-        let (_d, ctx) = indexed_store(1).await;
-        let err = embed(
-            &ctx,
-            EmbedArgs {
-                model: Some("openrouter/qwen/qwen3-embedding-8b".into()),
-                variant: Some("q8_0".into()),
-                dry_run: true,
-                ann_index: false,
-                ..EmbedArgs::default()
-            },
-            &Progress::none(),
-            &Cancel::none(),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("--variant"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn a_reranker_is_refused_as_an_embedding_model() {
-        let (_d, ctx) = indexed_store(1).await;
-        let err = embed(
-            &ctx,
-            EmbedArgs {
-                model: Some("qwen3-reranker-0.6b".into()),
-                variant: None,
-                batch: Some(BatchSize::Fixed(8)),
-                limit: None,
-                dry_run: true,
-                ann_index: false,
-            },
-            &Progress::none(),
-            &Cancel::none(),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("not an embedding model"), "{err}");
-    }
-
     /// One table, so switching models is refused rather than silently mixed. A vector
     /// from another model is in another space and still returns a ranked list, which is
     /// why the refusal has to happen before anything is written (§6.2).
     #[tokio::test]
     async fn a_second_model_is_refused_rather_than_mixed_in() {
         let (_d, ctx) = indexed_store(2).await;
-        VectorTable::open(&ctx.store.vectors_db(), "qwen3-embedding-4b", 2560)
+        VectorTable::open(&ctx.store.vectors_db(), &space(), 2560)
             .await
             .unwrap();
 
@@ -2035,11 +1821,8 @@ mod tests {
             &ctx,
             EmbedArgs {
                 model: Some("qwen3-embedding-0.6b".into()),
-                variant: None,
-                batch: Some(BatchSize::Fixed(8)),
-                limit: None,
                 dry_run: true,
-                ann_index: false,
+                ..Default::default()
             },
             &Progress::none(),
             &Cancel::none(),
@@ -2047,14 +1830,313 @@ mod tests {
         .await
         .unwrap_err()
         .to_string();
-
-        // Which of the two guards catches it depends on the pair — `0.6b` is 1024-dim,
-        // so the width check fires before the model check. Either is a refusal, and both
-        // have to name the way out; the model-id path is asserted on its own in
-        // `vectors`, where two models share a width.
+        assert!(err.contains("not comparable"), "{err}");
         assert!(
-            err.contains("centinel embed"),
-            "refused, and names the fix: {err}"
+            err.contains("centinel embed --adopt"),
+            "names the fix: {err}"
         );
+    }
+
+    // ── against a server ──────────────────────────────────────────────────────
+
+    /// The whole stage: the server's width makes the table, every chunk goes through it,
+    /// the table records the server, and a second run has nothing to send.
+    #[tokio::test]
+    async fn a_run_sends_the_work_to_the_server_and_stores_what_comes_back() {
+        let server = crate::inference::fake::serve().await;
+        let (_d, ctx) = indexed_store(5).await;
+
+        let report = embed_on(&ctx, &server, EmbedArgs::default()).await.unwrap();
+        assert_eq!(report.embedded, 5);
+        assert_eq!(report.remaining, 0);
+        assert_eq!(report.dims, Some(crate::inference::fake::DIMS));
+        assert_eq!(report.server, server.base_url);
+
+        let table = VectorTable::open_existing(&ctx.store.vectors_db())
+            .await
+            .unwrap();
+        assert_eq!(
+            table.space(),
+            &Space::of(&server.endpoint(Capability::Embed))
+        );
+        // Each passage's row holds its own vector, not a neighbour's: the fake answers
+        // rows in reverse, so a client trusting row order would cross them.
+        let own =
+            crate::embed::normalize(&crate::inference::fake::bag_of_words("passage number 3", 0));
+        let stored = table
+            .vectors_of(std::slice::from_ref(&passage(3).chunk_hash))
+            .await
+            .unwrap();
+        assert!(crate::embed::cosine(&own, &stored[&passage(3).chunk_hash]) > 0.9999);
+
+        let again = embed_on(&ctx, &server, EmbedArgs::default()).await.unwrap();
+        assert_eq!(again.embedded, 0);
+        assert_eq!(again.already_embedded, 5);
+        assert!(
+            ctx.store.spend_dir().exists(),
+            "the server's answers are in the ledger"
+        );
+    }
+
+    /// No server is a stage that fails once, loudly, naming it — not one that skips the
+    /// corpus a chunk at a time and reports success.
+    #[tokio::test]
+    async fn no_server_ends_the_run_and_says_where_it_looked() {
+        let (_d, ctx) = indexed_store(5).await;
+        let config = crate::inference::fake::nothing_listening();
+        let err = embed_with(
+            &ctx,
+            EmbedArgs::default(),
+            &config,
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap_err();
+        assert!(is_fatal(&err), "{err:#}");
+        assert!(format!("{err:#}").contains(&config.base_url), "{err:#}");
+    }
+
+    /// An outage that does not end stops the stage after a bounded number of requests,
+    /// rather than splitting every batch down to single chunks and skipping the corpus one
+    /// at a time.
+    #[tokio::test]
+    async fn a_server_that_stays_down_ends_the_run_after_three_attempts() {
+        let server = crate::inference::fake::serve_failing(503).await;
+        let (_d, ctx) = indexed_store(5).await;
+        seed(&ctx, 1, &Space::of(&server.endpoint(Capability::Embed)), 0).await;
+
+        let err = embed_on(&ctx, &server, EmbedArgs::default())
+            .await
+            .unwrap_err();
+        assert!(is_fatal(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("503"), "{err:#}");
+        assert_eq!(
+            server.hits("embeddings"),
+            3,
+            "one batch, three attempts, no split"
+        );
+    }
+
+    /// Stores vectors for every passage in an [`indexed_store`] as `salt`'s fake model
+    /// embeds them, under `space`.
+    async fn seed(ctx: &Ctx, n: usize, space: &Space, salt: u64) {
+        let table = VectorTable::open(&ctx.store.vectors_db(), space, crate::inference::fake::DIMS)
+            .await
+            .unwrap();
+        let rows: Vec<Row> = (0..n)
+            .map(|i| Row {
+                vector: crate::embed::normalize(&crate::inference::fake::bag_of_words(
+                    &format!("passage number {i}"),
+                    salt,
+                )),
+                ..stored(i)
+            })
+            .collect();
+        let lock = VectorLock::take(&ctx.store).await.unwrap();
+        table.append(&lock, &rows).await.unwrap();
+    }
+
+    /// The migration this flag exists for: a table the in-process embedder wrote, and a
+    /// server running the same model. Measured, adopted, and embedding carries on into the
+    /// same table with nothing re-embedded.
+    #[tokio::test]
+    async fn a_server_that_reproduces_the_table_adopts_it() {
+        let server = crate::inference::fake::serve().await;
+        let (_d, ctx) = indexed_store(6).await;
+        let in_process = Space {
+            model: "qwen3-embedding-4b".into(),
+            endpoint: None,
+        };
+        seed(&ctx, 4, &in_process, 0).await;
+
+        // Without the flag, the new server is another space and is refused.
+        let refused = embed_on(&ctx, &server, EmbedArgs::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("--adopt"), "{refused}");
+
+        // A dry run measures and writes nothing.
+        let plan = embed_on(
+            &ctx,
+            &server,
+            EmbedArgs {
+                adopt: true,
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let measured = plan.adoption.unwrap();
+        assert!(!measured.adopted);
+        assert_eq!(measured.sampled, 4);
+        assert!(measured.min_cosine > 0.9999, "{measured:?}");
+        let table = VectorTable::open_existing(&ctx.store.vectors_db())
+            .await
+            .unwrap();
+        assert_eq!(table.space(), &in_process, "a dry run rewrites nothing");
+
+        let report = embed_on(
+            &ctx,
+            &server,
+            EmbedArgs {
+                adopt: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(report.adoption.unwrap().adopted);
+        assert_eq!(report.already_embedded, 4, "nothing stored was re-embedded");
+        assert_eq!(
+            report.embedded, 2,
+            "and the rest went to the adopted server"
+        );
+        let table = VectorTable::open_existing(&ctx.store.vectors_db())
+            .await
+            .unwrap();
+        assert_eq!(
+            table.space(),
+            &Space::of(&server.endpoint(Capability::Embed))
+        );
+    }
+
+    /// A server running another model is refused with what was measured and with the
+    /// command that serves the model the table came from — and the table is left as it was.
+    #[tokio::test]
+    async fn a_server_in_another_space_is_refused_with_the_way_back() {
+        let other = crate::inference::fake::serve_salted(1).await;
+        let (_d, ctx) = indexed_store(4).await;
+        let in_process = Space {
+            model: "qwen3-embedding-4b".into(),
+            endpoint: None,
+        };
+        seed(&ctx, 4, &in_process, 0).await;
+
+        let err = embed_on(
+            &ctx,
+            &other,
+            EmbedArgs {
+                adopt: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("at worst"), "the figures: {err}");
+        assert!(
+            err.contains("llama-server -hf Qwen/Qwen3-Embedding-4B-GGUF:Q8_0"),
+            "the way back: {err}"
+        );
+        assert!(
+            err.contains("delete chunks.lance"),
+            "the way forward: {err}"
+        );
+
+        let table = VectorTable::open_existing(&ctx.store.vectors_db())
+            .await
+            .unwrap();
+        assert_eq!(table.space(), &in_process);
+    }
+
+    /// A table OpenRouter wrote names OpenRouter as the way back, in the config to paste.
+    #[test]
+    fn an_openrouter_table_is_pointed_back_at_openrouter() {
+        let from = Space {
+            model: "openrouter/qwen/qwen3-embedding-8b".into(),
+            endpoint: None,
+        };
+        let to = space();
+        let text = adopt_refusal(&from, &to, Some((32, 0.41, 0.63)));
+
+        // The block is pasted as it is printed, so it has to parse — the query prefix
+        // included, which a written `[inference.embed]` must state.
+        let block = text
+            .split("\n\n")
+            .find(|p| p.starts_with("[inference.embed]"))
+            .unwrap();
+        let parsed = crate::config::Config::parse(block).unwrap().inference;
+        assert_eq!(parsed.embed.model, "qwen/qwen3-embedding-8b");
+        assert_eq!(
+            parsed.embed.base_url.as_deref(),
+            Some("https://openrouter.ai/api/v1")
+        );
+        assert_eq!(
+            parsed.embed.api_key_env.as_deref(),
+            Some("OPENROUTER_API_KEY")
+        );
+        assert_eq!(parsed.embed.query_prefix, crate::embed::QWEN3_QUERY_PREFIX);
+    }
+
+    /// Adoption asks the index which chunks are current, so rows the table still holds for
+    /// chunks a re-index dropped cannot crowd out the ones that compare.
+    #[tokio::test]
+    async fn stale_rows_do_not_starve_an_adoption_sample() {
+        let server = crate::inference::fake::serve().await;
+        let (_d, ctx) = indexed_store(3).await;
+        let in_process = Space {
+            model: "qwen3-embedding-4b".into(),
+            endpoint: None,
+        };
+        let table = VectorTable::open(
+            &ctx.store.vectors_db(),
+            &in_process,
+            crate::inference::fake::DIMS,
+        )
+        .await
+        .unwrap();
+        let stale: Vec<Row> = (100..300)
+            .map(|i| Row {
+                vector: vec![0.5; crate::inference::fake::DIMS],
+                ..stored(i)
+            })
+            .collect();
+        let lock = VectorLock::take(&ctx.store).await.unwrap();
+        table.append(&lock, &stale).await.unwrap();
+        drop(lock);
+        seed(&ctx, 3, &in_process, 0).await;
+
+        let plan = embed_on(
+            &ctx,
+            &server,
+            EmbedArgs {
+                adopt: true,
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(plan.adoption.unwrap().sampled, 3);
+    }
+
+    /// A run with nothing to send needs no key: the key is read where a request is made.
+    #[tokio::test]
+    async fn a_run_that_sends_nothing_needs_no_key() {
+        let (_d, ctx) = indexed_store(2).await;
+        let table = VectorTable::open(&ctx.store.vectors_db(), &space(), 2560)
+            .await
+            .unwrap();
+        let lock = VectorLock::take(&ctx.store).await.unwrap();
+        table.append(&lock, &[stored(0), stored(1)]).await.unwrap();
+        drop(lock);
+
+        let config = InferenceConfig {
+            api_key_env: Some("CENTINEL_TEST_KEY_THAT_IS_NEVER_SET".into()),
+            ..Default::default()
+        };
+        let report = embed_with(
+            &ctx,
+            EmbedArgs::default(),
+            &config,
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.already_embedded, 2);
     }
 }

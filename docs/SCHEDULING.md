@@ -109,8 +109,8 @@ pub enum Reach {
     /// The operator: the CLI, and the scheduler acting on their written instruction.
     /// Never HTTP, never MCP.
     Operator,
-    /// The CLI alone. Not even the scheduler — this op acts on the host, and a
-    /// multi-gigabyte download must never ambush a 3am run (SPEC §3.6).
+    /// The CLI alone. Not even the scheduler — this op acts on the host, and replacing
+    /// the binary or launching a command must never ambush a 3am run.
     Host,
 }
 ```
@@ -131,7 +131,7 @@ Assignment across the current registry:
 | `Reach` | Ops |
 |---|---|
 | `Operator` | `run`, `discover`, `collect`, `extract`, `transcribe`, `index`, `embed`, `ingest`, `source` |
-| `Host` | `open`, `models` |
+| `Host` | `open`, `check`, `update` |
 | `Public` | `search`, `read`, `list`, `doctor`, and the new `schedules`, `history` |
 
 `source` is `Operator` for the same reason as the stages: `source add` changes what a bare
@@ -376,9 +376,10 @@ An operator who wants exactly 03:00 sets `jitter = "0s"`.
 
 Three reasons, in descending order of how quickly they bite:
 
-1. `transcribe` and `embed` each build a multi-gigabyte model. Two at once thrash, and both
-   finish later than either would have run alone. Loading the model once is the whole reason
-   `run` is two-phase (`ops/run.rs`).
+1. `transcribe` and `embed` each keep an inference server busy for hours. Two runs at once
+   split the same server, and both finish later than either would have run alone. (When
+   the models ran in-process each stage also built a multi-gigabyte model, and loading it
+   once is why `run` is two-phase, `ops/run.rs`.)
 2. Every stage's work list is a **subtraction computed at the start**. Two concurrent runs
    over the same source compute the same list and do all of it twice.
 3. `index` commits per document into one SQLite file.
@@ -398,9 +399,11 @@ current corpus; a fabricated run costs the record's honesty.
 The cheapness of the second run rests on one invariant, which is already how `embed` is
 written:
 
-> **A stage with an empty work list must not load its model.** `embed` opens the vector
-> table, computes the outstanding set, and returns before touching the model — the comment
-> at `ops/embed.rs:133` says so explicitly. `transcribe` must hold the same property.
+> **A stage with an empty work list must not send its server a request.** `embed` opens
+> the vector table, computes the outstanding set, and returns before the first request;
+> `transcribe` says `nothing to transcribe` and returns the same way. `run` does open one
+> TCP connection to each stage's server first, to skip a stage whose server is down — a
+> connect, not a model call.
 
 ### 5.2 The lock is on disk, because the CLI is a second process
 
@@ -429,12 +432,14 @@ that stops answering for four hours every night is one an operator stops trustin
 whole point of §8 is that consumers can ask how fresh the corpus is *while* it is being
 refreshed.
 
-**The discipline already exists in the stage code.** `embed` runs its inference loop inside
-`spawn_blocking` rather than on a runtime worker, and the comment at `ops/embed.rs:205`
-gives exactly this reason — *"an HTTP caller's connection has to stay responsive across
-hours"*. `search` does the same for scoring and for query embedding. Transcription and
-document extraction are child processes (`tool.rs`), so from the runtime's point of view
-they are I/O and not CPU at all.
+**The discipline already exists in the stage code.** No model runs in this process: `embed`,
+`search` and `transcribe` send requests to the servers `[inference]` names and await them,
+and `embed` reads chunk text on its own thread, so a multi-hour run holds no runtime worker
+while the server works. When the models ran in-process, `embed` and `search` each kept
+their inference inside `spawn_blocking` for exactly this reason — an HTTP caller's
+connection has to stay responsive across hours. Document extraction and audio decoding are
+child processes (`tool.rs`), so from the runtime's point of view they are I/O and not CPU
+at all.
 
 So the request path is already protected — **by six call sites each remembering.** That is
 the shape of problem `tool.rs` was written to end: *"seven call sites used to make those
@@ -474,9 +479,10 @@ threads start at **lower OS priority** (`nice +10` on unix, via tokio's `on_thre
 hook). Collection is throughput work, search is latency work, and that is precisely what
 the nice value is for. It costs one hook and no design.
 
-One contention this does *not* fix, and it is worth naming: memory. A search loads the
-reranker and a query embedder while a run holds the embedding model. Two multi-gigabyte
-residents on a machine chosen for neither. §12 flags it.
+One contention this does *not* fix, and it is worth naming: the inference servers.
+Centinel holds no model, and `nice` reaches only its own threads. A search's query
+embedding and rerank go to the same servers a run is keeping busy, and those servers hold
+their models resident whether a run is going or not. §12 flags it.
 
 #### The due check is measured from the last fire, not from now
 
@@ -836,7 +842,7 @@ buy an import path.
 |---|---|
 | ~~The cron parser~~ | **Settled: hand-rolled**, in `centinel-core/src/schedule.rs`. Every candidate crate is built on `chrono`, which is in the tree transitively but is not the workspace's time library, and adopting one would have put a second date library on a direct path to buy the *easy* half. The hard half — stepping through local time across a DST boundary — is jiff's either way. The grammar is five fields and fits on a page, including the rule that day-of-month and day-of-week are ORed when both are restricted, which is the one place cron does not intersect and the one place a hand-rolled parser gets it wrong. |
 | **Whether `runs/` federates** | It is truth, and it sits beside `log/`, so FEDERATION §7's table has a new row to answer. The likely answer is **no**: the run journal is a record of what one machine did, not of what the world served, and a peer receiving a slice has no use for your 3am timings. But it is exactly the kind of row that gets answered by accident by an implementation that copies whole directories. |
-| **Resident memory when a run and a search overlap** | §5.3 separates the runtimes and lowers the scheduler's priority, which settles CPU. It settles nothing about RAM: a `search` loads the reranker and a query embedder while a run holds the embedding model, and `transcribe` holds a whisper model beside both. The floor machine of [#13](https://github.com/bennyhodl/centinel/issues/13) is where this stops being theoretical, and #13 is where it should be answered — the options (refuse a run below a free-memory threshold, unload between stages, serialise the two) are hardware-profile decisions, not scheduling ones. |
+| **A run and a search sharing a server** | §5.3 separates the runtimes and lowers the scheduler's priority, which settles Centinel's own CPU. It settles nothing about the inference servers: a `search` sends its query embedding and its rerank to the servers a run's `embed` is keeping busy, and every model those servers hold stays resident in their memory, run or no run. When the models ran in-process this was a question about Centinel's RAM; it is now a question about how the operator runs the servers — which machine, how many slots, one server per model or one for all. The floor machine of [#13](https://github.com/bennyhodl/centinel/issues/13) is still where it stops being theoretical, and the options are server configuration, not scheduling. |
 | **The store lock's strength** | An advisory pid file is enough for two cooperating processes on one host. It is not enough for a store on a network filesystem, which is a configuration nothing else in Centinel supports yet either. |
 | **Access control** | Still SPEC §8, still unspecified, and this design narrows it without closing it. The write surface is gone from HTTP; the read surface still hands the whole corpus to anyone who can reach the port. Loopback is still the default and the non-loopback warning still fires. |
 | **When `Live` becomes `Gone`** | Still [#7](https://github.com/bennyhodl/centinel/issues/7). §7.2 reports the transitions; it does not decide how many consecutive refusals cause one. |

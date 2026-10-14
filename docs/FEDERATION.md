@@ -52,7 +52,7 @@ Settled in charting. **Do not relitigate.**
 | **The unit** | **A slice is `(chapter, source ids)`** — whole Sources inside one chapter, indivisible. **Pull only**, on the receiver's schedule. §6. |
 | **Confidentiality** | **Not a driver.** The corpus is public record; integrity, authenticity and provenance are what this design buys. |
 
-`centinel-whisper` is a second binary for a linker reason (SPEC §3.6) that does **not** apply here. Federation has no such excuse, and taking one would be a decision this section already refuses.
+Centinel is one binary. It used to be two — `centinel-whisper` existed for a linker reason (SPEC §3.6) that never applied here — and the models now run in servers the operator starts, outside Centinel entirely. Federation has no excuse for a second executable, and taking one would be a decision this section already refuses.
 
 ---
 
@@ -62,7 +62,7 @@ These bind every open decision below.
 
 ### 2.1 Everything in SPEC §2 still binds
 
-Local-only inference, files as the only truth, no second runtime, provenance not optional. Federation adds a network; it removes no constraint.
+Inference only on servers the operator names, local by default (§2.1 as amended); files as the only truth; no second runtime; provenance not optional. Federation adds a network; it removes no constraint.
 
 ### 2.2 The file tree is what makes this tractable
 
@@ -260,8 +260,8 @@ You subscribe to `(chapter, source)` and **your own node re-pulls on a schedule 
 |---|---|---|
 | **Blobs** | **Yes** | The evidentiary layer, and the only one no peer can regenerate. Verifies on arrival against `blob_sha` for free. |
 | **The log** | **Yes, entire, per Source** | Truth, not derived. The only place an address, a date, a liveness change or a discovery delta is written down. **§6 made it indivisible: `log/<source>/` travels whole and is never filtered**, so a transfer is always a real corpus and no record ever has to admit being an extract. |
-| **Derived text** | **Yes** | Extraction and OCR are cheap to redo; **a council transcript is hours of Whisper** on hardware the receiver may not have. "Derived" and "cheap" are not the same word. |
-| **Embeddings, index** | **Optional, and no longer portable by construction** | The operator's call. Chunk identity is still `hash(chunk_text)` (SPEC §6.1), so a peer's vectors *key* cleanly. What changed is the rest of the sentence this row used to make: it read *"vectors are portable because the embedding model is **fixed for every install**"*, and §6.2 un-fixed it on 2026-08-03 — the registry now ships a 2,560-dim default beside a 1,024-dim alternate, described in the code as a different vector space. A transferred vector table therefore has to have its model **checked**, not assumed. `chunks.lance/` records its model in schema metadata and refuses a query vector from any other, so the check now exists on one node; **what no longer exists is a reason two nodes agree.** See [#25](https://github.com/bennyhodl/centinel/issues/25). |
+| **Derived text** | **Yes** | Extraction and OCR are cheap to redo; **a council transcript is hours of a Whisper server's time** on hardware the receiver may not have. "Derived" and "cheap" are not the same word. |
+| **Embeddings, index** | **Optional, and no longer portable by construction** | The operator's call. Chunk identity is still `hash(chunk_text)` (SPEC §6.1), so a peer's vectors *key* cleanly. What changed is the rest of the sentence this row used to make: it read *"vectors are portable because the embedding model is **fixed for every install**"*, and §6.2 un-fixed it on 2026-08-03. The `[inference]` block took it further: the embedding model is whatever the operator's server runs, and a vector's **space** is that model *and* the server that ran it. A transferred vector table therefore has to have its space **checked**, not assumed. `chunks.lance/` records its space in schema metadata and refuses rows or a query vector from any other, and `centinel embed --adopt` measures whether a configured server reproduces a sample of stored vectors before taking the table over — so the check exists on one node, and a receiver could run it against a peer's table; **what no longer exists is a reason two nodes agree.** See [#25](https://github.com/bennyhodl/centinel/issues/25). |
 
 **Open:** the transfer unit · whether a filtered log is the same records or a new record type that admits it is an extract — *a partial log that looks whole is a lie about completeness* · which records travel, and specifically what happens to **DiscoveryRun snapshots, whose entire value is that they are complete** and which a slice truncates by definition · whether `Derivation` and `Underivable` travel, without which the receiver re-attempts forever · whether foreign derived text stays attributed to **the tier that made it** (SPEC §2.1 — quality varies by machine) · whether a better local tier re-derives from the blob now held · what verifies a **log record**, which is a claim and not content · what happens to a blob whose bytes do not match the hash offered.
 
