@@ -154,12 +154,8 @@ export const pathOf = (address: string) => {
   } catch { return address }
 }
 
-export const sizeOf = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
-
 /** `text/html; charset=utf-8` as `text/html`. */
 export const typeOf = (contentType?: string) => contentType?.split(';')[0].trim()
-
-export const clock = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
 
 /** How long the investigation took, and how many requests it made, as the subtitle says it. */
 export function summaryOf(report: InvestigationReport) {

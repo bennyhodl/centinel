@@ -7,7 +7,7 @@ import { queries } from './queries'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { money, number, plural, seconds, tail } from './format'
+import { money, number, plural, seconds, tail, when } from './format'
 import { again, asked, continuable, LiveRun, useRunDetail } from './live'
 import { ResultsSection } from './results'
 import { DocumentLink, Empty, ErrorBox, PageHeader, Spinner } from './ui'
@@ -70,7 +70,7 @@ function HistoryRow({ summary, onOpen }: { summary: RunSummary; onOpen: (outcome
     : failed ? `Stopped · ${summary.error ? summary.error : plural(totals.errors, 'error')}`
       : [totals.kept && `${number(totals.kept)} keep`, totals.tagged && `${number(totals.tagged)} tagged`, totals.excluded && `${number(totals.excluded)} exclude`, totals.not_asked && `${number(totals.not_asked)} not asked`, totals.errors && `${number(totals.errors)} errors`].filter(Boolean).join(' · ') || 'Nothing decided'
   return <div role="button" tabIndex={0} onClick={() => onOpen('')} onKeyDown={event => event.key === 'Enter' && onOpen('')} className="flex cursor-pointer items-center gap-6 border-b py-4 hover:bg-hover">
-    <span className="grid w-36 shrink-0 gap-0.5"><b className="text-sm font-semibold">{summary.created_at.slice(0, 16).replace('T', ' ')}</b><span className="text-xs text-muted-foreground">{seconds(summary.duration_ms)}{summary.cost_usd != null ? ` · ${money(summary.cost_usd)}` : ''}</span></span>
+    <span className="grid w-36 shrink-0 gap-0.5"><b className="text-sm font-semibold">{when(summary.created_at)}</b><span className="text-xs text-muted-foreground">{seconds(summary.duration_ms)}{summary.cost_usd != null ? ` · ${money(summary.cost_usd)}` : ''}</span></span>
     <span className="grid min-w-0 flex-1 gap-0.5"><span className="truncate text-sm">{run ? `${asked(run)} · ${plural(summary.document_count, 'document')}` : plural(summary.document_count, 'document')}</span><span className="truncate font-mono text-xs text-muted-foreground">{summary.id} · {summary.model}</span></span>
     <span className={`hidden w-56 shrink-0 truncate text-[13px] md:block ${failed ? 'text-destructive' : ''}`} title={outcome}>{outcome}</span>
     <span className="flex w-52 shrink-0 justify-end" onClick={event => event.stopPropagation()}>{run && <NextStep run={run} onOpen={onOpen} />}</span>

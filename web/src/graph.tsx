@@ -10,7 +10,7 @@ import { HostIcon, SourceIcon } from './host-icon'
 import { queries } from './queries'
 import { useTheme } from './theme'
 import { compact, number, plural } from './format'
-import { ErrorBox, Spinner } from './ui'
+import { ErrorBox, SectionRule, Spinner } from './ui'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -269,19 +269,15 @@ function HostCard({ node, view, nodes, onJump, onInvestigate, investigating, err
   const allow = useMutation({ mutationFn: () => api.allowHost(node.host), onSuccess: refresh })
   const standing = detail.data?.standing ?? node.standing
   const refused = standing === 'ignored'
-  const linkedFrom = detail.data?.sources ?? view.edges.filter(edge => edge.to === node.id).map(edge => ({ source: edge.from.replace(/^source:/, ''), pages: edge.pages, links: edge.links, example: '' }))
+  const sourceNode = (name: string) => view.nodes.find(other => other.kind === 'source' && other.source === name)
+  const linkedFrom = detail.data?.sources ?? view.edges.filter(edge => edge.to === node.id).flatMap(edge => { const from = nodes.get(edge.from); return from?.kind === 'source' ? [{ source: from.source, pages: edge.pages, links: edge.links, example: '' }] : [] })
   return <>
-    <div className="grid gap-3.5 border-b px-6 pt-6 pb-5">
-      <span className={`text-[11px] font-semibold uppercase tracking-[0.08em] ${refused ? 'text-muted-foreground' : 'text-flame-ink'}`}>Host · {standingLabel[standing]}</span>
-      <SheetTitle className="flex items-center gap-3 font-serif text-[30px] leading-8 font-normal"><HostIcon host={node.host} size={32} className="text-base" /><span className="min-w-0 truncate">{node.host}</span></SheetTitle>
-      <SheetDescription className="text-[13px]">
-        {detail.data ? <>{plural(detail.data.pages, 'page')} · {plural(detail.data.links, 'link')} · {plural(detail.data.sources.length, 'source')}{detail.data.note ? ` · ${detail.data.note}` : ''}</> : <Skeleton mask="11,442 pages · 198,470 links · 3 sources" />}
-      </SheetDescription>
-      {detail.data?.example && <a href={detail.data.example} target="_blank" rel="noreferrer" className="inline-flex max-w-full items-center gap-1.5 truncate font-mono text-xs text-muted-foreground hover:underline"><ExternalLink className="size-3 shrink-0" />{detail.data.example}</a>}
-    </div>
+    <CardHeader eyebrow={`Host · ${standingLabel[standing]}`} tone={refused ? 'text-muted-foreground' : 'text-flame-ink'} icon={<HostIcon host={node.host} size={32} className="text-base" />} title={node.host} href={detail.data?.example}>
+      {detail.data ? <>{plural(detail.data.pages, 'page')} · {plural(detail.data.links, 'link')} · {plural(detail.data.sources.length, 'source')}{detail.data.note ? ` · ${detail.data.note}` : ''}</> : <Skeleton mask="11,442 pages · 198,470 links · 3 sources" />}
+    </CardHeader>
     <div className="grid min-h-0 flex-1 content-start gap-7 overflow-y-auto px-6 py-5">
       <Section title="Linked from" aside={plural(linkedFrom.length, 'source')}>
-        {linkedFrom.map(from => <Row key={from.source} onClick={nodes.has(`source:${from.source}`) ? () => onJump(`source:${from.source}`) : undefined} icon={<SourceIcon source={from.source} size={20} />} label={from.source} detail={`${plural(from.pages, 'page')} · ${plural(from.links, 'link')}`} />)}
+        {linkedFrom.map(from => { const found = sourceNode(from.source); return <Row key={from.source} onClick={found ? () => onJump(found.id) : undefined} icon={<SourceIcon source={from.source} size={20} />} label={from.source} detail={`${plural(from.pages, 'page')} · ${plural(from.links, 'link')}`} /> })}
       </Section>
       <Section title="Where it points" aside={detail.data ? `${plural(detail.data.paths.length + detail.data.paths_more, 'path')}` : ''}>
         {detail.isPending && <Rows />}
@@ -312,12 +308,9 @@ function SourceCard({ node, view, nodes, onJump }: { node: Extract<GraphNode, { 
   const name = (id: string) => { const other = nodes.get(id); return other ? labelOf(other) : id }
   const shown = 40
   return <>
-    <div className="grid gap-3.5 border-b px-6 pt-6 pb-5">
-      <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Source · {node.acquisition}{node.enabled ? '' : ' · disabled'}</span>
-      <SheetTitle className="flex items-center gap-3 font-serif text-[30px] leading-8 font-normal"><SourceIcon source={node.source} size={32} className="text-base" /><span className="min-w-0 truncate">{node.source}</span></SheetTitle>
-      <SheetDescription className="text-[13px]">{plural(node.addresses, 'address', 'addresses')} · links to {plural(out.length, 'host')} · linked from {plural(into.length, 'source')}</SheetDescription>
-      <a href={node.target} target="_blank" rel="noreferrer" className="inline-flex max-w-full items-center gap-1.5 truncate font-mono text-xs text-muted-foreground hover:underline"><ExternalLink className="size-3 shrink-0" />{node.target}</a>
-    </div>
+    <CardHeader eyebrow={`Source · ${node.acquisition}${node.enabled ? '' : ' · disabled'}`} icon={<SourceIcon source={node.source} size={32} className="text-base" />} title={node.source} href={node.target}>
+      {plural(node.addresses, 'address', 'addresses')} · links to {plural(out.length, 'host')} · linked from {plural(into.length, 'source')}
+    </CardHeader>
     <div className="grid min-h-0 flex-1 content-start gap-7 overflow-y-auto px-6 py-5">
       <Section title="Links to" aside={`${plural(out.length, 'host')} in view`}>
         {out.slice(0, shown).map(edge => { const other = nodes.get(edge.to); return <Row key={edge.to} onClick={() => onJump(edge.to)} icon={other ? <NodeIcon node={other} size={20} /> : undefined} label={name(edge.to)} detail={`${plural(edge.pages, 'page')} · ${plural(edge.links, 'link')}`} /> })}
@@ -336,13 +329,20 @@ function SourceCard({ node, view, nodes, onJump }: { node: Extract<GraphNode, { 
   </>
 }
 
+/** The top of a node's card: what it is, its mark and name, its numbers, and where it lives. */
+function CardHeader({ eyebrow, tone = 'text-muted-foreground', icon, title, href, children }: { eyebrow: string; tone?: string; icon: ReactNode; title: string; href?: string; children: ReactNode }) {
+  return <div className="grid gap-3.5 border-b px-6 pt-6 pb-5">
+    <span className={`text-[11px] font-semibold uppercase tracking-[0.08em] ${tone}`}>{eyebrow}</span>
+    <SheetTitle className="flex items-center gap-3 font-serif text-[30px] leading-8 font-normal">{icon}<span className="min-w-0 truncate">{title}</span></SheetTitle>
+    <SheetDescription className="text-[13px]">{children}</SheetDescription>
+    {href && <a href={href} target="_blank" rel="noreferrer" className="inline-flex max-w-full items-center gap-1.5 truncate font-mono text-xs text-muted-foreground hover:underline"><ExternalLink className="size-3 shrink-0" />{href}</a>}
+  </div>
+}
+
 function Section({ title, aside, children }: { title: string; aside?: ReactNode; children: ReactNode }) {
   // `min-w-0`, or a long address in a row widens the section past the drawer and pushes
   // every row's count out of sight.
-  return <section className="grid min-w-0">
-    <div className="flex items-baseline justify-between gap-3 border-b pb-1.5"><span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{title}</span><span className="text-xs text-muted-foreground">{aside}</span></div>
-    {children}
-  </section>
+  return <section className="grid min-w-0"><SectionRule aside={aside}>{title}</SectionRule>{children}</section>
 }
 
 function Row({ icon, label, detail, mono, href, onClick }: { icon?: ReactNode; label: string; detail: string; mono?: boolean; href?: string; onClick?: () => void }) {

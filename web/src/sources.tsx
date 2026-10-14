@@ -8,7 +8,7 @@ import { InvestigateDialog, useInvestigate } from './investigate'
 import { queries } from './queries'
 import { Bar, LogLine, useJobs, useOpenJob } from './jobs'
 import { activeJobs, jobTitle } from './job-state'
-import { number, plural } from './format'
+import { number, plural, when } from './format'
 import { SourceIcon } from './host-icon'
 import { inTab, nextAction, runAction, sourceState, TABS, type SourceState, type Tab } from './source-state'
 import { BackToSources, Empty, ErrorBox, PageHeader, Pulse, SectionRule, Spinner } from './ui'
@@ -242,7 +242,7 @@ function SourceView({ id, detail }: { id: string; detail: SourceDetail }) {
         <SectionRule aside={plural(summary.problems.length + (summary.problems_truncated ?? 0), 'address', 'addresses')}>Not live</SectionRule>
         {summary.problems.map(problem => <div key={problem.natural_key} className="grid gap-0.5 border-b py-2.5">
           <span className="flex items-baseline gap-2"><Badge variant="outline">{problem.state}</Badge><span className="min-w-0 truncate font-mono text-[13px]">{problem.natural_key}</span></span>
-          <span className="text-xs text-muted-foreground">{plural(problem.consecutive_failures, 'failure')} since {problem.since.slice(0, 10)}{problem.detail ? ` · ${problem.detail}` : ''}</span>
+          <span className="text-xs text-muted-foreground">{plural(problem.consecutive_failures, 'failure')} since {when(problem.since)}{problem.detail ? ` · ${problem.detail}` : ''}</span>
         </div>)}
       </section> : null}
 
@@ -328,17 +328,13 @@ function RunStrip({ job }: { job: JobState }) {
 /**
  * How many hosts this source links to, out of the ledger `collect` writes. A source collected
  * before the ledger existed has pages with no row; **Record** reads their blobs once, as a
- * job, and writes the rows down.
+ * job, and writes the rows down; the ledger is read again when it ends.
  */
 function CrumbsFact({ id }: { id: string }) {
-  const client = useQueryClient()
   const openJob = useOpenJob()
   const crumbs = useQuery(queries.sourceCrumbs(id))
   const rescan = useMutation({ mutationFn: () => api.rescanCrumbs(id), onSuccess: ({ id }) => openJob(id) })
-  // Once the rescan ends, the ledger has changed: read it again.
   const job = useJobs().find(candidate => candidate.id === rescan.data?.id)
-  const finished = job?.outcome
-  useEffect(() => { if (finished) client.invalidateQueries({ queryKey: ['source-crumbs', id] }) }, [client, finished, id])
   const recording = rescan.isPending || Boolean(job && !job.outcome)
   if (crumbs.error) return <span className="text-destructive">{crumbs.error.message}</span>
   if (!crumbs.data) return <Skeleton mask="12 hosts, from 1,005 pages" />
@@ -348,8 +344,6 @@ function CrumbsFact({ id }: { id: string }) {
     {unrecorded > 0 && <Button size="sm" variant="outline" disabled={recording} title={rescan.error?.message} onClick={() => rescan.mutate()}>{recording && <Spinner />}{recording ? 'Recording' : 'Record'}</Button>}
   </span>
 }
-
-const when = (at: string) => at.slice(0, 16).replace('T', ' ')
 
 // ── shared ──────────────────────────────────────────────────────────────────
 
