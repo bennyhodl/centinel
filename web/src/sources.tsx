@@ -1,12 +1,13 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { Ellipsis, Play, Plus, Search, Square } from 'lucide-react'
+import { Ellipsis, Play, Plus, Search } from 'lucide-react'
 import { api, type JobState, type LaneHolder, type ListedSource, type NewSource, type RunAttempt, type SourceDetail } from './api'
 import { AddSource } from './add-source'
 import { InvestigateDialog, useInvestigate } from './investigate'
 import { queries } from './queries'
-import { Bar, LogLine, useJobs, useOpenJob } from './jobs'
+import { Bar, LogLine, StopJobButton as StopButton, useJobs, useOpenJob } from './jobs'
+import { SourceStages } from './source-stages'
 import { activeJobs, jobTitle } from './job-state'
 import { number, plural, when } from './format'
 import { SourceIcon } from './host-icon'
@@ -143,7 +144,7 @@ function SourceAction({ source, action, lane }: { source: Pick<ListedSource, 'id
   switch (action) {
     case 'stop': return job?.stoppable ? <StopButton id={job.id} /> : <Badge className="bg-flame-soft text-flame-ink">Collecting</Badge>
     case 'enable': return <Button size="sm" variant="outline" disabled={enable.isPending} title={error?.message} onClick={() => enable.mutate(true)}>Enable</Button>
-    default: return <Button size="sm" variant={action === 'resume' ? 'default' : 'outline'} disabled={Boolean(lane) || run.isPending} title={lane ? 'Another run holds the lane' : error?.message} onClick={() => run.mutate([])}>
+    default: return <Button size="sm" variant={action === 'resume' ? 'default' : 'outline'} disabled={Boolean(lane) || run.isPending} title={lane ? 'Another operation holds the collection lane' : error?.message} onClick={() => run.mutate([])}>
       {run.isPending ? <Spinner /> : <Play />}{action === 'resume' ? 'Resume' : 'Run'}
     </Button>
   }
@@ -157,22 +158,13 @@ function SourceAction({ source, action, lane }: { source: Pick<ListedSource, 'id
  */
 function LaneBanner({ holder }: { holder: LaneHolder }) {
   const open = useOpenJob()
-  const job = useLaneJob()
+  const job = useJobs().find(job => !job.outcome && (holder.operation ? job.kind === holder.operation && job.label === holder.sources?.join(', ') : job.id === holder.started_at))
   return <div className="flex items-center gap-3 rounded-lg bg-flame-soft px-4 py-3 text-sm text-flame-ink shadow-[inset_0_0_0_1px_var(--flame-line)]">
     <span className="size-2 shrink-0 animate-pulse rounded-full bg-flame" />
-    <span className="flex-1">A run is collecting {holder.sources?.length ? holder.sources.join(', ') : 'every enabled source'}, started {when(holder.started_at)}{holder.schedule ? ` by the ${holder.schedule} schedule` : ''}. Another waits for it to finish.</span>
+    <span className="flex-1">{holder.operation ? `${holder.operation} is processing` : 'A run is collecting'} {holder.sources?.length ? holder.sources.join(', ') : 'every enabled source'}, started {when(holder.started_at)}{holder.schedule ? ` by the ${holder.schedule} schedule` : ''}. Another waits for it to finish.</span>
     {job && <Button size="sm" variant="outline" onClick={() => open(job.id)}>Watch</Button>}
     {job?.stoppable && <StopButton id={job.id} />}
   </div>
-}
-
-/** Asks a job to stop. It ends at its next item, so the button says so until the job is gone. */
-function StopButton({ id }: { id: string }) {
-  const stop = useMutation({ mutationFn: () => api.stopJob(id) })
-  const stopping = stop.isPending || stop.isSuccess
-  return <Button size="sm" variant="outline" disabled={stopping} onClick={() => stop.mutate()} title={stop.error?.message}>
-    {stopping ? <Spinner /> : <Square />}{stopping ? 'Stopping' : 'Stop'}
-  </Button>
 }
 
 // ── one source ───────────────────────────────────────────────────────────────
@@ -235,6 +227,8 @@ function SourceView({ id, detail }: { id: string; detail: SourceDetail }) {
           ...(definition.matches?.length ? [['Only addresses containing', definition.matches.join(', ')] as [string, string]] : []),
         ]} />
       </section>
+
+      <SourceStages id={id} lane={detail.running} />
 
       {summary?.problems.length ? <section className="grid">
         <SectionRule aside={plural(summary.problems.length + (summary.problems_truncated ?? 0), 'address', 'addresses')}>Not live</SectionRule>

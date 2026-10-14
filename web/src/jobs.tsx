@@ -1,12 +1,14 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
-import { useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query'
-import { jobEventsUrl, type JobEvent, type JobItem, type JobState, type RunResult } from './api'
+import { useMutation, useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query'
+import { Square } from 'lucide-react'
+import { api, jobEventsUrl, type JobEvent, type JobItem, type JobState, type RunResult } from './api'
 import { activeJobs, foldJob, jobTitle, succeeded } from './job-state'
 import { clock, number, seconds, tail } from './format'
 import { answerSummary } from './live'
 import { queries } from './queries'
-import { DocumentLink } from './ui'
+import { DocumentLink, Spinner } from './ui'
+import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar'
 
@@ -53,6 +55,10 @@ const ended: Record<string, (job: string) => QueryKey[]> = {
   'vectors-repair': job => [['vector-report', job], ['system'], ['corpus']],
   'vectors-embed': () => [['system'], ['corpus']],
   crumbs: () => [['source-crumbs'], ['graph'], ['graph-host']],
+  extract: () => [['source'], ['sources'], ['corpus'], ['read']],
+  transcribe: () => [['source'], ['sources'], ['corpus'], ['read']],
+  index: () => [['source'], ['sources'], ['corpus'], ['classify-plan']],
+  embed: () => [['source'], ['sources'], ['corpus']],
 }
 
 /** How often the corpus is re-read while a classifier scores. */
@@ -191,10 +197,23 @@ function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) {
       </div>
       <div className="flex items-center gap-3 border-t px-6 py-4">
         <span className="flex-1 text-[13px] text-muted-foreground">{run ? `${run.model} · ${number(run.questions.length)} questions` : job?.kind}</span>
+        {running && job?.stoppable && <StopJobButton key={job.id} id={job.id} />}
         {classify && <Link to="/runs" search={{ run: id, page: 1, outcome: '' }} onClick={onClose} className="inline-flex h-[34px] items-center rounded-lg px-3.5 text-[13px] font-medium shadow-[inset_0_0_0_1px_var(--input)]">Open run</Link>}
       </div>
     </SheetContent>
   </Sheet>
+}
+
+/** Requests cancellation through the job's own token, at its next item boundary. */
+export function StopJobButton({ id }: { id: string }) {
+  const stop = useMutation({ mutationFn: () => api.stopJob(id) })
+  const stopping = stop.isPending || stop.isSuccess
+  return <span className="grid gap-1">
+    <Button size="sm" variant="outline" disabled={stopping} onClick={() => stop.mutate()}>
+      {stopping ? <Spinner /> : <Square />}{stopping ? 'Stopping' : 'Stop'}
+    </Button>
+    {stop.error && <span role="alert" className="text-xs text-destructive">{stop.error.message}</span>}
+  </span>
 }
 
 /** One line of a job's log, on the server's clock. A scored line says what Jev decided when its answer and questions are given. */

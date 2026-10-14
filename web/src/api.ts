@@ -495,7 +495,9 @@ export type ListedSource = {
 export type LastRun = { started_at: string; outcome: RunAttempt['outcome']; trigger: RunAttempt['trigger']; schedule?: string; documents: number }
 
 /** The run holding the store's one lane. `sources` is empty for a run over every enabled source. */
-export type LaneHolder = { pid: number; started_at: string; trigger: 'schedule' | 'manual' | 'catch_up'; schedule?: string; sources?: string[]; args: string }
+export type LaneHolder = { pid: number; started_at: string; trigger: 'schedule' | 'manual' | 'catch_up'; schedule?: string; sources?: string[]; args: string; operation?: string }
+
+export type SourceStage = 'extract' | 'transcribe' | 'index' | 'embed'
 
 /** `log/<id>/source.toml`. */
 export type SourceDefinition = {
@@ -767,6 +769,7 @@ export const api = {
   rerunCollection: (id: string) => request<{ run_id: string }>(`/workspace/history/${encodeURIComponent(id)}/rerun`, { method: 'POST' }),
   sources: () => request<{ sources: ListedSource[]; running: LaneHolder | null }>('/workspace/sources').then(value => withArray(value, 'sources', '/workspace/sources')),
   source: (id: string) => request<SourceDetail>(`/workspace/sources/${encodeURIComponent(id)}`),
+  startSourceStage: (id: string, stage: SourceStage, refresh = false) => request<{ id: string }>(`/workspace/sources/${encodeURIComponent(id)}/stages/${stage}`, { method: 'POST', body: JSON.stringify({ refresh }) }),
   sourceCrumbs: (id: string) => request<CrumbsList>(`/workspace/sources/${encodeURIComponent(id)}/crumbs`).then(value => withArray(value, 'crumbs', 'crumbs')),
   /** Reads every blob of the source once and writes its crumb rows, as a job. The answer is the job's id. */
   rescanCrumbs: (id: string) => request<{ id: string }>(`/workspace/sources/${encodeURIComponent(id)}/crumbs/rescan`, { method: 'POST' }),

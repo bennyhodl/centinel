@@ -9,6 +9,7 @@
 //! | `POST /workspace/sources/{id}/crumbs/rescan` | write the ledger again from the blobs, as a job |
 //! | `POST /workspace/sources/{id}/enabled` | `{ "enabled": bool }` |
 //! | `POST /workspace/sources/{id}/run` | run it in the store's one lane; 409 when the lane is held |
+//! | `POST /workspace/sources/{id}/stages/{stage}` | process stored material in that lane; see [`super::stages`] |
 //!
 //! ## Who may call these
 //!
@@ -273,6 +274,7 @@ mod tests {
             &store,
             &Holder {
                 pid: std::process::id(),
+                operation: None,
                 started_at: jiff::Timestamp::now().to_string(),
                 trigger: Trigger::Manual,
                 schedule: None,

@@ -12,7 +12,7 @@
 //! | `GET /workspace/classify/plan?source=&resource=&derived_sha=&questions=&model=` | what a classify run over that scope would send, and its cost |
 //! | `GET /workspace/jobs` | what this process is working on, and what it just finished |
 //! | `GET /workspace/jobs/events` | the same, then every job event as it happens (SSE) |
-//! | `POST /workspace/jobs/{id}/stop` | ask a stoppable job — a run from the Sources page — to stop at its next item |
+//! | `POST /workspace/jobs/{id}/stop` | ask a stoppable job to stop at its next item |
 //! | `GET /workspace/spend?since=` | every model call since then, by hour and model |
 //! | `GET /workspace/prices` | what each model is priced at, and where the price came from |
 //! | `/workspace/sources…` | the Sources page: list, define, run; see [`sources`] |
@@ -77,6 +77,7 @@ mod investigate;
 mod maintenance;
 mod schedules;
 mod sources;
+mod stages;
 mod vectors;
 
 /// Identifies the binary this process runs: the executable's size and modification
@@ -252,6 +253,7 @@ pub(crate) fn router_with_schedules(
         .merge(investigate::routes())
         .merge(sources::routes())
         .merge(schedules::routes())
+        .merge(stages::routes())
         .merge(icons::routes())
         .merge(graph::routes())
         .merge(vectors::routes())
@@ -713,7 +715,7 @@ fn workspace_response<T: serde::Serialize>(result: anyhow::Result<T>) -> Respons
 /// Starts `work` as a stoppable job and answers `202 { "id" }`, the id the page follows on
 /// the job stream and hands to `POST /workspace/jobs/{id}/stop`.
 ///
-/// The id is `{kind}-{ms}`, the instant rather than the process's counter, so a result filed
+/// The id is `{kind}-{ns}`, the instant rather than the process's counter, so a result filed
 /// under it before a restart is not overwritten by the first job after one. The work is
 /// handed the context, its own id, the job's progress and the token Stop trips; how it ended
 /// is the job's record, written here once rather than at every route that starts one.
@@ -728,7 +730,7 @@ where
     Fut: std::future::Future<Output = Result<T>> + Send + 'static,
 {
     let (job, cancel) = ctx.jobs.start_stoppable(
-        format!("{kind}-{}", jiff::Timestamp::now().as_millisecond()),
+        format!("{kind}-{}", jiff::Timestamp::now().as_nanosecond()),
         kind,
         label,
     );

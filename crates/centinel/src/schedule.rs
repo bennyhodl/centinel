@@ -227,6 +227,10 @@ impl Scheduler {
         let Some(holder) = RunLock::take_stale(&self.ctx.store) else {
             return;
         };
+        if let Some(operation) = &holder.operation {
+            tracing::warn!(%operation, pid = holder.pid, "reclaimed a dead maintenance job");
+            return;
+        }
         tracing::warn!(
             pid = holder.pid,
             schedule = holder.schedule.as_deref().unwrap_or("-"),
@@ -741,6 +745,7 @@ mod tests {
             &sched.ctx.store,
             &Holder {
                 pid: std::process::id(),
+                operation: None,
                 started_at: Timestamp::now().to_string(),
                 trigger: Trigger::Manual,
                 schedule: None,
@@ -781,6 +786,7 @@ mod tests {
             &sched.ctx.store,
             &Holder {
                 pid: std::process::id(),
+                operation: None,
                 started_at: Timestamp::now().to_string(),
                 trigger: Trigger::Manual,
                 schedule: None,
@@ -823,6 +829,7 @@ mod tests {
             sched.ctx.store.lock_path(),
             serde_json::to_vec_pretty(&Holder {
                 pid: 0x00ff_fffe,
+                operation: None,
                 started_at: "2026-08-06T03:00:00Z".into(),
                 trigger: Trigger::Schedule,
                 schedule: Some("daily".into()),
@@ -843,6 +850,49 @@ mod tests {
             RunLock::current(&sched.ctx.store).is_none(),
             "the lock was kept"
         );
+    }
+
+    /// A stage sharing the lane is reclaimed after a crash without inventing a collection
+    /// attempt. The next scheduled collection can acquire the released lane.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dead_maintenance_job_releases_the_lane_without_a_collection_record() {
+        let (_s, _c, sched) = scheduler("[[schedule]]\nid = \"daily\"\ncron = \"@daily\"\n").await;
+        std::fs::write(
+            sched.ctx.store.lock_path(),
+            serde_json::to_vec(&Holder {
+                pid: 0x00ff_fffe,
+                operation: Some("extract".into()),
+                started_at: "2026-08-06T03:00:00Z".into(),
+                trigger: Trigger::Manual,
+                schedule: None,
+                sources: vec!["tampa".into()],
+                args: "extract".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        sched.recover_interrupted().await;
+        assert!(
+            Journal::new(&sched.ctx.store)
+                .read()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(RunLock::current(&sched.ctx.store).is_none());
+        let lane = Lane::acquire(
+            &sched.ctx,
+            RunArgs::default(),
+            Launch {
+                surface: "schedule",
+                trigger: Trigger::Schedule,
+                schedule: Some("daily".into()),
+                due_at: None,
+            },
+        )
+        .expect("scheduled collection can take the lane");
+        drop(lane);
     }
 
     /// Adding a schedule must not start a crawl. Catch-up is for a fire that was *missed*,

@@ -741,6 +741,7 @@ mod tests {
             &ctx.store,
             &Holder {
                 pid: std::process::id(),
+                operation: None,
                 started_at: jiff::Timestamp::now().to_string(),
                 trigger: Trigger::Schedule,
                 schedule: Some("daily".into()),

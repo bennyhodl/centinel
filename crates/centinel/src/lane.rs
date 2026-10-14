@@ -62,6 +62,7 @@ impl Lane {
         let started = Timestamp::now();
         let holder = Holder {
             pid: std::process::id(),
+            operation: None,
             started_at: started.to_string(),
             trigger: launch.trigger,
             schedule: launch.schedule.clone(),

@@ -119,6 +119,11 @@ pub const ADOPT_MIN_COSINE: f32 = 0.99;
 
 #[derive(Clone, Debug, Default, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct EmbedArgs {
+    /// Embed only this source's indexed documents. Omit for every source.
+    #[arg(long)]
+    #[serde(default)]
+    pub source: Option<String>,
+
     /// The model to ask the embedding server for, for this run.
     ///
     /// Unset means "nobody said here", which falls through to `[inference.embed] model`.
@@ -259,6 +264,14 @@ pub(crate) async fn embed_with(
     progress: &Progress,
     cancel: &Cancel,
 ) -> anyhow::Result<EmbedReport> {
+    cancel.check()?;
+    if let Some(source) = &args.source {
+        SourceId::new(source.clone())?;
+        anyhow::ensure!(
+            !args.adopt && !args.ann_index,
+            "--adopt and --ann-index require the whole vector table"
+        );
+    }
     anyhow::ensure!(args.batch != Some(0), "--batch must be at least 1");
     // Before the work list is worked out, so a second run cannot work out the same one.
     let _run = match args.dry_run {
@@ -287,7 +300,12 @@ pub(crate) async fn embed_with(
     // is the first thing a caller waits on.
     progress.say("reading the index");
     let index = Index::open(ctx.store.require_index()?)?;
-    let placements = index.placements_by_length()?;
+    let mut placements = index.placements_by_length()?;
+    if let Some(source) = &args.source {
+        placements
+            .pairs
+            .retain(|(_, document)| placements.documents[*document as usize].source == *source);
+    }
 
     // Chunks for `--adopt` to compare, drawn from the index — the side that knows which
     // chunks are current — and read now, while the index is to hand: `adopt` awaits, and a
@@ -360,14 +378,27 @@ pub(crate) async fn embed_with(
         table
             .keys(|key| {
                 let Some((hash, document)) = parse_key(key) else {
-                    stale.push(key.to_owned());
+                    if args.source.is_none() {
+                        stale.push(key.to_owned());
+                    }
                     return;
                 };
+                let in_scope = args
+                    .source
+                    .as_ref()
+                    .is_none_or(|source| document.source == *source);
                 let Ok(hash) = hash_bytes(hash) else {
-                    stale.push(key.to_owned());
+                    if in_scope {
+                        stale.push(key.to_owned());
+                    }
                     return;
                 };
                 known.insert(hash);
+                // Vectors from other sources can supply copies, but their rows never
+                // enter this source's work list or pruning list.
+                if !in_scope {
+                    return;
+                }
                 match by_document.get(&document) {
                     Some(&document) if all.contains(&(hash, document)) => {
                         todo.remove(&(hash, document));
@@ -1363,6 +1394,109 @@ mod tests {
             state: DocState::default(),
             vector: vec![0.0; 2560],
         }
+    }
+
+    /// A scoped run copies shared vectors into its source and prunes only that source's
+    /// stale rows. Other sources' missing and stale placements stay untouched.
+    #[tokio::test]
+    async fn a_source_scoped_run_preserves_other_sources_vectors_and_work() {
+        let (_dir, ctx) = indexed_store(1).await;
+        let inference = crate::inference::fake::nothing_listening();
+        let mut index = Index::open(ctx.store.require_index().unwrap()).unwrap();
+        let shared = passage(0);
+        index
+            .insert(
+                &shared,
+                &Placement {
+                    source: "other".into(),
+                    ..placement(&shared, "https://other.gov/shared")
+                },
+            )
+            .unwrap();
+        let pending = passage(1);
+        index
+            .insert(
+                &pending,
+                &Placement {
+                    source: "other".into(),
+                    ..placement(&pending, "https://other.gov/pending")
+                },
+            )
+            .unwrap();
+        drop(index);
+
+        let table = VectorTable::open(
+            &ctx.store.vectors_db(),
+            &Space::of(&inference.endpoint(Capability::Embed)),
+            2560,
+        )
+        .await
+        .unwrap();
+        let foreign = Row {
+            document: DocumentId {
+                source: "other".into(),
+                resource: "https://other.gov/shared".into(),
+                ..document(0)
+            },
+            ..stored(0)
+        };
+        let foreign_stale = Row {
+            document: DocumentId {
+                source: "other".into(),
+                ..document(7)
+            },
+            ..stored(7)
+        };
+        let own_stale = stored(8);
+        let lock = VectorLock::take(&ctx.store).await.unwrap();
+        table
+            .append(&lock, &[foreign, foreign_stale.clone(), own_stale])
+            .await
+            .unwrap();
+        drop(lock);
+
+        let report = embed_with(
+            &ctx,
+            EmbedArgs {
+                source: Some("test".into()),
+                ..Default::default()
+            },
+            &inference,
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (
+                report.indexed,
+                report.filled,
+                report.embedded,
+                report.pruned,
+                report.remaining
+            ),
+            (1, 1, 0, 1, 0)
+        );
+        let mut keys = HashSet::new();
+        let reopened = VectorTable::open_existing(&ctx.store.vectors_db())
+            .await
+            .unwrap();
+        reopened
+            .keys(|key| {
+                keys.insert(key.to_string());
+            })
+            .await
+            .unwrap();
+        assert_eq!(keys.len(), 3);
+        assert!(keys.contains(&key_of(&stored(0).chunk_hash, &document(0))));
+        assert!(
+            keys.contains(&key_of(&foreign_stale.chunk_hash, &foreign_stale.document)),
+            "the other source's stale row survives"
+        );
+        assert!(
+            !ctx.store.spend_dir().exists(),
+            "no inference ran for the other source's pending chunk"
+        );
     }
 
     #[tokio::test]
