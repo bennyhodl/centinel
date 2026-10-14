@@ -338,7 +338,10 @@ mod tests {
             .await
             .unwrap();
         crate::catalog::Sources::new(&store)
-            .add(&crate::config::SourceConfig::site("tampa", "https://www.tampa.gov"))
+            .add(&crate::config::SourceConfig::site(
+                "tampa",
+                "https://www.tampa.gov",
+            ))
             .await
             .unwrap();
 

@@ -336,9 +336,14 @@ impl Graph {
             .collect();
         // Busiest first, and a stable order after that, so two reads draw the same.
         host_nodes.sort_by(|a, b| match (a, b) {
-            (Node::Host { pages: p, host: h, .. }, Node::Host { pages: q, host: g, .. }) => {
-                q.cmp(p).then(h.cmp(g))
-            }
+            (
+                Node::Host {
+                    pages: p, host: h, ..
+                },
+                Node::Host {
+                    pages: q, host: g, ..
+                },
+            ) => q.cmp(p).then(h.cmp(g)),
             _ => std::cmp::Ordering::Equal,
         });
         let mut edges: Vec<Edge> = edges.into_values().collect();
@@ -356,11 +361,27 @@ impl Graph {
             links: edges.iter().map(|e| e.links).sum(),
             open: host_nodes
                 .iter()
-                .filter(|n| matches!(n, Node::Host { standing: Standing::Open, .. }))
+                .filter(|n| {
+                    matches!(
+                        n,
+                        Node::Host {
+                            standing: Standing::Open,
+                            ..
+                        }
+                    )
+                })
                 .count(),
             refused: host_nodes
                 .iter()
-                .filter(|n| matches!(n, Node::Host { standing: Standing::Ignored, .. }))
+                .filter(|n| {
+                    matches!(
+                        n,
+                        Node::Host {
+                            standing: Standing::Ignored,
+                            ..
+                        }
+                    )
+                })
                 .count(),
         };
         nodes.extend(host_nodes);
@@ -378,7 +399,15 @@ impl Graph {
         let refused: BTreeSet<&str> = self
             .nodes
             .iter()
-            .filter(|n| matches!(n, Node::Host { standing: Standing::Ignored, .. }))
+            .filter(|n| {
+                matches!(
+                    n,
+                    Node::Host {
+                        standing: Standing::Ignored,
+                        ..
+                    }
+                )
+            })
             .map(Node::id)
             .collect();
         let mut edges = std::mem::take(&mut self.edges);
@@ -471,7 +500,8 @@ impl HostDetail {
 
         let mut sources = Vec::new();
         let mut paths: BTreeMap<String, usize> = BTreeMap::new();
-        let mut carriers_by_source: BTreeMap<String, (Vec<crumbs::Carrier>, usize)> = BTreeMap::new();
+        let mut carriers_by_source: BTreeMap<String, (Vec<crumbs::Carrier>, usize)> =
+            BTreeMap::new();
         let mut example: Option<String> = None;
         for source in &defined {
             let id = SourceId::new(source.id.clone())?;
@@ -572,7 +602,10 @@ mod tests {
     }
 
     async fn define(store: &Store, source: SourceConfig) {
-        crate::catalog::Sources::new(store).add(&source).await.unwrap();
+        crate::catalog::Sources::new(store)
+            .add(&source)
+            .await
+            .unwrap();
     }
 
     /// One page's row, as `collect` writes it down.
@@ -624,13 +657,30 @@ mod tests {
         assert_eq!((from_hills.pages, from_hills.links), (1, 2));
 
         assert_eq!(host_ids(&graph), ["host:hover.hillsclerk.com"]);
-        let Node::Host { pages, links, sources, standing, .. } = &graph.nodes[2] else {
+        let Node::Host {
+            pages,
+            links,
+            sources,
+            standing,
+            ..
+        } = &graph.nodes[2]
+        else {
             panic!("{:?}", graph.nodes);
         };
-        assert_eq!((*pages, *links, *sources, *standing), (3, 6, 2, Standing::Open));
+        assert_eq!(
+            (*pages, *links, *sources, *standing),
+            (3, 6, 2, Standing::Open)
+        );
         assert_eq!(
             graph.totals,
-            Totals { sources: 2, hosts: 1, edges: 2, links: 6, open: 1, refused: 0 }
+            Totals {
+                sources: 2,
+                hosts: 1,
+                edges: 2,
+                links: 6,
+                open: 1,
+                refused: 0
+            }
         );
     }
 
@@ -641,7 +691,11 @@ mod tests {
     async fn a_host_that_is_a_source_connects_the_two_sources() {
         let (_d, store) = store().await;
         define(&store, SourceConfig::site("tampa", "https://www.tampa.gov")).await;
-        define(&store, SourceConfig::site("hillsclerk", "https://publicrec.hillsclerk.com/Civil/")).await;
+        define(
+            &store,
+            SourceConfig::site("hillsclerk", "https://publicrec.hillsclerk.com/Civil/"),
+        )
+        .await;
         page(
             &store,
             "tampa",
@@ -679,18 +733,36 @@ mod tests {
             )
             .await;
         }
-        page(&store, "tampa", "https://www.tampa.gov/once", r#"<a href="https://once.example.com/">once</a>"#).await;
+        page(
+            &store,
+            "tampa",
+            "https://www.tampa.gov/once",
+            r#"<a href="https://once.example.com/">once</a>"#,
+        )
+        .await;
 
         let whole = Graph::read(&store).await.unwrap();
-        assert_eq!(host_ids(&whole), ["host:busy.example.com", "host:once.example.com"]);
+        assert_eq!(
+            host_ids(&whole),
+            ["host:busy.example.com", "host:once.example.com"]
+        );
 
-        let view = whole.clone().filtered(&Filter { min_pages: 2, hide_refused: false });
+        let view = whole.clone().filtered(&Filter {
+            min_pages: 2,
+            hide_refused: false,
+        });
         assert_eq!(host_ids(&view), ["host:busy.example.com"]);
         assert_eq!(view.edges.len(), 1);
         assert!(!view.truncated);
-        assert_eq!(view.totals, whole.totals, "the totals are the whole graph's");
+        assert_eq!(
+            view.totals, whole.totals,
+            "the totals are the whole graph's"
+        );
         // The source stays whatever the filter leaves it pointing at.
-        let none = whole.filtered(&Filter { min_pages: 99, hide_refused: false });
+        let none = whole.filtered(&Filter {
+            min_pages: 99,
+            hide_refused: false,
+        });
         assert_eq!(none.nodes.len(), 1);
         assert!(none.edges.is_empty());
     }
@@ -723,7 +795,10 @@ mod tests {
         let graph = Graph::read(&store).await.unwrap();
         assert_eq!((graph.totals.open, graph.totals.refused), (1, 1));
         assert!(graph.nodes.iter().any(|n| matches!(n, Node::Host { host, standing: Standing::Ignored, .. } if host == "www.facebook.com")));
-        let hidden = graph.filtered(&Filter { min_pages: 1, hide_refused: true });
+        let hidden = graph.filtered(&Filter {
+            min_pages: 1,
+            hide_refused: true,
+        });
         assert_eq!(host_ids(&hidden), ["host:publicrec.hillsclerk.com"]);
         assert_eq!(hidden.edges.len(), 1);
 
@@ -736,7 +811,10 @@ mod tests {
             })
             .await
             .unwrap();
-        let again = Graph::read(&store).await.unwrap().filtered(&Filter { min_pages: 1, hide_refused: true });
+        let again = Graph::read(&store).await.unwrap().filtered(&Filter {
+            min_pages: 1,
+            hide_refused: true,
+        });
         assert_eq!(again.totals.refused, 0);
         assert_eq!(host_ids(&again).len(), 2);
     }
@@ -747,31 +825,86 @@ mod tests {
         let (_d, store) = store().await;
         define(&store, SourceConfig::site("tampa", "https://www.tampa.gov")).await;
         define(&store, SourceConfig::site("hills", "https://www.hcfl.gov")).await;
-        page(&store, "tampa", "https://www.tampa.gov/a", r#"<a href="https://vendor.example.com/login">login</a>"#).await;
-        page(&store, "tampa", "https://www.tampa.gov/b", r#"<a href="https://vendor.example.com/login?x=1">login</a>"#).await;
+        page(
+            &store,
+            "tampa",
+            "https://www.tampa.gov/a",
+            r#"<a href="https://vendor.example.com/login">login</a>"#,
+        )
+        .await;
+        page(
+            &store,
+            "tampa",
+            "https://www.tampa.gov/b",
+            r#"<a href="https://vendor.example.com/login?x=1">login</a>"#,
+        )
+        .await;
         page(&store, "tampa", "https://www.tampa.gov/c", r#"<a href="https://vendor.example.com/docs/1">doc</a><a href="https://vendor.example.com/docs/2">doc</a>"#).await;
-        page(&store, "hills", "https://www.hcfl.gov/x", r#"<a href="https://vendor.example.com/docs/1">doc</a>"#).await;
+        page(
+            &store,
+            "hills",
+            "https://www.hcfl.gov/x",
+            r#"<a href="https://vendor.example.com/docs/1">doc</a>"#,
+        )
+        .await;
         page(&store, "hills", "https://www.hcfl.gov/y", "<p>nothing</p>").await;
 
-        let detail = HostDetail::read(&store, "Vendor.Example.com").await.unwrap();
+        let detail = HostDetail::read(&store, "Vendor.Example.com")
+            .await
+            .unwrap();
         assert_eq!(detail.host, "vendor.example.com");
-        let from_url = HostDetail::read(&store, "https://vendor.example.com/docs/1").await.unwrap();
-        assert_eq!(from_url, detail, "a URL on the host is the host, as `crumbs ignore` reads it");
+        let from_url = HostDetail::read(&store, "https://vendor.example.com/docs/1")
+            .await
+            .unwrap();
+        assert_eq!(
+            from_url, detail,
+            "a URL on the host is the host, as `crumbs ignore` reads it"
+        );
         assert!(HostDetail::read(&store, "not a host").await.is_err());
         assert_eq!((detail.pages, detail.links), (4, 5));
         assert_eq!(detail.standing, Standing::Open);
-        assert_eq!(detail.example.as_deref(), Some("https://vendor.example.com/docs/1"));
+        assert_eq!(
+            detail.example.as_deref(),
+            Some("https://vendor.example.com/docs/1")
+        );
 
-        let sources: Vec<(&str, usize, usize)> = detail.sources.iter().map(|s| (s.source.as_str(), s.pages, s.links)).collect();
+        let sources: Vec<(&str, usize, usize)> = detail
+            .sources
+            .iter()
+            .map(|s| (s.source.as_str(), s.pages, s.links))
+            .collect();
         assert_eq!(sources, [("tampa", 3, 4), ("hills", 1, 1)]);
 
-        let paths: Vec<(&str, usize)> = detail.paths.iter().map(|p| (p.path.as_str(), p.pages)).collect();
-        assert_eq!(paths, [("/docs/1", 2), ("/login", 2)], "the query string is not a path");
+        let paths: Vec<(&str, usize)> = detail
+            .paths
+            .iter()
+            .map(|p| (p.path.as_str(), p.pages))
+            .collect();
+        assert_eq!(
+            paths,
+            [("/docs/1", 2), ("/login", 2)],
+            "the query string is not a path"
+        );
         assert_eq!(detail.paths_more, 0);
 
-        let referrers: Vec<&str> = detail.referrers.iter().map(|r| r.address.as_str()).collect();
-        assert_eq!(referrers, ["https://www.tampa.gov/a", "https://www.tampa.gov/b", "https://www.tampa.gov/c", "https://www.hcfl.gov/x"]);
-        assert!(detail.referrers.iter().all(|r| r.blob.is_some()), "a referrer is openable");
+        let referrers: Vec<&str> = detail
+            .referrers
+            .iter()
+            .map(|r| r.address.as_str())
+            .collect();
+        assert_eq!(
+            referrers,
+            [
+                "https://www.tampa.gov/a",
+                "https://www.tampa.gov/b",
+                "https://www.tampa.gov/c",
+                "https://www.hcfl.gov/x"
+            ]
+        );
+        assert!(
+            detail.referrers.iter().all(|r| r.blob.is_some()),
+            "a referrer is openable"
+        );
         assert_eq!(detail.referrers_more, 0);
     }
 
@@ -781,8 +914,18 @@ mod tests {
     async fn a_host_detail_reports_standing() {
         let (_d, store) = store().await;
         define(&store, SourceConfig::site("tampa", "https://www.tampa.gov")).await;
-        define(&store, SourceConfig::site("hillsclerk", "https://publicrec.hillsclerk.com/")).await;
-        page(&store, "tampa", "https://www.tampa.gov/x", r#"<a href="https://publicrec.hillsclerk.com/Civil/">records</a>"#).await;
+        define(
+            &store,
+            SourceConfig::site("hillsclerk", "https://publicrec.hillsclerk.com/"),
+        )
+        .await;
+        page(
+            &store,
+            "tampa",
+            "https://www.tampa.gov/x",
+            r#"<a href="https://publicrec.hillsclerk.com/Civil/">records</a>"#,
+        )
+        .await;
         Decisions::new(&store)
             .append(&Decision {
                 host: "publicrec.hillsclerk.com".into(),
@@ -793,12 +936,19 @@ mod tests {
             .await
             .unwrap();
 
-        let promoted = HostDetail::read(&store, "publicrec.hillsclerk.com").await.unwrap();
+        let promoted = HostDetail::read(&store, "publicrec.hillsclerk.com")
+            .await
+            .unwrap();
         assert_eq!(promoted.standing, Standing::Promoted);
-        assert_eq!(promoted.note.as_deref(), Some("refused before it was added"));
+        assert_eq!(
+            promoted.note.as_deref(),
+            Some("refused before it was added")
+        );
         assert_eq!(promoted.pages, 1);
 
-        let nobody = HostDetail::read(&store, "nobody.example.com").await.unwrap();
+        let nobody = HostDetail::read(&store, "nobody.example.com")
+            .await
+            .unwrap();
         assert_eq!(nobody.pages, 0);
         assert!(nobody.sources.is_empty() && nobody.example.is_none());
     }
@@ -809,27 +959,55 @@ mod tests {
     async fn a_linkage_is_cached_and_follows_the_ledger() {
         let (_d, store) = store().await;
         let id = SourceId::new("tampa").unwrap();
-        page(&store, "tampa", "https://www.tampa.gov/a", r#"<a href="https://x.example.com/">x</a>"#).await;
+        page(
+            &store,
+            "tampa",
+            "https://www.tampa.gov/a",
+            r#"<a href="https://x.example.com/">x</a>"#,
+        )
+        .await;
 
         let linkages = Linkages::new(&store);
         let first = linkages.get(&id).await.unwrap();
         assert_eq!(first.hosts["x.example.com"].pages, 1);
-        assert!(store.linkage_path(&id).exists(), "written down for the next reader");
+        assert!(
+            store.linkage_path(&id).exists(),
+            "written down for the next reader"
+        );
 
         // Forged on disk and believed while the stamp matches: the cache is trusted,
         // which is what makes it a cache.
         let mut forged = first.clone();
         forged.hosts.get_mut("x.example.com").unwrap().pages = 99;
-        std::fs::write(store.linkage_path(&id), serde_json::to_vec(&forged).unwrap()).unwrap();
-        assert_eq!(linkages.get(&id).await.unwrap().hosts["x.example.com"].pages, 99);
+        std::fs::write(
+            store.linkage_path(&id),
+            serde_json::to_vec(&forged).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            linkages.get(&id).await.unwrap().hosts["x.example.com"].pages,
+            99
+        );
 
-        page(&store, "tampa", "https://www.tampa.gov/b", r#"<a href="https://x.example.com/">x</a>"#).await;
+        page(
+            &store,
+            "tampa",
+            "https://www.tampa.gov/b",
+            r#"<a href="https://x.example.com/">x</a>"#,
+        )
+        .await;
         let second = linkages.get(&id).await.unwrap();
-        assert_eq!(second.hosts["x.example.com"].pages, 2, "the ledger grew, so it was folded again");
+        assert_eq!(
+            second.hosts["x.example.com"].pages, 2,
+            "the ledger grew, so it was folded again"
+        );
         assert_ne!(second.ledger, first.ledger);
 
         // No ledger at all is an empty linkage, not an error.
-        let none = linkages.get(&SourceId::new("nobody").unwrap()).await.unwrap();
+        let none = linkages
+            .get(&SourceId::new("nobody").unwrap())
+            .await
+            .unwrap();
         assert_eq!(none, Linkage::default());
     }
 
@@ -840,15 +1018,29 @@ mod tests {
         define(&store, SourceConfig::site("tampa", "https://www.tampa.gov")).await;
         let mut graph = Graph::read(&store).await.unwrap();
         graph.edges = (0..MAX_EDGES + 2)
-            .map(|i| Edge { from: "source:tampa".into(), to: format!("host:h{i}"), pages: MAX_EDGES + 2 - i, links: 1 })
+            .map(|i| Edge {
+                from: "source:tampa".into(),
+                to: format!("host:h{i}"),
+                pages: MAX_EDGES + 2 - i,
+                links: 1,
+            })
             .collect();
         graph.nodes.extend((0..MAX_EDGES + 2).map(|i| Node::Host {
-            id: format!("host:h{i}"), host: format!("h{i}"), pages: 1, links: 1, sources: 1, standing: Standing::Open,
+            id: format!("host:h{i}"),
+            host: format!("h{i}"),
+            pages: 1,
+            links: 1,
+            sources: 1,
+            standing: Standing::Open,
         }));
         let view = graph.filtered(&Filter::default());
         assert!(view.truncated);
         assert_eq!(view.edges.len(), MAX_EDGES);
-        assert_eq!(view.edges.last().unwrap().pages, 3, "the weakest two were cut");
+        assert_eq!(
+            view.edges.last().unwrap().pages,
+            3,
+            "the weakest two were cut"
+        );
         assert_eq!(view.nodes.len(), MAX_EDGES + 1);
     }
 }

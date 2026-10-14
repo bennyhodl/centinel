@@ -112,9 +112,17 @@ mod tests {
         let headers = found.headers().clone();
         assert_eq!(headers[header::CONTENT_TYPE], "image/svg+xml");
         assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
-        assert!(headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap().starts_with("sandbox"));
+        assert!(
+            headers[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .starts_with("sandbox")
+        );
         assert_eq!(headers[header::CACHE_CONTROL], WEEK);
-        assert_eq!(to_bytes(found.into_body(), 1 << 20).await.unwrap().as_ref(), b"<svg/>");
+        assert_eq!(
+            to_bytes(found.into_body(), 1 << 20).await.unwrap().as_ref(),
+            b"<svg/>"
+        );
 
         let none = get(&app, "/workspace/icons/not-a-host.example").await;
         assert_eq!(none.status(), StatusCode::NOT_FOUND);

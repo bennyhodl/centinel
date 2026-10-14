@@ -98,7 +98,13 @@ pub struct RequestRecord {
 }
 
 impl RequestRecord {
-    fn of(step: Step, url: &str, at_ms: i64, elapsed_ms: u64, result: &Result<Fetched, Refusal>) -> Self {
+    fn of(
+        step: Step,
+        url: &str,
+        at_ms: i64,
+        elapsed_ms: u64,
+        result: &Result<Fetched, Refusal>,
+    ) -> Self {
         let base = Self {
             step,
             method: "GET".into(),
@@ -242,7 +248,10 @@ mod tests {
         assert!(!timed_out.ok());
         assert!(timed_out.error.as_deref().unwrap().contains("timed out"));
 
-        assert_eq!(refused(Some(503), "HTTP 503 Service Unavailable").status, Some(503));
+        assert_eq!(
+            refused(Some(503), "HTTP 503 Service Unavailable").status,
+            Some(503)
+        );
     }
 
     fn rendered(records: &[RequestRecord]) -> String {
@@ -278,6 +287,10 @@ mod tests {
         assert!(out.contains("+0.00s") && out.contains("+0.42s"), "{out}");
         assert!(out.contains("→ https://x.gov/new"), "{out}");
         assert!(out.contains("operation timed out"), "{out}");
-        assert_eq!(rendered(&[]), "", "an op that fetched nothing prints no table");
+        assert_eq!(
+            rendered(&[]),
+            "",
+            "an op that fetched nothing prints no table"
+        );
     }
 }

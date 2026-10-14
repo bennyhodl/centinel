@@ -534,10 +534,7 @@ impl Store {
     /// corpus scale (GovScape indexed 10M PDFs; a flat directory would not survive it).
     fn blob_path(&self, sha: &BlobSha) -> PathBuf {
         let s = sha.as_str();
-        self.blobs_dir()
-            .join(&s[0..2])
-            .join(&s[2..4])
-            .join(s)
+        self.blobs_dir().join(&s[0..2]).join(&s[2..4]).join(s)
     }
 
     /// Writes bytes into the pool and returns their address.
@@ -1326,7 +1323,10 @@ mod tests {
         let tampa = SourceId::new("tampa").unwrap();
         assert!(s.log_dir(&tampa).ends_with("log/tampa"));
         assert!(s.definition_path(&tampa).ends_with("log/tampa/source.toml"));
-        assert!(s.investigation_dir("investigate-1").ends_with("investigations/investigate-1"));
+        assert!(
+            s.investigation_dir("investigate-1")
+                .ends_with("investigations/investigate-1")
+        );
         assert!(s.icons_dir().ends_with("icons"));
         assert!(s.decisions_path().ends_with("decisions.jsonl"));
         assert!(s.workspace_dir().ends_with("workspace"));

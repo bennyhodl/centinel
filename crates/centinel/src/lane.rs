@@ -262,7 +262,10 @@ mod tests {
         let lane = Lane::acquire(&ctx, args, launch()).unwrap();
         let id = lane.run_id();
         let job = &ctx.jobs.snapshot()[0];
-        assert_eq!((job.id.as_str(), job.kind.as_str(), job.label.as_str()), (id.as_str(), "run", "tampa"));
+        assert_eq!(
+            (job.id.as_str(), job.kind.as_str(), job.label.as_str()),
+            (id.as_str(), "run", "tampa")
+        );
         assert!(job.stoppable);
 
         // Stopped before it runs: the op's first boundary check ends it before a single
@@ -279,7 +282,10 @@ mod tests {
             ctx.jobs.snapshot()[0].outcome,
             Some(centinel_core::jobs::Outcome::Cancelled)
         );
-        assert!(RunLock::current(&ctx.store).is_none(), "the lane is released");
+        assert!(
+            RunLock::current(&ctx.store).is_none(),
+            "the lane is released"
+        );
     }
 
     /// The scheduler's shutdown reaches the op through the job's token too: one way a run
@@ -295,7 +301,15 @@ mod tests {
         let ctx = Arc::new(Ctx::new(store));
         let (shutdown, cancel) = Cancel::channel();
         shutdown.cancel();
-        let lane = Lane::acquire(&ctx, RunArgs { sources: vec!["tampa".into()], ..Default::default() }, launch()).unwrap();
+        let lane = Lane::acquire(
+            &ctx,
+            RunArgs {
+                sources: vec!["tampa".into()],
+                ..Default::default()
+            },
+            launch(),
+        )
+        .unwrap();
         let attempt = lane.run(None, cancel).await;
         assert_eq!(attempt.outcome, Outcome::Interrupted);
     }

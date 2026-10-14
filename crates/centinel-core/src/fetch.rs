@@ -254,7 +254,11 @@ mod tests {
             meta: BTreeMap::from([("http_status".to_string(), "200".to_string())]),
         };
         assert_eq!(status_of(&Ok(fetched)), Some(200));
-        let refused = |status| FetchFailure { state: Liveness::Gone, detail: "x".into(), status };
+        let refused = |status| FetchFailure {
+            state: Liveness::Gone,
+            detail: "x".into(),
+            status,
+        };
         assert_eq!(status_of(&Err(refused(Some(404)))), Some(404));
         assert_eq!(status_of(&Err(refused(None))), None);
     }

@@ -286,13 +286,16 @@ pub async fn listed(ctx: &Ctx, only: Option<&str>) -> anyhow::Result<Vec<ListedS
         // beside the log and rebuilt when the log grows, and the list is asked every few
         // seconds by a page that replaying sixteen logs made wait over a second.
         let summary = summaries.get(&SourceId::new(source.id.clone())?).await?;
-        let last_run = attempts.iter().find(|a| a.covers(&source.id)).map(|a| LastRun {
-            started_at: a.started_at.clone(),
-            outcome: a.outcome,
-            trigger: a.trigger,
-            schedule: a.schedule.clone(),
-            documents: a.added.documents,
-        });
+        let last_run = attempts
+            .iter()
+            .find(|a| a.covers(&source.id))
+            .map(|a| LastRun {
+                started_at: a.started_at.clone(),
+                outcome: a.outcome,
+                trigger: a.trigger,
+                schedule: a.schedule.clone(),
+                documents: a.added.documents,
+            });
         out.push(ListedSource {
             id: source.id.clone(),
             kind: acquisition.kind(),
@@ -404,7 +407,10 @@ impl Render for SourceReport {
                         Cell::new(resources, Ink::Dim),
                     ];
                     if needs_state {
-                        row.push(Cell::new(if s.enabled { "" } else { "disabled" }, Ink::Yellow));
+                        row.push(Cell::new(
+                            if s.enabled { "" } else { "disabled" },
+                            Ink::Yellow,
+                        ));
                     }
                     row.push(Cell::new(render::truncate(&s.target, 46), ink));
                     table.push(row);
@@ -497,7 +503,12 @@ mod tests {
         Ctx::new(crate::store::Store::open(dir.join("store")).await.unwrap())
     }
 
-    async fn add_site(ctx: &Ctx, id: &str, site: Option<&str>, strategy: Option<&str>) -> anyhow::Result<SourceReport> {
+    async fn add_site(
+        ctx: &Ctx,
+        id: &str,
+        site: Option<&str>,
+        strategy: Option<&str>,
+    ) -> anyhow::Result<SourceReport> {
         add(
             ctx,
             AddArgs {
@@ -519,7 +530,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = empty_store(dir.path()).await;
 
-        match add_site(&ctx, "tampa", Some("https://www.tampa.gov"), None).await.unwrap() {
+        match add_site(&ctx, "tampa", Some("https://www.tampa.gov"), None)
+            .await
+            .unwrap()
+        {
             SourceReport::Add { source, run, .. } => {
                 assert_eq!(source, "tampa");
                 assert!(run.is_none(), "add must not collect without --run");
@@ -527,9 +541,20 @@ mod tests {
             _ => panic!("wrong variant"),
         }
 
-        let defined = Sources::new(&ctx.store).get("tampa").await.unwrap().unwrap();
+        let defined = Sources::new(&ctx.store)
+            .get("tampa")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(defined.site.as_deref(), Some("https://www.tampa.gov"));
-        assert_eq!(ctx.store.statuses(&SourceId::new("tampa").unwrap()).await.unwrap().len(), 0);
+        assert_eq!(
+            ctx.store
+                .statuses(&SourceId::new("tampa").unwrap())
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     /// The key had no writer: `investigate` is documented as writing nothing and `source
@@ -538,10 +563,19 @@ mod tests {
     async fn a_strategy_an_operator_accepted_can_be_pinned_when_the_source_is_added() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = empty_store(dir.path()).await;
-        add_site(&ctx, "hillsclerk", Some("https://publicrec.hillsclerk.com/Civil/"), Some("listing"))
+        add_site(
+            &ctx,
+            "hillsclerk",
+            Some("https://publicrec.hillsclerk.com/Civil/"),
+            Some("listing"),
+        )
+        .await
+        .unwrap();
+        let defined = Sources::new(&ctx.store)
+            .get("hillsclerk")
             .await
+            .unwrap()
             .unwrap();
-        let defined = Sources::new(&ctx.store).get("hillsclerk").await.unwrap().unwrap();
         assert_eq!(defined.strategy.as_deref(), Some("listing"));
     }
 
@@ -555,7 +589,13 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("onbase"), "{err}");
-        assert!(Sources::new(&ctx.store).get("tampa").await.unwrap().is_none());
+        assert!(
+            Sources::new(&ctx.store)
+                .get("tampa")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -571,7 +611,9 @@ mod tests {
     async fn listing_reports_a_defined_source_the_store_has_never_collected() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = empty_store(dir.path()).await;
-        add_site(&ctx, "tampa", Some("https://www.tampa.gov"), None).await.unwrap();
+        add_site(&ctx, "tampa", Some("https://www.tampa.gov"), None)
+            .await
+            .unwrap();
 
         match list(&ctx).await.unwrap() {
             SourceReport::List { sources } => {
@@ -611,8 +653,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = store_with_a_crawled_site(dir.path()).await;
         add_site(&ctx, "hillsborough", None, None).await.unwrap();
-        let defined = Sources::new(&ctx.store).get("hillsborough").await.unwrap().unwrap();
-        assert_eq!(defined.site.as_deref(), Some("https://www.hillsboroughcounty.org"));
+        let defined = Sources::new(&ctx.store)
+            .get("hillsborough")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            defined.site.as_deref(),
+            Some("https://www.hillsboroughcounty.org")
+        );
     }
 
     /// The gap the old config left: a source collected by hand was in the store and not in
@@ -621,7 +670,10 @@ mod tests {
     async fn a_source_collected_by_hand_is_listed_after_import() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = store_with_a_crawled_site(dir.path()).await;
-        Sources::new(&ctx.store).import(&crate::config::Config::default()).await.unwrap();
+        Sources::new(&ctx.store)
+            .import(&crate::config::Config::default())
+            .await
+            .unwrap();
 
         match list(&ctx).await.unwrap() {
             SourceReport::List { sources } => {
@@ -639,7 +691,10 @@ mod tests {
     async fn listing_counts_what_centinel_list_counts() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = store_with_a_crawled_site(dir.path()).await;
-        Sources::new(&ctx.store).import(&crate::config::Config::default()).await.unwrap();
+        Sources::new(&ctx.store)
+            .import(&crate::config::Config::default())
+            .await
+            .unwrap();
         let id = SourceId::new("hillsborough").unwrap();
 
         async fn counts(ctx: &Ctx) -> (usize, usize) {
@@ -679,11 +734,22 @@ mod tests {
     async fn disabling_leaves_a_source_out_of_a_bare_run_and_enabling_brings_it_back() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = empty_store(dir.path()).await;
-        add_site(&ctx, "tampa", Some("https://www.tampa.gov"), None).await.unwrap();
+        add_site(&ctx, "tampa", Some("https://www.tampa.gov"), None)
+            .await
+            .unwrap();
 
         toggle(&ctx, "tampa", false).await.unwrap();
-        assert!(Sources::new(&ctx.store).selected(&[]).await.unwrap().is_empty());
+        assert!(
+            Sources::new(&ctx.store)
+                .selected(&[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
         toggle(&ctx, "tampa", true).await.unwrap();
-        assert_eq!(Sources::new(&ctx.store).selected(&[]).await.unwrap().len(), 1);
+        assert_eq!(
+            Sources::new(&ctx.store).selected(&[]).await.unwrap().len(),
+            1
+        );
     }
 }

@@ -25,10 +25,10 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use centinel_core::catalog::Sources;
 use centinel_core::journal::{Journal, RunLock, Trigger};
 use centinel_core::op::{Cancel, Ctx, Progress};
@@ -56,7 +56,13 @@ pub fn routes() -> axum::Router<Arc<Ctx>> {
 }
 
 async fn source_op(ctx: &Ctx, action: SourceAction) -> anyhow::Result<SourceReport> {
-    ops::source(ctx, SourceArgs { action }, &Progress::none(), &Cancel::none()).await
+    ops::source(
+        ctx,
+        SourceArgs { action },
+        &Progress::none(),
+        &Cancel::none(),
+    )
+    .await
 }
 
 async fn list(State(ctx): State<Arc<Ctx>>) -> Response {
@@ -146,14 +152,19 @@ async fn rescan_crumbs(State(ctx): State<Arc<Ctx>>, Path(id): Path<String>) -> R
         return workspace_error(error);
     }
     let label = id.clone();
-    spawn_job(&ctx, "crumbs", label, |ctx, _, progress, cancel| async move {
-        let args = CrumbsArgs {
-            source: Some(id),
-            rescan: true,
-            ..Default::default()
-        };
-        ops::crumbs(&ctx, args, &progress, &cancel).await
-    })
+    spawn_job(
+        &ctx,
+        "crumbs",
+        label,
+        |ctx, _, progress, cancel| async move {
+            let args = CrumbsArgs {
+                source: Some(id),
+                rescan: true,
+                ..Default::default()
+            };
+            ops::crumbs(&ctx, args, &progress, &cancel).await
+        },
+    )
 }
 
 #[derive(Deserialize)]
@@ -255,8 +266,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let sources = Sources::new(&store);
-        sources.add(&SourceConfig::site("a", "https://a.gov")).await.unwrap();
-        sources.add(&SourceConfig::site("b", "https://b.gov")).await.unwrap();
+        sources
+            .add(&SourceConfig::site("a", "https://a.gov"))
+            .await
+            .unwrap();
+        sources
+            .add(&SourceConfig::site("b", "https://b.gov"))
+            .await
+            .unwrap();
         sources.set_enabled("b", false).await.unwrap();
         let lane = RunLock::acquire(
             &store,
@@ -282,7 +299,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "{path}");
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
@@ -297,12 +316,25 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|s| (s["id"].as_str().unwrap(), s["collecting"].as_bool().unwrap()))
+            .map(|s| {
+                (
+                    s["id"].as_str().unwrap(),
+                    s["collecting"].as_bool().unwrap(),
+                )
+            })
             .collect();
-        assert_eq!(collecting, [("a", true), ("b", false)], "a bare run skips a disabled source");
+        assert_eq!(
+            collecting,
+            [("a", true), ("b", false)],
+            "a bare run skips a disabled source"
+        );
 
         for row in list["sources"].as_array().unwrap() {
-            let page = get(&app, &format!("/workspace/sources/{}", row["id"].as_str().unwrap())).await;
+            let page = get(
+                &app,
+                &format!("/workspace/sources/{}", row["id"].as_str().unwrap()),
+            )
+            .await;
             assert_eq!(&page["source"], row);
         }
     }

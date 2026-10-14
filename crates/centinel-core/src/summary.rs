@@ -57,13 +57,14 @@ impl Summary {
     /// Folds a replay into its summary, stamped with the log sizes it was read from.
     pub fn of(replay: &Replay, log: BTreeMap<String, u64>) -> Self {
         let observed: Vec<&str> = replay.observed().into_iter().collect();
-        let claimed_hosts = match crate::sources::channel::claims(replay.discovery_method(), &observed) {
-            true => BTreeSet::new(),
-            false => observed
-                .iter()
-                .filter_map(|key| crate::crumbs::host_of(key))
-                .collect(),
-        };
+        let claimed_hosts =
+            match crate::sources::channel::claims(replay.discovery_method(), &observed) {
+                true => BTreeSet::new(),
+                false => observed
+                    .iter()
+                    .filter_map(|key| crate::crumbs::host_of(key))
+                    .collect(),
+            };
         let mut liveness: BTreeMap<String, usize> = BTreeMap::new();
         for status in replay.statuses().values() {
             *liveness.entry(status.state.to_string()).or_default() += 1;
@@ -167,7 +168,10 @@ mod tests {
                 &LogRecord::DiscoveryRun(DiscoveryRun {
                     source: id.clone(),
                     at: jiff::Timestamp::now(),
-                    resources: addresses.iter().map(|a| Resource::new(id.clone(), *a)).collect(),
+                    resources: addresses
+                        .iter()
+                        .map(|a| Resource::new(id.clone(), *a))
+                        .collect(),
                     method: "sitemap".into(),
                 }),
             )
@@ -197,16 +201,28 @@ mod tests {
 
         let summaries = Summaries::new(&store);
         let first = summaries.get(&id).await.unwrap();
-        assert_eq!((first.resources, first.observations, first.live()), (2, 1, 1));
+        assert_eq!(
+            (first.resources, first.observations, first.live()),
+            (2, 1, 1)
+        );
         assert_eq!(first.claimed_hosts, BTreeSet::from(["x.gov".to_string()]));
-        assert!(store.summary_path(&id).exists(), "written down for the next reader");
+        assert!(
+            store.summary_path(&id).exists(),
+            "written down for the next reader"
+        );
 
         // Observed again: one more observation, the same address.
         observe(&store, &id, "https://x.gov/a").await;
         observe(&store, &id, "https://x.gov/c").await;
         let second = summaries.get(&id).await.unwrap();
         assert_eq!((second.resources, second.observations), (3, 3));
-        assert_eq!(second, Summary::of(&store.replay(&id).await.unwrap(), store.log_sizes(&id).await.unwrap()));
+        assert_eq!(
+            second,
+            Summary::of(
+                &store.replay(&id).await.unwrap(),
+                store.log_sizes(&id).await.unwrap()
+            )
+        );
     }
 
     /// A summary on disk is only trusted while the log it names is the log on disk. A
@@ -222,10 +238,18 @@ mod tests {
         let mut forged: Summary = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         forged.resources = 999;
         std::fs::write(&path, serde_json::to_vec(&forged).unwrap()).unwrap();
-        assert_eq!(summaries.get(&id).await.unwrap().resources, 999, "the sizes match, so it is trusted");
+        assert_eq!(
+            summaries.get(&id).await.unwrap().resources,
+            999,
+            "the sizes match, so it is trusted"
+        );
 
         std::fs::write(&path, b"not json").unwrap();
-        assert_eq!(summaries.get(&id).await.unwrap().resources, 1, "unreadable means rebuilt");
+        assert_eq!(
+            summaries.get(&id).await.unwrap().resources,
+            1,
+            "unreadable means rebuilt"
+        );
     }
 
     /// Deleting `summaries/` loses nothing: it is derived, and the next read rebuilds it.

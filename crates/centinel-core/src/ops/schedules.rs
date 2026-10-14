@@ -559,7 +559,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         crate::catalog::Sources::new(&store)
-            .add(&crate::config::SourceConfig::site("tampa", "https://tampa.gov"))
+            .add(&crate::config::SourceConfig::site(
+                "tampa",
+                "https://tampa.gov",
+            ))
             .await
             .unwrap();
         (dir, Ctx::new(store))
@@ -850,7 +853,13 @@ mod tests {
         let tampa = history(&ctx, ask("tampa")).await.unwrap();
         assert_eq!(tampa.attempts.len(), 1);
         assert_eq!(tampa.attempts[0].run_id, "2026-08-01T03:00:00Z");
-        assert!(history(&ctx, ask("pinellas")).await.unwrap().attempts.is_empty());
+        assert!(
+            history(&ctx, ask("pinellas"))
+                .await
+                .unwrap()
+                .attempts
+                .is_empty()
+        );
     }
 
     /// The handle rule: what `history` prints, `history --run` takes back, by prefix.

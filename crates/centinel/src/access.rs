@@ -134,9 +134,13 @@ mod tests {
             let refused = send(method, path, "https://evil.example").await.unwrap();
             assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{method} {path}");
         }
-        let own = send("PUT", "/workspace/questions", "http://127.0.0.1:8787").await.unwrap();
+        let own = send("PUT", "/workspace/questions", "http://127.0.0.1:8787")
+            .await
+            .unwrap();
         assert_eq!(own.status(), StatusCode::OK);
-        let read = send("GET", "/workspace/questions", "https://evil.example").await.unwrap();
+        let read = send("GET", "/workspace/questions", "https://evil.example")
+            .await
+            .unwrap();
         assert_eq!(read.status(), StatusCode::OK, "a read is not a write");
     }
 

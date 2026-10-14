@@ -546,7 +546,10 @@ mod tests {
         let store = Store::open(store_dir.path()).await.unwrap();
         // The source the schedules here name, defined where the scheduler now looks.
         centinel_core::catalog::Sources::new(&store)
-            .add(&centinel_core::config::SourceConfig::site("tampa", "https://tampa.gov"))
+            .add(&centinel_core::config::SourceConfig::site(
+                "tampa",
+                "https://tampa.gov",
+            ))
             .await
             .unwrap();
         let ctx = Arc::new(Ctx::new(store));
@@ -559,7 +562,8 @@ mod tests {
         )
         .unwrap();
 
-        let s = Scheduler::new(ctx, Some(&path.display().to_string())).await
+        let s = Scheduler::new(ctx, Some(&path.display().to_string()))
+            .await
             .unwrap();
         (store_dir, config_dir, s)
     }
@@ -580,7 +584,8 @@ mod tests {
         )
         .unwrap();
 
-        let err = Scheduler::new(ctx, Some(&path.display().to_string())).await
+        let err = Scheduler::new(ctx, Some(&path.display().to_string()))
+            .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("refusing to serve"), "{err}");
@@ -588,8 +593,9 @@ mod tests {
         // of twenty blocks is the broken one.
         let full = format!(
             "{:#}",
-            Scheduler::new(ctx2, Some(&path.display().to_string())).await
-            .unwrap_err()
+            Scheduler::new(ctx2, Some(&path.display().to_string()))
+                .await
+                .unwrap_err()
         );
         assert!(full.contains("orlando"), "{full}");
     }
@@ -847,7 +853,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut sched = Scheduler::new(ctx, Some(&path.display().to_string())).await
+        let mut sched = Scheduler::new(ctx, Some(&path.display().to_string()))
+            .await
             .unwrap();
         assert_eq!(sched.schedules().len(), 1);
 

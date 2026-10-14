@@ -562,10 +562,19 @@ mod tests {
     fn a_holder_covers_what_its_run_is_walking() {
         let bare = holder(None);
         assert!(bare.covers("tampa", true));
-        assert!(!bare.covers("tampa", false), "a bare run skips a disabled source");
+        assert!(
+            !bare.covers("tampa", false),
+            "a bare run skips a disabled source"
+        );
 
-        let named = Holder { sources: vec!["tampa".into()], ..holder(None) };
-        assert!(named.covers("tampa", false), "naming a disabled source runs it");
+        let named = Holder {
+            sources: vec!["tampa".into()],
+            ..holder(None)
+        };
+        assert!(
+            named.covers("tampa", false),
+            "naming a disabled source runs it"
+        );
         assert!(!named.covers("pinellas", true));
     }
 
@@ -573,11 +582,17 @@ mod tests {
     /// a run of them; a run over every source answers only for the ones its report reached.
     #[test]
     fn an_attempt_covers_the_sources_it_was_started_for() {
-        let named = Attempt { sources: vec!["tampa".into()], ..attempt("a", None, Outcome::Interrupted) };
+        let named = Attempt {
+            sources: vec!["tampa".into()],
+            ..attempt("a", None, Outcome::Interrupted)
+        };
         assert!(named.covers("tampa"));
         assert!(!named.covers("hillsborough"));
         let everything = attempt("b", Some("nightly"), Outcome::Interrupted);
-        assert!(!everything.covers("tampa"), "no arguments and no report says nothing");
+        assert!(
+            !everything.covers("tampa"),
+            "no arguments and no report says nothing"
+        );
     }
 
     fn attempt(id: &str, schedule: Option<&str>, outcome: Outcome) -> Attempt {

@@ -62,14 +62,19 @@ async fn start(State(ctx): State<Arc<Ctx>>, Json(body): Json<Start>) -> Response
         Ok(url) if matches!(url.scheme(), "http" | "https") => url,
         _ => return workspace_error(anyhow::anyhow!("`{}` is not an http(s) address", body.url)),
     };
-    spawn_job(&ctx, KIND, url.to_string(), |ctx, id, progress, cancel| async move {
-        let dir = ctx.store.investigation_dir(&id);
-        let result = investigate(&ctx, url.as_str(), &dir, &progress, &cancel).await;
-        if let Err(error) = &result {
-            tracing::warn!(address = %url, error = %format!("{error:#}"), "investigation failed");
-        }
-        result
-    })
+    spawn_job(
+        &ctx,
+        KIND,
+        url.to_string(),
+        |ctx, id, progress, cancel| async move {
+            let dir = ctx.store.investigation_dir(&id);
+            let result = investigate(&ctx, url.as_str(), &dir, &progress, &cancel).await;
+            if let Err(error) = &result {
+                tracing::warn!(address = %url, error = %format!("{error:#}"), "investigation failed");
+            }
+            result
+        },
+    )
 }
 
 async fn investigate(
@@ -119,7 +124,10 @@ async fn investigate(
         "check": as_outcome(check),
     });
     // Atomic, because the page polls for this file and must not read half of it.
-    write_atomically(&dir.join("report.json"), serde_json::to_vec_pretty(&report)?)?;
+    write_atomically(
+        &dir.join("report.json"),
+        serde_json::to_vec_pretty(&report)?,
+    )?;
     Ok(())
 }
 
@@ -221,7 +229,9 @@ mod tests {
             .header("content-type", "application/json")
             .header("host", "127.0.0.1:8787")
             .header("origin", "https://evil.example")
-            .body(Body::from(json!({ "url": "https://example.gov/" }).to_string()))
+            .body(Body::from(
+                json!({ "url": "https://example.gov/" }).to_string(),
+            ))
             .unwrap();
         let resp = app.oneshot(request).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -259,7 +269,11 @@ mod tests {
 
         let filed = Store::at(dir.path()).investigation_dir("investigate-1");
         std::fs::create_dir_all(&filed).unwrap();
-        std::fs::write(filed.join("report.json"), br#"{"address":"https://x.gov/"}"#).unwrap();
+        std::fs::write(
+            filed.join("report.json"),
+            br#"{"address":"https://x.gov/"}"#,
+        )
+        .unwrap();
         let found = app
             .clone()
             .oneshot(get("/workspace/investigations/investigate-1"))
