@@ -683,8 +683,8 @@ impl SourceConfig {
         self.acquisition()?;
         if let Some(rps) = self.rps {
             anyhow::ensure!(
-                rps > 0.0,
-                "source `{}`: rps must be greater than zero",
+                rps.is_finite() && rps > 0.0,
+                "source `{}`: rps must be finite and greater than zero",
                 self.id
             );
         }

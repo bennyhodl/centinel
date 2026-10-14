@@ -73,7 +73,8 @@ pub use schedules::{
 };
 pub use search::{AlsoAt, SearchArgs, SearchReport, SearchResult, search};
 pub use source::{
-    AddArgs, IdArgs, ListedSource, SourceAction, SourceArgs, SourceReport, listed, source,
+    AddArgs, IdArgs, ListedSource, SourceAction, SourceArgs, SourceReport, SourceUpdateArgs,
+    listed, source,
 };
 pub use status::{SourceCount, StatusArgs, StatusReport, status};
 pub use transcribe::{

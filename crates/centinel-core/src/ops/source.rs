@@ -15,7 +15,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::Sources;
+use crate::catalog::{SourceSettings, Sources};
 use crate::config::SourceConfig;
 use crate::prelude::*;
 use crate::sources;
@@ -33,6 +33,9 @@ pub struct SourceArgs {
 pub enum SourceAction {
     /// Define a source in the store.
     Add(AddArgs),
+    /// Replace collection settings. Omitted overrides inherit defaults; omitted filters
+    /// collect every URL. The id, address, enabled state and yt-dlp arguments stay intact.
+    Update(SourceUpdateArgs),
     /// List the store's sources.
     List,
     /// Include a source in a bare `centinel run` again.
@@ -99,6 +102,15 @@ pub struct IdArgs {
     pub id: String,
 }
 
+#[derive(Clone, Debug, Default, clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct SourceUpdateArgs {
+    /// Existing source id.
+    pub id: String,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub settings: SourceSettings,
+}
+
 /// One source the store defines.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ListedSource {
@@ -155,9 +167,12 @@ pub enum SourceReport {
         source: String,
         enabled: bool,
     },
+    Update {
+        source: String,
+    },
 }
 
-/// Add, list, enable and disable the sources `centinel run` walks.
+/// Define, edit, list, enable and disable the sources `centinel run` walks.
 #[op(long_running, reach = "operator", group = "pipeline")]
 pub async fn source(
     ctx: &Ctx,
@@ -167,6 +182,10 @@ pub async fn source(
 ) -> anyhow::Result<SourceReport> {
     match args.action {
         SourceAction::Add(a) => add(ctx, a, progress, cancel).await,
+        SourceAction::Update(a) => {
+            let source = Sources::new(&ctx.store).update(&a.id, a.settings).await?;
+            Ok(SourceReport::Update { source: source.id })
+        }
         SourceAction::List => list(ctx).await,
         SourceAction::Enable(a) => toggle(ctx, &a.id, true).await,
         SourceAction::Disable(a) => toggle(ctx, &a.id, false).await,
@@ -325,6 +344,10 @@ async fn toggle(ctx: &Ctx, id: &str, enabled: bool) -> anyhow::Result<SourceRepo
 impl Render for SourceReport {
     fn render(&self, p: &mut Painter<'_>) -> std::io::Result<()> {
         match self {
+            Self::Update { source } => p.marked(
+                Mark::Ok,
+                format!("{} collection settings saved", p.paint(source, Ink::Bold)),
+            ),
             Self::Add {
                 source,
                 kind,

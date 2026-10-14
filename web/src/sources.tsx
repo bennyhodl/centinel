@@ -4,6 +4,7 @@ import { Link } from '@tanstack/react-router'
 import { Ellipsis, Play, Plus, Search } from 'lucide-react'
 import { api, type JobState, type LaneHolder, type ListedSource, type NewSource, type RunAttempt, type SourceDetail } from './api'
 import { AddSource } from './add-source'
+import { SourceSettings } from './source-settings'
 import { InvestigateDialog, useInvestigate } from './investigate'
 import { queries } from './queries'
 import { Bar, LogLine, StopJobButton as StopButton, useJobs, useOpenJob } from './jobs'
@@ -177,6 +178,7 @@ export function SourcePage({ id }: { id: string }) {
 }
 
 function SourceView({ id, detail }: { id: string; detail: SourceDetail }) {
+  const [settings, setSettings] = useState(false)
   const definition = detail.definition
   const { source, summary } = detail
   const target = source.target
@@ -190,6 +192,7 @@ function SourceView({ id, detail }: { id: string; detail: SourceDetail }) {
     <BackToSources />
     <PageHeader eyebrow={<span className="inline-flex items-center gap-2"><SourceIcon source={id} size={16} />{source.kind === 'channel' ? 'Channel' : 'Website'}</span>} title={id} detail={target}>
       <div className="flex shrink-0 flex-wrap gap-2">
+        <Button variant="outline" onClick={() => setSettings(true)}>Settings</Button>
         <Button variant="outline" disabled={enable.isPending} onClick={() => enable.mutate(!source.enabled)}>{source.enabled ? 'Disable' : 'Enable'}</Button>
         <SourceAction source={source} action={state === 'collecting' ? 'stop' : runAction(source)} lane={detail.running} />
         <DropdownMenu>
@@ -225,6 +228,10 @@ function SourceView({ id, detail }: { id: string; detail: SourceDetail }) {
           ['Links off-site', <CrumbsFact key="crumbs" id={id} />],
           ...(definition.rps ? [['Requests a second', String(definition.rps)] as [string, string]] : []),
           ...(definition.matches?.length ? [['Only addresses containing', definition.matches.join(', ')] as [string, string]] : []),
+          ...(source.kind === 'channel' ? [
+            ['Language', definition.lang ?? `default (${detail.settings_options.defaults.lang})`] as [string, string],
+            ['Audio fallback', definition.audio_if_no_captions === false ? 'never' : 'when captions are missing'] as [string, string],
+          ] : []),
         ]} />
       </section>
 
@@ -246,6 +253,7 @@ function SourceView({ id, detail }: { id: string; detail: SourceDetail }) {
 
       {state === 'collecting' && job && <RunStrip job={job} />}
     </div>
+    {settings && <SourceSettings definition={definition} options={detail.settings_options} onClose={() => setSettings(false)} />}
   </>
 }
 

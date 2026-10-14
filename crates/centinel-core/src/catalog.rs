@@ -29,6 +29,31 @@ use crate::config::{Config, ScheduleConfig, SourceConfig};
 use crate::domain::SourceId;
 use crate::store::Store;
 
+/// Editable collection settings. Replacing them never changes acquisition identity or
+/// operator-only yt-dlp arguments. Omitted overrides inherit the pipeline's defaults.
+#[derive(
+    Clone, Debug, Default, clap::Args, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSettings {
+    /// Requests per second. Omit to inherit [defaults].
+    #[arg(long)]
+    pub rps: Option<f64>,
+    /// Only collect URLs containing one of these substrings. Repeatable; omit for all.
+    #[arg(long = "match")]
+    #[serde(default)]
+    pub matches: Vec<String>,
+    /// Website discovery strategy. Omit to recognise it on each run.
+    #[arg(long)]
+    pub strategy: Option<String>,
+    /// Channel caption and transcription language. Omit to inherit [defaults].
+    #[arg(long)]
+    pub lang: Option<String>,
+    /// Fetch audio for videos without captions. Omit for the channel default (true).
+    #[arg(long, action = clap::ArgAction::Set)]
+    pub audio_if_no_captions: Option<bool>,
+}
+
 /// The store's sources. Cheap to make; holds nothing but the store.
 pub struct Sources<'a> {
     store: &'a Store,
@@ -145,6 +170,35 @@ impl<'a> Sources<'a> {
         Ok(source)
     }
 
+    /// Replaces collection settings, preserving every other field of the definition.
+    /// All validation happens before the atomic write, so a rejected edit changes nothing.
+    pub async fn update(&self, id: &str, settings: SourceSettings) -> anyhow::Result<SourceConfig> {
+        let mut source = self.require(id).await?;
+        if let Some(name) = &settings.strategy {
+            crate::strategies::crawl::by_name(name)?;
+        }
+        anyhow::ensure!(
+            settings
+                .matches
+                .iter()
+                .all(|s| !s.trim().is_empty() && !s.chars().any(char::is_control)),
+            "URL filters must be nonempty substrings without control characters"
+        );
+        if let Some(lang) = &settings.lang {
+            anyhow::ensure!(
+                !lang.is_empty() && lang.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                "language must be a language code such as en or en-US"
+            );
+        }
+        source.rps = settings.rps;
+        source.matches = settings.matches;
+        source.strategy = settings.strategy;
+        source.lang = settings.lang;
+        source.audio_if_no_captions = settings.audio_if_no_captions;
+        self.write(&SourceId::new(source.id.clone())?, &source)?;
+        Ok(source)
+    }
+
     /// The first source this schedule names that the store does not define.
     pub async fn missing_from(&self, schedule: &ScheduleConfig) -> anyhow::Result<Option<String>> {
         for id in &schedule.sources {
@@ -230,6 +284,99 @@ impl<'a> Sources<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejected_settings_leave_the_definition_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let sources = Sources::new(&store);
+        let original = SourceConfig {
+            rps: Some(0.5),
+            matches: vec!["/agenda/".into()],
+            strategy: Some("listing".into()),
+            ..SourceConfig::site("city", "https://city.gov")
+        };
+        sources.add(&original).await.unwrap();
+        let path = store.definition_path(&SourceId::new("city").unwrap());
+        let before = std::fs::read(&path).unwrap();
+        let invalid = [
+            (
+                SourceSettings {
+                    rps: Some(0.0),
+                    ..Default::default()
+                },
+                "rps",
+            ),
+            (
+                SourceSettings {
+                    rps: Some(-1.0),
+                    ..Default::default()
+                },
+                "rps",
+            ),
+            (
+                SourceSettings {
+                    rps: Some(f64::INFINITY),
+                    ..Default::default()
+                },
+                "finite",
+            ),
+            (
+                SourceSettings {
+                    rps: Some(f64::NAN),
+                    ..Default::default()
+                },
+                "finite",
+            ),
+            (
+                SourceSettings {
+                    matches: vec![" ".into()],
+                    ..Default::default()
+                },
+                "filters",
+            ),
+            (
+                SourceSettings {
+                    matches: vec!["agenda\nminutes".into()],
+                    ..Default::default()
+                },
+                "filters",
+            ),
+            (
+                SourceSettings {
+                    strategy: Some("not-a-strategy".into()),
+                    ..Default::default()
+                },
+                "strategy",
+            ),
+            (
+                SourceSettings {
+                    lang: Some("../../tmp".into()),
+                    ..Default::default()
+                },
+                "language",
+            ),
+            (
+                SourceSettings {
+                    lang: Some("".into()),
+                    ..Default::default()
+                },
+                "language",
+            ),
+        ];
+        for (settings, message) in invalid {
+            let error = sources.update("city", settings).await.unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        assert!(
+            sources
+                .update("missing", SourceSettings::default())
+                .await
+                .is_err()
+        );
+        assert_eq!(sources.list().await.unwrap().len(), 1);
+    }
 
     #[tokio::test]
     async fn a_source_added_is_listed_and_survives_a_reopen() {

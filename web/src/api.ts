@@ -513,6 +513,17 @@ export type SourceDefinition = {
   strategy?: string
 }
 
+/** Replaces editable settings. Null removes an override; other definition fields stay intact. */
+export type SourceSettings = {
+  rps: number | null
+  matches: string[]
+  strategy: string | null
+  lang: string | null
+  audio_if_no_captions: boolean | null
+}
+
+export type SourceSettingsOptions = { strategies: string[]; defaults: { rps: number; lang: string } }
+
 export type SourceProblem = { natural_key: string; state: string; since: string; consecutive_failures: number; detail?: string }
 
 /** What the log says of a source: `centinel list`, one row. */
@@ -546,7 +557,7 @@ export type CollectionHistoryFilters = { source: string; schedule: string; outco
 export type CollectionHistoryPage = { attempts: RunAttempt[]; total: number; page: number; page_size: number; running: LaneHolder | null }
 
 /** One source: its row as the list has it, its definition, what its log says, its runs. */
-export type SourceDetail = { source: ListedSource; definition: SourceDefinition; summary?: SourceSummary; runs: RunAttempt[]; running: LaneHolder | null }
+export type SourceDetail = { source: ListedSource; definition: SourceDefinition; settings_options: SourceSettingsOptions; summary?: SourceSummary; runs: RunAttempt[]; running: LaneHolder | null }
 
 export type CrumbStanding = 'open' | 'ignored' | 'promoted'
 export type Crumb = { host: string; links: number; pages: number; example: string; standing?: CrumbStanding }
@@ -777,6 +788,7 @@ export const api = {
   /** Asks a stoppable job to stop at its next item. A run so stopped is journaled `interrupted`. */
   stopJob: (id: string) => request<{ stopped: string }>(`/workspace/jobs/${encodeURIComponent(id)}/stop`, { method: 'POST' }),
   addSource: (source: NewSource) => request<unknown>('/workspace/sources', { method: 'POST', body: JSON.stringify(source) }),
+  updateSource: (id: string, settings: SourceSettings) => request<{ action: 'update'; source: string }>(`/workspace/sources/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(settings) }),
   setSourceEnabled: (id: string, enabled: boolean) => request<unknown>(`/workspace/sources/${encodeURIComponent(id)}/enabled`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   /** Starts a run in the store's one lane. `run_id` is the journal's handle and the job's id, so the page opens the drawer on it. */
   runSource: (id: string, body: { skip?: string[]; limit?: number; refresh?: boolean } = {}) => request<{ run_id: string }>(`/workspace/sources/${encodeURIComponent(id)}/run`, { method: 'POST', body: JSON.stringify(body) }),

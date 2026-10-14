@@ -5,6 +5,7 @@
 //! | `GET /workspace/sources` | every source (and whether a run is collecting it), and the run holding the lane if one is |
 //! | `POST /workspace/sources` | define a source (`source add`'s arguments) |
 //! | `GET /workspace/sources/{id}` | its definition, its list row, its log's account of it, its runs |
+//! | `PUT /workspace/sources/{id}` | replace editable collection settings; identity and yt-dlp arguments stay intact |
 //! | `GET /workspace/sources/{id}/crumbs` | the off-host links its pages carry, from the ledger |
 //! | `POST /workspace/sources/{id}/crumbs/rescan` | write the ledger again from the blobs, as a job |
 //! | `POST /workspace/sources/{id}/enabled` | `{ "enabled": bool }` |
@@ -30,7 +31,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use centinel_core::catalog::Sources;
+use centinel_core::catalog::{SourceSettings, Sources};
 use centinel_core::journal::{Journal, RunLock, Trigger};
 use centinel_core::op::{Cancel, Ctx, Progress};
 use centinel_core::ops::{
@@ -49,7 +50,7 @@ pub fn routes() -> axum::Router<Arc<Ctx>> {
     use axum::routing::{get, post};
     axum::Router::new()
         .route("/workspace/sources", get(list).post(add))
-        .route("/workspace/sources/{id}", get(detail))
+        .route("/workspace/sources/{id}", get(detail).put(update))
         .route("/workspace/sources/{id}/crumbs", get(crumbs))
         .route("/workspace/sources/{id}/crumbs/rescan", post(rescan_crumbs))
         .route("/workspace/sources/{id}/enabled", post(enabled))
@@ -89,6 +90,7 @@ async fn add(State(ctx): State<Arc<Ctx>>, Json(args): Json<AddArgs>) -> Response
 async fn detail(State(ctx): State<Arc<Ctx>>, Path(id): Path<String>) -> Response {
     let result = async {
         let definition = Sources::new(&ctx.store).require(&id).await?;
+        let defaults = centinel_core::config::Config::load()?.defaults;
         let summary = ops::list(
             &ctx,
             ListArgs {
@@ -112,6 +114,10 @@ async fn detail(State(ctx): State<Arc<Ctx>>, Path(id): Path<String>) -> Response
         runs.truncate(RUNS_SHOWN);
         anyhow::Ok(json!({
             "definition": definition,
+            "settings_options": {
+                "strategies": centinel_core::strategies::crawl::all().iter().map(|s| s.name).collect::<Vec<_>>(),
+                "defaults": { "rps": defaults.rps, "lang": defaults.lang },
+            },
             // The row the list shows for it, built by the same function.
             "source": ops::listed(&ctx, Some(&id)).await?.pop(),
             "summary": summary,
@@ -122,6 +128,22 @@ async fn detail(State(ctx): State<Arc<Ctx>>, Path(id): Path<String>) -> Response
     .await;
     match result {
         Ok(value) => Json(value).into_response(),
+        Err(error) => workspace_error(error),
+    }
+}
+
+async fn update(
+    State(ctx): State<Arc<Ctx>>,
+    Path(id): Path<String>,
+    Json(settings): Json<SourceSettings>,
+) -> Response {
+    match source_op(
+        &ctx,
+        SourceAction::Update(ops::SourceUpdateArgs { id, settings }),
+    )
+    .await
+    {
+        Ok(report) => Json(report).into_response(),
         Err(error) => workspace_error(error),
     }
 }
@@ -255,6 +277,137 @@ mod tests {
 
     use super::*;
 
+    async fn put(app: &axum::Router, id: &str, body: Value, origin: &str) -> Response {
+        app.clone()
+            .oneshot(
+                Request::put(format!("/workspace/sources/{id}"))
+                    .header("host", "localhost:8787")
+                    .header("origin", origin)
+                    .header("content-type", "application/json")
+                    .header("x-centinel-secret", "secret")
+                    .header("x-centinel-role", "admin")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn settings_save_and_clear_through_the_admin_router_and_survive_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let original = SourceConfig {
+            enabled: Some(false),
+            yt_dlp_args: vec!["--cookies-from-browser=brave".into()],
+            ..SourceConfig::channel("council", "https://www.youtube.com/@Council")
+        };
+        Sources::new(&store).add(&original).await.unwrap();
+        let app = crate::http::router(Arc::new(Ctx::new(store))).layer(
+            axum::middleware::from_fn_with_state("secret".to_string(), crate::access::authenticate),
+        );
+        let settings = json!({
+            "rps": 0.25, "matches": ["watch?v="], "strategy": null,
+            "lang": "es", "audio_if_no_captions": false,
+        });
+        let saved = put(&app, "council", settings, "http://localhost:8787").await;
+        assert_eq!(saved.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(saved.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let report: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(report, json!({"action": "update", "source": "council"}));
+
+        let page = get(&app, "/workspace/sources/council").await;
+        let definition = &page["definition"];
+        assert_eq!(definition["rps"], 0.25);
+        assert_eq!(definition["matches"], json!(["watch?v="]));
+        assert_eq!(definition["lang"], "es");
+        assert_eq!(definition["audio_if_no_captions"], false);
+        assert_eq!(definition["id"], "council");
+        assert_eq!(definition["channel"], "https://www.youtube.com/@Council");
+        assert_eq!(definition["enabled"], false);
+        assert_eq!(
+            definition["yt_dlp_args"],
+            json!(["--cookies-from-browser=brave"])
+        );
+        assert!(
+            page["settings_options"]["strategies"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("listing"))
+        );
+
+        let reopened = Store::open(dir.path()).await.unwrap();
+        let read = Sources::new(&reopened).require("council").await.unwrap();
+        assert_eq!(read.lang.as_deref(), Some("es"));
+        assert_eq!(read.audio_if_no_captions, Some(false));
+        assert_eq!(read.rps, Some(0.25));
+        let cleared = put(
+            &app,
+            "council",
+            json!({
+                "rps": null, "matches": [], "strategy": null,
+                "lang": null, "audio_if_no_captions": null,
+            }),
+            "http://localhost:8787",
+        )
+        .await;
+        assert_eq!(cleared.status(), StatusCode::OK);
+        let cleared = Sources::new(&reopened).require("council").await.unwrap();
+        assert_eq!(
+            serde_json::to_value(cleared).unwrap(),
+            serde_json::to_value(original).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_reject_identity_and_process_options_and_require_admin_and_same_origin() {
+        let (dir, app, _lane) = app().await;
+        let before = get(&app, "/workspace/sources/a").await["definition"].clone();
+        for (key, value) in [
+            ("id", json!("renamed")),
+            ("site", json!("https://elsewhere.gov")),
+            ("channel", json!("https://www.youtube.com/@Other")),
+            ("enabled", json!(false)),
+            ("yt_dlp_args", json!(["--exec=touch /tmp/unsafe"])),
+        ] {
+            let mut body = json!({"matches": []});
+            body[key] = value;
+            assert_eq!(
+                put(&app, "a", body, "http://localhost:8787").await.status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
+        assert_eq!(
+            put(&app, "a", json!({"matches": []}), "http://elsewhere.test")
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let store = Store::open(dir.path()).await.unwrap();
+        let reader = crate::http::router(Arc::new(Ctx::new(store))).layer(
+            axum::middleware::from_fn_with_state("secret".to_string(), crate::access::authenticate),
+        );
+        let request = Request::put("/workspace/sources/a")
+            .header("host", "localhost:8787")
+            .header("origin", "http://localhost:8787")
+            .header("content-type", "application/json")
+            .header("x-centinel-secret", "secret")
+            .header("x-centinel-role", "user")
+            .body(Body::from("{\"matches\":[]}"))
+            .unwrap();
+        assert_eq!(
+            reader.oneshot(request).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            get(&app, "/workspace/sources/a").await["definition"],
+            before
+        );
+    }
+
     /// Two sources, `b` disabled, behind the admin router, with a run over every enabled
     /// source holding the lane.
     async fn app() -> (tempfile::TempDir, axum::Router, RunLock) {
@@ -291,7 +444,13 @@ mod tests {
     async fn get(app: &axum::Router, path: &str) -> Value {
         let resp = app
             .clone()
-            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get(path)
+                    .header("x-centinel-secret", "secret")
+                    .header("x-centinel-role", "admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "{path}");
