@@ -107,6 +107,16 @@ pub async fn schedules(ctx: &Ctx, args: SchedulesArgs) -> anyhow::Result<Schedul
             .await?;
     }
 
+    let mut report = schedules_for(ctx, &config).await?;
+    report.config = path.map(|p| p.display().to_string());
+    Ok(report)
+}
+
+/// Reports a server's active snapshot without looking up another config file.
+pub async fn schedules_for(
+    ctx: &Ctx,
+    config: &crate::config::Config,
+) -> anyhow::Result<SchedulesReport> {
     let journal = Journal::new(&ctx.store);
     let attempts = journal.read().await?;
     let running = RunLock::current(&ctx.store);
@@ -193,7 +203,7 @@ pub async fn schedules(ctx: &Ctx, args: SchedulesArgs) -> anyhow::Result<Schedul
     }
 
     Ok(SchedulesReport {
-        config: path.map(|p| p.display().to_string()),
+        config: None,
         schedules: out,
         running,
     })

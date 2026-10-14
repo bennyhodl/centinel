@@ -88,6 +88,20 @@ impl Lane {
         self.started.to_string()
     }
 
+    /// Starts a web collection on its own runtime. The lane already owns its job.
+    pub fn spawn(self) -> anyhow::Result<String> {
+        let run_id = self.run_id();
+        std::thread::Builder::new()
+            .name(format!("run-{run_id}"))
+            .spawn(move || match tokio::runtime::Runtime::new() {
+                Ok(runtime) => {
+                    runtime.block_on(self.run(None, Cancel::none()));
+                }
+                Err(error) => tracing::error!(%error, "could not start a runtime for a web run"),
+            })?;
+        Ok(run_id)
+    }
+
     /// Runs, releases the lane, and records the attempt. Progress goes to `progress` when
     /// somebody is watching, else to the log. `shutdown` is the caller's own reason to
     /// stop — the scheduler's, on `SIGTERM` — and is forwarded to the job's token, so

@@ -14,6 +14,7 @@ mod logging;
 mod mcp;
 mod promote;
 mod schedule;
+mod schedule_control;
 mod service;
 mod tailscale;
 mod web;
@@ -390,10 +391,9 @@ async fn main() -> Result<()> {
 
 /// Serves the read API, and — unless told not to — fires the configured schedules.
 ///
-/// The two are deliberately separate concerns sharing one process: the server *reports* on
-/// the record and never causes it to grow, while the scheduler executes instructions the
-/// operator wrote into `centinel.toml`. Nothing arriving on the socket can reach the
-/// second (`op::Reach`), which is the whole of `docs/SCHEDULING.md` §1.1.
+/// Public ops remain read-only for collection. Browser-session administrators manage
+/// schedules through the workspace, sharing the active config with the scheduler.
+/// Collection still enters through the store's one lane.
 ///
 /// **A broken schedule refuses to start the whole command.** A server that came up happily
 /// and collected nothing would say so nowhere, and the operator would find out weeks later
@@ -407,13 +407,17 @@ async fn serve(ctx: Arc<Ctx>, bind: &str, matches: &clap::ArgMatches) -> Result<
     // Validated and running before anything is bound or published: a schedule that does
     // not parse refuses the command, and nothing that can still fail comes after the
     // tailnet mapping except the publishing itself.
-    let armed = if matches.get_flag("no-schedule") {
+    let config = matches.get_one::<String>("config").map(String::as_str);
+    let (armed, schedules) = if matches.get_flag("no-schedule") {
         tracing::info!("scheduler disabled by --no-schedule");
-        None
+        (
+            None,
+            schedule_control::ScheduleControl::load(config, "disabled by --no-schedule")?,
+        )
     } else {
-        let config = matches.get_one::<String>("config").map(String::as_str);
         let scheduler = schedule::Scheduler::new(Arc::clone(&ctx), config).await?;
         let count = scheduler.schedules().len();
+        let schedules = scheduler.control();
         let (reload_tx, reload_rx) = schedule::ReloadSignal::channel();
         let armed = schedule::spawn(scheduler, reload_rx)?;
         match count {
@@ -424,7 +428,7 @@ async fn serve(ctx: Arc<Ctx>, bind: &str, matches: &clap::ArgMatches) -> Result<
             ),
         }
         install_reload_handler(reload_tx);
-        Some(armed)
+        (Some(armed), schedules)
     };
 
     let listener = http::listen(bind).await?;
@@ -438,7 +442,7 @@ async fn serve(ctx: Arc<Ctx>, bind: &str, matches: &clap::ArgMatches) -> Result<
         None
     };
     let store = ctx.store.clone();
-    let served = http::serve_until(ctx, listener, terminate()).await;
+    let served = http::serve_until_with_schedules(ctx, listener, schedules, terminate()).await;
 
     // Off the tailnet first: it is quick, and a manager stopping this process kills it if
     // the scheduler below takes longer than it allows.

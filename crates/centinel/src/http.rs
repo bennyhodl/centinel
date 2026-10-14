@@ -72,6 +72,7 @@ mod graph;
 mod icons;
 mod investigate;
 mod maintenance;
+mod schedules;
 mod sources;
 mod vectors;
 
@@ -189,6 +190,15 @@ pub async fn serve_until(
     crate::gateway::serve(ctx, listener, shutdown).await
 }
 
+pub async fn serve_until_with_schedules(
+    ctx: Arc<Ctx>,
+    listener: tokio::net::TcpListener,
+    schedules: Arc<crate::schedule_control::ScheduleControl>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    crate::gateway::serve_with_schedules(ctx, listener, schedules, shutdown).await
+}
+
 /// The workspace page and its assets — everything the browser loads before it calls the
 /// API. Start forwards asset requests here over the authenticated private connection.
 pub fn page_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
@@ -199,7 +209,19 @@ pub fn page_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
         .route("/web/assets/{*path}", get(web_asset))
 }
 
+#[cfg(test)]
 pub(crate) fn router(ctx: Arc<Ctx>) -> Router {
+    router_with_schedules(
+        ctx,
+        crate::schedule_control::ScheduleControl::load(None, "disabled by centinel web")
+            .expect("valid config"),
+    )
+}
+
+pub(crate) fn router_with_schedules(
+    ctx: Arc<Ctx>,
+    schedules: Arc<crate::schedule_control::ScheduleControl>,
+) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .merge(page_routes())
@@ -226,6 +248,7 @@ pub(crate) fn router(ctx: Arc<Ctx>) -> Router {
         .route("/workspace/jobs/{id}/stop", post(workspace_stop_job))
         .merge(investigate::routes())
         .merge(sources::routes())
+        .merge(schedules::routes())
         .merge(icons::routes())
         .merge(graph::routes())
         .merge(vectors::routes())
@@ -233,6 +256,7 @@ pub(crate) fn router(ctx: Arc<Ctx>) -> Router {
         .route("/ops/{name}", post(invoke))
         .route("/ops/{name}/stream", post(invoke_streaming))
         .route("/mcp", post(mcp_over_http))
+        .layer(axum::Extension(schedules))
         .layer(axum::middleware::from_fn(
             crate::access::require_same_origin,
         ))

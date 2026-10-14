@@ -638,7 +638,24 @@ export type HostDetail = {
 /** What a refusal or an allow answers with: the ruling as `crumbs ignore` reports it. */
 export type Ruled = { action: 'ruled'; host: string; ruling: 'ignore' | 'allow'; at: string; note?: string; previous?: string }
 
+export type ScheduleDefinition = {
+  id: string; cron: string; tz?: string | null; sources?: string[]; skip?: string[];
+  limit?: number | null; refresh?: boolean; jitter_secs?: number | null;
+  enabled?: boolean | null; catch_up?: boolean | null
+}
+export type ScheduleRow = {
+  definition: ScheduleDefinition
+  status: { id: string; tz: string; enabled: boolean; running: boolean; last_fire?: string; last_outcome?: string; problem?: string }
+  next: string[]
+}
+export type ScheduleList = { schedules: ScheduleRow[]; running: LaneHolder | null; scheduler: { enabled: boolean; disabled_reason: string | null } }
+
 export const api = {
+  schedules: () => request<ScheduleList>('/workspace/schedules'),
+  saveSchedule: (schedule: ScheduleDefinition, creating: boolean) => request<unknown>(creating ? '/workspace/schedules' : `/workspace/schedules/${encodeURIComponent(schedule.id)}`, { method: creating ? 'POST' : 'PUT', body: JSON.stringify(schedule) }),
+  setScheduleEnabled: (id: string, enabled: boolean) => request<unknown>(`/workspace/schedules/${encodeURIComponent(id)}/enabled`, { method: 'POST', body: JSON.stringify({ enabled }) }),
+  removeSchedule: (id: string) => request<unknown>(`/workspace/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  runSchedule: (id: string) => request<{ run_id: string }>(`/workspace/schedules/${encodeURIComponent(id)}/run`, { method: 'POST' }),
   /** The signed-in account, or null when nobody is. */
   account: () => request<{ account: Account | null }>('/api/account').then(value => value.account),
   /** Every account, newest first. The administrator only. */

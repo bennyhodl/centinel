@@ -23,6 +23,7 @@ import { Route as WorkspaceAdminGraphRouteImport } from './routes/_workspace/_ad
 import { Route as WorkspaceAdminMaintenanceRouteImport } from './routes/_workspace/_admin/maintenance'
 import { Route as WorkspaceAdminReviewRouteImport } from './routes/_workspace/_admin/review'
 import { Route as WorkspaceAdminRunsRouteImport } from './routes/_workspace/_admin/runs'
+import { Route as WorkspaceAdminSchedulesRouteImport } from './routes/_workspace/_admin/schedules'
 import { Route as WorkspaceAdminSpendRouteImport } from './routes/_workspace/_admin/spend'
 import { Route as WorkspaceDocsSplatRouteImport } from './routes/_workspace/docs.$'
 import { Route as WorkspaceDocumentShaRouteImport } from './routes/_workspace/document.$sha'
@@ -99,6 +100,11 @@ const WorkspaceAdminRunsRoute = WorkspaceAdminRunsRouteImport.update({
   path: '/runs',
   getParentRoute: () => WorkspaceAdminRoute,
 } as any)
+const WorkspaceAdminSchedulesRoute = WorkspaceAdminSchedulesRouteImport.update({
+  id: '/schedules',
+  path: '/schedules',
+  getParentRoute: () => WorkspaceAdminRoute,
+} as any)
 const WorkspaceAdminSpendRoute = WorkspaceAdminSpendRouteImport.update({
   id: '/spend',
   path: '/spend',
@@ -144,6 +150,7 @@ export interface FileRoutesByFullPath {
   '/maintenance': typeof WorkspaceAdminMaintenanceRoute
   '/review': typeof WorkspaceAdminReviewRoute
   '/runs': typeof WorkspaceAdminRunsRoute
+  '/schedules': typeof WorkspaceAdminSchedulesRoute
   '/spend': typeof WorkspaceAdminSpendRoute
   '/docs/$': typeof WorkspaceDocsSplatRoute
   '/document/$sha': typeof WorkspaceDocumentShaRoute
@@ -163,6 +170,7 @@ export interface FileRoutesByTo {
   '/maintenance': typeof WorkspaceAdminMaintenanceRoute
   '/review': typeof WorkspaceAdminReviewRoute
   '/runs': typeof WorkspaceAdminRunsRoute
+  '/schedules': typeof WorkspaceAdminSchedulesRoute
   '/spend': typeof WorkspaceAdminSpendRoute
   '/docs/$': typeof WorkspaceDocsSplatRoute
   '/document/$sha': typeof WorkspaceDocumentShaRoute
@@ -186,6 +194,7 @@ export interface FileRoutesById {
   '/_workspace/_admin/maintenance': typeof WorkspaceAdminMaintenanceRoute
   '/_workspace/_admin/review': typeof WorkspaceAdminReviewRoute
   '/_workspace/_admin/runs': typeof WorkspaceAdminRunsRoute
+  '/_workspace/_admin/schedules': typeof WorkspaceAdminSchedulesRoute
   '/_workspace/_admin/spend': typeof WorkspaceAdminSpendRoute
   '/_workspace/docs/$': typeof WorkspaceDocsSplatRoute
   '/_workspace/document/$sha': typeof WorkspaceDocumentShaRoute
@@ -207,6 +216,7 @@ export interface FileRouteTypes {
     | '/maintenance'
     | '/review'
     | '/runs'
+    | '/schedules'
     | '/spend'
     | '/docs/$'
     | '/document/$sha'
@@ -226,6 +236,7 @@ export interface FileRouteTypes {
     | '/maintenance'
     | '/review'
     | '/runs'
+    | '/schedules'
     | '/spend'
     | '/docs/$'
     | '/document/$sha'
@@ -248,6 +259,7 @@ export interface FileRouteTypes {
     | '/_workspace/_admin/maintenance'
     | '/_workspace/_admin/review'
     | '/_workspace/_admin/runs'
+    | '/_workspace/_admin/schedules'
     | '/_workspace/_admin/spend'
     | '/_workspace/docs/$'
     | '/_workspace/document/$sha'
@@ -361,6 +373,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceAdminRunsRouteImport
       parentRoute: typeof WorkspaceAdminRoute
     }
+    '/_workspace/_admin/schedules': {
+      id: '/_workspace/_admin/schedules'
+      path: '/schedules'
+      fullPath: '/schedules'
+      preLoaderRoute: typeof WorkspaceAdminSchedulesRouteImport
+      parentRoute: typeof WorkspaceAdminRoute
+    }
     '/_workspace/_admin/spend': {
       id: '/_workspace/_admin/spend'
       path: '/spend'
@@ -425,6 +444,7 @@ interface WorkspaceAdminRouteChildren {
   WorkspaceAdminMaintenanceRoute: typeof WorkspaceAdminMaintenanceRoute
   WorkspaceAdminReviewRoute: typeof WorkspaceAdminReviewRoute
   WorkspaceAdminRunsRoute: typeof WorkspaceAdminRunsRoute
+  WorkspaceAdminSchedulesRoute: typeof WorkspaceAdminSchedulesRoute
   WorkspaceAdminSpendRoute: typeof WorkspaceAdminSpendRoute
   WorkspaceAdminSourcesIdRoute: typeof WorkspaceAdminSourcesIdRoute
   WorkspaceAdminSourcesIndexRoute: typeof WorkspaceAdminSourcesIndexRoute
@@ -438,6 +458,7 @@ const WorkspaceAdminRouteChildren: WorkspaceAdminRouteChildren = {
   WorkspaceAdminMaintenanceRoute: WorkspaceAdminMaintenanceRoute,
   WorkspaceAdminReviewRoute: WorkspaceAdminReviewRoute,
   WorkspaceAdminRunsRoute: WorkspaceAdminRunsRoute,
+  WorkspaceAdminSchedulesRoute: WorkspaceAdminSchedulesRoute,
   WorkspaceAdminSpendRoute: WorkspaceAdminSpendRoute,
   WorkspaceAdminSourcesIdRoute: WorkspaceAdminSourcesIdRoute,
   WorkspaceAdminSourcesIndexRoute: WorkspaceAdminSourcesIndexRoute,

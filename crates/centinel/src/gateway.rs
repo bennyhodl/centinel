@@ -23,6 +23,17 @@ pub async fn serve(
     public: tokio::net::TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
+    let schedules =
+        crate::schedule_control::ScheduleControl::load(None, "disabled by centinel web")?;
+    serve_with_schedules(ctx, public, schedules, shutdown).await
+}
+
+pub async fn serve_with_schedules(
+    ctx: Arc<Ctx>,
+    public: tokio::net::TcpListener,
+    schedules: Arc<crate::schedule_control::ScheduleControl>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     let address = public.local_addr()?;
     let backend = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let backend_url = format!("http://{}", backend.local_addr()?);
@@ -66,10 +77,9 @@ pub async fn serve(
     let origin = origin.trim_end_matches('/');
     let store_id = store_id(ctx.store.root());
     let store = ctx.store.clone();
-    let app = crate::http::router(ctx).layer(axum::middleware::from_fn_with_state(
-        secret.clone(),
-        crate::access::authenticate,
-    ));
+    let app = crate::http::router_with_schedules(ctx, schedules).layer(
+        axum::middleware::from_fn_with_state(secret.clone(), crate::access::authenticate),
+    );
     let mut backend_task = tokio::spawn(async move { axum::serve(backend, app).await });
     // The reserved public port transfers to Node. If another process takes it, Node
     // fails startup and both halves stop; no unauthenticated fallback is served.

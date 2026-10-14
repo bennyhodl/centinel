@@ -231,20 +231,9 @@ async fn run(
         }
     };
     // The run id is the job's id: the page opens the drawer on it and Stop names it.
-    let run_id = lane.run_id();
-    // On threads of its own, as the scheduler runs: one stage that blocks must not take a
-    // request worker for an hour.
-    let spawned = std::thread::Builder::new()
-        .name(format!("run-{run_id}"))
-        .spawn(move || match tokio::runtime::Runtime::new() {
-            Ok(runtime) => {
-                runtime.block_on(lane.run(None, Cancel::none()));
-            }
-            Err(e) => tracing::error!(error = %e, "could not start a runtime for a web run"),
-        });
-    match spawned {
-        Ok(_) => (StatusCode::ACCEPTED, Json(json!({ "run_id": run_id }))).into_response(),
-        Err(e) => workspace_error(anyhow::anyhow!("could not start the run: {e}")),
+    match lane.spawn() {
+        Ok(run_id) => (StatusCode::ACCEPTED, Json(json!({ "run_id": run_id }))).into_response(),
+        Err(error) => workspace_error(error),
     }
 }
 

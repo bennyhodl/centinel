@@ -1082,6 +1082,11 @@ default = "system"
 /// taken parses cleanly on its own and is silent until 3am. Whether its sources exist is
 /// checked by the caller, against the store.
 pub fn append_schedule(path: &Path, schedule: &ScheduleConfig) -> anyhow::Result<()> {
+    save_schedule(path, schedule, false)
+}
+
+/// Validates and atomically writes an addition or replacement, preserving other blocks.
+pub fn save_schedule(path: &Path, schedule: &ScheduleConfig, replace: bool) -> anyhow::Result<()> {
     let existing = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => EXAMPLE.to_string(),
@@ -1094,7 +1099,7 @@ pub fn append_schedule(path: &Path, schedule: &ScheduleConfig) -> anyhow::Result
             path.display()
         )
     })?;
-    if before.schedule(&schedule.id).is_some() {
+    if !replace && before.schedule(&schedule.id).is_some() {
         anyhow::bail!(
             "schedule `{}` is already in {}; edit it there or remove it first",
             schedule.id,
@@ -1104,10 +1109,14 @@ pub fn append_schedule(path: &Path, schedule: &ScheduleConfig) -> anyhow::Result
 
     // Checked before writing, against the config as it will be.
     let mut proposed = before.clone();
+    proposed.schedules.retain(|s| s.id != schedule.id);
     proposed.schedules.push(schedule.clone());
     proposed.validate_schedules()?;
 
     let mut text = existing;
+    if before.schedule(&schedule.id).is_some() {
+        text = without_schedule(path, &text, &schedule.id)?;
+    }
     if !text.is_empty() {
         if !text.ends_with('\n') {
             text.push('\n');
@@ -1116,7 +1125,12 @@ pub fn append_schedule(path: &Path, schedule: &ScheduleConfig) -> anyhow::Result
     }
     text.push_str(&schedule.to_toml_block());
 
-    let mut expected: Vec<String> = before.schedules.iter().map(|s| s.id.clone()).collect();
+    let mut expected: Vec<String> = before
+        .schedules
+        .iter()
+        .filter(|s| s.id != schedule.id)
+        .map(|s| s.id.clone())
+        .collect();
     expected.push(schedule.id.clone());
     verify_schedule_edit(path, &text, &expected)?;
     crate::store::write_atomically(path, &text).map_err(Into::into)
@@ -1138,6 +1152,18 @@ pub fn remove_schedule(path: &Path, id: &str) -> anyhow::Result<()> {
         path.display()
     );
 
+    let out = without_schedule(path, &text, id)?;
+    let expected: Vec<String> = before
+        .schedules
+        .iter()
+        .filter(|s| s.id != id)
+        .map(|s| s.id.clone())
+        .collect();
+    verify_schedule_edit(path, &out, &expected)?;
+    crate::store::write_atomically(path, &out).map_err(Into::into)
+}
+
+fn without_schedule(path: &Path, text: &str, id: &str) -> anyhow::Result<String> {
     let lines: Vec<&str> = text.lines().collect();
     let (start, end) = block_ranges(&lines, "[[schedule]]")
         .into_iter()
@@ -1160,14 +1186,7 @@ pub fn remove_schedule(path: &Path, id: &str) -> anyhow::Result<()> {
         out.push('\n');
     }
 
-    let expected: Vec<String> = before
-        .schedules
-        .iter()
-        .filter(|s| s.id != id)
-        .map(|s| s.id.clone())
-        .collect();
-    verify_schedule_edit(path, &out, &expected)?;
-    crate::store::write_atomically(path, &out).map_err(Into::into)
+    Ok(out)
 }
 
 /// Re-parses an edited file and checks it holds exactly the schedules expected.
