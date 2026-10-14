@@ -10,7 +10,7 @@
 //! page's headings survived `dom_smoothie`, whether a PDF's text layer came out as prose
 //! or as ligature soup, what a spreadsheet turns into. None of that needs an Observation,
 //! and filing one would mean a run of experiments left a source in the archive that no
-//! `[[source]]` block ever asked for. So there is no `--root`, no log line, no blob — two
+//! definition ever asked for. So there is no `--root`, no log line, no blob — two
 //! ordinary files in `$TMPDIR` and the commands to open them.
 //!
 //! That also makes it safe to point at anything. A link somebody sent you, a file off a

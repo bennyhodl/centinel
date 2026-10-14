@@ -235,9 +235,7 @@ impl Scheduler {
             subtracted: Subtracted::default(),
             report: None,
         };
-        if let Err(e) = Journal::new(&self.ctx.store).append(&attempt).await {
-            tracing::warn!(error = %e, "could not record the interrupted run");
-        }
+        crate::lane::record(&self.ctx, &attempt).await;
     }
 
     /// Fires each schedule that is more than one interval overdue — **once**.

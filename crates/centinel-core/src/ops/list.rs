@@ -17,6 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::prelude::*;
+use crate::summary::Summary;
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SourceSummary {
@@ -105,16 +106,9 @@ pub async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<ListReport> {
     for source in sources {
         let defined = catalog.get(source.as_str()).await?.is_some();
         let replay = ctx.store.replay(&source).await?;
-        // Statuses alone under-count: an address enumerated and never fetched is in a
-        // DiscoveryRun and nowhere else, and it is exactly the "discovered, not
-        // collected" state the resources column exists to show.
-        let resources = replay.resources().len();
-        let statuses = replay.statuses();
-        let observations = replay
-            .records()
-            .iter()
-            .filter(|r| matches!(r, LogRecord::Observation(_)))
-            .count();
+        // The counts are the summary's own fold ([`Summary::of`]), so this and the cached
+        // `source list` can never count differently; unstamped, because nothing is written.
+        let summary = Summary::of(&replay, BTreeMap::new());
         let last_discovery = replay.records().iter().rev().find_map(|r| match r {
             LogRecord::DiscoveryRun(d) => Some(Discovered {
                 at: d.at.to_string(),
@@ -124,10 +118,8 @@ pub async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<ListReport> {
             _ => None,
         });
 
-        let mut liveness: BTreeMap<String, usize> = BTreeMap::new();
         let mut problems = Vec::new();
-        for status in statuses.values() {
-            *liveness.entry(status.state.to_string()).or_default() += 1;
+        for status in replay.statuses().values() {
             if status.state != Liveness::Live {
                 problems.push(Problem {
                     natural_key: status.resource.natural_key.clone(),
@@ -153,9 +145,9 @@ pub async fn list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<ListReport> {
         out.push(SourceSummary {
             source: source.to_string(),
             defined,
-            resources,
-            observations,
-            liveness,
+            resources: summary.resources,
+            observations: summary.observations,
+            liveness: summary.liveness,
             problems,
             problems_truncated: (truncated > 0).then_some(truncated),
             last_discovery,

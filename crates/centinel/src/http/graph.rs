@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use centinel_core::crumbs::Ruling;
 use centinel_core::graph::{Filter, Graph, HostDetail};
@@ -24,7 +23,7 @@ use centinel_core::op::{Cancel, Ctx, Progress};
 use centinel_core::ops::{self, CrumbsAction, CrumbsArgs, RuleArgs};
 use serde::Deserialize;
 
-use super::{forbidden_origin, same_origin, workspace_error};
+use super::workspace_error;
 
 pub fn routes() -> axum::Router<Arc<Ctx>> {
     use axum::routing::{get, post};
@@ -58,27 +57,22 @@ struct RuleBody {
 
 async fn refuse(
     State(ctx): State<Arc<Ctx>>,
-    headers: HeaderMap,
     Path(host): Path<String>,
     body: Option<Json<RuleBody>>,
 ) -> Response {
-    rule(&ctx, &headers, host, Ruling::Ignore, body.map(|Json(b)| b).unwrap_or_default()).await
+    rule(&ctx, host, Ruling::Ignore, body.map(|Json(b)| b).unwrap_or_default()).await
 }
 
 async fn allow(
     State(ctx): State<Arc<Ctx>>,
-    headers: HeaderMap,
     Path(host): Path<String>,
     body: Option<Json<RuleBody>>,
 ) -> Response {
-    rule(&ctx, &headers, host, Ruling::Allow, body.map(|Json(b)| b).unwrap_or_default()).await
+    rule(&ctx, host, Ruling::Allow, body.map(|Json(b)| b).unwrap_or_default()).await
 }
 
 /// Through the `crumbs` op, which owns the ruling's spelling and the host's.
-async fn rule(ctx: &Ctx, headers: &HeaderMap, host: String, ruling: Ruling, body: RuleBody) -> Response {
-    if !same_origin(headers) {
-        return forbidden_origin();
-    }
+async fn rule(ctx: &Ctx, host: String, ruling: Ruling, body: RuleBody) -> Response {
     let args = RuleArgs { host, note: body.note };
     let action = match ruling {
         Ruling::Ignore => CrumbsAction::Ignore(args),

@@ -17,7 +17,7 @@
 //!
 //! ## Choosing one
 //!
-//! A `[[source]]` block may pin a strategy, which means an operator saw the evidence and
+//! A source's definition may pin a strategy, which means an operator saw the evidence and
 //! accepted it. A pinned strategy is still asked to recognise the site on every run, and
 //! one that stops recognising the address it was accepted for produces a **warning**. It
 //! does not produce a silent switch to a weaker strategy and an empty corpus.
@@ -40,7 +40,7 @@ use crate::domain::{
     SourceKind,
 };
 use crate::enclosure;
-use crate::fetch::{Fetch, Fetcher, status_in};
+use crate::fetch::{Fetch, Fetcher, status_of};
 use crate::op::{Cancel, ItemOutcome, Progress, Verdict};
 use crate::policy::{HostPolicy, Pacer};
 use crate::requests::{RequestLog, Step};
@@ -60,7 +60,7 @@ pub struct SiteSource {
     /// Where each request is written down, for the ops that report them. See
     /// [`crate::requests`]. Absent on a collect, which would otherwise keep a record per page.
     log: Option<RequestLog>,
-    /// The strategy the `[[source]]` block pinned, if it pinned one.
+    /// The strategy the definition pinned, if it pinned one.
     named: Option<&'static StrategyDef>,
     /// The strategy that actually ran.
     ///
@@ -395,14 +395,13 @@ impl SiteSource {
         let result = self.fetch(step, url).await;
         let millis = started.elapsed().as_millis() as u64;
 
+        // `404` is a status; a timeout or a DNS failure has none, and the two must not be
+        // shown as though they were the same kind of answer.
+        let status = status_of(&result);
         progress.item(match &result {
             Ok(fetched) => ItemOutcome {
                 address: url.to_string(),
-                tag: fetched
-                    .meta
-                    .get("http_status")
-                    .cloned()
-                    .unwrap_or_else(|| "200".into()),
+                tag: status.unwrap_or(200).to_string(),
                 verdict: Verdict::Ok,
                 noun: "requests".into(),
                 bytes: fetched.bytes.len() as u64,
@@ -411,24 +410,17 @@ impl SiteSource {
                 detail: None,
                 nested: enclosed,
             },
-            Err(refusal) => {
-                // `HTTP 404` is a status; a timeout or a DNS failure is not, and the two
-                // must not be shown as though they were the same kind of answer. The code
-                // is a *label* here and nothing turns on it — which is the whole reason
-                // reading it back out of prose is tolerable.
-                let status = status_in(&refusal.detail);
-                ItemOutcome {
-                    address: url.to_string(),
-                    tag: status.map_or_else(|| "—".into(), |s| s.to_string()),
-                    verdict: verdict_for(refusal.state),
-                    noun: "requests".into(),
-                    bytes: 0,
-                    produced: None,
-                    millis,
-                    detail: Some(refusal.detail.clone()),
-                    nested: enclosed,
-                }
-            }
+            Err(refusal) => ItemOutcome {
+                address: url.to_string(),
+                tag: status.map_or_else(|| "—".into(), |s| s.to_string()),
+                verdict: verdict_for(refusal.state),
+                noun: "requests".into(),
+                bytes: 0,
+                produced: None,
+                millis,
+                detail: Some(refusal.detail.clone()),
+                nested: enclosed,
+            },
         });
 
         result
@@ -775,10 +767,12 @@ mod tests {
                     Some(Err(state)) => Err(Refusal {
                         state: *state,
                         detail: format!("scripted {state}"),
+                        status: None,
                     }),
                     None => Err(Refusal {
                         state: Liveness::Gone,
                         detail: "HTTP 404 Not Found".into(),
+                        status: Some(404),
                     }),
                 }
             })

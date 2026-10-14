@@ -113,6 +113,7 @@ impl From<ToolError> for crate::domain::Refusal {
         Self {
             state: crate::domain::Liveness::Error,
             detail: e.to_string(),
+            status: None,
         }
     }
 }

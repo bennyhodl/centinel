@@ -306,7 +306,7 @@ pub async fn investigate(
     //
     // Asked of the source rather than re-derived from `hits`, which is what this did. Two
     // definitions of one decision is one too many, and this one had a consequence: a
-    // `[[source]]` block that pins a strategy is honoured by `run` and was invisible here,
+    // definition that pins a strategy is honoured by `run` and was invisible here,
     // so `investigate` answered "what would run" differently from `run` on exactly the
     // sources somebody had already looked at once.
     let (chosen, recognition) = site.choose(&seed, &mut warnings);

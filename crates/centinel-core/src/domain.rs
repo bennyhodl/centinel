@@ -455,6 +455,11 @@ pub struct Fetched {
 pub struct Refusal {
     pub state: Liveness,
     pub detail: String,
+    /// The HTTP status the server answered with, when it answered. A timeout or a DNS
+    /// failure has none, and the two must not read alike: "the server said 404" and "we
+    /// never reached the server" are different facts. Carried as a number so nothing
+    /// reads it back out of `detail`, which is prose for a person.
+    pub status: Option<u16>,
 }
 
 impl fmt::Display for Refusal {

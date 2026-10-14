@@ -26,14 +26,15 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use centinel_core::op::{Cancel, Ctx, Progress};
 use centinel_core::ops;
+use centinel_core::store::write_atomically;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{forbidden_origin, same_origin, workspace_error};
+use super::{spawn_job, workspace_error};
 
 /// Lines of extracted text an investigation keeps per document.
 const PREVIEW_LINES: usize = 40;
@@ -55,42 +56,20 @@ struct Start {
 
 /// Investigates an address and checks what extraction makes of it, as one job, and files
 /// both reports.
-async fn start(
-    State(ctx): State<Arc<Ctx>>,
-    headers: HeaderMap,
-    Json(body): Json<Start>,
-) -> Response {
-    if !same_origin(&headers) {
-        return forbidden_origin();
-    }
+async fn start(State(ctx): State<Arc<Ctx>>, Json(body): Json<Start>) -> Response {
     // An address, never a path: `check` reads local files, and this is not a file reader.
     let url = match reqwest::Url::parse(body.url.trim()) {
         Ok(url) if matches!(url.scheme(), "http" | "https") => url,
         _ => return workspace_error(anyhow::anyhow!("`{}` is not an http(s) address", body.url)),
     };
-    // Named by the instant rather than the process's counter, so an investigation filed
-    // before a restart is not overwritten by the first one after it.
-    let job = ctx.jobs.start_as(
-        format!("{KIND}-{}", jiff::Timestamp::now().as_millisecond()),
-        KIND,
-        url.as_str(),
-    );
-    let id = job.id().to_string();
-    let dir = filed_under(&ctx, &id);
-    let worker = Arc::clone(&ctx);
-    tokio::spawn(async move {
-        let progress = job.watch(Progress::none());
-        let result = investigate(&worker, url.as_str(), &dir, &progress).await;
+    spawn_job(&ctx, KIND, url.to_string(), |ctx, id, progress, cancel| async move {
+        let dir = ctx.store.investigation_dir(&id);
+        let result = investigate(&ctx, url.as_str(), &dir, &progress, &cancel).await;
         if let Err(error) = &result {
             tracing::warn!(address = %url, error = %format!("{error:#}"), "investigation failed");
         }
-        job.finish(&result);
-    });
-    (StatusCode::ACCEPTED, Json(json!({ "id": id }))).into_response()
-}
-
-fn filed_under(ctx: &Ctx, id: &str) -> std::path::PathBuf {
-    ctx.store.root().join("investigations").join(id)
+        result
+    })
 }
 
 async fn investigate(
@@ -98,6 +77,7 @@ async fn investigate(
     url: &str,
     dir: &std::path::Path,
     progress: &Progress,
+    cancel: &Cancel,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
     let started = jiff::Timestamp::now();
@@ -107,7 +87,7 @@ async fn investigate(
         ctx,
         serde_json::from_value(json!({ "target": url }))?,
         progress,
-        &Cancel::none(),
+        cancel,
     )
     .await;
 
@@ -123,9 +103,11 @@ async fn investigate(
             "head": PREVIEW_LINES,
         }))?,
         progress,
-        &Cancel::none(),
+        cancel,
     )
     .await;
+    // Stopped, not finished: a report half-filled by a cancelled op is not the finding.
+    cancel.check()?;
 
     // Each half is kept whatever became of the other: a site that refuses the probe may
     // still serve its front page, and that difference is the finding.
@@ -136,7 +118,8 @@ async fn investigate(
         "investigate": as_outcome(investigate),
         "check": as_outcome(check),
     });
-    std::fs::write(dir.join("report.json"), serde_json::to_vec_pretty(&report)?)?;
+    // Atomic, because the page polls for this file and must not read half of it.
+    write_atomically(&dir.join("report.json"), serde_json::to_vec_pretty(&report)?)?;
     Ok(())
 }
 
@@ -163,7 +146,7 @@ async fn read(State(ctx): State<Arc<Ctx>>, Path(id): Path<String>) -> Response {
         )
             .into_response();
     }
-    let path = filed_under(&ctx, &id).join("report.json");
+    let path = ctx.store.investigation_dir(&id).join("report.json");
     match std::fs::read(&path) {
         Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
             Ok(value) => Json(value).into_response(),
@@ -189,7 +172,7 @@ mod tests {
     async fn app() -> (tempfile::TempDir, axum::Router) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
-        (dir, routes().with_state(Arc::new(Ctx::new(store))))
+        (dir, crate::http::router(Arc::new(Ctx::new(store))))
     }
 
     async fn body_json(resp: Response) -> Value {
@@ -274,7 +257,7 @@ mod tests {
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 
-        let filed = dir.path().join("investigations").join("investigate-1");
+        let filed = Store::at(dir.path()).investigation_dir("investigate-1");
         std::fs::create_dir_all(&filed).unwrap();
         std::fs::write(filed.join("report.json"), br#"{"address":"https://x.gov/"}"#).unwrap();
         let found = app

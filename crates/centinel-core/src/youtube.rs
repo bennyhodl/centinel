@@ -310,6 +310,7 @@ pub fn classify(stderr: &str) -> YtFailure {
     YtFailure {
         state,
         detail: first_line,
+        status: None,
     }
 }
 
@@ -450,6 +451,7 @@ impl YtDlp {
         serde_json::from_slice(&out.stdout).map_err(|e| YtFailure {
             state: Liveness::Error,
             detail: format!("yt-dlp returned output that is not JSON: {e}"),
+            status: None,
         })
     }
 
@@ -542,6 +544,7 @@ impl YtDlp {
         first_file_named(work_dir, "audio").ok_or_else(|| YtFailure {
             state: Liveness::Error,
             detail: "yt-dlp reported success but wrote no audio file".to_string(),
+            status: None,
         })
     }
 }

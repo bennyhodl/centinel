@@ -2,9 +2,9 @@
 //!
 //! | Route | Purpose |
 //! |---|---|
-//! | `GET /workspace/sources` | every source, and the run holding the lane if one is |
+//! | `GET /workspace/sources` | every source (and whether a run is collecting it), and the run holding the lane if one is |
 //! | `POST /workspace/sources` | define a source (`source add`'s arguments) |
-//! | `GET /workspace/sources/{id}` | its definition, its log's account of it, its runs |
+//! | `GET /workspace/sources/{id}` | its definition, its list row, its log's account of it, its runs |
 //! | `GET /workspace/sources/{id}/crumbs` | the off-host links its pages carry, from the ledger |
 //! | `POST /workspace/sources/{id}/crumbs/rescan` | write the ledger again from the blobs, as a job |
 //! | `POST /workspace/sources/{id}/enabled` | `{ "enabled": bool }` |
@@ -26,7 +26,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use centinel_core::catalog::Sources;
@@ -38,7 +38,7 @@ use centinel_core::ops::{
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{forbidden_origin, same_origin, workspace_error};
+use super::{spawn_job, workspace_error};
 use crate::lane::{Lane, Launch};
 
 /// Runs shown on a source's page, newest first.
@@ -60,21 +60,17 @@ async fn source_op(ctx: &Ctx, action: SourceAction) -> anyhow::Result<SourceRepo
 }
 
 async fn list(State(ctx): State<Arc<Ctx>>) -> Response {
-    match source_op(&ctx, SourceAction::List).await {
-        Ok(SourceReport::List { sources }) => Json(json!({
+    match ops::listed(&ctx, None).await {
+        Ok(sources) => Json(json!({
             "sources": sources,
             "running": RunLock::current(&ctx.store),
         }))
         .into_response(),
-        Ok(_) => unreachable!("`source list` answers with a list"),
         Err(error) => workspace_error(error),
     }
 }
 
-async fn add(State(ctx): State<Arc<Ctx>>, headers: HeaderMap, Json(args): Json<AddArgs>) -> Response {
-    if !same_origin(&headers) {
-        return forbidden_origin();
-    }
+async fn add(State(ctx): State<Arc<Ctx>>, Json(args): Json<AddArgs>) -> Response {
     // `--run` is a separate request — the Run button — so the lane rules apply to it.
     let args = AddArgs { run: false, ..args };
     match source_op(&ctx, SourceAction::Add(args)).await {
@@ -109,6 +105,8 @@ async fn detail(State(ctx): State<Arc<Ctx>>, Path(id): Path<String>) -> Response
         runs.truncate(RUNS_SHOWN);
         anyhow::Ok(json!({
             "definition": definition,
+            // The row the list shows for it, built by the same function.
+            "source": ops::listed(&ctx, Some(&id)).await?.pop(),
             "summary": summary,
             "runs": runs,
             "running": RunLock::current(&ctx.store),
@@ -143,35 +141,19 @@ async fn crumbs(State(ctx): State<Arc<Ctx>>, Path(id): Path<String>) -> Response
 /// backfill for a source collected before the ledger existed, and the repair for a ledger
 /// that was damaged — explicit, because reading nineteen thousand blobs is a cost somebody
 /// should choose rather than one a page click incurs.
-async fn rescan_crumbs(
-    State(ctx): State<Arc<Ctx>>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
-    if !same_origin(&headers) {
-        return forbidden_origin();
-    }
+async fn rescan_crumbs(State(ctx): State<Arc<Ctx>>, Path(id): Path<String>) -> Response {
     if let Err(error) = Sources::new(&ctx.store).require(&id).await {
         return workspace_error(error);
     }
-    let (job, cancel) = ctx.jobs.start_stoppable(
-        format!("crumbs-{}", jiff::Timestamp::now().as_millisecond()),
-        "crumbs",
-        id.clone(),
-    );
-    let job_id = job.id().to_string();
-    let worker = Arc::clone(&ctx);
-    tokio::spawn(async move {
-        let progress = job.watch(Progress::none());
+    let label = id.clone();
+    spawn_job(&ctx, "crumbs", label, |ctx, _, progress, cancel| async move {
         let args = CrumbsArgs {
             source: Some(id),
             rescan: true,
             ..Default::default()
         };
-        let result = ops::crumbs(&worker, args, &progress, &cancel).await;
-        job.finish(&result);
-    });
-    (StatusCode::ACCEPTED, Json(json!({ "id": job_id }))).into_response()
+        ops::crumbs(&ctx, args, &progress, &cancel).await
+    })
 }
 
 #[derive(Deserialize)]
@@ -181,13 +163,9 @@ struct Enabled {
 
 async fn enabled(
     State(ctx): State<Arc<Ctx>>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<Enabled>,
 ) -> Response {
-    if !same_origin(&headers) {
-        return forbidden_origin();
-    }
     let action = match body.enabled {
         true => SourceAction::Enable(ops::IdArgs { id }),
         false => SourceAction::Disable(ops::IdArgs { id }),
@@ -211,13 +189,9 @@ struct RunBody {
 
 async fn run(
     State(ctx): State<Arc<Ctx>>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     body: Option<Json<RunBody>>,
 ) -> Response {
-    if !same_origin(&headers) {
-        return forbidden_origin();
-    }
     if let Err(error) = Sources::new(&ctx.store).require(&id).await {
         return workspace_error(error);
     }
@@ -260,5 +234,76 @@ async fn run(
     match spawned {
         Ok(_) => (StatusCode::ACCEPTED, Json(json!({ "run_id": run_id }))).into_response(),
         Err(e) => workspace_error(anyhow::anyhow!("could not start the run: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::Request;
+    use centinel_core::config::SourceConfig;
+    use centinel_core::journal::Holder;
+    use centinel_core::store::Store;
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    /// Two sources, `b` disabled, behind the admin router, with a run over every enabled
+    /// source holding the lane.
+    async fn app() -> (tempfile::TempDir, axum::Router, RunLock) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let sources = Sources::new(&store);
+        sources.add(&SourceConfig::site("a", "https://a.gov")).await.unwrap();
+        sources.add(&SourceConfig::site("b", "https://b.gov")).await.unwrap();
+        sources.set_enabled("b", false).await.unwrap();
+        let lane = RunLock::acquire(
+            &store,
+            &Holder {
+                pid: std::process::id(),
+                started_at: jiff::Timestamp::now().to_string(),
+                trigger: Trigger::Manual,
+                schedule: None,
+                sources: Vec::new(),
+                args: String::new(),
+            },
+        )
+        .unwrap();
+        let app = crate::http::router(Arc::new(Ctx::new(store)))
+            .layer(axum::Extension(crate::access::Role::Admin));
+        (dir, app, lane)
+    }
+
+    async fn get(app: &axum::Router, path: &str) -> Value {
+        let resp = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{path}");
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// The page reads `collecting` instead of working out from the lane which sources a run
+    /// is walking, and a source's own page shows the row the list shows.
+    #[tokio::test]
+    async fn the_list_and_a_sources_page_agree_on_whether_a_run_is_collecting_it() {
+        let (_d, app, _lane) = app().await;
+
+        let list = get(&app, "/workspace/sources").await;
+        let collecting: Vec<(&str, bool)> = list["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["id"].as_str().unwrap(), s["collecting"].as_bool().unwrap()))
+            .collect();
+        assert_eq!(collecting, [("a", true), ("b", false)], "a bare run skips a disabled source");
+
+        for row in list["sources"].as_array().unwrap() {
+            let page = get(&app, &format!("/workspace/sources/{}", row["id"].as_str().unwrap())).await;
+            assert_eq!(&page["source"], row);
+        }
     }
 }

@@ -456,6 +456,8 @@ export type ListedSource = {
   enabled: boolean
   resources: number
   liveness: Record<string, number>
+  /** Whether the run holding the lane walks it: one started for it, or one over every enabled source. */
+  collecting: boolean
   last_run?: LastRun
 }
 
@@ -508,7 +510,8 @@ export type RunAttempt = {
   sources?: string[]
 }
 
-export type SourceDetail = { definition: SourceDefinition; summary?: SourceSummary; runs: RunAttempt[]; running: LaneHolder | null }
+/** One source: its row as the list has it, its definition, what its log says, its runs. */
+export type SourceDetail = { source: ListedSource; definition: SourceDefinition; summary?: SourceSummary; runs: RunAttempt[]; running: LaneHolder | null }
 
 export type CrumbStanding = 'open' | 'ignored' | 'promoted'
 export type Crumb = { host: string; links: number; pages: number; example: string; standing?: CrumbStanding }

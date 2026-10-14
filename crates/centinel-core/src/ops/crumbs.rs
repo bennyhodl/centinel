@@ -267,7 +267,7 @@ async fn show(
     cancel: &Cancel,
 ) -> anyhow::Result<CrumbsReport> {
     let started = std::time::Instant::now();
-    let host = as_host(&which.host)?;
+    let host = crumbs::as_host(&which.host)?;
     let source = which.source.as_deref().or(args.source.as_deref());
     let field = survey(ctx, source, args.rescan, p, cancel).await?;
 
@@ -289,7 +289,7 @@ async fn show(
 
 /// Writes one ruling. Reads no blobs: refusing a host is a decision about a name.
 async fn rule(ctx: &Ctx, args: RuleArgs, ruling: Ruling) -> anyhow::Result<CrumbsReport> {
-    let host = as_host(&args.host)?;
+    let host = crumbs::as_host(&args.host)?;
     let decisions = Decisions::new(&ctx.store);
 
     let previous = decisions
@@ -345,26 +345,6 @@ impl Field {
     }
 }
 
-/// The hosts the store's source definitions claim.
-///
-/// The **intent** half of "already a Source"; [`survey`] adds the evidence half out of the
-/// logs it is reading anyway. A block for a host nothing has collected yet still answers the
-/// question — offering it back would ask the operator to decide something they decided an hour
-/// ago — and one that is `enabled = false` answers it too: they chose the host and then chose
-/// not to run it, and neither of those decisions was "ask me again".
-///
-/// **A channel claims no host.** `youtube.com` holds every channel there is, so a source for
-/// one of them says nothing about a crumb pointing at another. Marking the host answered would
-/// hide it; leaving it open costs one `crumbs ignore youtube.com` and hides nothing. A
-/// definition knows a channel by which field is set, and the log by
-/// [`crate::sources::channel::claims`].
-fn claimed_hosts(defined: &[crate::config::SourceConfig]) -> BTreeSet<String> {
-    defined
-        .iter()
-        .filter_map(|s| s.site.as_deref().and_then(crumbs::host_of))
-        .collect()
-}
-
 /// Every page of the selected Sources, from the ledger.
 ///
 /// **The ledger is the fast path and the blobs are the floor — and only `--rescan` walks
@@ -380,9 +360,8 @@ fn claimed_hosts(defined: &[crate::config::SourceConfig]) -> BTreeSet<String> {
 /// answered by the links it used to have.
 ///
 /// Whether a host is **already a Source** is a corpus-wide question, so it is asked of every
-/// definition and every Source's summary rather than only of the selected Sources — a crumb
-/// Tampa dropped may be a Source somebody added last week. See [`claimed_hosts`] for the
-/// definition half; the evidence half is [`crate::summary::Summary::claimed_hosts`].
+/// definition rather than only of the selected Sources — a crumb Tampa dropped may be a
+/// Source somebody added last week. See [`crumbs::claimants`].
 async fn survey(
     ctx: &Ctx,
     source: Option<&str>,
@@ -412,13 +391,9 @@ async fn survey(
         None => known.clone(),
     };
 
-    // The config first, so a malformed one fails before an hour of blob reads rather than
-    // after them.
-    let mut promoted = claimed_hosts(&crate::catalog::Sources::new(&ctx.store).list().await?);
-    let summaries = crate::summary::Summaries::new(&ctx.store);
-    for id in &known {
-        promoted.extend(summaries.get(id).await?.claimed_hosts);
-    }
+    // The definitions first, so a malformed one fails before an hour of blob reads rather
+    // than after them.
+    let promoted: BTreeSet<String> = crumbs::claimants(&ctx.store).await?.into_keys().collect();
 
     // The newest Observation per Resource of each selected Source, never the history: one
     // page holds one set of links, and an older version of it holds the links the site has
@@ -522,33 +497,6 @@ async fn scan_blob(ctx: &Ctx, obs: &Observation) -> Option<Recorded> {
     // Verified, because these bytes are about to be shown to a person as evidence.
     let bytes = ctx.store.get_blob(&obs.blob_sha).await.ok()?;
     Some(crumbs::scan_page(&String::from_utf8_lossy(&bytes), page))
-}
-
-/// A host, from a host or from any URL on one.
-///
-/// Both are what the operator has in hand — the list prints hosts and a crumb's example is a
-/// URL — so either is a reasonable thing to paste back. Anything that is neither is an error
-/// rather than a stored "host" with a slash in it that no crumb will ever equal.
-fn as_host(input: &str) -> anyhow::Result<String> {
-    let trimmed = input.trim();
-    if let Some(host) = url::Url::parse(trimmed).ok().and_then(|u| {
-        u.host_str()
-            .filter(|_| matches!(u.scheme(), "http" | "https"))
-            .map(str::to_ascii_lowercase)
-    }) {
-        return Ok(host);
-    }
-
-    // A bare host has no scheme, so `Url::parse` refuses it outright.
-    let host = trimmed.trim_end_matches('/').to_ascii_lowercase();
-    let plausible = !host.is_empty()
-        && host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'));
-    match plausible {
-        true => Ok(host),
-        false => anyhow::bail!("`{input}` is not a host, or a http(s) URL on one"),
-    }
 }
 
 // -----------------------------------------------------------------------------------------
@@ -1202,6 +1150,13 @@ mod tests {
             "<p>collected</p>",
         )
         .await;
+        // Defined by its front door: it is the log that shows it collects `publicrec`. A log
+        // with no definition is not a source, so it would claim nothing.
+        define(
+            &ctx,
+            crate::config::SourceConfig::site("hillsclerk", "https://www.hillsclerk.com"),
+        )
+        .await;
 
         let report = run(&ctx, CrumbsArgs::default()).await;
         let crumbs = listed(&report);
@@ -1489,19 +1444,5 @@ mod tests {
             .map(|c| c.host.clone())
             .collect();
         assert_eq!(hosts, ["new.example.com"]);
-    }
-
-    #[test]
-    fn a_host_is_taken_from_a_host_or_from_a_url_on_it() {
-        assert_eq!(as_host("Facebook.com").unwrap(), "facebook.com");
-        assert_eq!(as_host("  facebook.com/  ").unwrap(), "facebook.com");
-        assert_eq!(
-            as_host("https://www.facebook.com/CityofTampa?x=1").unwrap(),
-            "www.facebook.com"
-        );
-
-        for bad in ["", "mailto:clerk@tampa.gov", "two hosts", "a/b", "https://"] {
-            assert!(as_host(bad).is_err(), "`{bad}` was accepted as a host");
-        }
     }
 }

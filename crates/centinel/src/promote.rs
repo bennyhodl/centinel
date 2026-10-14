@@ -94,8 +94,8 @@ fn can_ask(output: Output) -> bool {
 
 /// Whether the operator says yes.
 ///
-/// The default is yes. This writes one `[[source]]` block, collects nothing, and is undone
-/// by `centinel source remove`; the expensive decision is `centinel run`, which is still a
+/// The default is yes. This defines one source, collects nothing, and is undone
+/// by `centinel source disable`; the expensive decision is `centinel run`, which is still a
 /// separate command you type yourself.
 fn ask(promote: &Promote, store: &Path, output: Output) -> bool {
     if !can_ask(output) {

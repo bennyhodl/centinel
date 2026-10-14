@@ -129,15 +129,15 @@ impl<'a> Linkages<'a> {
     /// empty one, which is an answer rather than an error: nothing has been written down.
     pub async fn get(&self, source: &SourceId) -> anyhow::Result<Linkage> {
         let stamp = self.stamp(source).await?;
-        if let Some(cached) = self.read(source).await
-            && cached.ledger == stamp
-        {
-            return Ok(cached);
-        }
-        let rows = Ledger::new(self.store, source.clone()).current().await?;
-        let linkage = Linkage::of(rows.values(), stamp);
-        self.write(source, &linkage).await?;
-        Ok(linkage)
+        crate::summary::cached(
+            &self.store.linkage_path(source),
+            |linkage: &Linkage| linkage.ledger == stamp,
+            async {
+                let rows = Ledger::new(self.store, source.clone()).current().await?;
+                Ok(Linkage::of(rows.values(), stamp))
+            },
+        )
+        .await
     }
 
     async fn stamp(&self, source: &SourceId) -> anyhow::Result<LedgerStamp> {
@@ -156,24 +156,6 @@ impl<'a> Linkages<'a> {
             len: meta.len(),
             modified_ms,
         })
-    }
-
-    async fn read(&self, source: &SourceId) -> Option<Linkage> {
-        let bytes = tokio::fs::read(self.store.linkage_path(source)).await.ok()?;
-        serde_json::from_slice(&bytes).ok()
-    }
-
-    /// Write-then-rename, so two readers rebuilding at once leave one whole file.
-    async fn write(&self, source: &SourceId, linkage: &Linkage) -> anyhow::Result<()> {
-        let path = self.store.linkage_path(source);
-        let dir = path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("a linkage always has a parent directory"))?;
-        tokio::fs::create_dir_all(dir).await?;
-        let tmp = dir.join(format!(".{source}.links.tmp"));
-        tokio::fs::write(&tmp, serde_json::to_vec(linkage)?).await?;
-        tokio::fs::rename(&tmp, &path).await?;
-        Ok(())
     }
 }
 
@@ -280,35 +262,11 @@ impl Default for Filter {
     }
 }
 
-/// Which sources answer for which host.
-///
-/// The intent half is each definition's site host — a source added an hour ago and never
-/// run still claims its host — and the evidence half is every host a source's log has
-/// observed. A channel claims nothing either way ([`crate::summary::Summary::claimed_hosts`]).
-/// A map rather than the set `crumbs` keeps, because the graph needs to know *which*
-/// source to draw the edge to.
-async fn claimants(
-    store: &Store,
-    defined: &[crate::config::SourceConfig],
-) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
-    let summaries = crate::summary::Summaries::new(store);
-    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for source in defined {
-        let id = SourceId::new(source.id.clone())?;
-        let mut claimed = summaries.get(&id).await?.claimed_hosts;
-        claimed.extend(source.site.as_deref().and_then(crumbs::host_of));
-        for host in claimed {
-            out.entry(host).or_default().push(source.id.clone());
-        }
-    }
-    Ok(out)
-}
-
 impl Graph {
     /// The whole graph, from every source's linkage and the operator's rulings.
     pub async fn read(store: &Store) -> anyhow::Result<Self> {
         let defined = crate::catalog::Sources::new(store).list().await?;
-        let claimants = claimants(store, &defined).await?;
+        let claimants = crumbs::claimants(store).await?;
         let summaries = crate::summary::Summaries::new(store);
         let linkages = Linkages::new(store);
         let decisions = Decisions::new(store).current().await?;
@@ -327,7 +285,7 @@ impl Graph {
                 source: source.id.clone(),
                 acquisition: acquisition.kind(),
                 target: acquisition.target().to_string(),
-                host: source.site.as_deref().and_then(crumbs::host_of),
+                host: source.site_host(),
                 enabled: source.is_enabled(),
                 addresses: summaries.get(&id).await?.resources,
             });
@@ -338,8 +296,8 @@ impl Graph {
                     // A link into its own host is `enumerate`'s business, not an edge.
                     Some(owners) => owners
                         .iter()
-                        .filter(|owner| **owner != source.id)
-                        .map(|owner| Node::source_id(owner))
+                        .filter(|owner| owner.as_str() != source.id)
+                        .map(|owner| Node::source_id(owner.as_str()))
                         .collect(),
                     None => {
                         let tally = hosts.entry(host.clone()).or_default();
@@ -506,9 +464,9 @@ impl HostDetail {
     /// this module that is not cached: it is one host, asked for by a click, and the
     /// paths and referrers it wants are the rows themselves rather than a count of them.
     pub async fn read(store: &Store, host: &str) -> anyhow::Result<Self> {
-        let host = host.trim().to_ascii_lowercase();
+        let host = crumbs::as_host(host)?;
         let defined = crate::catalog::Sources::new(store).list().await?;
-        let claimed = claimants(store, &defined).await?.contains_key(&host);
+        let claimed = crumbs::claimants(store).await?.contains_key(&host);
         let decision = Decisions::new(store).current().await?.remove(&host);
 
         let mut sources = Vec::new();
@@ -797,6 +755,9 @@ mod tests {
 
         let detail = HostDetail::read(&store, "Vendor.Example.com").await.unwrap();
         assert_eq!(detail.host, "vendor.example.com");
+        let from_url = HostDetail::read(&store, "https://vendor.example.com/docs/1").await.unwrap();
+        assert_eq!(from_url, detail, "a URL on the host is the host, as `crumbs ignore` reads it");
+        assert!(HostDetail::read(&store, "not a host").await.is_err());
         assert_eq!((detail.pages, detail.links), (4, 5));
         assert_eq!(detail.standing, Standing::Open);
         assert_eq!(detail.example.as_deref(), Some("https://vendor.example.com/docs/1"));

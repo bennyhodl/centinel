@@ -388,6 +388,17 @@ impl Holder {
         }
     }
 
+    /// Whether the run holding the lane is walking this source: named in its arguments, or
+    /// — for a run over every enabled source, which is the empty list — enabled. `enabled`
+    /// is the caller's to say because a disabled source is skipped by a bare run and
+    /// walked by one that names it.
+    pub fn covers(&self, source: &str, enabled: bool) -> bool {
+        match self.sources.is_empty() {
+            true => enabled,
+            false => self.sources.iter().any(|s| s == source),
+        }
+    }
+
     /// Whether the process that wrote this is still alive.
     ///
     /// `kill(pid, 0)` sends no signal and reports whether the pid is addressable. It can
@@ -543,6 +554,19 @@ mod tests {
             sources: Vec::new(),
             args: "--source tampa".into(),
         }
+    }
+
+    /// A named run walks what it names, even a disabled source; a bare one walks the enabled
+    /// sources and nothing else.
+    #[test]
+    fn a_holder_covers_what_its_run_is_walking() {
+        let bare = holder(None);
+        assert!(bare.covers("tampa", true));
+        assert!(!bare.covers("tampa", false), "a bare run skips a disabled source");
+
+        let named = Holder { sources: vec!["tampa".into()], ..holder(None) };
+        assert!(named.covers("tampa", false), "naming a disabled source runs it");
+        assert!(!named.covers("pinellas", true));
     }
 
     /// A run names its sources in its arguments, so one stopped before it reported is still
