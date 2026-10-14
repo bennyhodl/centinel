@@ -206,10 +206,7 @@ async fn choose_sources(theme: &ColorfulTheme, store: &Store) -> Result<Vec<Stri
         .items(&labels)
         .interact()?;
 
-    Ok(chosen
-        .into_iter()
-        .map(|i| defined[i].id.clone())
-        .collect())
+    Ok(chosen.into_iter().map(|i| defined[i].id.clone()).collect())
 }
 
 /// "1,005 addresses · collected 2026-08-05", or why not.

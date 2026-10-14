@@ -230,7 +230,9 @@ pub(crate) fn router(ctx: Arc<Ctx>) -> Router {
         .route("/ops/{name}", post(invoke))
         .route("/ops/{name}/stream", post(invoke_streaming))
         .route("/mcp", post(mcp_over_http))
-        .layer(axum::middleware::from_fn(crate::access::require_same_origin))
+        .layer(axum::middleware::from_fn(
+            crate::access::require_same_origin,
+        ))
         .layer(axum::middleware::from_fn(log_request))
         .with_state(ctx)
 }
@@ -415,10 +417,7 @@ async fn workspace_review_queue(
 
 /// A person's verdicts on one document. A write: it can restore or exclude the document
 /// and it puts tags on it.
-async fn workspace_review(
-    State(ctx): State<Arc<Ctx>>,
-    Json(review): Json<Review>,
-) -> Response {
+async fn workspace_review(State(ctx): State<Arc<Ctx>>, Json(review): Json<Review>) -> Response {
     let workspace = Workspace::new(&ctx.store);
     let report = workspace.review(review);
     workspace_response(match report {
@@ -488,10 +487,7 @@ async fn workspace_run_detail(
     workspace_response(Workspace::new(&ctx.store).run_detail(&id, query))
 }
 
-async fn workspace_run(
-    State(ctx): State<Arc<Ctx>>,
-    Json(request): Json<RunRequest>,
-) -> Response {
+async fn workspace_run(State(ctx): State<Arc<Ctx>>, Json(request): Json<RunRequest>) -> Response {
     // Answer with the run as started, then score it on a task of its own, as a job under
     // the run's id. The browser follows it on the job stream and reads the answers from
     // the run detail; a request held open for a thousand documents sat behind proxies,
@@ -604,10 +600,7 @@ async fn workspace_jobs(State(ctx): State<Arc<Ctx>>) -> Response {
 /// durable, and a run so stopped is journaled `interrupted` ([`crate::lane`]). A job that
 /// is not running, or was not started as stoppable, is a 404: the page offered a button
 /// for a job that is not there to stop.
-async fn workspace_stop_job(
-    State(ctx): State<Arc<Ctx>>,
-    Path(id): Path<String>,
-) -> Response {
+async fn workspace_stop_job(State(ctx): State<Arc<Ctx>>, Path(id): Path<String>) -> Response {
     match ctx.jobs.stop(&id) {
         true => Json(json!({ "stopped": id })).into_response(),
         false => (
@@ -1314,7 +1307,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Arc::new(Ctx::new(Store::open(dir.path()).await.unwrap()));
         let app = router(Arc::clone(&ctx)).layer(axum::Extension(crate::access::Role::Admin));
-        let (job, cancel) = ctx.jobs.start_stoppable("2026-10-13T00:00:00Z", "run", "tampa");
+        let (job, cancel) = ctx
+            .jobs
+            .start_stoppable("2026-10-13T00:00:00Z", "run", "tampa");
         let plain = ctx.jobs.start("embed", "schedule");
         let stop = |id: &str| {
             Request::post(format!("/workspace/jobs/{id}/stop"))
@@ -1337,7 +1332,10 @@ mod tests {
             .header("origin", "http://attacker.example")
             .body(Body::empty())
             .unwrap();
-        assert_eq!(app.oneshot(foreign).await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            app.oneshot(foreign).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[test]

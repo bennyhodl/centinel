@@ -60,7 +60,13 @@ async fn refuse(
     Path(host): Path<String>,
     body: Option<Json<RuleBody>>,
 ) -> Response {
-    rule(&ctx, host, Ruling::Ignore, body.map(|Json(b)| b).unwrap_or_default()).await
+    rule(
+        &ctx,
+        host,
+        Ruling::Ignore,
+        body.map(|Json(b)| b).unwrap_or_default(),
+    )
+    .await
 }
 
 async fn allow(
@@ -68,12 +74,21 @@ async fn allow(
     Path(host): Path<String>,
     body: Option<Json<RuleBody>>,
 ) -> Response {
-    rule(&ctx, host, Ruling::Allow, body.map(|Json(b)| b).unwrap_or_default()).await
+    rule(
+        &ctx,
+        host,
+        Ruling::Allow,
+        body.map(|Json(b)| b).unwrap_or_default(),
+    )
+    .await
 }
 
 /// Through the `crumbs` op, which owns the ruling's spelling and the host's.
 async fn rule(ctx: &Ctx, host: String, ruling: Ruling, body: RuleBody) -> Response {
-    let args = RuleArgs { host, note: body.note };
+    let args = RuleArgs {
+        host,
+        note: body.note,
+    };
     let action = match ruling {
         Ruling::Ignore => CrumbsAction::Ignore(args),
         Ruling::Allow => CrumbsAction::Allow(args),
@@ -114,19 +129,28 @@ mod tests {
                <a href="https://publicrec.hillsclerk.com/Civil/">records</a>"#,
             Carrier::at_address("https://www.tampa.gov/clerk"),
         );
-        Ledger::new(&store, SourceId::new("tampa").unwrap()).append(&row).await.unwrap();
+        Ledger::new(&store, SourceId::new("tampa").unwrap())
+            .append(&row)
+            .await
+            .unwrap();
         let app = crate::http::router(Arc::new(Ctx::new(store)))
             .layer(axum::Extension(crate::access::Role::Admin));
         (dir, app)
     }
 
     async fn json(resp: Response) -> Value {
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
     async fn get(app: &axum::Router, path: &str) -> Value {
-        let resp = app.clone().oneshot(Request::get(path).body(Body::empty()).unwrap()).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "{path}");
         json(resp).await
     }
@@ -146,7 +170,12 @@ mod tests {
             .unwrap()
             .iter()
             .filter(|n| n["kind"] == "host")
-            .map(|n| (n["host"].as_str().unwrap().to_string(), n["standing"].as_str().unwrap().to_string()))
+            .map(|n| {
+                (
+                    n["host"].as_str().unwrap().to_string(),
+                    n["standing"].as_str().unwrap().to_string(),
+                )
+            })
             .collect()
     }
 
@@ -162,7 +191,10 @@ mod tests {
 
         let resp = app
             .clone()
-            .oneshot(post("/workspace/graph/host/www.facebook.com/refuse", "http://127.0.0.1:8787"))
+            .oneshot(post(
+                "/workspace/graph/host/www.facebook.com/refuse",
+                "http://127.0.0.1:8787",
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -175,7 +207,10 @@ mod tests {
         assert_eq!(marked["totals"]["refused"], 1);
 
         let hidden = get(&app, "/workspace/graph?hide_refused=true&min_pages=1").await;
-        assert_eq!(host_standings(&hidden), [("publicrec.hillsclerk.com".to_string(), "open".to_string())]);
+        assert_eq!(
+            host_standings(&hidden),
+            [("publicrec.hillsclerk.com".to_string(), "open".to_string())]
+        );
 
         let card = get(&app, "/workspace/graph/host/www.facebook.com").await;
         assert_eq!(card["standing"], "ignored");
@@ -185,7 +220,10 @@ mod tests {
 
         let resp = app
             .clone()
-            .oneshot(post("/workspace/graph/host/www.facebook.com/allow", "http://127.0.0.1:8787"))
+            .oneshot(post(
+                "/workspace/graph/host/www.facebook.com/allow",
+                "http://127.0.0.1:8787",
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -199,7 +237,10 @@ mod tests {
         let (_d, app) = app().await;
         let resp = app
             .clone()
-            .oneshot(post("/workspace/graph/host/www.facebook.com/refuse", "http://attacker.example"))
+            .oneshot(post(
+                "/workspace/graph/host/www.facebook.com/refuse",
+                "http://attacker.example",
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);

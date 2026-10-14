@@ -331,7 +331,10 @@ impl Jobs {
         label: impl Into<String>,
     ) -> (Job, Cancel) {
         let (canceller, cancel) = Cancel::channel();
-        (self.begin(id.into(), kind, label.into(), Some(canceller)), cancel)
+        (
+            self.begin(id.into(), kind, label.into(), Some(canceller)),
+            cancel,
+        )
     }
 
     /// Asks a running job to stop at its next item boundary. False when no active job
@@ -657,10 +660,19 @@ mod tests {
         assert!(cancel.check().is_err());
 
         job.finish::<()>(&Err(crate::op::Cancelled.into()));
-        assert!(!jobs.stop("2026-10-13T00:00:00Z"), "a finished job cannot be stopped");
+        assert!(
+            !jobs.stop("2026-10-13T00:00:00Z"),
+            "a finished job cannot be stopped"
+        );
         let started = rx.try_recv().unwrap();
         assert!(
-            matches!(started.event, JobEvent::Started { stoppable: true, .. }),
+            matches!(
+                started.event,
+                JobEvent::Started {
+                    stoppable: true,
+                    ..
+                }
+            ),
             "{started:?}"
         );
     }

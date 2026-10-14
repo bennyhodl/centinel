@@ -176,7 +176,11 @@ impl Icons {
     }
 
     fn lock_for(&self, host: &str) -> Arc<Mutex<()>> {
-        let mut hosts = self.shared.hosts.lock().expect("a lock map is never poisoned");
+        let mut hosts = self
+            .shared
+            .hosts
+            .lock()
+            .expect("a lock map is never poisoned");
         Arc::clone(hosts.entry(host.to_string()).or_default())
     }
 
@@ -208,7 +212,12 @@ impl Icons {
     async fn linked_from(&self, defined: &[SourceConfig], host: &str) -> anyhow::Result<bool> {
         let linkages = Linkages::new(&self.store);
         for source in defined {
-            if linkages.get(&SourceId::new(source.id.clone())?).await?.hosts.contains_key(host) {
+            if linkages
+                .get(&SourceId::new(source.id.clone())?)
+                .await?
+                .hosts
+                .contains_key(host)
+            {
                 return Ok(true);
             }
         }
@@ -223,7 +232,10 @@ impl Icons {
             Some(stored) => stored,
             // A front door that will not open may still serve its icon.
             None => match self.fetch(&address.front).await {
-                Some(fetched) => (String::from_utf8_lossy(&fetched.bytes).into_owned(), fetched.url),
+                Some(fetched) => (
+                    String::from_utf8_lossy(&fetched.bytes).into_owned(),
+                    fetched.url,
+                ),
                 None => (String::new(), address.front.clone()),
             },
         };
@@ -311,7 +323,9 @@ impl Icons {
                 }),
                 Err(_) => Cached::Unknown,
             },
-            None if Timestamp::now().as_second() - record.checked.as_second() < MISS_DAYS * 86_400 => {
+            None if Timestamp::now().as_second() - record.checked.as_second()
+                < MISS_DAYS * 86_400 =>
+            {
                 Cached::Missed
             }
             None => Cached::Unknown,
@@ -327,7 +341,10 @@ impl Icons {
             checked: Timestamp::now(),
             icon: found.map(|(kept, _)| kept.clone()),
         };
-        Ok(write_atomically(&self.store.icon_record_path(host), serde_json::to_vec(&record)?)?)
+        Ok(write_atomically(
+            &self.store.icon_record_path(host),
+            serde_json::to_vec(&record)?,
+        )?)
     }
 }
 
@@ -344,7 +361,9 @@ fn clean(host: &str) -> Option<String> {
     (host.len() <= 253
         && first.is_ascii_alphanumeric()
         && !host.contains("..")
-        && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'))
     .then_some(host)
 }
 
@@ -475,7 +494,14 @@ fn candidates(html: &str, base: &Url) -> Vec<Candidate> {
         let rel = tag.attr("rel").unwrap_or_default().to_ascii_lowercase();
         let rels: Vec<&str> = rel.split_whitespace().collect();
         let mask = rels.contains(&"mask-icon");
-        if !mask && !rels.iter().any(|r| matches!(*r, "icon" | "apple-touch-icon" | "apple-touch-icon-precomposed")) {
+        if !mask
+            && !rels.iter().any(|r| {
+                matches!(
+                    *r,
+                    "icon" | "apple-touch-icon" | "apple-touch-icon-precomposed"
+                )
+            })
+        {
             continue;
         }
         let Some(url) = tag
@@ -502,9 +528,20 @@ fn candidates(html: &str, base: &Url) -> Vec<Candidate> {
             .attr("sizes")
             .unwrap_or_default()
             .split_whitespace()
-            .filter_map(|size| size.to_ascii_lowercase().split_once('x')?.0.parse::<u32>().ok())
+            .filter_map(|size| {
+                size.to_ascii_lowercase()
+                    .split_once('x')?
+                    .0
+                    .parse::<u32>()
+                    .ok()
+            })
             .max();
-        out.push(Candidate { url, format, px, mask });
+        out.push(Candidate {
+            url,
+            format,
+            px,
+            mask,
+        });
     }
     out
 }
@@ -517,9 +554,24 @@ fn sniff(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
         [0, 0, 1, 0, ..] => Some(("ico", "image/x-icon")),
         [b'G', b'I', b'F', b'8', ..] => Some(("gif", "image/gif")),
         [0xFF, 0xD8, 0xFF, ..] => Some(("jpg", "image/jpeg")),
-        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some(("webp", "image/webp")),
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => Some(("webp", "image/webp")),
         _ => {
-            let head = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]).to_ascii_lowercase();
+            let head =
+                String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]).to_ascii_lowercase();
             (head.contains("<svg") && !head.contains("<html")).then_some(("svg", "image/svg+xml"))
         }
     }
@@ -587,7 +639,11 @@ mod tests {
         }
     }
 
-    fn ok(path: &'static str, content_type: &'static str, body: &[u8]) -> (&'static str, &'static str, &'static str, Vec<u8>) {
+    fn ok(
+        path: &'static str,
+        content_type: &'static str,
+        body: &[u8],
+    ) -> (&'static str, &'static str, &'static str, Vec<u8>) {
         (path, "200 OK", content_type, body.to_vec())
     }
 
@@ -613,17 +669,33 @@ mod tests {
     async fn the_icon_link_is_read_from_the_collected_front_page_with_no_request_for_it() {
         let site = Site::start(vec![ok("/assets/mark.png", "image/png", PNG)]).await;
         let (_dir, store, icons) = serving(&site).await;
-        let resource = crate::domain::Resource::new(SourceId::new("town").unwrap(), format!("{}/", site.url()));
+        let resource = crate::domain::Resource::new(
+            SourceId::new("town").unwrap(),
+            format!("{}/", site.url()),
+        );
         store
-            .record_observation(&resource, page_declaring("/assets/mark.png").as_bytes(), Timestamp::now(), Default::default())
+            .record_observation(
+                &resource,
+                page_declaring("/assets/mark.png").as_bytes(),
+                Timestamp::now(),
+                Default::default(),
+            )
             .await
             .unwrap();
 
-        let icon = icons.get("127.0.0.1").await.unwrap().expect("the page declares an icon");
+        let icon = icons
+            .get("127.0.0.1")
+            .await
+            .unwrap()
+            .expect("the page declares an icon");
 
         assert_eq!(icon.content_type, "image/png");
         assert_eq!(icon.bytes, PNG);
-        assert_eq!(site.asked(), ["/assets/mark.png"], "the page itself came from the store");
+        assert_eq!(
+            site.asked(),
+            ["/assets/mark.png"],
+            "the page itself came from the store"
+        );
     }
 
     /// Nothing collected and nothing declared: one request for the page, then the place a
@@ -632,13 +704,21 @@ mod tests {
     #[tokio::test]
     async fn without_a_collected_page_it_asks_once_then_falls_back_to_favicon_ico() {
         let site = Site::start(vec![
-            ok("/", "text/html", b"<html><head><title>x</title></head></html>"),
+            ok(
+                "/",
+                "text/html",
+                b"<html><head><title>x</title></head></html>",
+            ),
             ok("/favicon.ico", "text/plain", ICO),
         ])
         .await;
         let (_dir, store, icons) = serving(&site).await;
 
-        let icon = icons.get("127.0.0.1").await.unwrap().expect("favicon.ico is served");
+        let icon = icons
+            .get("127.0.0.1")
+            .await
+            .unwrap()
+            .expect("favicon.ico is served");
 
         assert_eq!(icon.content_type, "image/x-icon");
         assert_eq!(site.asked(), ["/", "/favicon.ico"]);
@@ -658,14 +738,26 @@ mod tests {
         ])
         .await;
         let (_dir, store, icons) = serving(&site).await;
-        let resource = crate::domain::Resource::new(SourceId::new("town").unwrap(), format!("{}/", site.url()));
+        let resource = crate::domain::Resource::new(
+            SourceId::new("town").unwrap(),
+            format!("{}/", site.url()),
+        );
         let obs = store
-            .record_observation(&resource, b"collected once", Timestamp::now(), Default::default())
+            .record_observation(
+                &resource,
+                b"collected once",
+                Timestamp::now(),
+                Default::default(),
+            )
             .await
             .unwrap();
         std::fs::remove_file(store.blob_path_of(&obs.blob_sha)).unwrap();
 
-        let icon = icons.get("127.0.0.1").await.unwrap().expect("the live page declares one");
+        let icon = icons
+            .get("127.0.0.1")
+            .await
+            .unwrap()
+            .expect("the live page declares one");
 
         assert_eq!(icon.content_type, "image/svg+xml");
         assert_eq!(site.asked(), ["/", "/m.svg"]);
@@ -674,7 +766,12 @@ mod tests {
     #[test]
     fn an_svg_beats_a_sharp_png_beats_an_ico() {
         let base = Url::parse("https://city.gov/news/").unwrap();
-        let tags = |links: &[&str]| links.iter().map(|l| format!("<link {l}>")).collect::<String>();
+        let tags = |links: &[&str]| {
+            links
+                .iter()
+                .map(|l| format!("<link {l}>"))
+                .collect::<String>()
+        };
         let ico = r#"rel="shortcut icon" href="/favicon.ico""#;
         let small = r#"rel="icon" type="image/png" sizes="16x16" href="s16.png""#;
         let big = r#"rel="icon" type="image/png" sizes="96x96" href="/b96.png""#;
@@ -683,11 +780,32 @@ mod tests {
         let mask = r#"rel="mask-icon" href="/pin.svg" color="black""#;
         let chosen = |links: &[&str]| best(&tags(links), &base).unwrap().to_string();
 
-        assert_eq!(chosen(&[ico, small, big, svg, mask]), "https://city.gov/mark.svg");
-        assert_eq!(chosen(&[ico, small, big, medium]), "https://city.gov/m32.png", "the smallest that is sharp");
-        assert_eq!(chosen(&[ico, small]), "https://city.gov/favicon.ico", "a 16 px PNG is blurrier than the ico");
-        assert_eq!(chosen(&[small, mask]), "https://city.gov/news/s16.png", "relative to the page; a mask is last");
-        assert!(best("<html><link rel=\"stylesheet\" href=\"/a.css\"></html>", &base).is_none());
+        assert_eq!(
+            chosen(&[ico, small, big, svg, mask]),
+            "https://city.gov/mark.svg"
+        );
+        assert_eq!(
+            chosen(&[ico, small, big, medium]),
+            "https://city.gov/m32.png",
+            "the smallest that is sharp"
+        );
+        assert_eq!(
+            chosen(&[ico, small]),
+            "https://city.gov/favicon.ico",
+            "a 16 px PNG is blurrier than the ico"
+        );
+        assert_eq!(
+            chosen(&[small, mask]),
+            "https://city.gov/news/s16.png",
+            "relative to the page; a mask is last"
+        );
+        assert!(
+            best(
+                "<html><link rel=\"stylesheet\" href=\"/a.css\"></html>",
+                &base
+            )
+            .is_none()
+        );
     }
 
     /// Fifty icon-less hosts on a page must not mean fifty requests per load.
@@ -703,7 +821,11 @@ mod tests {
         assert_eq!(site.asked(), first, "a fresh miss costs no request");
 
         let eight_days_ago = Timestamp::now() - jiff::SignedDuration::from_hours(8 * 24);
-        let stale = serde_json::to_vec(&Record { checked: eight_days_ago, icon: None }).unwrap();
+        let stale = serde_json::to_vec(&Record {
+            checked: eight_days_ago,
+            icon: None,
+        })
+        .unwrap();
         std::fs::write(store.icon_record_path("127.0.0.1"), stale).unwrap();
         assert_eq!(icons.get("127.0.0.1").await.unwrap(), None);
         assert_eq!(site.asked().len(), 4, "a week-old miss is looked at again");
@@ -716,7 +838,14 @@ mod tests {
         let site = Site::start(vec![ok("/favicon.ico", "image/x-icon", ICO)]).await;
         let (_dir, store, icons) = serving(&site).await;
 
-        for host in ["localhost", "example.gov", "127.0.0.2", "../etc/passwd", "a/b", ""] {
+        for host in [
+            "localhost",
+            "example.gov",
+            "127.0.0.2",
+            "../etc/passwd",
+            "a/b",
+            "",
+        ] {
             assert_eq!(icons.get(host).await.unwrap(), None, "{host:?}");
         }
 
@@ -742,9 +871,19 @@ mod tests {
         ledger.append(&page).await.unwrap();
         let icons = Icons::new(store);
 
-        let known = icons.address_of("portal.vendor.com").await.unwrap().expect("named by a crumb");
+        let known = icons
+            .address_of("portal.vendor.com")
+            .await
+            .unwrap()
+            .expect("named by a crumb");
         assert_eq!(known.front.as_str(), "https://portal.vendor.com/");
-        assert!(icons.address_of("other.vendor.com").await.unwrap().is_none());
+        assert!(
+            icons
+                .address_of("other.vendor.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(icons.address_of("169.254.169.254").await.unwrap().is_none());
     }
 
@@ -757,7 +896,11 @@ mod tests {
         let site = Site::start(vec![
             ok("/", "text/html", page_declaring("/huge.png").as_bytes()),
             ok("/huge.png", "image/png", &huge),
-            ok("/favicon.ico", "image/x-icon", b"<html>Not found, honest</html>"),
+            ok(
+                "/favicon.ico",
+                "image/x-icon",
+                b"<html>Not found, honest</html>",
+            ),
         ])
         .await;
         let (_dir, _store, icons) = serving(&site).await;
@@ -778,13 +921,23 @@ mod tests {
         let (a, b) = tokio::join!(icons.get("127.0.0.1"), icons.get("127.0.0.1"));
 
         assert_eq!(a.unwrap(), b.unwrap());
-        assert_eq!(site.asked(), ["/", "/favicon.ico"], "one page, one icon, however many asked");
+        assert_eq!(
+            site.asked(),
+            ["/", "/favicon.ico"],
+            "one page, one icon, however many asked"
+        );
     }
 
     #[test]
     fn only_a_public_name_may_be_reached_on_a_crumbs_word() {
         assert!(is_public_name("portal.vendor.com"));
-        for host in ["localhost", "10.0.0.1", "printer", "nas.local", "db.internal"] {
+        for host in [
+            "localhost",
+            "10.0.0.1",
+            "printer",
+            "nas.local",
+            "db.internal",
+        ] {
             assert!(!is_public_name(host), "{host}");
         }
     }

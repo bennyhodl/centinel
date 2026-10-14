@@ -220,14 +220,7 @@ async fn list(
     cancel: &Cancel,
 ) -> anyhow::Result<CrumbsReport> {
     let started = std::time::Instant::now();
-    let field = survey(
-        ctx,
-        args.source.as_deref(),
-        args.rescan,
-        p,
-        cancel,
-    )
-    .await?;
+    let field = survey(ctx, args.source.as_deref(), args.rescan, p, cancel).await?;
 
     let mut crumbs = field.trail.crumbs();
     for crumb in &mut crumbs {
@@ -814,7 +807,10 @@ mod tests {
 
     /// Defines a source in the store, as `source add` would.
     async fn define(ctx: &Ctx, source: crate::config::SourceConfig) {
-        crate::catalog::Sources::new(&ctx.store).add(&source).await.unwrap();
+        crate::catalog::Sources::new(&ctx.store)
+            .add(&source)
+            .await
+            .unwrap();
     }
 
     fn listed(report: &CrumbsReport) -> &Vec<Crumb> {
@@ -904,7 +900,11 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!((*unrecorded, *unread, *from_blobs), (1, 0, 0), "the blob was opened");
+        assert_eq!(
+            (*unrecorded, *unread, *from_blobs),
+            (1, 0, 0),
+            "the blob was opened"
+        );
         assert_eq!(*documents, 1, "an unrecorded page is not accounted for");
     }
 
@@ -929,11 +929,17 @@ mod tests {
             },
         )
         .await;
-        let CrumbsReport::Show { carried_by, pages, .. } = &report else {
+        let CrumbsReport::Show {
+            carried_by, pages, ..
+        } = &report
+        else {
             panic!("expected a show, got {report:?}");
         };
         let addresses: Vec<&str> = carried_by.iter().map(|c| c.address.as_str()).collect();
-        assert_eq!(addresses, ["https://www.tampa.gov/a", "https://www.tampa.gov/b"]);
+        assert_eq!(
+            addresses,
+            ["https://www.tampa.gov/a", "https://www.tampa.gov/b"]
+        );
         assert_eq!(*pages, 2);
     }
 
@@ -1089,7 +1095,10 @@ mod tests {
             &ctx,
             crate::config::SourceConfig {
                 enabled: Some(false),
-                ..crate::config::SourceConfig::site("hillsclerk", "https://publicrec.hillsclerk.com/Civil/")
+                ..crate::config::SourceConfig::site(
+                    "hillsclerk",
+                    "https://publicrec.hillsclerk.com/Civil/",
+                )
             },
         )
         .await;
@@ -1118,7 +1127,10 @@ mod tests {
 
         define(
             &ctx,
-            crate::config::SourceConfig::channel("tampa-tv", "https://www.youtube.com/@CityofTampa"),
+            crate::config::SourceConfig::channel(
+                "tampa-tv",
+                "https://www.youtube.com/@CityofTampa",
+            ),
         )
         .await;
         let report = run(&ctx, CrumbsArgs::default()).await;
@@ -1335,7 +1347,14 @@ mod tests {
         let html = r#"<a href="https://publicrec.hillsclerk.com/Probate/">probate</a>
                <a href="https://publicrec.hillsclerk.com/Civil/">civil</a>
                <a href="/ours">ours</a>"#;
-        observed(&ctx, "tampa", "https://www.tampa.gov/clerk", html.as_bytes(), "text/html").await;
+        observed(
+            &ctx,
+            "tampa",
+            "https://www.tampa.gov/clerk",
+            html.as_bytes(),
+            "text/html",
+        )
+        .await;
 
         // A pre-ledger corpus: nothing is read, and the report says what is missing.
         let cold = run(&ctx, CrumbsArgs::default()).await;
@@ -1383,7 +1402,10 @@ mod tests {
         // the same as the row the rescan wrote from the blob.
         let (_d2, fresh) = self::ctx().await;
         page(&fresh, "tampa", "https://www.tampa.gov/clerk", html).await;
-        assert_eq!(listed(&run(&fresh, CrumbsArgs::default()).await), listed(&warm));
+        assert_eq!(
+            listed(&run(&fresh, CrumbsArgs::default()).await),
+            listed(&warm)
+        );
 
         // The example is the smallest address on the host, so it does not depend on which
         // feed answered or on what order the pages arrived in.
@@ -1429,7 +1451,10 @@ mod tests {
             .unwrap();
 
         let report = run(&ctx, CrumbsArgs::default()).await;
-        assert!(listed(&report).is_empty(), "a stale row answered: {report:?}");
+        assert!(
+            listed(&report).is_empty(),
+            "a stale row answered: {report:?}"
+        );
         let CrumbsReport::List { unrecorded, .. } = &report else {
             unreachable!()
         };
@@ -1437,7 +1462,12 @@ mod tests {
 
         // Written down as `collect` would, the new row answers and the old one does not.
         Ledger::new(&ctx.store, resource.source.clone())
-            .record(&resource, br#"<a href="https://new.example.com/">new</a>"#, ContentKind::Html, &obs)
+            .record(
+                &resource,
+                br#"<a href="https://new.example.com/">new</a>"#,
+                ContentKind::Html,
+                &obs,
+            )
             .await;
         let hosts: Vec<String> = listed(&run(&ctx, CrumbsArgs::default()).await)
             .iter()

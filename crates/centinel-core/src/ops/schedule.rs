@@ -309,7 +309,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         crate::catalog::Sources::new(&store)
-            .add(&crate::config::SourceConfig::site("tampa", "https://tampa.gov"))
+            .add(&crate::config::SourceConfig::site(
+                "tampa",
+                "https://tampa.gov",
+            ))
             .await
             .unwrap();
         (dir, Ctx::new(store))

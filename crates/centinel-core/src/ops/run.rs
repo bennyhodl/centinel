@@ -432,7 +432,9 @@ pub async fn run(
         }
         None => (Config::load()?, Config::locate()),
     };
-    let selected = crate::catalog::Sources::new(&ctx.store).selected(&args.sources).await?;
+    let selected = crate::catalog::Sources::new(&ctx.store)
+        .selected(&args.sources)
+        .await?;
 
     let mut report = RunReport {
         config: config_path.map(|p| p.display().to_string()),

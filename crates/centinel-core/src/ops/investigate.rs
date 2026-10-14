@@ -576,13 +576,7 @@ impl Render for InvestigateReport {
             }
             if !self.declined.is_empty() {
                 // After what answered, and without reasons: see [`InvestigateReport::declined`].
-                p.nest(|p| {
-                    p.kv(
-                        "declined",
-                        12,
-                        p.paint(&self.declined.join(", "), Ink::Dim),
-                    )
-                })?;
+                p.nest(|p| p.kv("declined", 12, p.paint(&self.declined.join(", "), Ink::Dim)))?;
             }
             if let Some(probe) = &self.probe {
                 probe.render(p)?;

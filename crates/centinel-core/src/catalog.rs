@@ -99,8 +99,8 @@ impl<'a> Sources<'a> {
             self.store.root().display(),
             match (close, all.is_empty()) {
                 (Some(s), _) => format!(" (did you mean `{}`?)", s.id),
-                (None, true) => " — it has no sources yet; add one with `centinel source add`"
-                    .to_string(),
+                (None, true) =>
+                    " — it has no sources yet; add one with `centinel source add`".to_string(),
                 (None, false) => String::new(),
             }
         )
@@ -251,7 +251,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let sources = Sources::new(&store);
-        sources.add(&SourceConfig::site("tampa", "https://www.tampa.gov")).await.unwrap();
+        sources
+            .add(&SourceConfig::site("tampa", "https://www.tampa.gov"))
+            .await
+            .unwrap();
         let err = sources
             .add(&SourceConfig::site("tampa", "https://other.gov"))
             .await
@@ -264,11 +267,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let sources = Sources::new(&store);
-        sources.add(&SourceConfig::site("a", "https://a.gov")).await.unwrap();
-        sources.add(&SourceConfig::site("b", "https://b.gov")).await.unwrap();
+        sources
+            .add(&SourceConfig::site("a", "https://a.gov"))
+            .await
+            .unwrap();
+        sources
+            .add(&SourceConfig::site("b", "https://b.gov"))
+            .await
+            .unwrap();
         sources.set_enabled("b", false).await.unwrap();
 
-        let all: Vec<String> = sources.selected(&[]).await.unwrap().into_iter().map(|s| s.id).collect();
+        let all: Vec<String> = sources
+            .selected(&[])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
         assert_eq!(all, ["a"]);
         let named = sources.selected(&["b".into()]).await.unwrap();
         assert_eq!(named[0].id, "b");
@@ -279,7 +294,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let sources = Sources::new(&store);
-        sources.add(&SourceConfig::site("tampa", "https://www.tampa.gov")).await.unwrap();
+        sources
+            .add(&SourceConfig::site("tampa", "https://www.tampa.gov"))
+            .await
+            .unwrap();
 
         let config = Config::parse(
             "[[source]]\nid = \"tampa\"\nsite = \"https://elsewhere.gov\"\n\n\
@@ -292,7 +310,11 @@ mod tests {
         assert!(again.from_config.is_empty());
 
         let tampa = sources.get("tampa").await.unwrap().unwrap();
-        assert_eq!(tampa.site.as_deref(), Some("https://www.tampa.gov"), "the store's own definition wins");
+        assert_eq!(
+            tampa.site.as_deref(),
+            Some("https://www.tampa.gov"),
+            "the store's own definition wins"
+        );
     }
 
     #[tokio::test]
@@ -300,12 +322,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let sources = Sources::new(&store);
-        sources.add(&SourceConfig::site("tampa", "https://www.tampa.gov")).await.unwrap();
+        sources
+            .add(&SourceConfig::site("tampa", "https://www.tampa.gov"))
+            .await
+            .unwrap();
 
-        let ok = Config::parse("[[schedule]]\nid = \"x\"\ncron = \"@daily\"\nsources = [\"tampa\"]\n").unwrap();
+        let ok =
+            Config::parse("[[schedule]]\nid = \"x\"\ncron = \"@daily\"\nsources = [\"tampa\"]\n")
+                .unwrap();
         sources.check_schedules(&ok).await.unwrap();
 
-        let bad = Config::parse("[[schedule]]\nid = \"x\"\ncron = \"@daily\"\nsources = [\"orlando\"]\n").unwrap();
+        let bad =
+            Config::parse("[[schedule]]\nid = \"x\"\ncron = \"@daily\"\nsources = [\"orlando\"]\n")
+                .unwrap();
         let err = sources.check_schedules(&bad).await.unwrap_err().to_string();
         assert!(err.contains("orlando"), "{err}");
     }
@@ -327,7 +356,10 @@ mod tests {
         };
         Sources::new(&store).add(&written).await.unwrap();
         let read = Sources::new(&store).get("tampa").await.unwrap().unwrap();
-        assert_eq!(toml::to_string(&read).unwrap(), toml::to_string(&written).unwrap());
+        assert_eq!(
+            toml::to_string(&read).unwrap(),
+            toml::to_string(&written).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -335,7 +367,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let sources = Sources::new(&store);
-        sources.add(&SourceConfig::site("tampa", "https://www.tampa.gov")).await.unwrap();
+        sources
+            .add(&SourceConfig::site("tampa", "https://www.tampa.gov"))
+            .await
+            .unwrap();
         let err = sources.require("tamp").await.unwrap_err();
         assert!(err.to_string().contains("did you mean `tampa`"), "{err}");
     }

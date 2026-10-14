@@ -546,7 +546,10 @@ fn resolve_root(matches: &clap::ArgMatches) -> Result<PathBuf> {
 /// otherwise be silently ignored.
 async fn import_sources(store: &Store, matches: &clap::ArgMatches) -> Result<()> {
     let (config, path) = match explicit_config(matches) {
-        Some(path) => (Config::from_file(Path::new(path))?, Some(PathBuf::from(path))),
+        Some(path) => (
+            Config::from_file(Path::new(path))?,
+            Some(PathBuf::from(path)),
+        ),
         None => (Config::load()?, Config::locate()),
     };
     let imported = centinel_core::catalog::Sources::new(store)
