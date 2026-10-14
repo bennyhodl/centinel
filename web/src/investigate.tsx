@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { Link, useNavigate } from '@tanstack/react-router'
-import { Check, ChevronLeft, ClipboardCopy, Plus, Search, X } from 'lucide-react'
+import { useNavigate } from '@tanstack/react-router'
+import { Check, ClipboardCopy, Plus, Search, X } from 'lucide-react'
 import { cn } from 'cn'
 import { api, type InvestigationReport, type NewSource, type RequestRecord } from './api'
 import { AddSource } from './add-source'
@@ -10,7 +10,7 @@ import { useJobs } from './jobs'
 import { bytes, clock, plural } from './format'
 import { agentReport, frontPage, glanceOf, hostOf, pathOf, summaryOf, timelineOf, typeOf, verdictOf, type Decisions, type Entry, type Verdict } from './investigate-logic'
 import { queries } from './queries'
-import { ErrorBox, SectionRule, Spinner } from './ui'
+import { BackToSources, ErrorBox, SectionRule, Spinner } from './ui'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
@@ -78,10 +78,6 @@ export function InvestigatePage({ id }: { id: string }) {
 
 function Working({ message }: { message: string }) {
   return <div className="mb-6 flex items-center gap-3 rounded-lg border px-4 py-3 text-sm"><Spinner /><span className="flex-1">{message}…</span></div>
-}
-
-function BackToSources() {
-  return <Link to="/sources" className="mb-4 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground"><ChevronLeft className="size-3.5" />All sources</Link>
 }
 
 /** The title and the line under it. The host is the title, in the face every page title wears. */
