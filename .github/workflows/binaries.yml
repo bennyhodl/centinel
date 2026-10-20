@@ -1,9 +1,10 @@
 # Prebuilt binaries for a released tag, so that installing is a download rather than a
-# twenty-minute build. Three assets, one binary in each:
+# twenty-minute build. Four assets, one binary in each:
 #
-#   centinel-aarch64-apple-darwin.tar.gz       Apple Silicon
-#   centinel-x86_64-unknown-linux-gnu.tar.gz   x86-64-v3 — AVX2, any x86_64 since ~2013
-#   centinel-aarch64-unknown-linux-gnu.tar.gz  arm64 Linux, the DGX Spark included
+#   centinel-aarch64-apple-darwin.tar.gz          Apple Silicon
+#   centinel-x86_64-unknown-linux-gnu.tar.gz      x86-64-v3 — AVX2, any x86_64 since ~2013
+#   centinel-x86_64-unknown-linux-gnu-v2.tar.gz   x86-64-v2 — SSE4.2, no AVX2, since ~2009
+#   centinel-aarch64-unknown-linux-gnu.tar.gz     arm64 Linux, the DGX Spark included
 #
 # None of them carries a GPU backend, because none of them runs a model: embedding,
 # reranking and transcription are requests to the servers `[inference]` names, and the
@@ -103,7 +104,7 @@ jobs:
           gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
 
   linux:
-    name: ${{ matrix.target }}
+    name: ${{ matrix.asset }}
     strategy:
       fail-fast: false
       matrix:
@@ -111,13 +112,22 @@ jobs:
           # Pinned for the same reason as the macOS image: it decides the oldest glibc the
           # asset will start on.
           #
-          # x86-64-v3 is AVX2, FMA, F16C and BMI2 — every x86_64 since about 2013 — and the
-          # installer refuses this asset on a CPU without AVX2 rather than letting it fault.
+          # x86-64-v3 is AVX2, FMA, F16C and BMI2 — every x86_64 since about 2013. x86-64-v2
+          # is SSE4.2, POPCNT and CX16, for the CPUs before that: Sandy Bridge and Ivy Bridge
+          # Xeons still run a lot of hypervisors. The installer picks v3 on a CPU with AVX2
+          # and v2 on one with the v2 flags, and offers neither below that rather than
+          # letting a binary fault. Two rows share a target, so the asset names the row.
           # arm64 builds for armv8-a, the baseline of the architecture.
           - target: x86_64-unknown-linux-gnu
+            asset: centinel-x86_64-unknown-linux-gnu.tar.gz
             runner: ubuntu-22.04
             rustflags: "-C target-cpu=x86-64-v3"
+          - target: x86_64-unknown-linux-gnu
+            asset: centinel-x86_64-unknown-linux-gnu-v2.tar.gz
+            runner: ubuntu-22.04
+            rustflags: "-C target-cpu=x86-64-v2"
           - target: aarch64-unknown-linux-gnu
+            asset: centinel-aarch64-unknown-linux-gnu.tar.gz
             runner: ubuntu-24.04-arm
             rustflags: ""
     runs-on: ${{ matrix.runner }}
@@ -154,7 +164,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag }}
-          ASSET: centinel-${{ matrix.target }}.tar.gz
+          ASSET: ${{ matrix.asset }}
         run: |
           set -euo pipefail
           tar -czf "$ASSET" -C target/release centinel

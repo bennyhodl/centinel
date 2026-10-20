@@ -16,12 +16,14 @@
 #   download   a release asset, when a release carries one this host can run
 #   build      from source, which is every other host and the fallback for every failure
 #
-# A release carries one asset per platform, and none of them carries a GPU backend:
-# Centinel runs no model itself. Embedding, reranking and transcription are requests to the
-# servers `[inference]` names in the config file, and the GPU is theirs.
+# A release carries one asset per platform — two for x86_64 Linux — and none of them
+# carries a GPU backend: Centinel runs no model itself. Embedding, reranking and
+# transcription are requests to the servers `[inference]` names in the config file, and the
+# GPU is theirs.
 #
 #   aarch64-apple-darwin
-#   x86_64-unknown-linux-gnu    x86-64-v3, so AVX2 — any x86_64 since about 2013
+#   x86_64-unknown-linux-gnu      x86-64-v3, so AVX2 — any x86_64 since about 2013
+#   x86_64-unknown-linux-gnu-v2   x86-64-v2, SSE4.2 and no AVX2 — since about 2009
 #   aarch64-unknown-linux-gnu
 #
 # Nothing about the download is load-bearing. No asset for this host, no release yet, a
@@ -52,6 +54,7 @@ REPO="https://github.com/bennyhodl/centinel"
 # installing rather than a second thing to remember.
 ASSET_MACOS_ARM64="centinel-aarch64-apple-darwin.tar.gz"
 ASSET_LINUX_X86_64="centinel-x86_64-unknown-linux-gnu.tar.gz"
+ASSET_LINUX_X86_64_V2="centinel-x86_64-unknown-linux-gnu-v2.tar.gz"
 ASSET_LINUX_ARM64="centinel-aarch64-unknown-linux-gnu.tar.gz"
 
 # A cold build unpacks and compiles arrow, datafusion and lance. Below this it is close
@@ -274,6 +277,10 @@ fi
 
 cpu_has() { grep -qw "$1" /proc/cpuinfo 2>/dev/null; }
 
+cpu_has_all() {
+    for _f in "$@"; do cpu_has "$_f" || return 1; done
+}
+
 # The asset for this host, or empty with a reason on stderr. Empty is not a failure: it
 # is the answer "build", which is what this script did for every host before releases
 # carried binaries at all.
@@ -282,14 +289,21 @@ asset_for_host() {
         macos/arm64)
             printf '%s' "$ASSET_MACOS_ARM64" ;;
         linux/x86_64)
-            # Built for x86-64-v3, which is AVX2 and FMA — any x86_64 since about 2013.
-            # Older than that and the binary faults on an instruction rather than saying
-            # anything useful, so it is not offered.
-            if ! cpu_has avx2; then
-                note "this CPU has no AVX2, and the release binary is built for it"
-                return 0
-            fi
-            printf '%s' "$ASSET_LINUX_X86_64" ;;
+            # Two builds: x86-64-v3, which is AVX2 and FMA — any x86_64 since about 2013 —
+            # and x86-64-v2, which is SSE4.2 and POPCNT, for the CPUs before that. A binary
+            # on a CPU below its level faults on an instruction rather than saying anything
+            # useful, so below v2 neither is offered.
+            #
+            # v2 is checked flag by flag, not by one: a hypervisor's generic CPU model —
+            # Proxmox's `kvm64` is one — hides SSE4.2 and POPCNT from a guest whose host
+            # has them, and that guest is below v2 whatever the silicon underneath is.
+            if cpu_has avx2; then
+                printf '%s' "$ASSET_LINUX_X86_64"
+            elif cpu_has_all cx16 lahf_lm popcnt sse4_1 sse4_2 ssse3; then
+                printf '%s' "$ASSET_LINUX_X86_64_V2"
+            else
+                note "this CPU is below x86-64-v2, and the oldest release binary is built for it"
+            fi ;;
         linux/arm64)
             printf '%s' "$ASSET_LINUX_ARM64" ;;
         *)
@@ -722,7 +736,7 @@ else
     note "$PKG_MAIN ${NOW:-(version unknown)}"
 fi
 if [ "$DONE" = download ]; then
-    note "a release binary, built for the baseline CPU of this architecture"
+    note "a release binary, $ASSET"
 fi
 say ""
 

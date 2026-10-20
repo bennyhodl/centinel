@@ -19,16 +19,22 @@ same on a laptop and on a GPU box, and nothing here asks which GPU you have.
 
 ## What a release carries
 
-One asset per platform, one binary in each:
+One asset per platform, two for x86_64 Linux, one binary in each:
 
 | Asset | Wants |
 |---|---|
 | `aarch64-apple-darwin` | an Apple Silicon Mac |
 | `x86_64-unknown-linux-gnu` | AVX2 — any x86_64 since about 2013 |
+| `x86_64-unknown-linux-gnu-v2` | x86-64-v2 — SSE4.2 and POPCNT, for an x86_64 without AVX2 |
 | `aarch64-unknown-linux-gnu` | an arm64 Linux host, the DGX Spark included |
 
 None of them carries a GPU backend, because none of them runs a model. The GPU belongs to
 the inference server.
+
+On x86_64 Linux the script reads `/proc/cpuinfo`: AVX2 gets the first, the x86-64-v2 flags
+without AVX2 get the second, and a CPU below that builds. A virtual machine sees the CPU
+model its hypervisor gives it, not the host's — Proxmox's default `kvm64` is below v2, so
+set the VM's CPU type to `host` to get a download.
 
 Nothing about the download is load-bearing. No asset for this host, no release, a checksum
 that does not match, a binary that will not start — each falls back to the build, so the
@@ -138,7 +144,7 @@ carries AVX2 and FMA is:
 RUSTFLAGS="-C target-cpu=x86-64-v3" ./install.sh --portable
 ```
 
-The release binaries are built exactly that way: `x86-64-v3` on x86_64 Linux, the arm64
+The release binaries are built exactly that way: `x86-64-v3` and `x86-64-v2` on x86_64 Linux, the arm64
 baseline elsewhere, and on macOS the apple-m1 baseline every Apple Silicon Mac shares.
 
 **It says what an older install left behind.** Before inference moved to servers, Centinel

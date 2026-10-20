@@ -434,7 +434,7 @@ tags, and publishes. There is nothing to do by hand.
 
 Prebuilt binaries are a second workflow, `Binaries`, which `Release` calls at the end of
 every release. It builds one CPU binary per platform — Apple Silicon, x86_64 Linux at
-`x86-64-v3`, arm64 Linux — and uploads them to the tag, which is what turns an install from
+`x86-64-v3` and again at `x86-64-v2`, arm64 Linux — and uploads them to the tag, which is what turns an install from
 a twenty-minute build into a download. Start it by hand against any existing tag from the
 Actions tab to backfill a release. A release without assets is not broken: `install.sh`
 asks, does not find, and builds.
