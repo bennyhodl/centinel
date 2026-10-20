@@ -366,6 +366,7 @@ attention, threads, VAD — belongs to the server, set once for that machine, an
 this binary's flags. So there is no GPU build and no model download here: a release is
 one plain CPU binary per platform (`centinel-aarch64-apple-darwin`,
 `centinel-x86_64-unknown-linux-gnu` built for x86-64-v3,
+`centinel-x86_64-unknown-linux-gnu-v2` built for x86-64-v2 for CPUs without AVX2,
 `centinel-aarch64-unknown-linux-gnu`).
 
 **One failure ends a stage; the rest skip a chunk.** All three go through one HTTP
