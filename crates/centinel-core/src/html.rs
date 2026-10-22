@@ -31,6 +31,16 @@ pub struct Scan<'a> {
     lower: String,
 }
 
+/// One `<a …>` and the markup it wraps, up to its `</a>`.
+///
+/// The text is what a person reads as the link, and the only place a page says *who* an
+/// address belongs to: `<a href="mailto:jdoe@tampagov.net">Jane Doe</a>`.
+pub struct Link<'s> {
+    pub tag: Tag<'s>,
+    /// The markup between the tag and its close, in its original casing.
+    pub inner: &'s str,
+}
+
 /// One `<name …>`, as found.
 pub struct Tag<'s> {
     /// Lowercased, because that is what a caller matches on.
@@ -50,6 +60,35 @@ impl<'a> Scan<'a> {
 
     /// Every `<name …>` whose name is wanted, in document order.
     pub fn tags(&self, want: &[&str]) -> Vec<Tag<'_>> {
+        self.spans(want).into_iter().map(|(tag, _)| tag).collect()
+    }
+
+    /// Every `<a …>`, with what it wraps.
+    ///
+    /// A link ends at its `</a>`, or at the next `<a` when a page never closed it — a
+    /// missing close must not turn one link's text into the rest of the page. Both are
+    /// whole tag names: `</abbr>` inside a link is not its end.
+    pub fn links(&self) -> Vec<Link<'_>> {
+        self.spans(&["a"])
+            .into_iter()
+            .map(|(tag, close)| {
+                let start = close + 1;
+                let rest = &self.lower[start..];
+                let end = [find_tag(rest, "</a"), find_tag(rest, "<a")]
+                    .into_iter()
+                    .flatten()
+                    .min()
+                    .map_or(self.html.len(), |i| start + i);
+                Link {
+                    tag,
+                    inner: &self.html[start..end],
+                }
+            })
+            .collect()
+    }
+
+    /// Each wanted tag, with the offset of the `>` that closes it.
+    fn spans(&self, want: &[&str]) -> Vec<(Tag<'_>, usize)> {
         let mut out = Vec::new();
         let mut from = 0;
 
@@ -64,11 +103,14 @@ impl<'a> Scan<'a> {
             };
             let name = &self.lower[after..name_end.min(close)];
             if want.contains(&name) {
-                out.push(Tag {
-                    name,
-                    raw: &self.html[open..close],
-                    lower: &self.lower[open..close],
-                });
+                out.push((
+                    Tag {
+                        name,
+                        raw: &self.html[open..close],
+                        lower: &self.lower[open..close],
+                    },
+                    close,
+                ));
             }
             from = close + 1;
         }
@@ -148,6 +190,57 @@ impl<'s> Tag<'s> {
         }
         None
     }
+}
+
+/// Where `opening` — `<a` or `</a` — starts a tag of exactly that name in lowercased
+/// markup: not `<abbr>`, `<area>` or `</abbr>`, which begin the same way.
+fn find_tag(lower: &str, opening: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(at) = lower[from..].find(opening).map(|i| i + from) {
+        match lower.as_bytes().get(at + opening.len()) {
+            Some(c) if c.is_ascii_whitespace() || matches!(c, b'>' | b'/') => return Some(at),
+            _ => from = at + opening.len(),
+        }
+    }
+    None
+}
+
+/// Tags that sit inside a run of text rather than break it: `O<span>'Neil</span>` is one
+/// word on the page, and a space where the tag was would make it two.
+const INLINE: &[&str] = &[
+    "a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "dfn", "em", "font", "i", "kbd",
+    "mark", "q", "s", "samp", "small", "span", "strong", "sub", "sup", "time", "u", "var",
+];
+
+/// What a person reads in a fragment of markup: tags dropped — an inline one joining the
+/// text either side, any other breaking it — every character reference decoded, and runs
+/// of whitespace one space.
+pub fn text(fragment: &str) -> String {
+    let mut out = String::with_capacity(fragment.len());
+    let mut rest = fragment;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let tag = &rest[open + 1..];
+        let Some(close) = tag.find('>') else {
+            rest = "";
+            break;
+        };
+        let name: String = tag[..close]
+            .trim_start_matches('/')
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if !INLINE.contains(&name.as_str()) {
+            out.push(' ');
+        }
+        rest = &tag[close + 1..];
+    }
+    out.push_str(rest);
+    html_escape::decode_html_entities(&out)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// One quoted run in a fragment of script, and whether the script was building it.
@@ -232,6 +325,44 @@ pub fn unescape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_link_reads_as_its_text() {
+        let scan = Scan::new(
+            r#"<a href="/council/viera"><span>Council&nbsp;Member</span>
+                 Luis <b>Viera</b></a><abbr>x</abbr>"#,
+        );
+        let links = scan.links();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].tag.attr("href"), Some("/council/viera"));
+        assert_eq!(text(links[0].inner), "Council Member Luis Viera");
+    }
+
+    /// `</abbr>` inside a link is not the link's end: the name after it is the point.
+    #[test]
+    fn a_link_ends_at_its_own_close_and_not_at_one_that_starts_the_same() {
+        let scan = Scan::new(r#"<a href="/staff"><abbr>Dr.</abbr> Jane Doe</a><area>"#);
+        assert_eq!(text(scan.links()[0].inner), "Dr. Jane Doe");
+    }
+
+    /// Inline markup inside a word leaves it one word, a block break makes two, and every
+    /// character reference reads as the character it names.
+    #[test]
+    fn text_reads_as_the_page_renders_it() {
+        assert_eq!(text("Mary O<span>'Neil</span>"), "Mary O'Neil");
+        assert_eq!(text("Jos&#233; N&uacute;&ntilde;ez"), "José Núñez");
+        assert_eq!(text("Jane<br>Doe"), "Jane Doe");
+        assert_eq!(text("<b>Luis</b>&nbsp;Viera"), "Luis Viera");
+    }
+
+    /// A page that never closes a link must not hand that link the text of every link
+    /// after it — and `<abbr>` is not the next link.
+    #[test]
+    fn an_unclosed_link_ends_where_the_next_one_opens() {
+        let scan = Scan::new(r#"<a href="/a">Jane Doe <abbr>JD</abbr><a href="/b">Bob Roe</a>"#);
+        let texts: Vec<String> = scan.links().iter().map(|a| text(a.inner)).collect();
+        assert_eq!(texts, ["Jane Doe JD", "Bob Roe"]);
+    }
 
     #[test]
     fn tags_are_found_whatever_their_casing() {

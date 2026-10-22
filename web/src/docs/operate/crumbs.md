@@ -113,6 +113,9 @@ crumbs  236 documents in 3 sources · 0.2s
     236 pages read from blobs and written down
 ```
 
+The same walk reads the [Rolodex](../use/rolodex.md)'s mentions onto each row, so a rescan
+is also how a corpus collected before the Rolodex gets its names.
+
 A scanner bug is repaired the same way — delete the file, rescan, and the rebuilt answer is
 the same answer. That is why the ledger sits beside `log/` rather than in it.
 

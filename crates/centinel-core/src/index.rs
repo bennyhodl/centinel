@@ -20,7 +20,7 @@
 //! them, and nothing here caches them, so a threshold moved in the workspace is what the
 //! next query sees.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -411,6 +411,53 @@ impl Index {
         )?;
         let n: i64 = stmt.query_row(params![source, resource, derived_sha], |r| r.get(0))?;
         Ok(n != 0)
+    }
+
+    /// Per source, how many documents hold any of these phrases word for word — every one,
+    /// unranked.
+    ///
+    /// Not [`Self::search`], which answers *which passages best fit a question*: it ranks,
+    /// stops at a limit, and matches each word anywhere in a chunk. This answers *where
+    /// does this name appear at all*, so a phrase is matched as a phrase and nothing is
+    /// cut. A document is an address, so two pages with identical text are two. No
+    /// workspace filter either: a page the classifier set aside as junk still names
+    /// whoever it names.
+    ///
+    /// `sources` narrows it to those, in the query rather than after it: a common name over
+    /// one source should not pay for every source's matches. Empty means every source.
+    pub fn sources_naming(
+        &self,
+        phrases: &[String],
+        sources: &[String],
+    ) -> anyhow::Result<BTreeMap<String, usize>> {
+        let expr = phrases
+            .iter()
+            .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|p| !p.is_empty())
+            // A phrase is one double-quoted string in FTS5; a quote inside it is doubled.
+            .map(|p| format!("\"{}\"", p.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        if expr.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let only = match sources.len() {
+            0 => String::new(),
+            n => format!(" AND p.source IN ({})", vec!["?"; n].join(", ")),
+        };
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT p.source, COUNT(DISTINCT p.resource)
+             FROM chunk_fts
+             JOIN chunk c ON c.id = chunk_fts.rowid
+             JOIN placement p ON p.chunk_hash = c.chunk_hash
+             WHERE chunk_fts MATCH ?{only}
+             GROUP BY p.source"
+        ))?;
+        let values = std::iter::once(&expr).chain(sources);
+        let rows = stmt.query_map(rusqlite::params_from_iter(values), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// BM25 search over the chunks with a placement the filter admits.
@@ -876,6 +923,49 @@ mod tests {
             }
         }
         idx
+    }
+
+    /// Where a name appears at all: as a phrase, in every source, each address once — and
+    /// not a page that has both words apart, which is the match `search` would make.
+    #[test]
+    fn a_name_is_found_as_a_phrase_in_every_source_that_holds_it() {
+        let mut idx = indexed(&[
+            (
+                "https://www.tampa.gov/minutes",
+                "Council Member Luis Viera moved to approve.",
+            ),
+            (
+                "https://www.tampa.gov/agenda",
+                "Luis Viera, District 7. Seconded by Luis Viera.",
+            ),
+            (
+                "https://www.tampa.gov/other",
+                "Luis spoke. Later, Viera abstained.",
+            ),
+        ]);
+        for c in chunk_markdown(
+            "Viera, Luis — interview transcript.",
+            &ChunkConfig::default(),
+        ) {
+            idx.insert(
+                &c,
+                &placement("cttv", "https://youtube.com/watch?v=1", &"7".repeat(64)),
+            )
+            .unwrap();
+        }
+
+        let names = ["Luis Viera".to_string(), "Viera, Luis".to_string()];
+        let found = idx.sources_naming(&names, &[]).unwrap();
+        assert_eq!(
+            found,
+            BTreeMap::from([("cttv".to_string(), 1), ("tampa".to_string(), 2)])
+        );
+        // Narrowed to one source in the query, not filtered after it.
+        assert_eq!(
+            idx.sources_naming(&names, &["cttv".to_string()]).unwrap(),
+            BTreeMap::from([("cttv".to_string(), 1)])
+        );
+        assert!(idx.sources_naming(&[" ".into()], &[]).unwrap().is_empty());
     }
 
     /// The work-list order `embed` batches by: texts of one length ride together, the

@@ -17,6 +17,7 @@
 - [Runs](use/runs.md)
 - [Review](use/review.md)
 - [Graph](use/graph.md)
+- [Rolodex](use/rolodex.md)
 - [Spend](use/spend.md)
 - [Agents and programs](use/agents.md)
 

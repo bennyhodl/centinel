@@ -1,5 +1,5 @@
 import { keepPreviousData, queryOptions, skipToken } from '@tanstack/react-query'
-import { api, corpusParams, type CollectionHistoryFilters, type CorpusFilters, type DocumentIdentity, type GraphFilter, type JobState, type RunDetailQuery } from './api'
+import { api, corpusParams, type CollectionHistoryFilters, type CorpusFilters, type DocumentIdentity, type GraphFilter, type JobState, type RolodexFilter, type RunDetailQuery } from './api'
 
 /**
  * Every read the workspace makes, one builder each. A route's loader warms the cache
@@ -123,6 +123,8 @@ export const queries = {
   }),
 
   /** One host's card. Read from the ledgers on each open, so a refusal shows at once. */
+  rolodex: (filter: RolodexFilter) => queryOptions({ queryKey: ['rolodex', filter.name, filter.source], queryFn: () => api.rolodex(filter), placeholderData: keepPreviousData }),
+  rolodexPerson: (name: string) => queryOptions({ queryKey: ['rolodex-person', name], queryFn: () => api.rolodexPerson(name) }),
   graphHost: (host: string) => queryOptions({ queryKey: ['graph-host', host], queryFn: () => api.graphHost(host), staleTime: 60_000 }),
 
   reviewQueue: (pageSize: number) => queryOptions({

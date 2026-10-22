@@ -7,6 +7,7 @@
   investigations/<id>/           RUNTIME  one web investigation: report.json, its request log, and the bytes `check` saved
   crumbs/<source>.jsonl          DERIVED  the off-host links each page dropped, written as it was stored
   summaries/<source>.json        DERIVED  what the log adds up to, keyed by the log's size
+  summaries/<source>.names.json  DERIVED  the names the crumb ledger links, keyed by the ledger's stamp
   icons/<host>.<ext>, .json      DERIVED  the favicon a host serves, fetched once when the web first asks
   current/<source>/…             DERIVED  a tree that mirrors the URLs
   centinel.db                    DERIVED  SQLite metadata + FTS5   — the BM25 arm

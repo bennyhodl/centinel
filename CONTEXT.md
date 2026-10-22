@@ -71,6 +71,21 @@ worth reading twice. Rulings are **corpus-wide**, which is why they are not `Log
 "this host is not a Source" is not a fact about Tampa, and filed per Source the hosts every
 city links would need refusing once per city.
 
+**Mention** — a link that names somebody: a `mailto:` (or Cloudflare's protected form of
+one), a profile on a social platform, or any link whose text is a person's name. Written on
+the same ledger row as the page's crumbs, by the same walk over the same `<a>` tags, so it is
+derived the same way and repaired the same way. A row with no `mentions` was written before
+they were read, which is a different answer from an empty list — the Rolodex counts those
+pages rather than reading them as pages that name nobody. Names in running text are not
+mentions: finding them is a model's question, not a scan's.
+
+**Rolodex entry** — a **name as written**, keyed on its lowercased spelling with titles
+dropped, and not a person. *Why it matters:* the rule that makes a Resource an address
+applies here too. Two Jane Does in two cities are one entry and `Jane A. Doe` is another,
+because merging people on anything fuzzier is identity resolution, and a wrong merge
+corrupts the record quietly. The entry carries the sources and pages that named it, which
+is what lets a person tell two people apart.
+
 **Standing** — whether a crumb still wants a person: `open`, `ignored`, or `collected`.
 Already collected beats already refused, because a host that became a Source is answered by
 the corpus and an old `ignore` on it is stale rather than binding. `open` is the honest

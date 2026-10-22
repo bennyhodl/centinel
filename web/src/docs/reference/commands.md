@@ -55,6 +55,7 @@ never calls it: text leaves the machine only when a person starts a classifier r
 | `verify` | Read every vector fragment back, and with `--repair` drop the ones that cannot be. *(operator)* |
 | `investigate` | Ask the registry what it makes of an address. Nothing is stored. |
 | `crumbs` | The off-host hosts this corpus links to, and the rulings on them. |
+| `rolodex` | The people this corpus names by linking to them, and with `show`, every source a name comes up in. |
 | `schedules` | Show configured schedules, when each next fires, and how the last one went. |
 | `history` | Show what scheduled and manual runs did, newest first. |
 

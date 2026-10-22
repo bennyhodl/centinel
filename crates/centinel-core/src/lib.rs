@@ -57,6 +57,7 @@ pub mod policy;
 pub mod render;
 pub mod requests;
 pub mod rerank;
+pub mod rolodex;
 pub mod schedule;
 pub mod sources;
 pub mod spend;

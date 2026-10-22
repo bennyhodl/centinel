@@ -1,10 +1,30 @@
 import Graph from 'graphology'
-import type { GraphEdge, GraphNode, GraphView } from './api'
+import type { GraphEdge, GraphNode } from './api'
 
 /**
- * What the Graph page draws, shaped from what the server sends. Pure: no canvas, no
- * React, so the sizes, colours and the search can be tested as the functions they are.
+ * What the Graph page and a Rolodex person draw, shaped from what the server sends. Pure:
+ * no canvas, no React, so the sizes, colours and the search can be tested as the functions
+ * they are.
  */
+
+/**
+ * A node only a Rolodex person draws: the person, a source the name comes up in, and an
+ * address, account or page their links point at. The server's graph is sources and hosts;
+ * these are shaped on this side from one person's report (`rolodex-logic.ts`).
+ */
+export type PersonNode =
+  | { kind: 'person'; id: string; name: string; pages: number }
+  | { kind: 'appearance'; id: string; source: string; linked: number; named?: number }
+  | { kind: 'identifier'; id: string; what: 'address' | 'account' | 'page'; label: string; url: string; pages: number }
+
+export type DrawnNode = GraphNode | PersonNode
+
+/**
+ * What the canvas draws: any nodes, and the edges between them. A `GraphView` is one.
+ * `positions` is a layout the view already knows, which the canvas keeps rather than
+ * settling: a person's graph is always a star, and a force layout only scatters one.
+ */
+export type Shown = { nodes: DrawnNode[]; edges: GraphEdge[]; positions?: Record<string, { x: number; y: number }> }
 
 /** The colours the canvas is drawn in, read off the page's own tokens at mount. */
 export type Palette = {
@@ -31,9 +51,9 @@ export type NodeAttributes = {
   label: string
   /** The node-border program draws every node; see `graph.tsx`. */
   type: 'border'
-  /** Sources are always labelled; a host earns its label by size. */
+  /** Everything is labelled but a host, which earns its label by size. */
   forceLabel: boolean
-  node: GraphNode
+  node: DrawnNode
 }
 
 export type EdgeAttributes = { size: number; color: string; pages: number; links: number }
@@ -46,13 +66,25 @@ export type Drawn = Graph<NodeAttributes, EdgeAttributes>
  */
 export type Hover = { node?: string; edge?: string; ends?: [string, string]; lit: Set<string>; x: number; y: number; flip?: boolean }
 
-export const labelOf = (node: GraphNode) => node.kind === 'source' ? node.source : node.host
+export function labelOf(node: DrawnNode): string {
+  switch (node.kind) {
+    case 'source': case 'appearance': return node.source
+    case 'host': return node.host
+    case 'person': return node.name
+    case 'identifier': return node.label
+  }
+}
 
 /** A source by how many addresses it holds, a host by how many pages link to it. Log, so a city and a village both fit. */
-export function sizeOf(node: GraphNode): number {
-  return node.kind === 'source'
-    ? 8 + 3 * Math.log10(node.addresses + 1)
-    : 3 + 1.4 * Math.log10(node.pages + 1)
+export function sizeOf(node: DrawnNode): number {
+  switch (node.kind) {
+    case 'source': return 8 + 3 * Math.log10(node.addresses + 1)
+    case 'appearance': return 9 + 3 * Math.log10(node.linked + (node.named ?? 0) + 1)
+    case 'person': return 17
+    case 'host': return 3 + 1.4 * Math.log10(node.pages + 1)
+    // A person's graph has a handful of nodes, so each can be large enough to see and to hit.
+    case 'identifier': return 6 + 2 * Math.log10(node.pages + 1)
+  }
 }
 
 /** Edge width grows with the log of the pages carrying it: one page is a hair, ten thousand is a cord. */
@@ -60,15 +92,22 @@ export function widthOf(pages: number): number {
   return Math.min(10, 0.5 + 0.7 * Math.log2(Math.max(1, pages)))
 }
 
-/** How a node is painted: sources ink, hosts outlined, a refused host greyed. */
-export function paintOf(node: GraphNode, palette: Palette): Pick<NodeAttributes, 'color' | 'borderColor'> {
-  if (node.kind === 'source') return { color: palette.ink, borderColor: palette.ink }
-  if (node.standing === 'ignored') return { color: palette.track, borderColor: palette.stone }
-  return { color: palette.paper, borderColor: palette.ink }
+/**
+ * How a node is painted: sources ink on both graphs, hosts outlined, a refused host greyed.
+ * A person is the outlined ring at the centre of their own graph, and what their links
+ * point at is stone.
+ */
+export function paintOf(node: DrawnNode, palette: Palette): Pick<NodeAttributes, 'color' | 'borderColor'> {
+  switch (node.kind) {
+    case 'source': case 'appearance': return { color: palette.ink, borderColor: palette.ink }
+    case 'person': return { color: palette.paper, borderColor: palette.ink }
+    case 'identifier': return { color: palette.stone, borderColor: palette.stone }
+    case 'host': return node.standing === 'ignored' ? { color: palette.track, borderColor: palette.stone } : { color: palette.paper, borderColor: palette.ink }
+  }
 }
 
 /** "198,470 links on 11,442 pages", with both ends named. */
-export function edgeTitle(edge: GraphEdge, nodes: Map<string, GraphNode>): { from: string; to: string; pages: number; links: number } {
+export function edgeTitle(edge: GraphEdge, nodes: Map<string, DrawnNode>): { from: string; to: string; pages: number; links: number } {
   const name = (id: string) => { const node = nodes.get(id); return node ? labelOf(node) : id }
   return { from: name(edge.from), to: name(edge.to), pages: edge.pages, links: edge.links }
 }
@@ -86,9 +125,9 @@ function hashOf(text: string): number {
  * sources sit on a ring and each host starts beside the sources that link to it, which
  * gives the force layout a short way to go.
  */
-export function toGraphology(view: GraphView, palette: Palette, kept: Map<string, { x: number; y: number }> = new Map()): Drawn {
+export function toGraphology(view: Shown, palette: Palette, kept: Map<string, { x: number; y: number }> = new Map()): Drawn {
   const graph = new Graph<NodeAttributes, EdgeAttributes>({ multi: false, type: 'directed' })
-  const sources = view.nodes.filter(node => node.kind === 'source')
+  const sources = view.nodes.filter(node => node.kind === 'source' || node.kind === 'appearance')
   const at = new Map<string, { x: number; y: number }>()
   sources.forEach((node, index) => {
     const angle = (index / Math.max(1, sources.length)) * 2 * Math.PI
@@ -98,7 +137,7 @@ export function toGraphology(view: GraphView, palette: Palette, kept: Map<string
   view.edges.forEach(edge => linkedFrom.set(edge.to, [...(linkedFrom.get(edge.to) ?? []), edge.from]))
 
   for (const node of view.nodes) {
-    let position = kept.get(node.id) ?? at.get(node.id)
+    let position = view.positions?.[node.id] ?? kept.get(node.id) ?? at.get(node.id)
     if (!position) {
       const near = (linkedFrom.get(node.id) ?? []).map(id => at.get(id)).filter((p): p is { x: number; y: number } => Boolean(p))
       const centre = near.length
@@ -108,7 +147,7 @@ export function toGraphology(view: GraphView, palette: Palette, kept: Map<string
       const reach = 0.2 + 0.5 * hashOf(`${node.id}:r`)
       position = { x: centre.x * 1.3 + Math.cos(spin) * reach, y: centre.y * 1.3 + Math.sin(spin) * reach }
     }
-    graph.addNode(node.id, { ...position, ...paintOf(node, palette), size: sizeOf(node), label: labelOf(node), type: 'border', forceLabel: node.kind === 'source', node })
+    graph.addNode(node.id, { ...position, ...paintOf(node, palette), size: sizeOf(node), label: labelOf(node), type: 'border', forceLabel: node.kind !== 'host', node })
   }
   for (const edge of view.edges) {
     if (!graph.hasNode(edge.from) || !graph.hasNode(edge.to) || graph.hasEdge(edge.from, edge.to)) continue

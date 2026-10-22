@@ -28,7 +28,7 @@ const card = 'rounded-xl bg-background/95 shadow-[0_0_0_1px_var(--rule),0_4px_14
 const minPagesOptions = [1, 2, 5, 10, 25, 100]
 
 /** The canvas is drawn in the page's own tokens, read once the page is on screen. */
-function paletteOf(): Palette {
+export function paletteOf(): Palette {
   const style = getComputedStyle(document.documentElement)
   const token = (name: string, fallback: string) => style.getPropertyValue(name).trim() || fallback
   return {
