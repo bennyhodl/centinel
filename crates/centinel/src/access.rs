@@ -89,6 +89,8 @@ fn user_may_read(path: &str) -> bool {
             | "/workspace/system"
             | "/workspace/source-hosts"
             | "/workspace/graph"
+            | "/workspace/rolodex"
+            | "/workspace/rolodex/person"
     ) || path.starts_with("/workspace/icons/")
         || path
             .strip_prefix("/workspace/graph/host/")
@@ -169,6 +171,10 @@ mod tests {
             ("secret", "user", "/workspace/icons/tampa.gov", "GET", 404),
             ("secret", "user", "/workspace/source-hosts", "GET", 200),
             ("secret", "user", "/workspace/graph", "GET", 200),
+            ("secret", "user", "/workspace/rolodex", "GET", 200),
+            // A 400 is the route answering — `name` is required — past the role check.
+            ("secret", "user", "/workspace/rolodex/person", "GET", 400),
+            ("secret", "user", "/workspace/rolodex/person", "POST", 403),
             (
                 "secret",
                 "user",

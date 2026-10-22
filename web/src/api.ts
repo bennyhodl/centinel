@@ -675,6 +675,38 @@ export type HostDetail = {
 /** What a refusal or an allow answers with: the ruling as `crumbs ignore` reports it. */
 export type Ruled = { action: 'ruled'; host: string; ruling: 'ignore' | 'allow'; at: string; note?: string; previous?: string }
 
+// ── Rolodex ─────────────────────────────────────────────────────────────────
+
+/** One name in the list: how much links it, and under which addresses and accounts. */
+export type RolodexListed = { name: string; key: string; pages: number; sources: Record<string, number>; emails: string[]; profiles: string[]; links: number }
+
+/** The names the selected sources link, most-named first. `unread` pages have not been read for names yet. */
+export type RolodexList = { action: 'list'; sources: string[]; pages: number; matched: number; people: RolodexListed[]; unnamed: number; unread: number }
+
+export type RolodexProfile = { platform: string; handle: string; url: string; pages: number }
+
+/** One name as written, and everything the pages that linked it pointed at. */
+export type RolodexPerson = {
+  name: string
+  key: string
+  spellings: Record<string, number>
+  pages: number
+  /** Per source, how many pages linked them and the first few. */
+  sources: Record<string, { pages: number; examples: string[] }>
+  emails: Record<string, number>
+  /** Keyed `platform:handle`. */
+  profiles: Record<string, RolodexProfile>
+  links: Record<string, number>
+}
+
+/** One source a name comes up in: pages linking it, and documents whose text holds it. `named` is absent when the store has no index. */
+export type Appearance = { source: string; linked: number; named?: number }
+
+/** One name: the entry when a link carries it, and every source it comes up in either way. */
+export type RolodexShow = { action: 'show'; asked: string; person?: RolodexPerson; sources: Appearance[]; indexed: boolean; unread: number }
+
+export type RolodexFilter = { name: string; source: string }
+
 export type ScheduleDefinition = {
   id: string; cron: string; tz?: string | null; sources?: string[]; skip?: string[];
   limit?: number | null; refresh?: boolean; jitter_secs?: number | null;
@@ -803,6 +835,16 @@ export const api = {
   graph: (filter: GraphFilter) => {
     const path = `/workspace/graph?${new URLSearchParams({ min_pages: String(filter.min_pages), hide_refused: String(filter.hide_refused) })}`
     return request<GraphView>(path).then(value => withArray(withArray(value, 'nodes', path), 'edges', path))
+  },
+  /** The names the Rolodex holds, narrowed by a word of the name and a source. */
+  rolodex: (filter: RolodexFilter) => {
+    const path = `/workspace/rolodex?${new URLSearchParams(filter)}`
+    return request<RolodexList>(path).then(value => withArray(value, 'people', path))
+  },
+  /** One name, whether or not a link carries it. */
+  rolodexPerson: (name: string) => {
+    const path = `/workspace/rolodex/person?${new URLSearchParams({ name })}`
+    return request<RolodexShow>(path).then(value => withArray(value, 'sources', path))
   },
   graphHost: (host: string) => request<HostDetail>(`/workspace/graph/host/${encodeURIComponent(host)}`),
   /** The same corpus-wide ruling `centinel crumbs ignore` writes. */

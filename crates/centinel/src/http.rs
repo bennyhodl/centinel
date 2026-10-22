@@ -18,6 +18,7 @@
 //! | `/workspace/sources…` | the Sources page: list, define, run; see [`sources`] |
 //! | `/workspace/investigations…` | investigate an address and read what it found; see [`investigate`] |
 //! | `/workspace/graph…` | the Graph page: sources, the hosts they link to, and how much; see [`graph`] |
+//! | `/workspace/rolodex…` | the Rolodex page: the people the corpus names, and every source a name comes up in; see [`rolodex`] |
 //! | `GET /workspace/admin/health` | read-only doctor, corpus usage and collection lane diagnostics; see [`health`] |
 //! | `GET /workspace/icons/{host}`, `GET /workspace/source-hosts` | the favicon beside each source and host, and the host each source collects from; see [`icons`] |
 //!
@@ -76,6 +77,7 @@ mod icons;
 mod ingest;
 mod investigate;
 mod maintenance;
+mod rolodex;
 mod schedules;
 mod sources;
 mod stages;
@@ -261,6 +263,7 @@ pub(crate) fn router_with_schedules(
         .merge(ingest::routes())
         .merge(icons::routes())
         .merge(graph::routes())
+        .merge(rolodex::routes())
         .merge(vectors::routes())
         .merge(history::routes())
         .merge(health::routes())

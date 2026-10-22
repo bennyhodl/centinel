@@ -481,10 +481,7 @@ async fn scan_blob(ctx: &Ctx, obs: &Observation) -> Option<Recorded> {
     // what four kilobytes settle.
     let head = ctx.store.blob_head(&obs.blob_sha, SNIFF_BYTES).await.ok()?;
     if ContentKind::classify(&obs.meta, &head) != ContentKind::Html {
-        return Some(Recorded {
-            page,
-            links: Vec::new(),
-        });
+        return Some(Recorded::nothing(page));
     }
 
     // Verified, because these bytes are about to be shown to a person as evidence.

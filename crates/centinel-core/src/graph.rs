@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::crumbs::{self, Decisions, Ledger, Recorded, Ruling, Standing, Trail};
+use crate::crumbs::{self, Decisions, Ledger, LedgerStamp, Recorded, Ruling, Standing, Trail};
 use crate::domain::{SourceId, SourceKind};
 use crate::store::Store;
 
@@ -50,18 +50,6 @@ pub const MAX_PATHS: usize = 25;
 pub const MAX_REFERRERS: usize = 24;
 
 // ── one source's ledger, added up ─────────────────────────────────────────────
-
-/// The ledger file a [`Linkage`] was folded from, as its length and modification time.
-///
-/// Length alone is what the summary keys on, and for an append-only log it is enough.
-/// A ledger is rewritten by `crumbs --rescan`, and a rewrite that happens to land on the
-/// same length would otherwise be believed; the time closes that.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LedgerStamp {
-    pub len: u64,
-    /// Milliseconds since the epoch, or zero when the file does not exist.
-    pub modified_ms: i128,
-}
 
 /// What one source's pages point at, per host.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,34 +116,17 @@ impl<'a> Linkages<'a> {
     /// The linkage for this source's ledger as it is now. A source with no ledger has an
     /// empty one, which is an answer rather than an error: nothing has been written down.
     pub async fn get(&self, source: &SourceId) -> anyhow::Result<Linkage> {
-        let stamp = self.stamp(source).await?;
+        let ledger = Ledger::new(self.store, source.clone());
+        let stamp = ledger.stamp().await?;
         crate::summary::cached(
             &self.store.linkage_path(source),
             |linkage: &Linkage| linkage.ledger == stamp,
             async {
-                let rows = Ledger::new(self.store, source.clone()).current().await?;
+                let rows = ledger.current().await?;
                 Ok(Linkage::of(rows.values(), stamp))
             },
         )
         .await
-    }
-
-    async fn stamp(&self, source: &SourceId) -> anyhow::Result<LedgerStamp> {
-        let meta = match tokio::fs::metadata(self.store.crumbs_path(source)).await {
-            Ok(meta) => meta,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(LedgerStamp::default()),
-            Err(e) => return Err(e.into()),
-        };
-        let modified_ms = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i128)
-            .unwrap_or_default();
-        Ok(LedgerStamp {
-            len: meta.len(),
-            modified_ms,
-        })
     }
 }
 

@@ -184,9 +184,25 @@ pub struct Recorded {
     pub page: Carrier,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Linked>,
+    /// The people its links name — see [`crate::rolodex`].
+    ///
+    /// Absent on a row written before mentions were read, which is not the same answer as
+    /// an empty list: the first is a page nobody has read for names, and `crumbs --rescan`
+    /// reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mentions: Option<Vec<crate::rolodex::Mention>>,
 }
 
 impl Recorded {
+    /// A document scanned that cannot carry a link: a PDF, a caption track.
+    pub fn nothing(page: Carrier) -> Self {
+        Self {
+            page,
+            links: Vec::new(),
+            mentions: Some(Vec::new()),
+        }
+    }
+
     /// Whether this row was read out of these bytes.
     ///
     /// Asked of the row the ledger holds for a page's *address*, against the blob the log
@@ -215,16 +231,20 @@ impl Recorded {
 /// collapsing them here would quietly decide a question the operator owns.
 pub fn scan_page(html: &str, page: Carrier) -> Recorded {
     let mut by_host: BTreeMap<String, (usize, String)> = BTreeMap::new();
+    let mut mentions = Vec::new();
 
     if let Ok(base) = url::Url::parse(&page.address) {
         let here = base.host_str().unwrap_or_default().to_string();
-        for tag in crate::html::Scan::new(html).tags(&["a"]) {
-            let Some(href) = tag.attr("href") else {
+        for link in crate::html::Scan::new(html).links() {
+            let Some(href) = link.tag.attr("href") else {
                 continue;
             };
             let Ok(target) = base.join(&crate::html::unescape(href)) else {
                 continue;
             };
+            // Before the host test: a bio page on the site's own host and a `mailto:` both
+            // name somebody, and neither is a crumb.
+            mentions.extend(crate::rolodex::mentions(&target, &link));
             let Some(host) = target.host_str() else {
                 continue;
             };
@@ -258,8 +278,16 @@ pub fn scan_page(html: &str, page: Carrier) -> Recorded {
         })
         .collect();
     links.sort_by(|a, b| b.links.cmp(&a.links).then(a.host.cmp(&b.host)));
+    // Once per page, whatever the template repeats: a footer naming the mayor twice is one
+    // page naming the mayor.
+    mentions.sort();
+    mentions.dedup();
 
-    Recorded { page, links }
+    Recorded {
+        page,
+        links,
+        mentions: Some(mentions),
+    }
 }
 
 /// One pass over pages, gathering the links that leave the host.
@@ -467,9 +495,42 @@ pub struct Ledger<'a> {
     source: crate::domain::SourceId,
 }
 
+/// The ledger file as its length and modification time: what a fold of it is current for.
+///
+/// Length alone is what the summary keys on, and for an append-only log it is enough.
+/// A ledger is rewritten by `crumbs --rescan`, and a rewrite that happens to land on the
+/// same length would otherwise be believed; the time closes that.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedgerStamp {
+    pub len: u64,
+    /// Milliseconds since the epoch, or zero when the file does not exist.
+    pub modified_ms: i128,
+}
+
 impl<'a> Ledger<'a> {
     pub fn new(store: &'a Store, source: crate::domain::SourceId) -> Self {
         Self { store, source }
+    }
+
+    /// The file as it is now. An absent ledger has the default stamp.
+    pub async fn stamp(&self) -> anyhow::Result<LedgerStamp> {
+        let meta = match tokio::fs::metadata(self.store.crumbs_path(&self.source)).await {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LedgerStamp::default());
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let modified_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i128)
+            .unwrap_or_default();
+        Ok(LedgerStamp {
+            len: meta.len(),
+            modified_ms,
+        })
     }
 
     /// Writes down what one freshly stored artifact points at, from bytes already in hand.
@@ -498,10 +559,7 @@ impl<'a> Ledger<'a> {
         };
         let row = match kind {
             crate::content::ContentKind::Html => scan_page(&String::from_utf8_lossy(bytes), page),
-            _ => Recorded {
-                page,
-                links: Vec::new(),
-            },
+            _ => Recorded::nothing(page),
         };
         if let Err(e) = self.append(&row).await {
             tracing::warn!(

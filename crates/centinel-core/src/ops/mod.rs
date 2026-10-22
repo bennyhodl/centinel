@@ -33,6 +33,7 @@ mod open;
 mod probe;
 mod questions;
 mod read;
+mod rolodex;
 mod run;
 mod schedule;
 mod schedules;
@@ -49,6 +50,7 @@ pub use open::{OpenArgs, OpenReport, open, system_opener};
 pub use probe::NetArgs;
 pub use questions::{QuestionSummary, QuestionsArgs, QuestionsReport, questions};
 pub use read::{ReadArgs, ReadReport, read};
+pub use rolodex::{Listed, PersonArgs, RolodexAction, RolodexArgs, RolodexReport, rolodex};
 
 pub use build_index::{IndexArgs, IndexReport, index};
 pub use classify::{ClassifyArgs, ClassifyFailure, ClassifyReport, classify};

@@ -3,8 +3,7 @@ import { drawDiscNodeLabel } from 'sigma/rendering'
 import { createNodeBorderProgram } from '@sigma/node-border'
 import FA2Layout from 'graphology-layout-forceatlas2/worker'
 import forceAtlas2 from 'graphology-layout-forceatlas2'
-import type { GraphView } from './api'
-import { neighbourhood, positionsOf, toGraphology, type Drawn, type EdgeAttributes, type Hover, type NodeAttributes, type Palette } from './graph-data'
+import { neighbourhood, positionsOf, toGraphology, type Drawn, type EdgeAttributes, type Hover, type NodeAttributes, type Palette, type Shown } from './graph-data'
 
 /**
  * The renderer over the page's graph, and the layout that settles it. In its own module,
@@ -13,7 +12,7 @@ import { neighbourhood, positionsOf, toGraphology, type Drawn, type EdgeAttribut
  */
 export type Canvas = {
   /** Draws a view, keeping the position of every node that was already on the canvas, then settles it. */
-  show(view: GraphView): void
+  show(view: Shown): void
   /** Brings one node to the centre and lights its neighbourhood. */
   focus(id: string): void
   kill(): void
@@ -100,7 +99,7 @@ export function mountGraph(container: HTMLElement, graph: Drawn, palette: Palett
       const next = toGraphology(view, palette, positionsOf(graph))
       graph.clear()
       graph.import(next.export())
-      settle()
+      if (!view.positions) settle()
     },
     focus(id) {
       const data = renderer.getNodeDisplayData(id)

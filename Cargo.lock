@@ -855,6 +855,7 @@ dependencies = [
  "governor",
  "hex",
  "htmd",
+ "html-escape",
  "inventory",
  "jiff",
  "lance",

@@ -368,6 +368,13 @@ impl Store {
         self.summaries_dir().join(format!("{source}.links.json"))
     }
 
+    /// `summaries/<source>.names.json` — the names a Source's crumb ledger links, gathered.
+    /// Stamped with the ledger like its neighbour, and safe to delete. See
+    /// [`crate::rolodex`].
+    pub fn names_path(&self, source: &SourceId) -> PathBuf {
+        self.summaries_dir().join(format!("{source}.names.json"))
+    }
+
     /// `decisions.jsonl` — what the operator decided. **Truth, and the fourth thing that
     /// is.**
     ///

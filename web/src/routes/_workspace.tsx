@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { createFileRoute, Link, Navigate, Outlet, redirect, useLocation } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, BookOpen, CalendarClock, ChevronsUpDown, CircleDollarSign, Download, Eye, FlaskConical, Globe, History, LogOut, Moon, Plug, Search, ShieldCheck, Sparkles, Sun, Users, Waypoints, Wrench } from 'lucide-react'
+import { Activity, BookOpen, BookUser, CalendarClock, ChevronsUpDown, CircleDollarSign, Download, Eye, FlaskConical, Globe, History, LogOut, Moon, Plug, Search, ShieldCheck, Sparkles, Sun, Users, Waypoints, Wrench } from 'lucide-react'
 import { signOut } from '../auth'
 import { queries } from '../queries'
 import { JobDrawerProvider, WorkingNow, useJobEvents } from '../jobs'
@@ -68,6 +68,9 @@ function Shell({ account }: { account: Account }) {
         </NavItem>
         <NavItem active={at('/graph')} label="Graph">
           <Link to="/graph" search={{}}><Waypoints /><span>Graph</span></Link>
+        </NavItem>
+        <NavItem active={pathname.startsWith('/rolodex')} label="Rolodex">
+          <Link to="/rolodex" search={{}}><BookUser /><span>Rolodex</span></Link>
         </NavItem>
       </NavGroup>
       {admin && <NavGroup label="Admin">

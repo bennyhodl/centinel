@@ -30,6 +30,8 @@ import { Route as WorkspaceAdminSpendRouteImport } from './routes/_workspace/_ad
 import { Route as WorkspaceAdminSystemRouteImport } from './routes/_workspace/_admin/system'
 import { Route as WorkspaceDocsSplatRouteImport } from './routes/_workspace/docs.$'
 import { Route as WorkspaceDocumentShaRouteImport } from './routes/_workspace/document.$sha'
+import { Route as WorkspaceRolodexIndexRouteImport } from './routes/_workspace/rolodex.index'
+import { Route as WorkspaceRolodexNameRouteImport } from './routes/_workspace/rolodex.$name'
 import { Route as WorkspaceAdminSourcesIndexRouteImport } from './routes/_workspace/_admin/sources.index'
 import { Route as WorkspaceAdminSourcesIdRouteImport } from './routes/_workspace/_admin/sources.$id'
 import { Route as WorkspaceAdminSourcesInvestigateIdRouteImport } from './routes/_workspace/_admin/sources.investigate.$id'
@@ -138,6 +140,16 @@ const WorkspaceDocumentShaRoute = WorkspaceDocumentShaRouteImport.update({
   path: '/document/$sha',
   getParentRoute: () => WorkspaceRoute,
 } as any)
+const WorkspaceRolodexIndexRoute = WorkspaceRolodexIndexRouteImport.update({
+  id: '/rolodex/',
+  path: '/rolodex/',
+  getParentRoute: () => WorkspaceRoute,
+} as any)
+const WorkspaceRolodexNameRoute = WorkspaceRolodexNameRouteImport.update({
+  id: '/rolodex/$name',
+  path: '/rolodex/$name',
+  getParentRoute: () => WorkspaceRoute,
+} as any)
 const WorkspaceAdminSourcesIndexRoute =
   WorkspaceAdminSourcesIndexRouteImport.update({
     id: '/sources/',
@@ -175,6 +187,8 @@ export interface FileRoutesByFullPath {
   '/system': typeof WorkspaceAdminSystemRoute
   '/docs/$': typeof WorkspaceDocsSplatRoute
   '/document/$sha': typeof WorkspaceDocumentShaRoute
+  '/rolodex/$name': typeof WorkspaceRolodexNameRoute
+  '/rolodex/': typeof WorkspaceRolodexIndexRoute
   '/sources/$id': typeof WorkspaceAdminSourcesIdRoute
   '/sources/': typeof WorkspaceAdminSourcesIndexRoute
   '/sources/investigate/$id': typeof WorkspaceAdminSourcesInvestigateIdRoute
@@ -198,6 +212,8 @@ export interface FileRoutesByTo {
   '/system': typeof WorkspaceAdminSystemRoute
   '/docs/$': typeof WorkspaceDocsSplatRoute
   '/document/$sha': typeof WorkspaceDocumentShaRoute
+  '/rolodex/$name': typeof WorkspaceRolodexNameRoute
+  '/rolodex': typeof WorkspaceRolodexIndexRoute
   '/sources/$id': typeof WorkspaceAdminSourcesIdRoute
   '/sources': typeof WorkspaceAdminSourcesIndexRoute
   '/sources/investigate/$id': typeof WorkspaceAdminSourcesInvestigateIdRoute
@@ -225,6 +241,8 @@ export interface FileRoutesById {
   '/_workspace/_admin/system': typeof WorkspaceAdminSystemRoute
   '/_workspace/docs/$': typeof WorkspaceDocsSplatRoute
   '/_workspace/document/$sha': typeof WorkspaceDocumentShaRoute
+  '/_workspace/rolodex/$name': typeof WorkspaceRolodexNameRoute
+  '/_workspace/rolodex/': typeof WorkspaceRolodexIndexRoute
   '/_workspace/_admin/sources/$id': typeof WorkspaceAdminSourcesIdRoute
   '/_workspace/_admin/sources/': typeof WorkspaceAdminSourcesIndexRoute
   '/_workspace/_admin/sources/investigate/$id': typeof WorkspaceAdminSourcesInvestigateIdRoute
@@ -250,6 +268,8 @@ export interface FileRouteTypes {
     | '/system'
     | '/docs/$'
     | '/document/$sha'
+    | '/rolodex/$name'
+    | '/rolodex/'
     | '/sources/$id'
     | '/sources/'
     | '/sources/investigate/$id'
@@ -273,6 +293,8 @@ export interface FileRouteTypes {
     | '/system'
     | '/docs/$'
     | '/document/$sha'
+    | '/rolodex/$name'
+    | '/rolodex'
     | '/sources/$id'
     | '/sources'
     | '/sources/investigate/$id'
@@ -299,6 +321,8 @@ export interface FileRouteTypes {
     | '/_workspace/_admin/system'
     | '/_workspace/docs/$'
     | '/_workspace/document/$sha'
+    | '/_workspace/rolodex/$name'
+    | '/_workspace/rolodex/'
     | '/_workspace/_admin/sources/$id'
     | '/_workspace/_admin/sources/'
     | '/_workspace/_admin/sources/investigate/$id'
@@ -458,6 +482,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceDocumentShaRouteImport
       parentRoute: typeof WorkspaceRoute
     }
+    '/_workspace/rolodex/': {
+      id: '/_workspace/rolodex/'
+      path: '/rolodex'
+      fullPath: '/rolodex/'
+      preLoaderRoute: typeof WorkspaceRolodexIndexRouteImport
+      parentRoute: typeof WorkspaceRoute
+    }
+    '/_workspace/rolodex/$name': {
+      id: '/_workspace/rolodex/$name'
+      path: '/rolodex/$name'
+      fullPath: '/rolodex/$name'
+      preLoaderRoute: typeof WorkspaceRolodexNameRouteImport
+      parentRoute: typeof WorkspaceRoute
+    }
     '/_workspace/_admin/sources/': {
       id: '/_workspace/_admin/sources/'
       path: '/sources'
@@ -539,6 +577,8 @@ interface WorkspaceRouteChildren {
   WorkspaceIndexRoute: typeof WorkspaceIndexRoute
   WorkspaceDocsSplatRoute: typeof WorkspaceDocsSplatRoute
   WorkspaceDocumentShaRoute: typeof WorkspaceDocumentShaRoute
+  WorkspaceRolodexNameRoute: typeof WorkspaceRolodexNameRoute
+  WorkspaceRolodexIndexRoute: typeof WorkspaceRolodexIndexRoute
 }
 
 const WorkspaceRouteChildren: WorkspaceRouteChildren = {
@@ -549,6 +589,8 @@ const WorkspaceRouteChildren: WorkspaceRouteChildren = {
   WorkspaceIndexRoute: WorkspaceIndexRoute,
   WorkspaceDocsSplatRoute: WorkspaceDocsSplatRoute,
   WorkspaceDocumentShaRoute: WorkspaceDocumentShaRoute,
+  WorkspaceRolodexNameRoute: WorkspaceRolodexNameRoute,
+  WorkspaceRolodexIndexRoute: WorkspaceRolodexIndexRoute,
 }
 
 const WorkspaceRouteWithChildren = WorkspaceRoute._addFileChildren(

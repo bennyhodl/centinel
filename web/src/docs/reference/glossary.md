@@ -44,6 +44,13 @@ link read out of a blob, rebuildable — while the **ruling** on it (`ignore` / 
 truth, because nothing in a page records that a person refused a host. See
 [Crumbs](../operate/crumbs.md).
 
+**Mention** — a link that names somebody: a `mailto:`, a social profile, or a link whose
+text is a person's name. Read by the same walk that records crumbs, on the same ledger row,
+so it is derived the same way. See [Rolodex](../use/rolodex.md).
+
+**Rolodex entry** — a name as written, not a person. Two people who share a spelling share
+an entry, and the pages that named each are what tell them apart.
+
 **Standing** — whether a crumb still wants a person: open, `ignored`, or `already a
 source`. Already a source beats already refused, because a host that became a Source is
 answered by the corpus and an old refusal on it is stale rather than binding.
