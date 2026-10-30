@@ -211,7 +211,7 @@ fn atom_content(node: roxmltree::Node<'_, '_>) -> Option<Body> {
     match node.attribute("type") {
         Some("xhtml") => {
             let first = node.children().find(|n| n.is_element())?;
-            let last = node.children().filter(|n| n.is_element()).last()?;
+            let last = node.children().rfind(|n| n.is_element())?;
             let doc = node.document().input_text();
             Some(Body::Html(
                 doc[first.range().start..last.range().end].to_string(),
