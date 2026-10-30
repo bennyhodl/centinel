@@ -79,7 +79,7 @@ pub mod sitemap;
 
 use super::Recognition;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use futures::future::BoxFuture;
 
@@ -242,7 +242,9 @@ pub struct Pass<'a, T> {
     /// does not, so this is per strategy — passed rather than shadowed by two constants
     /// under one name.
     max_depth: usize,
-    queue: Vec<(T, usize)>,
+    // Visit the shortest routes first. A stack can reach a navigation link at the depth
+    // ceiling before processing that same link directly from the seed.
+    queue: VecDeque<(T, usize)>,
     visited: HashSet<String>,
     seen: HashSet<String>,
     visits: u64,
@@ -259,7 +261,7 @@ impl<'a, T: std::fmt::Display> Pass<'a, T> {
             walk,
             noun,
             max_depth,
-            queue: Vec::new(),
+            queue: VecDeque::new(),
             visited: HashSet::new(),
             seen: HashSet::new(),
             visits: 0,
@@ -276,7 +278,7 @@ impl<'a, T: std::fmt::Display> Pass<'a, T> {
 
     /// Somewhere else to look, at a depth.
     pub fn push(&mut self, item: T, depth: usize) {
-        self.queue.push((item, depth));
+        self.queue.push_back((item, depth));
     }
 
     /// The next place to visit, or `None` because a ceiling was reached or nothing is left.
@@ -311,7 +313,7 @@ impl<'a, T: std::fmt::Display> Pass<'a, T> {
                 return None;
             }
 
-            let (item, depth) = self.queue.pop()?;
+            let (item, depth) = self.queue.pop_front()?;
             if !self.visited.insert(item.to_string()) {
                 continue;
             }

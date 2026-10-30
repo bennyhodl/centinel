@@ -297,6 +297,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn navigation_loops_do_not_spend_the_depth_of_direct_links() {
+        let s = seed(&page(&["/home", "/a"]), "https://publisher.test/");
+        let crawl = Fake::new([
+            ("https://publisher.test/home", page(&["/details"])),
+            ("https://publisher.test/details", page(&["/leaf"])),
+            ("https://publisher.test/leaf", page(&[])),
+            ("https://publisher.test/a", page(&["/b"])),
+            ("https://publisher.test/b", page(&["/c"])),
+            ("https://publisher.test/c", page(&["/home"])),
+        ]);
+
+        let got = Links.enumerate(&s, &crawl).await.unwrap();
+        assert!(
+            !got.truncated,
+            "every page is within four clicks of the seed"
+        );
+        assert!(
+            got.addresses
+                .contains(&"https://publisher.test/leaf".to_string())
+        );
+        assert_eq!(crawl.requests(), 6, "every page is read once");
+    }
+
+    #[tokio::test]
     async fn feeds_published_below_the_seed_are_discovered() {
         let s = seed(&page(&["/news"]), "https://publisher.test/");
         let crawl = Fake::new([

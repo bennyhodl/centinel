@@ -271,15 +271,15 @@ pub async fn collect(
     // One pass over the log for the work list, the resume state and the change baseline.
     let replay = store.replay(&id).await?;
 
-    let discovered: Vec<Resource> = replay
+    let discovered = replay
         .latest_discovery()
-        .map(|d| d.resources.clone())
-        .unwrap_or_default();
-
-    anyhow::ensure!(
-        !discovered.is_empty(),
-        "no discovery run for `{id}` — run `centinel discover --source {id}` first"
-    );
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no discovery run for `{id}` — run `centinel discover --source {id}` first"
+            )
+        })?
+        .resources
+        .clone();
 
     // Written to as each artifact is stored, from markup already in hand. See
     // [`crate::crumbs::Ledger`] — this is the whole reason `crumbs` is a file read rather
@@ -671,6 +671,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::open(dir.path()).await.unwrap();
         (dir, s)
+    }
+
+    #[tokio::test]
+    async fn an_empty_discovery_is_distinct_from_no_discovery() {
+        let (_d, store) = store().await;
+        let src = Scripted::new("empty", &[]);
+        let missing = collect(&store, &src, &CollectOpts::default(), &Progress::none())
+            .await
+            .unwrap_err();
+        assert!(missing.to_string().contains("no discovery run"));
+
+        discover(&store, &src, &DiscoverOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+        let collected = collect(&store, &src, &CollectOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+        assert_eq!(collected.attempted, 0);
+        assert_eq!(collected.stored, 0);
+        assert!(src.acquired().is_empty());
     }
 
     #[tokio::test]
