@@ -26,6 +26,7 @@
 use futures::future::BoxFuture;
 use url::Url;
 
+use super::scope::directory_of;
 use super::{Addresses, Enumerated, Pass, Seed, Strategy, StrategyDef, Walk};
 use crate::domain::Note;
 use crate::strategies::{Keyed, Recognition};
@@ -119,6 +120,7 @@ impl Strategy for Listing {
                     },
                 };
 
+                pass.read_surface();
                 let html = String::from_utf8_lossy(&body);
                 for target in links_in(&html, &dir, &root) {
                     match target.as_str().ends_with('/') {
@@ -153,56 +155,6 @@ impl Strategy for Listing {
     fn addresses_are(&self) -> Addresses {
         Addresses::Documents
     }
-}
-
-/// The directory a URL sits in: `…/Civil/index.html` → `…/Civil/`, and `…/Civil` → `…/Civil/`.
-///
-/// A listing served from a file path still bounds its walk by the folder, which is what a
-/// person clicking the same link would get.
-///
-/// **The last segment decides, and getting it wrong unbounds the walk.** A path with no
-/// trailing slash is ambiguous — `/Civil` is either a file in `/` or a directory served
-/// without the redirect — and reading it as a file cut the root back to `/`, so
-/// `target.path().starts_with("/")` admitted every link on the page and a request for one
-/// folder became a walk of the whole server. That is the failure the module docs call
-/// structurally impossible, and `investigate`'s own help text encourages the input that
-/// triggered it.
-///
-/// So a segment is only treated as a file when it **looks** like one, by the same rule
-/// `check` uses to name a downloaded file: a short alphanumeric extension. The residual
-/// case is a directory whose name ends in something extension-shaped — `/2026.budget` — and
-/// it degrades to the old behaviour rather than to anything worse, because every candidate
-/// is still bound to the seed's host.
-fn directory_of(url: &Url) -> Url {
-    let path = url.path();
-    let mut dir = url.clone();
-    // Never carried into the root: `…/Civil/?C=N;O=D` is a sort order, and keeping it made
-    // the walk's declared root a different address from the one it fetched.
-    dir.set_query(None);
-    dir.set_fragment(None);
-    if path.ends_with('/') {
-        return dir;
-    }
-
-    let last = path.rsplit('/').next().unwrap_or_default();
-    match names_a_file(last) {
-        true => {
-            let cut = path.rfind('/').map_or(1, |i| i + 1);
-            dir.set_path(&path[..cut]);
-        }
-        false => dir.set_path(&format!("{path}/")),
-    }
-    dir
-}
-
-/// Whether a path segment reads as a filename rather than as a directory name.
-fn names_a_file(segment: &str) -> bool {
-    let Some((stem, ext)) = segment.rsplit_once('.') else {
-        return false;
-    };
-    !stem.is_empty()
-        && (1..=5).contains(&ext.len())
-        && ext.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// Every link on a listing page that is inside the tree being walked.

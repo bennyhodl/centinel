@@ -26,6 +26,22 @@
 //! anyway — it is the best available guess and it is what every source in the store was
 //! collected with — and the run says so, because a fallback and a recognition currently
 //! produce identical records and only one of them is worth investigating.
+//!
+//! An unpinned walk that could read nothing — no sitemap answered, or none parsed — gives
+//! way to [`crawl::last_resort`], which follows links from the seed inside the seed's
+//! scope. A site with no sitemap is not a site with no pages.
+//!
+//! ## Feeds
+//!
+//! Whatever walked the site, the seed page is also asked which feeds it publishes (see
+//! [`crate::feed::published`]). One inside the seed's scope is an address like any other;
+//! one elsewhere — a Medium feed linked from an organisation's own site, a Google Calendar
+//! it embeds — is named in the notes and not followed, because a host is promoted to its
+//! own source by a person.
+//!
+//! Acquiring a feed stores the response, and then each entry it carries as its own
+//! artifact at `…#entry=<id>`, cut from that response. That is how an article whose own
+//! page answers 403 still reaches the corpus, without anything claiming the page was read.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -49,7 +65,8 @@ use crate::strategies::crawl::{self, Addresses, Seed, StrategyDef, Walk};
 
 pub struct SiteSource {
     id: SourceId,
-    /// Any URL on the site. Only the origin is used.
+    /// The website's address. `robots.txt` and any sitemap are read from its host; a walk
+    /// that follows links stays under its path.
     site: String,
     policy: HostPolicy,
     limits: DiscoveryLimits,
@@ -98,6 +115,20 @@ pub struct SiteSource {
     /// Documents that refused, so a run can say so without failing over them.
     partial: Mutex<Vec<String>>,
     enclosed: AtomicUsize,
+    dropped: AtomicUsize,
+    /// Feeds acquired, and the entries they gave. For [`Source::remarks`].
+    feeds: FeedCounts,
+}
+
+/// What acquiring feeds produced, for the report.
+#[derive(Debug, Default)]
+struct FeedCounts {
+    feeds: AtomicUsize,
+    /// Feeds that list only their latest entries — RSS and Atom — so the entries are a
+    /// window and not the archive.
+    windows: AtomicUsize,
+    entries: AtomicUsize,
+    /// Entries past [`crate::feed::MAX_ENTRIES`].
     dropped: AtomicUsize,
 }
 
@@ -152,6 +183,7 @@ impl SiteSource {
             partial: Mutex::new(Vec::new()),
             enclosed: AtomicUsize::new(0),
             dropped: AtomicUsize::new(0),
+            feeds: FeedCounts::default(),
         })
     }
 
@@ -283,24 +315,68 @@ impl SiteSource {
         Ok((Seed { page, robots }, warnings))
     }
 
-    /// Runs one strategy against a seed already in hand, and records that it spoke.
+    /// Runs one strategy against a seed already in hand, and records what spoke.
     ///
     /// Split out of [`Source::enumerate`] so `investigate` can recognise, choose from the
-    /// full list, and then enumerate — without fetching the seed a second time.
+    /// full list, and then enumerate — without fetching the seed a second time. Everything
+    /// that decides the address set is in here, so the two cannot disagree: the strategy,
+    /// the [`crawl::last_resort`] an unpinned one gives way to when it read nothing, and
+    /// the feeds the seed publishes.
     pub async fn run(
         &self,
         chosen: &'static StrategyDef,
         seed: &Seed,
         progress: &Progress,
     ) -> anyhow::Result<crate::strategies::crawl::Enumerated> {
-        let _ = self.spoke.set(chosen);
-        progress.say(format!("enumerating with `{}`", chosen.name));
+        // One budget for the whole enumeration, however many walks it takes.
+        let spent = AtomicUsize::new(0);
+        let mut found = self.walk(chosen, seed, &spent, progress).await?;
+        let mut spoke = chosen;
 
+        let next = crawl::last_resort();
+        if self.named.is_none() && found.discovery_failed && chosen.name != next.name {
+            progress.say(format!(
+                "`{}` read nothing; following links instead",
+                chosen.name
+            ));
+            let mut then = self.walk(next, seed, &spent, progress).await?;
+            // Why the second walk ran is the first walk's warnings — a 404 on
+            // `/sitemap.xml` — so they lead, and the sentence that joins them follows.
+            let mut warnings = std::mem::take(&mut found.warnings);
+            warnings.push(format!(
+                "`{}` could read nothing here; followed links from the seed instead",
+                chosen.name
+            ));
+            warnings.append(&mut then.warnings);
+            then.warnings = warnings;
+            // The first walk's own figures (`sitemaps_fetched`) stay readable beside the
+            // second's, which win where both use a name.
+            for (k, v) in found.figures {
+                then.figures.entry(k).or_insert(v);
+            }
+            found = then;
+            spoke = next;
+        }
+        let _ = self.spoke.set(spoke);
+
+        self.add_published_feeds(seed, &mut found);
+        Ok(found)
+    }
+
+    /// One strategy's walk, against the shared budget.
+    async fn walk(
+        &self,
+        def: &'static StrategyDef,
+        seed: &Seed,
+        spent: &AtomicUsize,
+        progress: &Progress,
+    ) -> anyhow::Result<crate::strategies::crawl::Enumerated> {
+        progress.say(format!("enumerating with `{}`", def.name));
         let crawl = SiteCrawl {
             site: self,
-            strategy: chosen.name,
+            strategy: def.name,
             progress,
-            spent: AtomicUsize::new(0),
+            spent,
             // `--max-sitemaps` names the only strategy that existed when the flag was
             // added. It has always meant "requests this enumeration may spend", which is
             // what every strategy needs, so it is reused rather than renamed — a flag
@@ -308,7 +384,106 @@ impl SiteSource {
             budget: self.limits.max_sitemaps,
             max_addresses: self.limits.max_urls,
         };
-        chosen.it.enumerate(seed, &crawl).await
+        def.it.enumerate(seed, &crawl).await
+    }
+
+    /// The feeds the seed page publishes: inside its scope, an address; elsewhere, a note.
+    ///
+    /// Read from bytes already in hand, so it costs no request. Same-host and in-scope is
+    /// the same rule [`crawl::links`] follows, so a feed is collected exactly when a link to
+    /// it would have been.
+    fn add_published_feeds(&self, seed: &Seed, found: &mut crate::strategies::crawl::Enumerated) {
+        let Some(base) = seed.final_url() else {
+            return;
+        };
+        if crate::content::ContentKind::classify(&seed.page.meta, &seed.page.bytes)
+            != crate::content::ContentKind::Html
+        {
+            return;
+        }
+        let scope = crawl::scope::Scope::of(&base);
+        let html = String::from_utf8_lossy(&seed.page.bytes);
+        let mut added = 0u64;
+        for feed in crate::feed::published(&html, &base) {
+            let address = feed.url.to_string();
+            if !scope.contains(&feed.url) {
+                found.notes.push(Note::marked(
+                    "feed",
+                    format!(
+                        "{address} ({}, {}) is outside {scope} and was not followed; \
+                         add it as its own source to collect it",
+                        feed.format, feed.how
+                    ),
+                    NoteMark::Warn,
+                ));
+                continue;
+            }
+            if !seed.robots.allowed(&address) || found.addresses.contains(&address) {
+                continue;
+            }
+            found.notes.push(Note::new(
+                "feed",
+                format!("{address} ({}, {})", feed.format, feed.how),
+            ));
+            found.addresses.push(address);
+            added += 1;
+        }
+        if added > 0 {
+            found.figures.insert("feeds_published".into(), added);
+        }
+    }
+
+    /// The entries a feed carries, each as its own artifact cut from the feed's response.
+    ///
+    /// `final_url` stays the feed's: that is where these bytes were served. The entry's
+    /// content-type is its format's, since the server declared one for the whole response
+    /// and not for the slice; what it declared is kept beside it.
+    fn entries_of(&self, resource: &Resource, fetched: &Fetched) -> Vec<Acquired> {
+        let split = match crate::feed::entries(&fetched.bytes) {
+            Ok(split) => split,
+            Err(e) => {
+                self.note_partial(format!(
+                    "{} — served as a feed but could not be split: {e}",
+                    resource.natural_key
+                ));
+                return Vec::new();
+            }
+        };
+        let counts = &self.feeds;
+        counts.feeds.fetch_add(1, Ordering::Relaxed);
+        if split.format.is_window() {
+            counts.windows.fetch_add(1, Ordering::Relaxed);
+        }
+        counts
+            .entries
+            .fetch_add(split.entries.len(), Ordering::Relaxed);
+        counts.dropped.fetch_add(split.dropped, Ordering::Relaxed);
+
+        split
+            .entries
+            .into_iter()
+            .map(|entry| {
+                let mut meta = fetched.meta.clone();
+                if let Some(served) = meta.remove("content-type") {
+                    meta.insert("served_content_type".into(), served);
+                }
+                meta.insert("content-type".into(), split.format.mime().into());
+                meta.insert("entry_of".into(), resource.natural_key.clone());
+                if let Some(link) = entry.link {
+                    meta.insert("link".into(), link);
+                }
+                Acquired {
+                    resource: Resource::new(
+                        self.id.clone(),
+                        format!("{}#{}", resource.natural_key, entry.fragment),
+                    ),
+                    fetched: Fetched {
+                        bytes: entry.bytes,
+                        meta,
+                    },
+                }
+            })
+            .collect()
     }
 
     /// Which strategy runs, and on what evidence.
@@ -339,7 +514,9 @@ impl SiteSource {
     ) -> (&'static StrategyDef, Option<Recognition>) {
         if let Some(named) = self.named {
             let recognition = named.it.recognise(seed);
-            if recognition.is_none() {
+            // `links` keys on nothing and never recognises, so pinning it disagrees with
+            // nothing and is not worth a warning on every run.
+            if recognition.is_none() && named.name != crawl::last_resort().name {
                 // Not "no longer": this same path serves `check --strategy=<name>`, where
                 // the strategy was forced by hand and never recognised the address at all.
                 // The sentence has to be true for both, so it states what is observed and
@@ -471,7 +648,9 @@ struct SiteCrawl<'a> {
     /// Whose walk this is, so each request it makes is recorded under that strategy.
     strategy: &'static str,
     progress: &'a Progress,
-    spent: AtomicUsize,
+    /// Shared by every walk of one enumeration, so a walk that gives way to another does
+    /// not hand it a fresh budget.
+    spent: &'a AtomicUsize,
     budget: usize,
     max_addresses: usize,
 }
@@ -569,7 +748,7 @@ impl Source for SiteSource {
                 }
                 None => notes.push(Note::marked(
                     "strategy",
-                    format!("{} — nothing recognised this address", chosen.name),
+                    format!("{} — nothing recognised this address", self.method()),
                     NoteMark::Warn,
                 )),
             }
@@ -577,6 +756,19 @@ impl Source for SiteSource {
             warnings.extend(found.warnings);
 
             let mut figures = found.figures;
+            // Could not find out, against found nothing. Both are zero addresses from a
+            // sitemap, and only one of them says anything about the site.
+            if found.discovery_failed {
+                notes.push(Note::marked(
+                    "discovery",
+                    "failed — nothing that lists this site's pages could be read, so the \
+                     count below is not the site's size",
+                    NoteMark::Warn,
+                ));
+                figures.insert("discovery_failed".to_string(), 1);
+            } else if found.addresses.is_empty() {
+                notes.push(Note::new("discovery", "read, and it lists no addresses"));
+            }
             if let Some(total) = found.declared_total {
                 // The number that tells "collected the site" from "collected 4% of it".
                 notes.push(Note::ok_or_warn(
@@ -652,11 +844,21 @@ impl Source for SiteSource {
                 true => self.enclosures(&fetched, &base),
                 false => Vec::new(),
             };
+            // On what the bytes are, wherever the address came from: a feed a sitemap
+            // happened to list is split the same as one handed over as the seed.
+            let entries = match crate::content::ContentKind::classify(&fetched.meta, &fetched.bytes)
+            {
+                crate::content::ContentKind::Feed | crate::content::ContentKind::Calendar => {
+                    self.entries_of(resource, &fetched)
+                }
+                _ => Vec::new(),
+            };
 
             let mut out = vec![Acquired {
                 resource: resource.clone(),
                 fetched,
             }];
+            out.extend(entries);
 
             for url in enclosed {
                 match self.fetch_reporting(&url, true, progress).await {
@@ -704,6 +906,43 @@ impl Source for SiteSource {
             ));
         }
 
+        let feeds = self.feeds.feeds.load(Ordering::Relaxed);
+        if feeds > 0 {
+            notes.push(Note::new(
+                "feeds",
+                format!(
+                    "{} entries stored from {} feed(s)",
+                    crate::render::count(self.feeds.entries.load(Ordering::Relaxed) as u64),
+                    crate::render::count(feeds as u64)
+                ),
+            ));
+        }
+        // A feed is a window. Ten items is the latest ten, and the report must not let
+        // them read as the publication.
+        let windows = self.feeds.windows.load(Ordering::Relaxed);
+        if windows > 0 {
+            notes.push(Note::marked(
+                "feeds",
+                format!(
+                    "{} of them list only their latest entries; anything older is not covered",
+                    crate::render::count(windows as u64)
+                ),
+                NoteMark::Warn,
+            ));
+        }
+        let over = self.feeds.dropped.load(Ordering::Relaxed);
+        if over > 0 {
+            notes.push(Note::marked(
+                "feeds",
+                format!(
+                    "{} entries past the {} per feed were not stored",
+                    crate::render::count(over as u64),
+                    crate::feed::MAX_ENTRIES
+                ),
+                NoteMark::Warn,
+            ));
+        }
+
         for detail in partial.iter() {
             notes.push(Note::marked("document", detail.clone(), NoteMark::Warn));
         }
@@ -734,6 +973,8 @@ mod tests {
     #[derive(Debug, Default)]
     struct Scripted {
         pages: std::collections::BTreeMap<String, Result<Vec<u8>, Liveness>>,
+        /// The `content-type` a page is served with, where a test says.
+        types: std::collections::BTreeMap<String, String>,
     }
 
     impl Scripted {
@@ -741,6 +982,11 @@ mod tests {
             self.pages
                 .insert(url.to_string(), Ok(body.as_bytes().to_vec()));
             self
+        }
+
+        fn serving_as(mut self, url: &str, content_type: &str, body: &str) -> Self {
+            self.types.insert(url.to_string(), content_type.to_string());
+            self.serving(url, body)
         }
 
         fn refusing(mut self, url: &str, state: Liveness) -> Self {
@@ -760,10 +1006,16 @@ mod tests {
         ) -> BoxFuture<'a, Result<crate::domain::Fetched, crate::fetch::FetchFailure>> {
             Box::pin(async move {
                 match self.pages.get(url) {
-                    Some(Ok(bytes)) => Ok(Fetched {
-                        bytes: bytes.clone(),
-                        meta: BTreeMap::from([("final_url".to_string(), url.to_string())]),
-                    }),
+                    Some(Ok(bytes)) => {
+                        let mut meta = BTreeMap::from([("final_url".to_string(), url.to_string())]);
+                        if let Some(ct) = self.types.get(url) {
+                            meta.insert("content-type".to_string(), ct.clone());
+                        }
+                        Ok(Fetched {
+                            bytes: bytes.clone(),
+                            meta,
+                        })
+                    }
                     Some(Err(state)) => Err(Refusal {
                         state: *state,
                         detail: format!("scripted {state}"),
@@ -925,9 +1177,13 @@ mod tests {
     // socket until `Fetch` became a trait, and everything here had a defect.
 
     fn site_with(pages: Scripted, limits: DiscoveryLimits) -> SiteSource {
+        site_at("https://www.tampa.gov/", pages, limits)
+    }
+
+    fn site_at(seed: &str, pages: Scripted, limits: DiscoveryLimits) -> SiteSource {
         SiteSource::new(
             SourceId::new("tampa").unwrap(),
-            "https://www.tampa.gov/",
+            seed,
             HostPolicy {
                 // Fast, not zero: `min_interval` reads `0.0` as *unset* and returns one
                 // second, so the obvious spelling would make every test here sleep once per
@@ -1085,6 +1341,279 @@ mod tests {
                 .any(|n| n.label == "strategy" && n.mark == Some(NoteMark::Warn)),
             "{:?}",
             out.notes
+        );
+    }
+
+    // ── no sitemap, shared hosts, feeds ───────────────────────────────────────────
+    //
+    // Each of these is a real source that collected nothing, or the wrong thing, before:
+    // a Google Site with no sitemap, a Linktree page that refuses everything, a Medium
+    // publication whose articles 403 while its feed serves them, a Google Calendar.
+
+    /// `pinellasdsa.org`: readable HTML, no `robots.txt`, no sitemap.
+    const GOOGLE_SITE: &str = r#"<html><head>
+        <link rel="alternate" type="application/rss+xml" href="/feed"></head><body>
+        <a href="/join">Join</a><a href="/blog">Blog</a>
+        <a href="https://dsa-pinellas.medium.com/">Medium</a>
+        <iframe src="https://calendar.google.com/calendar/embed?src=abc%40group.calendar.google.com&amp;ctz=America%2FNew_York"></iframe>
+        </body></html>"#;
+
+    fn google_site() -> Scripted {
+        Scripted::default()
+            .refusing("https://www.pinellasdsa.org/robots.txt", Liveness::Gone)
+            .serving_as("https://www.pinellasdsa.org/", "text/html", GOOGLE_SITE)
+            .serving_as(
+                "https://www.pinellasdsa.org/join",
+                "text/html",
+                "<html><body>join</body></html>",
+            )
+            .serving_as(
+                "https://www.pinellasdsa.org/blog",
+                "text/html",
+                "<html><body><a href=\"/\">home</a></body></html>",
+            )
+    }
+
+    /// No sitemap is not no pages. The walk that read nothing gives way to the links from
+    /// the seed, and the run records that `links` collected it.
+    #[tokio::test]
+    async fn a_site_with_no_sitemap_is_collected_by_following_its_links() {
+        let s = site_at(
+            "https://www.pinellasdsa.org/",
+            google_site(),
+            DiscoveryLimits::default(),
+        );
+
+        let out = s.enumerate(&Progress::none()).await.unwrap();
+
+        let mut keys: Vec<&str> = out
+            .resources
+            .iter()
+            .map(|r| r.natural_key.as_str())
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "https://www.pinellasdsa.org/",
+                "https://www.pinellasdsa.org/blog",
+                "https://www.pinellasdsa.org/feed",
+                "https://www.pinellasdsa.org/join",
+            ],
+            "the seed, its pages, and the feed it publishes on its own host"
+        );
+        assert_eq!(s.method(), "links", "the run records what collected it");
+        assert!(
+            out.warnings.iter().any(|w| w.contains("followed links")),
+            "{:?}",
+            out.warnings
+        );
+        assert!(!out.figures.contains_key("discovery_failed"));
+        // The embedded calendar is on another host: named, with the address to add, and
+        // not followed.
+        assert!(
+            out.notes.iter().any(|n| n.label == "feed"
+                && n.mark == Some(NoteMark::Warn)
+                && n.detail.contains(
+                    "https://calendar.google.com/calendar/ical/abc%40group.calendar.google.com/public/basic.ics"
+                )
+                && n.detail.contains("not followed")),
+            "{:?}",
+            out.notes
+        );
+    }
+
+    /// `linktr.ee/TampaDSA`: 403 on everything. Discovery failed — said so, as a flag and
+    /// a note — and the seed is still the address, so acquiring it records it blocked.
+    #[tokio::test]
+    async fn a_seed_that_refuses_everything_is_kept_and_reads_as_blocked() {
+        let s = site_at(
+            "https://linktr.ee/TampaDSA",
+            Scripted::default()
+                .refusing("https://linktr.ee/robots.txt", Liveness::Blocked)
+                .refusing("https://linktr.ee/TampaDSA", Liveness::Blocked)
+                .refusing("https://linktr.ee/sitemap.xml", Liveness::Blocked),
+            DiscoveryLimits::default(),
+        );
+
+        let out = s.enumerate(&Progress::none()).await.unwrap();
+
+        assert_eq!(
+            out.resources
+                .iter()
+                .map(|r| r.natural_key.as_str())
+                .collect::<Vec<_>>(),
+            ["https://linktr.ee/TampaDSA"],
+            "the account's page, and not the platform's"
+        );
+        assert_eq!(out.figures.get("discovery_failed"), Some(&1));
+        assert!(
+            out.notes
+                .iter()
+                .any(|n| n.label == "discovery" && n.mark == Some(NoteMark::Warn)),
+            "{:?}",
+            out.notes
+        );
+
+        let refused = s
+            .acquire(&out.resources[0], &Progress::none())
+            .await
+            .unwrap_err();
+        assert_eq!(refused.state, Liveness::Blocked, "blocked, not gone");
+    }
+
+    /// A pinned sitemap keeps the behaviour it was accepted with. It finds nothing and the
+    /// report says it could not find out, rather than walking links nobody asked for.
+    #[tokio::test]
+    async fn a_pinned_sitemap_does_not_give_way_and_reports_the_failure() {
+        let s = site_at(
+            "https://www.pinellasdsa.org/",
+            google_site(),
+            DiscoveryLimits::default(),
+        )
+        .with_strategy(Some(crate::strategies::crawl::by_name("sitemap").unwrap()));
+
+        let out = s.enumerate(&Progress::none()).await.unwrap();
+
+        assert_eq!(s.method(), "sitemap");
+        assert_eq!(
+            out.resources
+                .iter()
+                .map(|r| r.natural_key.as_str())
+                .collect::<Vec<_>>(),
+            ["https://www.pinellasdsa.org/feed"],
+            "only the feed the seed publishes"
+        );
+        assert_eq!(out.figures.get("discovery_failed"), Some(&1));
+    }
+
+    /// Medium's shape: `text/xml`, namespaced bodies in CDATA, articles that 403.
+    const MEDIUM_FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title><![CDATA[Stories by Pinellas DSA on Medium]]></title><link>https://medium.com/@dsa-pinellas</link><item><title><![CDATA[Why We Organize]]></title><link>https://dsa-pinellas.medium.com/why-we-organize-1a2b</link><guid isPermaLink="false">https://medium.com/p/1a2b</guid><dc:creator><![CDATA[Pinellas DSA]]></dc:creator><pubDate>Tue, 14 Oct 2026 18:00:00 GMT</pubDate><content:encoded><![CDATA[<h3>Why We Organize</h3><p>Rent in Pinellas rose 40% in three years.</p>]]></content:encoded></item><item><title><![CDATA[Bus Fare]]></title><link>https://dsa-pinellas.medium.com/bus-fare-3c4d</link><guid isPermaLink="false">https://medium.com/p/3c4d</guid><content:encoded><![CDATA[<p>PSTA fares.</p>]]></content:encoded></item></channel></rss>"#;
+
+    /// The articles refuse; the feed carries them. Each entry is its own artifact at a
+    /// sub-address of the feed, holding the bytes the feed served, and it reads as the
+    /// article — with the article's address in the text and on the record, and the feed
+    /// as where the bytes came from.
+    #[tokio::test]
+    async fn a_feed_carries_the_articles_its_pages_refuse() {
+        let feed = "https://dsa-pinellas.medium.com/feed";
+        let s = site_at(
+            feed,
+            Scripted::default()
+                .serving(
+                    "https://dsa-pinellas.medium.com/robots.txt",
+                    "Sitemap: https://dsa-pinellas.medium.com/sitemap/sitemap.xml\n",
+                )
+                .serving_as(feed, "text/xml; charset=UTF-8", MEDIUM_FEED)
+                .refusing(
+                    "https://dsa-pinellas.medium.com/why-we-organize-1a2b",
+                    Liveness::Blocked,
+                ),
+            DiscoveryLimits::default(),
+        );
+
+        let out = s.enumerate(&Progress::none()).await.unwrap();
+        assert_eq!(s.method(), "feed");
+        assert_eq!(out.resources.len(), 1);
+        assert_eq!(out.resources[0].natural_key, feed);
+
+        let got = s
+            .acquire(&out.resources[0], &Progress::none())
+            .await
+            .unwrap();
+        let keys: Vec<&str> = got
+            .iter()
+            .map(|a| a.resource.natural_key.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                feed,
+                "https://dsa-pinellas.medium.com/feed#entry=https://medium.com/p/1a2b",
+                "https://dsa-pinellas.medium.com/feed#entry=https://medium.com/p/3c4d",
+            ]
+        );
+        assert_eq!(
+            got[0].fetched.bytes,
+            MEDIUM_FEED.as_bytes(),
+            "the response, as served"
+        );
+
+        let entry = &got[1].fetched;
+        assert!(
+            MEDIUM_FEED
+                .as_bytes()
+                .windows(entry.bytes.len())
+                .any(|w| w == entry.bytes)
+        );
+        assert_eq!(
+            entry.meta["final_url"], feed,
+            "served by the feed, not by the article"
+        );
+        assert_eq!(
+            entry.meta["link"],
+            "https://dsa-pinellas.medium.com/why-we-organize-1a2b"
+        );
+
+        let kind = crate::content::ContentKind::classify(&entry.meta, &entry.bytes);
+        let text = crate::extract::extract(kind, &entry.bytes, None, None);
+        let text = text.text().expect("the entry reads");
+        assert!(text.starts_with("# Why We Organize"), "{text}");
+        assert!(
+            text.contains("Rent in Pinellas rose 40% in three years."),
+            "{text}"
+        );
+        assert!(
+            text.contains("**Link:** https://dsa-pinellas.medium.com/why-we-organize-1a2b"),
+            "{text}"
+        );
+
+        // Two items is the latest two, and the report must not let them read as the blog.
+        let remarks = s.remarks(&Default::default(), 1);
+        assert!(
+            remarks
+                .iter()
+                .any(|n| n.mark == Some(NoteMark::Warn) && n.detail.contains("latest entries")),
+            "{remarks:?}"
+        );
+    }
+
+    /// A public Google Calendar, handed over as its `.ics` address: every event becomes a
+    /// searchable artifact under its UID.
+    #[tokio::test]
+    async fn a_calendar_seed_is_collected_one_event_at_a_time() {
+        let ics = "https://calendar.google.com/calendar/ical/abc%40group.calendar.google.com/public/basic.ics";
+        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nX-WR-CALNAME:Pinellas DSA\r\nBEGIN:VEVENT\r\nDTSTART:20261105T230000Z\r\nUID:gbm@google.com\r\nSUMMARY:General Body Meeting\r\nLOCATION:St. Petersburg Main Library\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let s = site_at(
+            ics,
+            Scripted::default()
+                .refusing("https://calendar.google.com/robots.txt", Liveness::Gone)
+                .serving_as(ics, "text/calendar; charset=UTF-8", body),
+            DiscoveryLimits::default(),
+        );
+
+        let out = s.enumerate(&Progress::none()).await.unwrap();
+        assert_eq!(s.method(), "feed");
+        let got = s
+            .acquire(&out.resources[0], &Progress::none())
+            .await
+            .unwrap();
+
+        assert_eq!(got.len(), 2, "the calendar and its one event");
+        assert_eq!(
+            got[1].resource.natural_key,
+            format!("{ics}#entry=gbm@google.com")
+        );
+        let kind =
+            crate::content::ContentKind::classify(&got[1].fetched.meta, &got[1].fetched.bytes);
+        assert_eq!(kind, crate::content::ContentKind::Calendar);
+        let text = crate::extract::extract(kind, &got[1].fetched.bytes, None, None);
+        let text = text.text().unwrap();
+        assert!(text.contains("# General Body Meeting"), "{text}");
+        assert!(text.contains("**When:** 2026-11-05 23:00 UTC"), "{text}");
+        assert!(
+            text.contains("**Where:** St. Petersburg Main Library"),
+            "{text}"
         );
     }
 

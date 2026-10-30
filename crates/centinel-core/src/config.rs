@@ -470,7 +470,8 @@ pub struct SourceConfig {
     /// Becomes a directory name under `log/`, so it is a [`crate::domain::SourceId`].
     pub id: String,
 
-    /// Any URL on the site. Only the origin is used.
+    /// The website's address. `robots.txt` and any sitemap are read from its host; a walk
+    /// that follows links stays under its path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site: Option<String>,
 

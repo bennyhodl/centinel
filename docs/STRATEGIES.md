@@ -1,7 +1,9 @@
 # Centinel — Collection strategies
 
 **Status:** partly built. On branch `enumeration`: §11's five universal fixes, the crawl
-registry with `sitemap` and `listing` (§4–§6), and `investigate` (§8, §17). Not built:
+registry with `sitemap` and `listing` (§4–§6), and `investigate` (§8, §17). Since then:
+`feed` for an RSS, Atom or iCalendar seed, and `links`, which an unpinned walk that read
+nothing gives way to, bounded by the seed's scope. Not built:
 `index` and `none` (§10.3, §7 rule 3), and the skill (§18). The central claim rests on four
 sites and **has not been falsified yet** — §12 names the ten-minute test that would.
 

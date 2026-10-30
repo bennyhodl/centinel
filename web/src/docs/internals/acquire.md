@@ -60,6 +60,31 @@ level makes acquisition a recursive crawler with no snapshot to bound it — and
 A strategy that names documents rather than pages skips the scan entirely. See
 [`addresses_are`](strategies.md#pages-or-documents).
 
+## Feeds
+
+A feed is a document that lists other documents and usually carries them. An RSS item
+from Medium holds the whole article in `content:encoded`; a Google Calendar `.ics` holds
+every event's description, place and time. When the article pages answer 403 to anything
+but a browser, the feed is the only place the text can be read from.
+
+So acquiring an address whose bytes are a `feed` or a `calendar` stores the response as it
+came, and then **each entry as its own artifact** at a sub-address of the feed:
+
+| Artifact | Address | Bytes |
+|---|---|---|
+| the feed | `https://dsa-pinellas.medium.com/feed` | the response |
+| one entry | `…/feed#entry=https://medium.com/p/1a2b` | that `<item>…</item>`, sliced from the response |
+| one event | `…/basic.ics#entry=gbm@google.com` | that `BEGIN:VEVENT … END:VEVENT` block |
+
+The entry's identity is the publisher's: an RSS `guid`, an Atom `id`, an iCalendar `UID`
+with its `RECURRENCE-ID`. Its record keeps the feed's `final_url` — that is where the bytes
+were served — records the entry's format as its `content-type`, and names the article in
+`link`. Nothing is stored as though the article's own page had been fetched.
+
+**A feed is a window.** RSS and Atom list the latest entries, not the archive, and the run
+says so in its remarks: ten items is the latest ten. A calendar file is conventionally
+whole. Entries past 10,000 in one feed are counted and dropped.
+
 ## Politeness
 
 Per host, and deliberately slow. `rps = 1.0` by default. Acquisition runs per source for

@@ -463,6 +463,9 @@ pub async fn collect(
 /// `…/watch?v=ID` + `…/watch?v=ID#captions.json3` → `captions.json3`. An address that
 /// holds one artifact is [`WHOLE`], so the breakdown reads as a table in both cases
 /// rather than as a bare number for one kind and a table for the other.
+///
+/// A part that names one of many — a feed's `#entry=<id>` — is counted under its name,
+/// `entry`, so nine hundred calendar events are one row and not nine hundred.
 fn part_of(parent: &Resource, acquired: &Resource) -> String {
     if acquired.natural_key == parent.natural_key {
         return WHOLE.to_string();
@@ -470,7 +473,12 @@ fn part_of(parent: &Resource, acquired: &Resource) -> String {
     acquired
         .natural_key
         .strip_prefix(parent.natural_key.as_str())
-        .map(|rest| rest.trim_start_matches('#').to_string())
+        .map(|rest| rest.trim_start_matches('#'))
+        .map(|rest| {
+            rest.split_once('=')
+                .map_or(rest, |(name, _)| name)
+                .to_string()
+        })
         .filter(|rest| !rest.is_empty())
         .unwrap_or_else(|| WHOLE.to_string())
 }

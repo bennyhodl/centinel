@@ -516,6 +516,15 @@ fn whole_page_is_better(bytes: &[u8], article: &str) -> bool {
     crate::verdict::ReadQuality::measure(bytes, text).link_share <= crate::verdict::LINK_SHARE
 }
 
+/// A fragment of markup — a feed entry's article — as markdown, through the converter a
+/// whole page goes through. `None` when it converts to nothing.
+pub(super) fn html_fragment(html: &str) -> Option<String> {
+    markdown_converter()
+        .convert(html)
+        .ok()
+        .filter(|md| !md.trim().is_empty())
+}
+
 /// The whole page, minus scripts. Worse for search, but a listing page with no article is
 /// still content worth having.
 pub(super) fn html_whole_page(bytes: &[u8]) -> Extracted {

@@ -19,7 +19,13 @@ audio_if_no_captions = true
 chunking, indexing, search — is a shared model, because acquisition is the only place the
 two genuinely differ.
 
-For a website, `site` is any URL on it; only the origin is used.
+For a website, `site` is the seed. `robots.txt` and any sitemap are read from its host,
+so a city's sitemap is the whole city whichever page you give. When there is no sitemap to
+read, Centinel follows links from the seed instead, and that walk stays under the seed's
+path — so `https://linktr.ee/TampaDSA` is that one page and not Linktree. A feed or
+calendar address works as a seed too: `https://dsa-pinellas.medium.com/feed`, or a Google
+Calendar's public `…/basic.ics`. Each article or event it carries is stored as its own
+entry; see [Acquisition](../internals/acquire.md#feeds).
 
 ## Adding one
 

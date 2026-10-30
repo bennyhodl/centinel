@@ -181,11 +181,13 @@ impl Strategy for Sitemap {
 
                 match doc::parse(&body) {
                     Ok(SitemapDoc::Index(refs)) => {
+                        pass.read_surface();
                         for r in refs {
                             pass.push(r.loc, depth + 1);
                         }
                     }
                     Ok(SitemapDoc::UrlSet(entries)) => {
+                        pass.read_surface();
                         for e in entries {
                             // `next` writes the warning and ends the walk; this only stops
                             // filling past the ceiling.

@@ -41,6 +41,13 @@ level, same host.** The page's own HTML is scanned and what comes back is not, b
 second level makes acquisition a recursive crawler with no snapshot to bound it — and that
 is `enumerate`'s job, which is where a *complete* address set comes from.
 
+**Feed entry** — one item of an RSS or Atom feed, or one event of an iCalendar file, stored
+as its own artifact at `<feed>#entry=<id>`, holding the bytes the feed served for it. The id
+is the publisher's (`guid`, Atom `id`, `UID` + `RECURRENCE-ID`). *Why it matters:* a feed
+carries text its article pages refuse to serve, and storing the entry as cut from the feed
+keeps the provenance true — nothing claims the article page was fetched. A feed is a
+**window**, not an archive, and the run says so.
+
 **Crumb** — an off-host link **recorded and not followed**: the host, how many links point
 at it, how many pages carried them, and one address to look at. The other half of the
 enclosure rule above — a link that leaves the host is not fetched, it is *named*. *Why it
@@ -563,6 +570,16 @@ page whose only variation is a rotated CSRF token moves the first and not the se
 is the discovery delta. *Why it matters:* a truncated snapshot looks exactly like a source
 that shrank, so nothing may silently cap one — which is why `run --limit` applies to
 collection and not to discovery.
+
+**Scope** — the origin and path a seed covers: `/TampaDSA` covers `/TampaDSA` and
+`/TampaDSA/…`, and `/` covers the host. *Why it matters:* on a platform host a seed's path
+is the whole of what was asked for, and the `links` walk would otherwise crawl the
+platform. A host's own sitemap is not narrowed by it.
+
+**Discovery failed** — an enumeration that could read nothing that lists the site's pages,
+as against one that read a sitemap and found it empty. *Why it matters:* the two were both
+zero addresses and a stopped run. An unpinned walk that fails gives way to `links`; a
+pinned one reports it.
 
 **Pass** — one enumeration in progress: the queue, the ceilings, and what has been kept.
 Held by `strategies::crawl`, handed to a strategy, and the reason a strategy carries only

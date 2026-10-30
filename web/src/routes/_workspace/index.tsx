@@ -115,7 +115,7 @@ function Searching() {
 }
 
 /** What a count of each kind reads as. */
-const kindLabels: Record<string, string> = { pdf: 'PDFs', web_page: 'web pages', spreadsheet: 'spreadsheets', document: 'office documents', video: 'video transcripts', text: 'text files', other: 'other' }
+const kindLabels: Record<string, string> = { pdf: 'PDFs', web_page: 'web pages', spreadsheet: 'spreadsheets', document: 'office documents', video: 'video transcripts', feed: 'feed entries', calendar: 'calendar events', text: 'text files', other: 'other' }
 
 /** The corpus by kind, largest first. A server without the count still gives the total. */
 const kindsOf = (kinds: Record<string, number> | undefined, total: number): Array<[string, number]> => kinds
