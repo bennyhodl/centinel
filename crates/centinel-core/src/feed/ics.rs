@@ -8,7 +8,8 @@
 use super::{Entries, Entry, Format, Readable, body_from, capped, fragment_for};
 
 pub(super) fn entries(bytes: &[u8]) -> anyhow::Result<Entries> {
-    let text = decode(bytes);
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    let text = std::str::from_utf8(bytes)?;
     let mut out: Vec<Entry> = Vec::new();
 
     // Component nesting is tracked so an alarm's `END:VALARM` inside an event does not end
@@ -47,7 +48,7 @@ pub(super) fn entries(bytes: &[u8]) -> anyhow::Result<Entries> {
         "not an iCalendar file"
     );
 
-    let calendar = properties(&text);
+    let calendar = properties(text);
     let (entries, dropped) = capped(out);
     Ok(Entries {
         format: Format::Calendar,

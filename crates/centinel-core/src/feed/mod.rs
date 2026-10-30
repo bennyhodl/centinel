@@ -245,7 +245,7 @@ pub fn published(html: &str, base: &Url) -> Vec<Published> {
             false => href.to_string(),
         };
         if let Some(url) = join(base, &href)
-            && url.path().to_ascii_lowercase().ends_with(".ics")
+            && (webcal || url.path().to_ascii_lowercase().ends_with(".ics"))
         {
             push(url, Format::Calendar, ".ics link");
         }
@@ -336,6 +336,17 @@ mod tests {
         Url::parse("https://www.pinellasdsa.org/calendar").unwrap()
     }
 
+    #[test]
+    fn splitting_never_replaces_invalid_bytes_with_fabricated_entry_bytes() {
+        for body in [
+            b"<rss><channel><item><title>\xff</title></item></channel></rss>".as_slice(),
+            b"BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:\xff\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+                .as_slice(),
+        ] {
+            assert!(entries(body).is_err());
+        }
+    }
+
     /// The three declarations a page makes, each read as the feed it names.
     #[test]
     fn a_page_declares_its_feeds_three_ways() {
@@ -344,6 +355,7 @@ mod tests {
             <link rel="stylesheet" href="/s.css">
             </head><body>
             <a href="webcal://www.pinellasdsa.org/events.ics">Subscribe</a>
+            <a href="webcal://www.pinellasdsa.org/subscribe">Subscribe without a file extension</a>
             <iframe src="https://calendar.google.com/calendar/embed?src=gqol8ujletle8qvphl2a7dvgjs%40group.calendar.google.com&amp;ctz=America%2FNew_York"></iframe>
             </body></html>"#;
 
@@ -354,6 +366,7 @@ mod tests {
             [
                 ("https://www.pinellasdsa.org/feed", Format::Rss),
                 ("https://www.pinellasdsa.org/events.ics", Format::Calendar),
+                ("https://www.pinellasdsa.org/subscribe", Format::Calendar),
                 (
                     "https://calendar.google.com/calendar/ical/gqol8ujletle8qvphl2a7dvgjs%40group.calendar.google.com/public/basic.ics",
                     Format::Calendar

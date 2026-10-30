@@ -165,11 +165,21 @@ fn pages_in(html: &str, base: &Url) -> Vec<Url> {
         // A fragment is a place on the same page.
         target.set_fragment(None);
         let named = ContentKind::from_path(std::path::Path::new(target.path()));
-        if named.is_some_and(|k| k != ContentKind::Html) {
+        if named.is_some_and(|k| {
+            !matches!(
+                k,
+                ContentKind::Html | ContentKind::Feed | ContentKind::Calendar
+            )
+        }) {
             continue;
         }
         out.push(target);
     }
+    out.extend(
+        crate::feed::published(html, base)
+            .into_iter()
+            .map(|feed| feed.url),
+    );
     out
 }
 
@@ -284,6 +294,46 @@ mod tests {
             4,
             "known addresses are kept, read or not"
         );
+    }
+
+    #[tokio::test]
+    async fn feeds_published_below_the_seed_are_discovered() {
+        let s = seed(&page(&["/news"]), "https://publisher.test/");
+        let crawl = Fake::new([
+            (
+                "https://publisher.test/news",
+                "<html><link rel=\"alternate\" type=\"application/rss+xml\" href=\"/updates.xml\"><a href=\"/events.ics\">Calendar</a></html>".to_string(),
+            ),
+            ("https://publisher.test/updates.xml", "<rss><channel/></rss>".to_string()),
+            ("https://publisher.test/events.ics", "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".to_string()),
+        ]);
+
+        let got = Links.enumerate(&s, &crawl).await.unwrap();
+        assert!(
+            got.addresses
+                .contains(&"https://publisher.test/updates.xml".to_string())
+        );
+        assert!(
+            got.addresses
+                .contains(&"https://publisher.test/events.ics".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_depth_limited_walk_reports_partial_coverage() {
+        let s = seed(&page(&["/1"]), "https://publisher.test/");
+        let crawl = Fake::new([
+            ("https://publisher.test/1", page(&["/2"])),
+            ("https://publisher.test/2", page(&["/3"])),
+            ("https://publisher.test/3", page(&["/4"])),
+            ("https://publisher.test/4", page(&["/5"])),
+            ("https://publisher.test/5", page(&["/6"])),
+        ]);
+
+        let got = Links.enumerate(&s, &crawl).await.unwrap();
+        assert!(got.truncated);
+        assert!(got.warnings.iter().any(|w| w.contains("depth limit")));
+        assert_eq!(crawl.requests(), MAX_DEPTH);
     }
 
     #[tokio::test]

@@ -421,6 +421,14 @@ impl SiteSource {
             if !seed.robots.allowed(&address) || found.addresses.contains(&address) {
                 continue;
             }
+            if found.addresses.len() >= self.limits.max_urls {
+                found.truncated = true;
+                found.warnings.push(format!(
+                    "published feed {address} exceeds the {}-address ceiling and was not added",
+                    self.limits.max_urls
+                ));
+                continue;
+            }
             found.notes.push(Note::new(
                 "feed",
                 format!("{address} ({}, {})", feed.format, feed.how),

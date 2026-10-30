@@ -100,3 +100,16 @@ jobs:
       # server, or a network the runner might not reach.
       - name: tests
         run: cargo test --workspace --locked
+
+      # Reuse the tested dependency build for a CLI operators can smoke-test without
+      # replacing an installed release or compiling the workspace on their server.
+      - name: build smoke-test CLI
+        if: github.event_name == 'pull_request'
+        run: cargo build --locked -p centinel
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'pull_request'
+        with:
+          name: centinel-linux-smoke
+          path: target/debug/centinel
+          retention-days: 3

@@ -316,6 +316,7 @@ impl<'a, T: std::fmt::Display> Pass<'a, T> {
                 continue;
             }
             if depth > self.max_depth {
+                self.out.truncated = true;
                 self.out
                     .warnings
                     .push(format!("depth limit reached, skipping {item}"));

@@ -43,8 +43,11 @@ fn root_name(head: &str) -> Option<&str> {
 }
 
 pub(super) fn entries(bytes: &[u8]) -> anyhow::Result<Entries> {
-    let text = decode(bytes);
-    let doc = parse(&text)?;
+    // Splitting must never replace bytes and then claim the replacement was served.
+    // Keep unsupported encodings in the original response without inventing entries.
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    let text = std::str::from_utf8(bytes)?;
+    let doc = parse(text)?;
     let root = doc.root_element();
     let (format, container, noun) = channel(root)?;
 
