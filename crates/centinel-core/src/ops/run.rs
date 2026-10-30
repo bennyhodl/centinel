@@ -943,6 +943,7 @@ async fn run_derivation(
                             // fifty menus and a run that reads fifty pages both said
                             // "50 documents" until this was carried up.
                             ("poor_reads", r.poor_reads as u64),
+                            ("corrupt_blobs", r.corrupt_blobs as u64),
                         ],
                     ))
                 },
@@ -958,6 +959,12 @@ async fn run_derivation(
                         line.push_str(&format!(
                             " \u{00b7} {} read poorly",
                             render::count(t.get("poor_reads"))
+                        ));
+                    }
+                    if t.get("corrupt_blobs") > 0 {
+                        line.push_str(&format!(
+                            " \u{00b7} {} corrupt, skipped",
+                            render::count(t.get("corrupt_blobs"))
                         ));
                     }
                     line
@@ -1061,6 +1068,7 @@ async fn run_derivation(
                             // reached nothing, and subtracting for it is not a thing
                             // anybody does.
                             ("empty_documents", r.empty_documents as u64),
+                            ("corrupt_blobs", r.corrupt_blobs as u64),
                         ],
                     )
                     // The size of the whole index, not of this call's work.
@@ -1077,6 +1085,12 @@ async fn run_derivation(
                         line.push_str(&format!(
                             " \u{00b7} {} produced nothing",
                             render::count(t.get("empty_documents"))
+                        ));
+                    }
+                    if t.get("corrupt_blobs") > 0 {
+                        line.push_str(&format!(
+                            " \u{00b7} {} corrupt, skipped",
+                            render::count(t.get("corrupt_blobs"))
                         ));
                     }
                     line
