@@ -12,13 +12,16 @@ pub trait Strategy: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// What did you see, and how sure are you? `None` is a valid, common answer.
-    fn recognise(&self, seed: &Fetched) -> Option<Recognition>;
+    fn recognise(&self, seed: &Seed) -> Option<Recognition>;
 
-    /// Produce the complete address set.
-    fn enumerate(&self, seed: &Fetched) -> anyhow::Result<Enumerated>;
+    /// Produce the complete address set, fetching only through `crawl`.
+    fn enumerate(&self, seed: &Seed, crawl: &dyn Walk) -> BoxFuture<anyhow::Result<Enumerated>>;
 
     /// Did this strategy name **pages**, or did it name **documents**?
     fn addresses_are(&self) -> Addresses { Addresses::Pages }
+
+    /// Is the first address the seed itself? Lets the store give back a seed's path.
+    fn first_address_is_the_seed(&self) -> bool { false }
 }
 ```
 
@@ -99,8 +102,49 @@ This is content-kind detection one level up: magic bytes are a list of *(signatu
 kind)* where each element answers for itself, and a strategy registry is magic bytes for
 websites. Registration is link-time, so there is nowhere to forget to add one.
 
-Two strategies are registered today — `sitemap` and `listing` — with `listing` covering
-both IIS and Apache/nginx directory indexes.
+Four strategies are registered today:
+
+| Strategy | Keys on | Addresses |
+|---|---|---|
+| `sitemap` | a `Sitemap:` line in `robots.txt` (standard) | every `<loc>` the sitemaps list |
+| `listing` | an IIS or Apache/nginx directory index (server default) | the files under the seed's directory |
+| `feed` | an RSS, Atom or iCalendar seed (standard) | the feed itself; its entries are split at [acquisition](acquire.md#feeds) |
+| `links` | nothing — it never recognises | the seed, and the readable pages it links to inside its scope |
+
+## When nothing can be read
+
+With nothing pinned and nothing recognised, `sitemap` runs anyway and tries
+`/sitemap.xml`. A walk that then reads **nothing** — every sitemap refused or would not
+parse — gives way to `links`: the seed, and the pages it links to, followed breadth-first
+inside the seed's **scope** under the same request budget, pacing, `robots.txt` and
+cancellation. A site with no sitemap is not a site with no pages; a Google Site is the
+common case.
+
+Two outcomes that used to look identical are now told apart. A sitemap that was read and
+lists nothing is an empty set. A sitemap that could not be read is failed discovery, and
+the run says so with a `discovery` note and the `discovery_failed` figure. When even the
+seed refuses, the seed is still the one address, so acquiring it records it `blocked`
+rather than the run recording nothing.
+
+A **pinned** strategy does not give way. It is what the operator accepted, and it keeps
+that behaviour; its failure is reported, not replaced.
+
+### Scope
+
+A seed's path is part of what the operator said. `linktr.ee/TampaDSA` is one account on a
+platform, and `actionnetwork.org/forms/join-…` is one form. `links` stays on the seed's
+origin and under the directory its path names — `/TampaDSA` covers `/TampaDSA` and
+`/TampaDSA/…`, and a seed at `/` covers the host. Nothing names a platform: the rule is
+the same everywhere. A host's own sitemap is not narrowed by it, because a sitemap is the
+publisher's statement of what the site holds.
+
+## Feeds a page publishes
+
+Whatever walked the site, the seed page is asked which feeds it declares: a
+`<link rel="alternate">` to RSS or Atom, a link to an `.ics` or `webcal:` address, or a
+Google Calendar embed, whose public `.ics` address is read from the embed's `src`. One
+inside the seed's scope is an address like any other. One elsewhere is a note naming the
+address to add as its own source, and is not followed.
 
 ## Recognition must carry evidence
 

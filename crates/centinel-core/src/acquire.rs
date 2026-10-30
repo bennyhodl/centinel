@@ -271,15 +271,15 @@ pub async fn collect(
     // One pass over the log for the work list, the resume state and the change baseline.
     let replay = store.replay(&id).await?;
 
-    let discovered: Vec<Resource> = replay
+    let discovered = replay
         .latest_discovery()
-        .map(|d| d.resources.clone())
-        .unwrap_or_default();
-
-    anyhow::ensure!(
-        !discovered.is_empty(),
-        "no discovery run for `{id}` — run `centinel discover --source {id}` first"
-    );
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no discovery run for `{id}` — run `centinel discover --source {id}` first"
+            )
+        })?
+        .resources
+        .clone();
 
     // Written to as each artifact is stored, from markup already in hand. See
     // [`crate::crumbs::Ledger`] — this is the whole reason `crumbs` is a file read rather
@@ -463,6 +463,9 @@ pub async fn collect(
 /// `…/watch?v=ID` + `…/watch?v=ID#captions.json3` → `captions.json3`. An address that
 /// holds one artifact is [`WHOLE`], so the breakdown reads as a table in both cases
 /// rather than as a bare number for one kind and a table for the other.
+///
+/// A part that names one of many — a feed's `#entry=<id>` — is counted under its name,
+/// `entry`, so nine hundred calendar events are one row and not nine hundred.
 fn part_of(parent: &Resource, acquired: &Resource) -> String {
     if acquired.natural_key == parent.natural_key {
         return WHOLE.to_string();
@@ -470,7 +473,12 @@ fn part_of(parent: &Resource, acquired: &Resource) -> String {
     acquired
         .natural_key
         .strip_prefix(parent.natural_key.as_str())
-        .map(|rest| rest.trim_start_matches('#').to_string())
+        .map(|rest| rest.trim_start_matches('#'))
+        .map(|rest| {
+            rest.split_once('=')
+                .map_or(rest, |(name, _)| name)
+                .to_string()
+        })
         .filter(|rest| !rest.is_empty())
         .unwrap_or_else(|| WHOLE.to_string())
 }
@@ -663,6 +671,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::open(dir.path()).await.unwrap();
         (dir, s)
+    }
+
+    #[tokio::test]
+    async fn an_empty_discovery_is_distinct_from_no_discovery() {
+        let (_d, store) = store().await;
+        let src = Scripted::new("empty", &[]);
+        let missing = collect(&store, &src, &CollectOpts::default(), &Progress::none())
+            .await
+            .unwrap_err();
+        assert!(missing.to_string().contains("no discovery run"));
+
+        discover(&store, &src, &DiscoverOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+        let collected = collect(&store, &src, &CollectOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+        assert_eq!(collected.attempted, 0);
+        assert_eq!(collected.stored, 0);
+        assert!(src.acquired().is_empty());
     }
 
     #[tokio::test]

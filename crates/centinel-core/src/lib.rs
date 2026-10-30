@@ -42,6 +42,7 @@ pub mod domain;
 pub mod embed;
 pub mod enclosure;
 pub mod extract;
+pub mod feed;
 pub mod fetch;
 pub mod graph;
 pub mod html;

@@ -60,6 +60,12 @@ pub enum ContentKind {
     Captions,
     Json,
     Xml,
+    /// RSS or Atom: a document listing other documents, and usually carrying them. Often
+    /// served as plain `text/xml`, so it is *sniffed* out of [`Xml`] by its root element,
+    /// the way [`Captions`] is out of [`Json`]. See [`crate::feed`].
+    Feed,
+    /// An iCalendar file, or one event cut out of one.
+    Calendar,
     Csv,
     Spreadsheet,
     /// Word, PowerPoint, OpenDocument, RTF and EPUB. One word for eight formats, because
@@ -122,6 +128,9 @@ const FORMATS: &[Format] = &[
     written("md", Markdown),
     f("json", "application/json", Json),
     f("xml", "application/xml", Xml),
+    f("rss", "application/rss+xml", Feed),
+    f("atom", "application/atom+xml", Feed),
+    f("ics", "text/calendar", Calendar),
     f("csv", "text/csv", Csv),
     f(
         "xlsx",
@@ -184,6 +193,8 @@ impl ContentKind {
         Captions,
         Json,
         Xml,
+        Feed,
+        Calendar,
         Csv,
         Spreadsheet,
         Document,
@@ -208,6 +219,8 @@ impl ContentKind {
             Captions => "captions",
             Json => "json",
             Xml => "xml",
+            Feed => "feed",
+            Calendar => "calendar",
             Csv => "csv",
             Spreadsheet => "spreadsheet",
             Document => "document",
@@ -238,6 +251,13 @@ impl ContentKind {
             // API response.
             return match kind {
                 Json if crate::captions::looks_like_json3(bytes) => Captions,
+                // The commonest feed on the web is served as `text/xml`, and a calendar
+                // is as often `text/plain` as `text/calendar`. The root settles both.
+                Xml | Text => match crate::feed::Format::sniff(bytes) {
+                    Some(crate::feed::Format::Calendar) => Calendar,
+                    Some(_) if kind == Xml => Feed,
+                    _ => kind,
+                },
                 kind => kind,
             };
         }
@@ -337,6 +357,13 @@ impl ContentKind {
         // holding the whole blob, sorts the spreadsheets back out.
         if bytes.starts_with(b"{\\rtf") || bytes.starts_with(&OLE_MAGIC) {
             return Some(Document);
+        }
+        // A feed served as `application/octet-stream`, or with no type at all, still
+        // names itself in its root element.
+        match crate::feed::Format::sniff(bytes) {
+            Some(crate::feed::Format::Calendar) => return Some(Calendar),
+            Some(_) => return Some(Feed),
+            None => {}
         }
         if bytes.starts_with(b"PK\x03\x04") {
             return Some(ZipContainer);
@@ -600,6 +627,26 @@ mod tests {
             Document
         );
         assert_eq!(classify("application/octet-stream", &OLE_MAGIC), Document);
+    }
+
+    /// Medium serves its feed as `text/xml` and calendars arrive as `text/plain`; the root
+    /// settles both. A sitemap is XML too, and must stay `xml`.
+    #[test]
+    fn a_feed_is_known_by_its_root_whatever_it_was_served_as() {
+        let rss = b"<?xml version=\"1.0\"?><rss version=\"2.0\"><channel/></rss>";
+        let ics = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n";
+        assert_eq!(classify("text/xml; charset=UTF-8", rss), Feed);
+        assert_eq!(classify("application/octet-stream", rss), Feed);
+        assert_eq!(classify("text/plain", ics), Calendar);
+        assert_eq!(classify("text/calendar; charset=UTF-8", ics), Calendar);
+        assert_eq!(
+            classify(
+                "text/xml",
+                b"<?xml version=\"1.0\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"/>"
+            ),
+            Xml
+        );
+        assert_eq!(classify("text/plain", b"minutes of the meeting"), Text);
     }
 
     /// The 2.2 GB case. IIS serves `.csv` as `application/octet-stream`, which asserts

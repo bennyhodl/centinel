@@ -183,12 +183,21 @@ pub async fn infer_from(store: &Store, replay: &Replay) -> anyhow::Result<Option
         }));
     }
 
+    // The same `method` string that names the kind also names the strategy. A method this
+    // build has no strategy for is simply not pinned — see [`Inferred::strategy`].
+    let strategy = crate::strategies::crawl::by_name(replay.discovery_method()).ok();
+    // A walk bounded by its seed's path recorded the seed first, path and all; reading
+    // only its origin would widen `linktr.ee/TampaDSA` to the platform.
+    let seed = strategy
+        .filter(|s| s.it.first_address_is_the_seed())
+        .and_then(|_| replay.latest_discovery())
+        .and_then(|run| run.resources.first())
+        .map(|r| r.natural_key.clone());
+
     Ok(Some(Inferred {
         kind: SourceKind::Site,
-        target: keys.iter().find_map(|k| origin_of(k)),
-        // The same `method` string that names the kind also names the strategy. A method
-        // this build has no strategy for is simply not pinned — see [`Inferred::strategy`].
-        strategy: crate::strategies::crawl::by_name(replay.discovery_method()).ok(),
+        target: seed.or_else(|| keys.iter().find_map(|k| origin_of(k))),
+        strategy,
     }))
 }
 
@@ -547,6 +556,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(s.method(), "listing", "and it acquires as what it was");
+    }
+
+    /// A walk bounded by its seed's path gives the seed back with its path. Read as an
+    /// origin, a Linktree account would come back as Linktree.
+    #[tokio::test]
+    async fn a_source_walked_from_its_seed_is_recovered_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).await.unwrap();
+        let id = SourceId::new("tampa-dsa-linktree").unwrap();
+        store
+            .append(
+                &id,
+                &LogRecord::DiscoveryRun(DiscoveryRun {
+                    source: id.clone(),
+                    at: jiff::Timestamp::now(),
+                    resources: vec![
+                        Resource::new(id.clone(), "https://linktr.ee/TampaDSA"),
+                        Resource::new(id.clone(), "https://linktr.ee/TampaDSA/events"),
+                    ],
+                    method: "links".into(),
+                }),
+            )
+            .await
+            .unwrap();
+
+        let got = infer(&store, &id).await.unwrap().unwrap();
+        assert_eq!(got.target.as_deref(), Some("https://linktr.ee/TampaDSA"));
+        assert_eq!(got.strategy.map(|s| s.name), Some("links"));
     }
 
     /// A method this build has no strategy for is not an error. An older store, or a

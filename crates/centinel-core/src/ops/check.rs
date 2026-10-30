@@ -648,7 +648,9 @@ fn extension_for(kind: ContentKind, item: &Item) -> String {
     //
     // Exhaustive on purpose: a new kind has to say which side of that line it falls on.
     let from_kind = match kind {
-        Html | Pdf | Text | Csv | Json | Captions | Xml => Some(kind.extension(&item.bytes)),
+        Html | Pdf | Text | Csv | Json | Captions | Xml | Feed | Calendar => {
+            Some(kind.extension(&item.bytes))
+        }
         // Knowable from the bytes, and the one kind where guessing wrong means no player
         // opens it at all — so an unrecognised container defers to the address instead of
         // taking `materialize`'s commonest-container guess.

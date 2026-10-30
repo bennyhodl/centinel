@@ -299,17 +299,17 @@ fn push_row(out: &mut String, cells: &[String], width: usize) {
 /// exists to publish. So the rule is the widest region the page marks as its own, and the
 /// narrower ones are there for pages that mark nothing else.
 const MARKERS: &[Marker] = &[
-    Marker::new("main", &["<main"]),
-    Marker::new("[role=main]", &["role=\"main\"", "role='main'"]),
-    Marker::new(
+    Marker::page("main", &["<main"]),
+    Marker::page("[role=main]", &["role=\"main\"", "role='main'"]),
+    Marker::page(
         "#main-content",
         &["id=\"main-content\"", "id='main-content'"],
     ),
-    Marker::new(
+    Marker::page(
         ".main-content",
         &["class=\"main-content\"", "class='main-content'"],
     ),
-    Marker::new("article", &["<article"]),
+    Marker::part("article", &["<article"]),
 ];
 
 /// A content marker: the selector that finds the region, and the substrings that prove it
@@ -322,17 +322,103 @@ const MARKERS: &[Marker] = &[
 struct Marker {
     selector: &'static str,
     needles: &'static [&'static str],
+    /// The marker conventionally names the page's content. Nested sectioning is evidence
+    /// that it may label only a text box; see [`content_around`].
+    ///
+    /// `<article>` is the one that does not: it is a section itself, and a post inside a
+    /// `<section>` is ordinary markup rather than a sign the marker missed anything.
+    claims_page: bool,
 }
 
 impl Marker {
-    const fn new(selector: &'static str, needles: &'static [&'static str]) -> Self {
-        Self { selector, needles }
+    const fn page(selector: &'static str, needles: &'static [&'static str]) -> Self {
+        Self {
+            selector,
+            needles,
+            claims_page: true,
+        }
+    }
+
+    const fn part(selector: &'static str, needles: &'static [&'static str]) -> Self {
+        Self {
+            selector,
+            needles,
+            claims_page: false,
+        }
     }
 }
 
-/// Dropped inside the region. Within a marked region these are sub-navigation, and the
-/// page has already told us the region is the document.
+/// The page's chrome. Dropped inside the region — within a marked region these are
+/// sub-navigation, and the page has already told us the region is the document — and the
+/// edge [`content_around`] stops at when it has to find the region itself.
 const CHROME: &[&str] = &["nav", "header", "footer"];
+
+/// Sectioning ancestors that can indicate a page marker labels only part of the content.
+const SECTIONING: &[&str] = &["section", "article"];
+
+/// The content a misplaced page marker belongs to, and the sectioning element that gave it
+/// away. `None` when the marker is where the page's content marker belongs, which is
+/// nearly always.
+///
+/// **The evidence is structure, not a length.** A page-level marker nested inside a
+/// section may label a text box rather than the whole document. This is a recovery
+/// heuristic, not a guarantee about what the publisher intended. Google Sites builds
+/// every page this way: `role="main"` goes on the first text box of the first `<section>`,
+/// so on `pinellasdsa.org` it held one sentence of the home page, the word *Calendar*, and
+/// the word *Blog* — while the chapter's description sat in the next text box of the same
+/// section and every blog excerpt in the sections after it. 485 characters across five pages.
+///
+/// **Where it stops is where a correct marker would have sat: beside the chrome.** A
+/// hierarchically correct `<main>` is the sibling of the `<header>`, `<nav>` and `<footer>`
+/// around it. So this climbs from the marker for as long as the content it would add holds
+/// none of them, and never to `<body>`. On those pages that is the wrapper around the run of
+/// `<section>`s, one step inside the one holding the site header.
+///
+/// What this cannot see: chrome built from unlabelled `<div>`s, which is invisible here exactly as
+/// it is to [`CHROME`] inside a correct marker, and is [`crate::boilerplate`]'s to remove.
+/// That cost is paid only on a page that has already mis-marked its content.
+fn content_around<'a>(
+    marker: &dom_query::NodeRef<'a>,
+) -> Option<(dom_query::NodeRef<'a>, &'static str)> {
+    let section = marker
+        .ancestors_it(None)
+        .find_map(|a| SECTIONING.iter().copied().find(|s| a.has_name(s)))?;
+
+    let mut region = *marker;
+    while let Some(parent) = region.parent() {
+        if !parent.is_element()
+            || parent.has_name("body")
+            || parent.has_name("html")
+            || adds_chrome(&parent, &region)
+        {
+            break;
+        }
+        region = parent;
+    }
+    Some((region, section))
+}
+
+/// Whether widening `region` to `parent` would take in page chrome: any sibling of the
+/// region that is chrome or holds some. Chrome inside the region is the region's own
+/// sub-navigation, which the converter drops, and does not stop the climb.
+fn adds_chrome(parent: &dom_query::NodeRef<'_>, region: &dom_query::NodeRef<'_>) -> bool {
+    fn is_chrome(node: &dom_query::NodeRef<'_>) -> bool {
+        CHROME.iter().any(|c| node.has_name(c))
+            || node.has_name("aside")
+            || node.attr("role").is_some_and(|roles| {
+                roles.split_whitespace().any(|role| {
+                    matches!(
+                        role,
+                        "navigation" | "banner" | "contentinfo" | "complementary"
+                    )
+                })
+            })
+    }
+    parent
+        .children_it(false)
+        .filter(|sibling| sibling.id != region.id)
+        .any(|sibling| is_chrome(&sibling) || sibling.descendants_it().any(|d| is_chrome(&d)))
+}
 
 /// The region the page marks as its own content, as markdown.
 ///
@@ -362,9 +448,16 @@ const CHROME: &[&str] = &["nav", "header", "footer"];
 /// [`crate::boilerplate`] removes it corpus-wide. Content that was never extracted cannot be
 /// recovered by any later stage; chrome that was extracted can be dropped by one.
 ///
-/// **It does not judge the region it found.** A page that marks nothing, or marks a region
-/// holding no text, produces nothing here — and the readers below get their turn, by the
-/// same [`produced_text`] rule every other reader is held to.
+/// **A marker is evidence, not proof that the whole document is inside it.** Standing where
+/// a content marker belongs, it is read as the page's content. A page marker nested
+/// inside a `<section>` may mark just part of the document; the content around it is read
+/// instead. [`content_around`] says how far that reaches and why it stops
+/// at chrome. A short marker that stands where it belongs is kept as it is: a landmark's
+/// whole record is 123 characters and is not a sign that anything is missing.
+///
+/// A page that marks nothing, or marks a region holding no text, produces nothing here, and
+/// the readers below get their turn by the same [`produced_text`] rule every other reader is
+/// held to.
 pub(super) fn html_marked(bytes: &[u8]) -> Extracted {
     let html = String::from_utf8_lossy(bytes);
 
@@ -385,12 +478,27 @@ pub(super) fn html_marked(bytes: &[u8]) -> Extracted {
 
     let doc = dom_query::Document::from(html.as_ref());
     let converter = region_converter(CHROME);
-    let Some((body, selector)) = candidates.iter().find_map(|m| {
+    let Some((body, note)) = candidates.iter().find_map(|m| {
         let node = doc
             .try_select(m.selector)
             .and_then(|s| s.nodes().first().cloned())?;
-        let md = converter.convert(&node.html()).ok()?.trim().to_string();
-        (!md.is_empty()).then_some((md, m.selector))
+        let around = match m.claims_page {
+            true => content_around(&node),
+            false => None,
+        };
+        let (region, note) = match around {
+            Some((around, section)) => (
+                around,
+                format!(
+                    "read the region marked `{}` and the content around it: widened because \
+                     the page marker is nested inside a `<{section}>`",
+                    m.selector
+                ),
+            ),
+            None => (node, format!("read the region marked `{}`", m.selector)),
+        };
+        let md = converter.convert(&region.html()).ok()?.trim().to_string();
+        (!md.is_empty()).then_some((md, note))
     }) else {
         return Extracted::Unextractable {
             reason: "the page marks a content region and it holds no text".into(),
@@ -407,7 +515,7 @@ pub(super) fn html_marked(bytes: &[u8]) -> Extracted {
         title,
         tool: Reader::Marked.name().into(),
         version: HTMD_VERSION.into(),
-        notes: vec![format!("read the region marked `{selector}`")],
+        notes: vec![note],
     })
 }
 
@@ -514,6 +622,15 @@ fn whole_page_is_better(bytes: &[u8], article: &str) -> bool {
         return false;
     };
     crate::verdict::ReadQuality::measure(bytes, text).link_share <= crate::verdict::LINK_SHARE
+}
+
+/// A fragment of markup — a feed entry's article — as markdown, through the converter a
+/// whole page goes through. `None` when it converts to nothing.
+pub(super) fn html_fragment(html: &str) -> Option<String> {
+    markdown_converter()
+        .convert(html)
+        .ok()
+        .filter(|md| !md.trim().is_empty())
 }
 
 /// The whole page, minus scripts. Worse for search, but a listing page with no article is

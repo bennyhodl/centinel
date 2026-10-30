@@ -25,6 +25,10 @@ three.
 **Enclosure** — a document a page carries at its own address rather than contains. One
 level, same host.
 
+**Feed entry** — one item of an RSS or Atom feed, or one event of an iCalendar file, stored as
+its own artifact at `<feed>#entry=<id>` with the bytes the feed served for it. The id is
+the publisher's. A feed is a **window**: it lists the latest entries, not the archive.
+
 **Marker** — the address whose presence in the log proves a Resource was acquired. The
 page itself for a site; the *metadata* sub-resource for a video.
 
@@ -115,6 +119,13 @@ collecting a site and collecting its front door.
 **Pass** — one enumeration in progress: the queue, the ceilings, and what has been kept. A
 strategy must not decide what a ceiling means.
 
+**Scope** — the origin and path a seed covers. `links` stays inside it; a seed at `/` is the
+whole host. A host's own sitemap is not narrowed by it.
+
+**Discovery failed** — an enumeration that could read nothing that lists the site's pages,
+as against one that read a sitemap and found it empty. An unpinned walk that fails gives
+way to `links`.
+
 **Lead** — a host nothing recognised, and what was measured about it.
 
 ## Extraction
@@ -127,7 +138,9 @@ admission that the first tool's silence was never evidence.
 definition of *produced nothing*.
 
 **Marked region** — the part of a page the page itself declares to be its content:
-`<main>`, `[role=main]`, `#main-content`, `.main-content`, `<article>`, widest first.
+`<main>`, `[role=main]`, `#main-content`, `.main-content`, `<article>`, widest first. A
+page marker nested inside a `<section>` marks only part of the content, so the region read
+is the content around it, up to the page chrome.
 
 **Title** — the document's own name, written into the extracted text as an `# H1` rather
 than recorded beside it, because only the text is searched.

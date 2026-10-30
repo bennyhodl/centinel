@@ -38,7 +38,8 @@ pub struct DiscoverArgs {
     #[arg(long)]
     pub source: String,
 
-    /// Any URL on a website. Only the origin is used.
+    /// The website's address. `robots.txt` and any sitemap are read from its host; a walk
+    /// that follows links stays under its path.
     #[arg(long, conflicts_with = "channel")]
     #[serde(default)]
     pub site: Option<String>,

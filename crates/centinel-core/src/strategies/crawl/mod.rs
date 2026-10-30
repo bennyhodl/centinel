@@ -71,12 +71,15 @@
 //! [`Pacer`]: crate::policy::Pacer
 //! [`HostPolicy`]: crate::policy::HostPolicy
 
+pub mod feed;
+pub mod links;
 pub mod listing;
+pub mod scope;
 pub mod sitemap;
 
 use super::Recognition;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use futures::future::BoxFuture;
 
@@ -199,6 +202,15 @@ pub struct Enumerated {
     ///
     /// Set by the strategy, which is the only thing that knows what its ceilings were.
     pub truncated: bool,
+    /// No document that defines the surface could be read: every sitemap refused or would
+    /// not parse, or the seed page that a link walk starts from refused.
+    ///
+    /// The difference between *we could not find out* and *there is nothing here*. A
+    /// sitemap that was read and lists no addresses is an empty set, and an honest one; a
+    /// sitemap that 404s is no answer at all, and the two used to look identical — zero
+    /// addresses and a run that stopped. Set by [`Pass::finish`] from what the strategy
+    /// reported through [`Pass::read_surface`], so no strategy has to get it right alone.
+    pub discovery_failed: bool,
     /// The same provenance for a machine, named as the strategy names it.
     pub figures: BTreeMap<String, u64>,
 }
@@ -230,11 +242,16 @@ pub struct Pass<'a, T> {
     /// does not, so this is per strategy — passed rather than shadowed by two constants
     /// under one name.
     max_depth: usize,
-    queue: Vec<(T, usize)>,
+    // Visit the shortest routes first. A stack can reach a navigation link at the depth
+    // ceiling before processing that same link directly from the seed.
+    queue: VecDeque<(T, usize)>,
     visited: HashSet<String>,
     seen: HashSet<String>,
     visits: u64,
     disallowed: u64,
+    /// Documents that defined part of the surface and were read. See
+    /// [`Enumerated::discovery_failed`].
+    read: u64,
     out: Enumerated,
 }
 
@@ -244,11 +261,12 @@ impl<'a, T: std::fmt::Display> Pass<'a, T> {
             walk,
             noun,
             max_depth,
-            queue: Vec::new(),
+            queue: VecDeque::new(),
             visited: HashSet::new(),
             seen: HashSet::new(),
             visits: 0,
             disallowed: 0,
+            read: 0,
             out: Enumerated::default(),
         }
     }
@@ -260,7 +278,7 @@ impl<'a, T: std::fmt::Display> Pass<'a, T> {
 
     /// Somewhere else to look, at a depth.
     pub fn push(&mut self, item: T, depth: usize) {
-        self.queue.push((item, depth));
+        self.queue.push_back((item, depth));
     }
 
     /// The next place to visit, or `None` because a ceiling was reached or nothing is left.
@@ -273,6 +291,12 @@ impl<'a, T: std::fmt::Display> Pass<'a, T> {
     /// exactly the borrow `for` would have taken.
     pub fn next_to_visit(&mut self) -> Option<(T, usize)> {
         loop {
+            // An empty queue is the end of the source, whatever the budget says. Asked
+            // first, so a walk that spends its last request on its last document is not
+            // reported as one that stopped short.
+            if self.queue.is_empty() {
+                return None;
+            }
             if !self.walk.may_fetch() {
                 self.out.truncated = true;
                 self.out.warnings.push(format!(
@@ -289,11 +313,12 @@ impl<'a, T: std::fmt::Display> Pass<'a, T> {
                 return None;
             }
 
-            let (item, depth) = self.queue.pop()?;
+            let (item, depth) = self.queue.pop_front()?;
             if !self.visited.insert(item.to_string()) {
                 continue;
             }
             if depth > self.max_depth {
+                self.out.truncated = true;
                 self.out
                     .warnings
                     .push(format!("depth limit reached, skipping {item}"));
@@ -311,6 +336,13 @@ impl<'a, T: std::fmt::Display> Pass<'a, T> {
             self.visits + self.queue.len() as u64 + 1,
         );
         self.visits += 1;
+    }
+
+    /// A document that defines the surface — a sitemap, a listing, a page of links — was
+    /// read and understood. A walk that never says this failed to discover anything, which
+    /// is a different report from finding an empty set.
+    pub fn read_surface(&mut self) {
+        self.read += 1;
     }
 
     /// How many places have been visited. The strategy's own figure, under its own name.
@@ -389,6 +421,7 @@ impl<'a, T: std::fmt::Display> Pass<'a, T> {
         self.out
             .figures
             .insert("disallowed".into(), self.disallowed);
+        self.out.discovery_failed = self.read == 0;
         self.out
     }
 }
@@ -435,6 +468,17 @@ pub trait Strategy: Send + Sync {
     /// Did this strategy name pages, or documents? See [`Addresses`].
     fn addresses_are(&self) -> Addresses {
         Addresses::Pages
+    }
+
+    /// Whether the first address this strategy returns is the seed itself.
+    ///
+    /// True of a walk that starts from the seed and is bounded by its path — `links`, and
+    /// `feed`, whose one address is the seed. It is how a source collected by hand gets its
+    /// address back from the store with the path intact: `linktr.ee/TampaDSA` recovered as
+    /// its origin would be the whole platform. False — the default — reads the origin, which
+    /// is right for a sitemap, whose first address is any page at all.
+    fn first_address_is_the_seed(&self) -> bool {
+        false
     }
 }
 
@@ -538,6 +582,21 @@ pub fn best(seed: &Seed) -> Option<(&'static StrategyDef, Recognition)> {
 /// hosts worth writing a strategy for.
 pub fn fallback() -> &'static StrategyDef {
     by_name("sitemap").expect("the sitemap strategy is compiled in")
+}
+
+/// What runs when an unpinned strategy could read nothing at all.
+///
+/// The reader list's rule, one stage earlier: *a fallback is the admission that the first
+/// tool's silence was never evidence.* A host with no sitemap is not a host with no pages,
+/// and stopping at zero addresses collected nothing from every site that publishes plain
+/// HTML and no sitemap — a Google Site among them. So the walk that failed gives way to
+/// [`links::Links`], which starts from the seed and follows readable links inside its
+/// [`scope::Scope`].
+///
+/// Only an unpinned strategy gives way. A pinned one is what the operator accepted, and it
+/// keeps the behaviour it was accepted with; its failure is reported, not replaced.
+pub fn last_resort() -> &'static StrategyDef {
+    by_name("links").expect("the links strategy is compiled in")
 }
 
 #[cfg(test)]

@@ -76,7 +76,10 @@ pub const PIPELINE: &str = "centinel-extract";
 ///
 /// `3` — a PDF that `pdf-inspector` makes nothing of is now offered to `pdftotext`, which
 /// reads a text layer the first reader misses on a third of them.
-pub const PIPELINE_VERSION: &str = "3";
+///
+/// `4` — `feed` and `calendar` became readable, so an RSS feed stored as `xml` and an
+/// `.ics` file stored as `other` are worth another attempt.
+pub const PIPELINE_VERSION: &str = "4";
 
 /// What extraction produced.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -237,6 +240,12 @@ pub enum Reader {
     AnyDoc,
     Spreadsheet,
     Captions,
+    /// An RSS or Atom feed, or one entry cut from one: its title, date, author and link,
+    /// then the article it carries.
+    Feed,
+    /// An iCalendar file, or one event cut from one: what, when, where, then the
+    /// description.
+    Calendar,
     /// The bytes, as text. For the kinds that are already text.
     Passthrough,
 }
@@ -253,12 +262,14 @@ impl Reader {
             Self::AnyDoc => "anydoc",
             Self::Spreadsheet => "calamine",
             Self::Captions => "youtube-asr-json3",
+            Self::Feed => "feed",
+            Self::Calendar => "icalendar",
             Self::Passthrough => "passthrough",
         }
     }
 
     /// Every reader, for finding one by the name a record carries.
-    const ALL: [Reader; 9] = [
+    const ALL: [Reader; 11] = [
         Self::Marked,
         Self::Readability,
         Self::WholePage,
@@ -267,6 +278,8 @@ impl Reader {
         Self::AnyDoc,
         Self::Spreadsheet,
         Self::Captions,
+        Self::Feed,
+        Self::Calendar,
         Self::Passthrough,
     ];
 
@@ -286,6 +299,8 @@ impl Reader {
             Self::AnyDoc => "document",
             Self::Spreadsheet => "spreadsheet",
             Self::Captions => "video",
+            Self::Feed => "feed",
+            Self::Calendar => "calendar",
             Self::Passthrough => "text",
         }
     }
@@ -307,6 +322,7 @@ impl Reader {
             Self::AnyDoc => extract_document(blob.bytes),
             Self::Spreadsheet => extract_spreadsheet(blob.bytes),
             Self::Captions => extract_captions(blob.bytes, blob.title),
+            Self::Feed | Self::Calendar => extract_feed(self, blob.bytes),
             Self::Passthrough => passthrough(blob.bytes),
             Self::Poppler => unreachable!("a spawning reader is never read in process"),
         }
@@ -342,6 +358,8 @@ pub fn readers_for(kind: ContentKind) -> &'static [Reader] {
         // the same question, and `anydoc` is where it gets answered.
         Document | ZipContainer => &[Reader::AnyDoc],
         Captions => &[Reader::Captions],
+        Feed => &[Reader::Feed],
+        Calendar => &[Reader::Calendar],
         Text | Csv | Json | Xml => &[Reader::Passthrough],
         // Nothing to read. `audio` goes to `transcribe`; `markdown` is already derived
         // text; `other` is bytes nothing here claims.
@@ -486,6 +504,59 @@ fn give_up_reason(kind: ContentKind, carried: &[(Reader, String)]) -> String {
         [(_, reason)] => reason.clone(),
         many => notes_of(many).join("; "),
     }
+}
+
+/// A feed, or one entry of it, as markdown: the title as an `# H1`, the labelled facts,
+/// then the body — an article's markup through the same converter a web page goes
+/// through.
+///
+/// The article address is a line of the text, `**Link:** …`, so a hit on an entry the feed
+/// carried leads to the page it was published at. The page itself was not fetched, and
+/// the record says where the words came from: the feed.
+fn extract_feed(reader: Reader, bytes: &[u8]) -> Extracted {
+    let read = match crate::feed::read(bytes) {
+        Ok(read) => read,
+        Err(e) => {
+            return Extracted::Unextractable {
+                reason: format!("not a readable feed: {e}"),
+            };
+        }
+    };
+
+    let mut text = String::new();
+    if let Some(title) = &read.title {
+        text.push_str(&format!("# {title}\n\n"));
+    }
+    for (label, value) in &read.fields {
+        text.push_str(&format!("**{label}:** {value}  \n"));
+    }
+    if !read.fields.is_empty() {
+        text.push('\n');
+    }
+    match &read.body {
+        Some(crate::feed::Body::Html(html)) => {
+            if let Some(md) = html::html_fragment(html) {
+                text.push_str(md.trim());
+                text.push_str("\n\n");
+            }
+        }
+        Some(crate::feed::Body::Text(body)) => {
+            text.push_str(body.trim());
+            text.push_str("\n\n");
+        }
+        None => {}
+    }
+    for line in &read.listed {
+        text.push_str(&format!("- {line}\n"));
+    }
+
+    Extracted::Text(Extraction {
+        text: text.trim().to_string(),
+        title: read.title,
+        tool: reader.name().into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        notes: vec![],
+    })
 }
 
 /// The bytes, as text, for the kinds that already are text.
@@ -1670,6 +1741,108 @@ mod tests {
         );
         assert!(text.contains("Outer fact"), "{text}");
         assert!(text.contains("Inner prose"), "{text}");
+    }
+
+    /// `pinellasdsa.org`, a Google Sites page, reduced to its shape. `role="main"` is on the
+    /// first text box of the first `<section>`: the lead line. The chapter's description is
+    /// the next text box of the same section, and the blog excerpts are the sections after
+    /// it. Reading the marker alone gave 485 characters across five pages.
+    #[test]
+    fn a_page_marker_inside_a_section_is_read_with_the_content_around_it() {
+        let html = "<html><head><title>Pinellas DSA - Blog</title></head><body>\
+             <div class=\"shell\">\
+             <header><nav><a href=\"/home\">Home</a><a href=\"/join\">Join Us</a>\
+             <a href=\"/calendar\">Calendar</a></nav></header>\
+             <div class=\"page\">\
+               <section><div><div><div role=\"main\" tabindex=\"0\"><h1>Blog</h1></div></div>\
+                 <div><p>Learn what the chapter is up to and read op-eds from members.</p></div>\
+               </div></section>\
+               <section><div><h2>Chapter Notes: October 2026</h2>\
+                 <p>Our chapter is now officially more than 400 members strong.</p></div></section>\
+               <section><div><h2>DeFlock St. Pete</h2>\
+                 <p>We are organizing against the use of Flock cameras in the city.</p></div></section>\
+             </div>\
+             <footer><p>Report abuse</p></footer>\
+             </div></body></html>";
+
+        let out = extract(ContentKind::Html, html.as_bytes(), None, None);
+        let text = out.text().expect("the page has content").to_string();
+
+        assert!(text.contains("Blog"), "the marked lead was lost:\n{text}");
+        assert!(
+            text.contains("op-eds from members"),
+            "the prose beside the marker in its own section was lost:\n{text}"
+        );
+        assert!(
+            text.contains("400 members strong") && text.contains("Flock cameras"),
+            "the sections after the marker's were lost:\n{text}"
+        );
+        assert!(!text.contains("Join Us"), "the site header leaked:\n{text}");
+        assert!(!text.contains("Report abuse"), "the footer leaked:\n{text}");
+
+        let (tool, _) = out.tool().unwrap();
+        assert_eq!(tool, "marked+htmd", "the marker still decides the region");
+        let Extracted::Text(e) = &out else {
+            panic!("text, not a partial read");
+        };
+        assert!(
+            e.notes
+                .iter()
+                .any(|n| n.contains("`[role=main]`") && n.contains("`<section>`")),
+            "the record must say the region was found around the marker: {:?}",
+            e.notes
+        );
+    }
+
+    /// ARIA navigation must stop widening before unrelated sibling content is included.
+    #[test]
+    fn recovering_a_sectioned_marker_stops_at_aria_chrome() {
+        let text = marked(
+            "<html><body><div class=\"shell\">\
+             <div role=\"navigation\"><a href=\"/other\">Other departments</a></div>\
+             <div class=\"content\"><section><div role=\"main\"><h1>Report</h1></div>\
+             <p>The council approved the transit budget.</p></section></div>\
+             <div>Unrelated account notices.</div></div></body></html>",
+        );
+        assert!(text.contains("approved the transit budget"), "{text}");
+        assert!(!text.contains("Other departments"), "{text}");
+        assert!(!text.contains("Unrelated account notices"), "{text}");
+    }
+
+    /// A correctly placed short record and a standalone article keep their own scope.
+    #[test]
+    fn a_marker_that_stands_where_it_belongs_is_not_widened() {
+        let nav: String = (0..80)
+            .map(|i| format!("<li><a href=\"/dept/{i}\">Department of Everything {i}</a></li>"))
+            .collect();
+        let text = marked(&format!(
+            "<html><body><div id=\"page\"><nav><ul>{nav}</ul></nav>\
+             <div role=\"main\"><h2>Landmark Details</h2><p>1835</p>\
+             <p>W 23rd Street and Garden Avenue</p></div>\
+             <div class=\"related\"><p>Related pages that every landmark on the site lists \
+             beside its own record.</p></div>\
+             <footer>Contact City Hall</footer></div></body></html>"
+        ));
+        assert!(
+            text.contains("W 23rd Street"),
+            "the record was lost:\n{text}"
+        );
+        assert!(
+            !text.contains("Related pages"),
+            "a correctly placed marker was widened:\n{text}"
+        );
+        assert!(!text.contains("Department of Everything"), "{text}");
+        assert!(!text.contains("Contact City Hall"), "{text}");
+
+        let text = marked(
+            "<html><body><section><article><p>The post itself.</p></article>\
+             <div><p>Other posts from the same author.</p></div></section></body></html>",
+        );
+        assert!(text.contains("The post itself"), "{text}");
+        assert!(
+            !text.contains("Other posts"),
+            "an article inside a section was widened:\n{text}"
+        );
     }
 
     /// A table inside the region keeps its boundaries — the converter's handler travels.

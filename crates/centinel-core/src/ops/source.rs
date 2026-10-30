@@ -49,7 +49,8 @@ pub struct AddArgs {
     /// Source id, e.g. `tampa`. Becomes a directory name under `log/`.
     pub id: String,
 
-    /// Any URL on the site. Only the origin is used.
+    /// The website's address. `robots.txt` and any sitemap are read from its host; a walk
+    /// that follows links stays under its path.
     #[arg(long, conflicts_with = "channel")]
     #[serde(default)]
     pub site: Option<String>,

@@ -329,7 +329,9 @@ pub async fn investigate(
                 // total, and this was previously recovered by grepping warning text —
                 // which missed the walk that fills its ceiling and then exits cleanly.
                 complete: !found.truncated,
-                strategy: def.name.to_string(),
+                // What ran, which is not always what was chosen: an unpinned walk that
+                // read nothing gives way to `links`, and the report says which collected.
+                strategy: site.method().to_string(),
                 by_fallback,
                 requests_allowed: super::probe::REQUESTS,
                 sample: found.addresses.iter().take(SAMPLE).cloned().collect(),
