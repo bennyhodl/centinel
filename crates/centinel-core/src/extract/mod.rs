@@ -1743,6 +1743,95 @@ mod tests {
         assert!(text.contains("Inner prose"), "{text}");
     }
 
+    /// `pinellasdsa.org`, a Google Sites page, reduced to its shape. `role="main"` is on the
+    /// first text box of the first `<section>`: the lead line. The chapter's description is
+    /// the next text box of the same section, and the blog excerpts are the sections after
+    /// it. Reading the marker alone gave 485 characters across five pages.
+    #[test]
+    fn a_page_marker_inside_a_section_is_read_with_the_content_around_it() {
+        let html = "<html><head><title>Pinellas DSA - Blog</title></head><body>\
+             <div class=\"shell\">\
+             <header><nav><a href=\"/home\">Home</a><a href=\"/join\">Join Us</a>\
+             <a href=\"/calendar\">Calendar</a></nav></header>\
+             <div class=\"page\">\
+               <section><div><div><div role=\"main\" tabindex=\"0\"><h1>Blog</h1></div></div>\
+                 <div><p>Learn what the chapter is up to and read op-eds from members.</p></div>\
+               </div></section>\
+               <section><div><h2>Chapter Notes: October 2026</h2>\
+                 <p>Our chapter is now officially more than 400 members strong.</p></div></section>\
+               <section><div><h2>DeFlock St. Pete</h2>\
+                 <p>We are organizing against the use of Flock cameras in the city.</p></div></section>\
+             </div>\
+             <footer><p>Report abuse</p></footer>\
+             </div></body></html>";
+
+        let out = extract(ContentKind::Html, html.as_bytes(), None, None);
+        let text = out.text().expect("the page has content").to_string();
+
+        assert!(text.contains("Blog"), "the marked lead was lost:\n{text}");
+        assert!(
+            text.contains("op-eds from members"),
+            "the prose beside the marker in its own section was lost:\n{text}"
+        );
+        assert!(
+            text.contains("400 members strong") && text.contains("Flock cameras"),
+            "the sections after the marker's were lost:\n{text}"
+        );
+        assert!(!text.contains("Join Us"), "the site header leaked:\n{text}");
+        assert!(!text.contains("Report abuse"), "the footer leaked:\n{text}");
+
+        let (tool, _) = out.tool().unwrap();
+        assert_eq!(tool, "marked+htmd", "the marker still decides the region");
+        let Extracted::Text(e) = &out else {
+            panic!("text, not a partial read");
+        };
+        assert!(
+            e.notes
+                .iter()
+                .any(|n| n.contains("`[role=main]`") && n.contains("`<section>`")),
+            "the record must say the region was found around the marker: {:?}",
+            e.notes
+        );
+    }
+
+    /// The other side of that rule. A marker standing where a content marker belongs is the
+    /// page's own answer however short it is, and an `<article>` is a section in its own
+    /// right — neither is widened to the text that happens to sit beside it.
+    #[test]
+    fn a_marker_that_stands_where_it_belongs_is_not_widened() {
+        let nav: String = (0..80)
+            .map(|i| format!("<li><a href=\"/dept/{i}\">Department of Everything {i}</a></li>"))
+            .collect();
+        let text = marked(&format!(
+            "<html><body><div id=\"page\"><nav><ul>{nav}</ul></nav>\
+             <div role=\"main\"><h2>Landmark Details</h2><p>1835</p>\
+             <p>W 23rd Street and Garden Avenue</p></div>\
+             <div class=\"related\"><p>Related pages that every landmark on the site lists \
+             beside its own record.</p></div>\
+             <footer>Contact City Hall</footer></div></body></html>"
+        ));
+        assert!(
+            text.contains("W 23rd Street"),
+            "the record was lost:\n{text}"
+        );
+        assert!(
+            !text.contains("Related pages"),
+            "a correctly placed marker was widened:\n{text}"
+        );
+        assert!(!text.contains("Department of Everything"), "{text}");
+        assert!(!text.contains("Contact City Hall"), "{text}");
+
+        let text = marked(
+            "<html><body><section><article><p>The post itself.</p></article>\
+             <div><p>Other posts from the same author.</p></div></section></body></html>",
+        );
+        assert!(text.contains("The post itself"), "{text}");
+        assert!(
+            !text.contains("Other posts"),
+            "an article inside a section was widened:\n{text}"
+        );
+    }
+
     /// A table inside the region keeps its boundaries — the converter's handler travels.
     #[test]
     fn a_headerless_table_inside_the_region_keeps_its_cells() {

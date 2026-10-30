@@ -138,7 +138,9 @@ admission that the first tool's silence was never evidence.
 definition of *produced nothing*.
 
 **Marked region** — the part of a page the page itself declares to be its content:
-`<main>`, `[role=main]`, `#main-content`, `.main-content`, `<article>`, widest first.
+`<main>`, `[role=main]`, `#main-content`, `.main-content`, `<article>`, widest first. A
+page marker nested inside a `<section>` marks only part of the content, so the region read
+is the content around it, up to the page chrome.
 
 **Title** — the document's own name, written into the extracted text as an `# H1` rather
 than recorded beside it, because only the text is searched.

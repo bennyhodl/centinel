@@ -66,6 +66,21 @@ It is the **first** reader for HTML, ahead of readability, because readability i
 about where the content is and this is the page's own answer. 298 of 300 measured
 documents carry a marker.
 
+A marker shows where the content is. It does not prove the whole document is inside it.
+`<main>`, `[role=main]`, `#main-content` and `.main-content` each claim to be the page's
+content, so the spec puts them beside the page chrome and never inside a `<section>` or
+`<article>`. When one sits inside a section anyway, it marks only part of the content. The
+reader then climbs from the marker for as long as the content it would add holds no
+`<header>`, `<nav>` or `<footer>`, and stops below `<body>`. Google Sites puts
+`role="main"` on the first text box of a page, often just its heading. Without this rule,
+five `pinellasdsa.org` pages came to 485 characters, and the chapter's description and
+every blog excerpt were missing. The note on the record says when this happened.
+
+A marker in its proper place is kept as it is, however short: a landmark page's whole
+record is 123 characters. `<article>` is a section itself and is never widened. Chrome built
+from bare `<div>`s cannot stop the climb. That cost falls only on pages that have already
+put their marker in the wrong place, and boilerplate removal is what clears it.
+
 That is a rule about HTML, not about a vendor, so it is a `Reader` in the list and not a
 registry in front of it. It had its own registry for one commit, and that registry opted
 out of every invariant the list holds: `recovered_by_fallback` was hardcoded false for the
