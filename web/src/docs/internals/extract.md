@@ -68,17 +68,18 @@ documents carry a marker.
 
 A marker shows where the content is. It does not prove the whole document is inside it.
 `<main>`, `[role=main]`, `#main-content` and `.main-content` each claim to be the page's
-content, so the spec puts them beside the page chrome and never inside a `<section>` or
-`<article>`. When one sits inside a section anyway, it marks only part of the content. The
+content. When one sits inside a `<section>` or `<article>`, it may label just one text box.
+That is a recovery heuristic, not proof of the publisher's intended content region. The
 reader then climbs from the marker for as long as the content it would add holds no
-`<header>`, `<nav>` or `<footer>`, and stops below `<body>`. Google Sites puts
+`<header>`, `<nav>`, `<footer>`, `<aside>` or their ARIA landmark equivalents, and stops
+below `<body>`. Google Sites puts
 `role="main"` on the first text box of a page, often just its heading. Without this rule,
 five `pinellasdsa.org` pages came to 485 characters, and the chapter's description and
 every blog excerpt were missing. The note on the record says when this happened.
 
 A marker in its proper place is kept as it is, however short: a landmark page's whole
 record is 123 characters. `<article>` is a section itself and is never widened. Chrome built
-from bare `<div>`s cannot stop the climb. That cost falls only on pages that have already
+from unlabelled `<div>`s cannot stop the climb. That cost falls only on pages that have already
 put their marker in the wrong place, and boilerplate removal is what clears it.
 
 That is a rule about HTML, not about a vendor, so it is a `Reader` in the list and not a

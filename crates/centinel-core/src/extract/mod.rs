@@ -1794,9 +1794,22 @@ mod tests {
         );
     }
 
-    /// The other side of that rule. A marker standing where a content marker belongs is the
-    /// page's own answer however short it is, and an `<article>` is a section in its own
-    /// right — neither is widened to the text that happens to sit beside it.
+    /// ARIA navigation must stop widening before unrelated sibling content is included.
+    #[test]
+    fn recovering_a_sectioned_marker_stops_at_aria_chrome() {
+        let text = marked(
+            "<html><body><div class=\"shell\">\
+             <div role=\"navigation\"><a href=\"/other\">Other departments</a></div>\
+             <div class=\"content\"><section><div role=\"main\"><h1>Report</h1></div>\
+             <p>The council approved the transit budget.</p></section></div>\
+             <div>Unrelated account notices.</div></div></body></html>",
+        );
+        assert!(text.contains("approved the transit budget"), "{text}");
+        assert!(!text.contains("Other departments"), "{text}");
+        assert!(!text.contains("Unrelated account notices"), "{text}");
+    }
+
+    /// A correctly placed short record and a standalone article keep their own scope.
     #[test]
     fn a_marker_that_stands_where_it_belongs_is_not_widened() {
         let nav: String = (0..80)

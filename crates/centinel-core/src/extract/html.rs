@@ -322,8 +322,8 @@ const MARKERS: &[Marker] = &[
 struct Marker {
     selector: &'static str,
     needles: &'static [&'static str],
-    /// The marker claims to be **the** page's content, so it cannot honestly sit inside a
-    /// section of it. See [`content_around`] for what is read when it does.
+    /// The marker conventionally names the page's content. Nested sectioning is evidence
+    /// that it may label only a text box; see [`content_around`].
     ///
     /// `<article>` is the one that does not: it is a section itself, and a post inside a
     /// `<section>` is ordinary markup rather than a sign the marker missed anything.
@@ -353,18 +353,16 @@ impl Marker {
 /// edge [`content_around`] stops at when it has to find the region itself.
 const CHROME: &[&str] = &["nav", "header", "footer"];
 
-/// Elements that divide content into sections. A marker that claims the whole page and sits
-/// inside one of these marks part of the content, not all of it.
+/// Sectioning ancestors that can indicate a page marker labels only part of the content.
 const SECTIONING: &[&str] = &["section", "article"];
 
 /// The content a misplaced page marker belongs to, and the sectioning element that gave it
 /// away. `None` when the marker is where the page's content marker belongs, which is
 /// nearly always.
 ///
-/// **The evidence is the HTML spec's own rule, not a length.** A `<main>` is *hierarchically
-/// correct* only beneath `html`, `body`, `div` and `form`; ARIA asks the same of
-/// `role="main"` as a top-level landmark. One inside a `<section>` cannot be the page's
-/// content, because the section it sits in is only part of the page. Google Sites builds
+/// **The evidence is structure, not a length.** A page-level marker nested inside a
+/// section may label a text box rather than the whole document. This is a recovery
+/// heuristic, not a guarantee about what the publisher intended. Google Sites builds
 /// every page this way: `role="main"` goes on the first text box of the first `<section>`,
 /// so on `pinellasdsa.org` it held one sentence of the home page, the word *Calendar*, and
 /// the word *Blog* — while the chapter's description sat in the next text box of the same
@@ -376,7 +374,7 @@ const SECTIONING: &[&str] = &["section", "article"];
 /// none of them, and never to `<body>`. On those pages that is the wrapper around the run of
 /// `<section>`s, one step inside the one holding the site header.
 ///
-/// What this cannot see: chrome built from bare `<div>`s, which is invisible here exactly as
+/// What this cannot see: chrome built from unlabelled `<div>`s, which is invisible here exactly as
 /// it is to [`CHROME`] inside a correct marker, and is [`crate::boilerplate`]'s to remove.
 /// That cost is paid only on a page that has already mis-marked its content.
 fn content_around<'a>(
@@ -406,6 +404,15 @@ fn content_around<'a>(
 fn adds_chrome(parent: &dom_query::NodeRef<'_>, region: &dom_query::NodeRef<'_>) -> bool {
     fn is_chrome(node: &dom_query::NodeRef<'_>) -> bool {
         CHROME.iter().any(|c| node.has_name(c))
+            || node.has_name("aside")
+            || node.attr("role").is_some_and(|roles| {
+                roles.split_whitespace().any(|role| {
+                    matches!(
+                        role,
+                        "navigation" | "banner" | "contentinfo" | "complementary"
+                    )
+                })
+            })
     }
     parent
         .children_it(false)
@@ -443,8 +450,8 @@ fn adds_chrome(parent: &dom_query::NodeRef<'_>, region: &dom_query::NodeRef<'_>)
 ///
 /// **A marker is evidence, not proof that the whole document is inside it.** Standing where
 /// a content marker belongs, it is read as the page's content. A page marker nested
-/// inside a `<section>` stands somewhere the spec does not allow, and there the content it
-/// is part of is read instead. [`content_around`] says how far that reaches and why it stops
+/// inside a `<section>` may mark just part of the document; the content around it is read
+/// instead. [`content_around`] says how far that reaches and why it stops
 /// at chrome. A short marker that stands where it belongs is kept as it is: a landmark's
 /// whole record is 123 characters and is not a sign that anything is missing.
 ///
@@ -483,8 +490,8 @@ pub(super) fn html_marked(bytes: &[u8]) -> Extracted {
             Some((around, section)) => (
                 around,
                 format!(
-                    "read the region marked `{}` and the content around it: the marker sits \
-                     inside a `<{section}>`, so it marks part of the content",
+                    "read the region marked `{}` and the content around it: widened because \
+                     the page marker is nested inside a `<{section}>`",
                     m.selector
                 ),
             ),
