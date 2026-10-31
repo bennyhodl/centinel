@@ -37,7 +37,7 @@ use html::{html_marked, html_readability, html_whole_page};
 /// re-extraction, never a wrong answer.
 const HTMD_VERSION: &str = "0.5.5";
 const DOM_SMOOTHIE_VERSION: &str = "0.18.0";
-const PDF_INSPECTOR_VERSION: &str = "0.1.7";
+const PDF_INSPECTOR_VERSION: &str = "1.25.2";
 const CALAMINE_VERSION: &str = "0.36.1";
 const ANYDOC_VERSION: &str = "0.1.3";
 
