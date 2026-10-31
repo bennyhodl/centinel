@@ -49,10 +49,11 @@ dom_smoothie = "0.18.0"
 # declared because `strategies::read::marked` uses it directly, and an undeclared
 # transitive dependency breaks the day dom_smoothie changes its mind.
 dom_query = "0.28.0"
-pdf-inspector = "0.1.7"
+pdf-inspector = "1.25.2"
 # Office formats, and only those. PDFs stay on `pdf-inspector` directly: anydoc wraps the
 # same crate but collapses its result to a `String`, and `pages_needing_ocr` is the whole
 # reason a 300-page budget with two scanned exhibits still yields 298 searchable pages.
+# anydoc still pins `pdf-inspector` 0.1, so both versions build; only this one reads PDFs.
 anydoc = "0.1.3"
 # Held at anydoc's requirement so one copy of calamine is in the tree, not two.
 calamine = "0.36.1"

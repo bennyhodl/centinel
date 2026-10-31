@@ -117,7 +117,7 @@ Superseded (2026-10): weights fetched by `centinel models pull` into a cache dir
 3. **Diarization is unavailable** while there is no sidecar. Speaker attribution stays out of scope.
 4. **Docling's chunker is unavailable** (Python-only).
 5. **~450–500 lines of gap-filling** must be written rather than depended on.
-6. **Two upstream dependencies lag their npm equivalents.** Firecrawl's Rust SDK is batch-ported; `pdf-inspector` is crates.io `0.1.7` against npm `1.11.2`. *Mitigation: depend on the git repo.*
+6. **An upstream dependency lags its npm equivalent.** Firecrawl's Rust SDK is batch-ported. `pdf-inspector` lagged too, at crates.io `0.1.7` against npm `1.11.2`, until crates.io caught up at `1.25.2`. *Mitigation: depend on the git repo.*
 7. **`yt-dlp` staleness is ongoing operational work.**
 
 ### 3.5 Licence constraints binding any implementation
