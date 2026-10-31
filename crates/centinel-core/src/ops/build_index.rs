@@ -4,7 +4,7 @@
 //! into `centinel.db`. Entirely derived: `centinel index --rebuild` after `rm centinel.db`
 //! reproduces it from the blob pool.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use crate::boilerplate;
 use crate::chunk::{ChunkConfig, chunk_markdown};
 use crate::index::{Index, Placement};
 use crate::prelude::*;
-use crate::store::LogRecord;
+use crate::store::{CorruptBlob, LogRecord, StoreError};
 
 #[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct IndexArgs {
@@ -93,6 +93,10 @@ pub struct IndexReport {
     /// A sample of them, with the reason each produced nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub empty: Vec<EmptyDocument>,
+    /// Derived blobs that failed their hash even after re-reads, skipped and listed in
+    /// `workspace/corrupt-blobs.jsonl` for repair.
+    #[serde(default)]
+    pub corrupt_blobs: usize,
 }
 
 /// A document that reached the index and left no trace in it.
@@ -119,6 +123,33 @@ fn note_empty(report: &mut IndexReport, pending: &[(String, jiff::Timestamp)], w
             why: why.to_string(),
         });
     }
+}
+
+/// Count, log and list a derived blob that failed its hash, under the first address that
+/// cites it.
+async fn note_corrupt(
+    ctx: &Ctx,
+    report: &mut IndexReport,
+    source: &SourceId,
+    d: &crate::domain::Derivation,
+    addresses: &HashMap<BlobSha, Vec<(String, jiff::Timestamp)>>,
+    actual: &BlobSha,
+) {
+    let address = addresses
+        .get(&d.from_sha)
+        .and_then(|places| places.first())
+        .map(|(resource, _)| resource.as_str())
+        .unwrap_or_default();
+    tracing::warn!(sha = %d.to_sha, %actual, address, "skipping corrupt derived blob");
+    ctx.store
+        .note_corrupt_blob(
+            &d.to_sha,
+            source.as_str(),
+            address,
+            CorruptBlob::Derived { from: &d.from_sha },
+        )
+        .await;
+    report.corrupt_blobs += 1;
 }
 
 /// Chunk extracted text into the search index.
@@ -172,6 +203,7 @@ pub async fn index(
         boilerplate_documents: 0,
         empty_documents: 0,
         empty: Vec::new(),
+        corrupt_blobs: 0,
     };
 
     for source in &sources {
@@ -236,12 +268,23 @@ pub async fn index(
         // must strip exactly what a fresh one would, or half a corpus carries the menu.
         let sample = derivations.len().min(boilerplate::LEARN_SAMPLE);
         let mut learner = boilerplate::Learner::new();
+        let mut corrupt = HashSet::new();
         for (i, d) in derivations.iter().take(sample).enumerate() {
             cancel.check()?;
             if i % 25 == 0 {
                 progress.step(format!("reading {source}"), i as u64, sample as u64);
             }
-            let bytes = ctx.store.get_blob(&d.to_sha).await?;
+            // A corrupt derived blob is left out of the sample, listed for repair, and
+            // remembered so the pass below does not wait on it a second time. The chrome
+            // is then learned from one document fewer than a clean run would read.
+            let bytes = match ctx.store.get_blob(&d.to_sha).await {
+                Err(StoreError::BlobCorrupt { sha, actual }) => {
+                    note_corrupt(ctx, &mut report, source, d, &addresses, &actual).await;
+                    corrupt.insert(sha);
+                    continue;
+                }
+                other => other?,
+            };
             learner.add(&String::from_utf8_lossy(&bytes));
         }
         let chrome = learner.finish();
@@ -273,7 +316,18 @@ pub async fn index(
                 continue;
             }
 
-            let bytes = ctx.store.get_blob(&d.to_sha).await?;
+            // Skipped and listed for repair rather than ending the index run. Its
+            // placements stay absent, so the next run tries it again.
+            if corrupt.contains(&d.to_sha) {
+                continue;
+            }
+            let bytes = match ctx.store.get_blob(&d.to_sha).await {
+                Err(StoreError::BlobCorrupt { actual, .. }) => {
+                    note_corrupt(ctx, &mut report, source, d, &addresses, &actual).await;
+                    continue;
+                }
+                other => other?,
+            };
             let text = String::from_utf8_lossy(&bytes);
             if text.trim().is_empty() {
                 report.empty_documents += 1;
@@ -478,6 +532,18 @@ impl Render for IndexReport {
             // Under the chrome line, deliberately: on `dunedin.gov` these are the same
             // event seen twice — the chrome pass worked, and it worked on a document that
             // was nothing but chrome. Reading them together is what makes that legible.
+            if self.corrupt_blobs > 0 {
+                p.blank()?;
+                p.marked(
+                    Mark::Warn,
+                    format!(
+                        "{} failed their hash and reached no search; listed in \
+                         workspace/corrupt-blobs.jsonl",
+                        render::plural(self.corrupt_blobs, "derived blob", "derived blobs")
+                    ),
+                )?;
+            }
+
             if self.empty_documents > 0 {
                 p.blank()?;
                 p.marked(
@@ -969,6 +1035,46 @@ mod tests {
         );
         // The pages that had content beneath the banner are unaffected.
         assert_eq!(report.documents_indexed, boilerplate::MIN_DOCUMENTS + 2);
+    }
+
+    /// The defect: one derived blob that failed its hash ended the index run for its whole
+    /// Source. It is skipped, listed once with the blob to re-extract it from, and read
+    /// once: the chrome sample and the indexing pass do not both wait on it.
+    #[tokio::test]
+    async fn a_corrupt_derived_blob_is_skipped_listed_once_and_the_rest_index() {
+        use crate::store::Store;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).await.unwrap();
+        let id = SourceId::new("tampa").unwrap();
+        let bad_text = body("budget");
+        let bad = add_page(&store, &id, "https://tampa.test/bad", &bad_text).await;
+        add_page(&store, &id, "https://tampa.test/good", &body("zoning")).await;
+        let bad_sha = BlobSha::from_bytes(bad_text.as_bytes());
+        std::fs::write(store.blob_path_of(&bad_sha), b"what the disk returned").unwrap();
+
+        let ctx = Ctx::new(store);
+        let report = index(
+            &ctx,
+            IndexArgs::default(),
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .expect("a corrupt blob must not end the run");
+        assert_eq!(report.corrupt_blobs, 1, "counted once, not once per pass");
+        assert_eq!(report.documents_indexed, 1, "the good page still indexes");
+
+        let listed = std::fs::read_to_string(ctx.store.corrupt_blobs_path()).unwrap();
+        let lines: Vec<serde_json::Value> = listed
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 1, "listed once per run");
+        assert_eq!(lines[0]["sha"], bad_sha.as_str());
+        assert_eq!(lines[0]["kind"], "derived");
+        assert_eq!(lines[0]["from"], bad.blob_sha.as_str());
+        assert_eq!(lines[0]["address"], "https://tampa.test/bad");
     }
 
     async fn add_page(
