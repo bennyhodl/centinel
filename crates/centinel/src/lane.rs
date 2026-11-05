@@ -1,16 +1,21 @@
-//! The store's one run lane, shared by the scheduler and the web's Run button.
+//! The store's one run lane, shared by the scheduler, the web's Run button and `centinel
+//! run` at a terminal.
 //!
 //! A run takes the lane ([`RunLock`]) or does not run at all, and every run that took it is
 //! written to the journal. The scheduler used to own both halves inline; the Sources page
 //! starts runs too, and a second copy of "take the lock, invoke, release, record" is the
-//! copy that forgets one of the four. So they live here, once.
+//! copy that forgets one of the four. So they live here, once. The CLI was that copy: it
+//! invoked the op bare, so a run typed at a terminal held no lock, wrote no record, and
+//! was invisible to every page that asks `run.lock` whether anything is collecting
+//! (`docs/SCHEDULING.md` §5.2).
 //!
 //! ## Collection authority
 //!
-//! Only two callers: a `[[schedule]]` the operator wrote, and an administrator signed in
-//! to the web (`/workspace/sources/{id}/run`, admin-only in `access.rs`, browser session
-//! only at the gateway). Neither MCP nor `/ops` can reach this — `run` stays
-//! `Reach::Operator` in the registry.
+//! Three callers, all the operator's: a `[[schedule]]` they wrote, `centinel run` typed at
+//! their terminal, and an administrator signed in to the web
+//! (`/workspace/sources/{id}/run`, admin-only in `access.rs`, browser session only at the
+//! gateway). Neither MCP nor `/ops` can reach this — `run` stays `Reach::Operator` in the
+//! registry.
 //!
 //! ## One id: the journal's, the job's, the page's
 //!
@@ -27,13 +32,63 @@ use centinel_core::jobs::Job;
 use centinel_core::journal::{
     Attempt, Held, Holder, Journal, Outcome, RunLock, Subtracted, Trigger, arithmetic,
 };
-use centinel_core::op::{self, Cancel, Ctx, Progress};
+use centinel_core::op::{self, Cancel, Ctx, OpDef, Progress};
 use centinel_core::ops::{RunArgs, RunReport};
 use jiff::Timestamp;
 
+/// The op a lane runs. Named once, so the CLI asks [`takes_the_lane`] rather than
+/// spelling it.
+const OP: &str = "run";
+
+/// Whether invoking `def` means taking the lane.
+pub fn takes_the_lane(def: &OpDef) -> bool {
+    def.name == OP
+}
+
+/// `centinel run` at a terminal: the lane, the journal and a stoppable job, exactly as a
+/// scheduled or web run gets them.
+///
+/// `interrupt` is ctrl-C, forwarded to the job's token as a server's shutdown is, so the
+/// run stops at its next item boundary and is journaled `interrupted` — where killing the
+/// process left no record at all. A lane already held is refused with who holds it.
+///
+/// A `--dry-run` is a plan, not a run: it promises to touch neither the network nor the
+/// store, so it takes no lane and leaves no attempt, and answers while a run holds the
+/// lane — the same reason a `[[schedule]]` may not set it.
+pub async fn run_at_terminal(
+    ctx: &Arc<Ctx>,
+    args: RunArgs,
+    interrupt: Cancel,
+) -> anyhow::Result<RunReport> {
+    if args.dry_run {
+        let def = op::find(OP).expect("`run` is always registered");
+        let args = serde_json::to_value(&args).expect("RunArgs always serializes");
+        let plan =
+            crate::logging::invoke_cancellable("cli", def, Arc::clone(ctx), args, None, interrupt)
+                .await?;
+        return Ok(serde_json::from_value(plan)?);
+    }
+    let launch = Launch {
+        surface: "cli",
+        trigger: Trigger::Manual,
+        schedule: None,
+        due_at: None,
+    };
+    let attempt = Lane::acquire(ctx, args, launch)?.run(None, interrupt).await;
+    match (attempt.outcome, attempt.report, attempt.detail) {
+        (_, Some(report), _) => Ok(report),
+        (Outcome::Interrupted, None, _) => Err(anyhow::Error::new(op::Cancelled).context(
+            "stopped at an item boundary and journaled `interrupted`; the next run resumes from here",
+        )),
+        (_, None, detail) => Err(anyhow::anyhow!(
+            detail.unwrap_or_else(|| "the run ended without a report".into())
+        )),
+    }
+}
+
 /// Who started a run, for the lock file and the journal.
 pub struct Launch {
-    /// The surface the op is invoked from, for the log: `schedule`, `web`.
+    /// The surface the op is invoked from, for the log: `schedule`, `web`, `cli`.
     pub surface: &'static str,
     pub trigger: Trigger,
     /// The `[[schedule]]` that fired, if one did.
@@ -72,7 +127,7 @@ impl Lane {
         let lock = RunLock::acquire(&ctx.store, &holder)?;
         let (job, cancel) = ctx
             .jobs
-            .start_stoppable(started.to_string(), "run", label(&args));
+            .start_stoppable(started.to_string(), OP, label(&args));
         Ok(Self {
             ctx: Arc::clone(ctx),
             lock,
@@ -124,7 +179,7 @@ impl Lane {
             "run started"
         );
 
-        let def = op::find("run").expect("`run` is always registered");
+        let def = op::find(OP).expect("`run` is always registered");
         let value = serde_json::to_value(&args).expect("RunArgs always serializes");
         let run_id = started.to_string();
         let work = crate::logging::invoke_as(
@@ -327,6 +382,58 @@ mod tests {
         .unwrap();
         let attempt = lane.run(None, cancel).await;
         assert_eq!(attempt.outcome, Outcome::Interrupted);
+    }
+
+    /// `centinel run` at a terminal is a run like any other: refused while the lane is
+    /// held, and once it has the lane, a ctrl-C ends it as an `interrupted` attempt in the
+    /// journal and a cancellation to the caller — not a failure, and not a gap.
+    #[tokio::test]
+    async fn a_terminal_run_takes_the_lane_and_is_journaled() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        Sources::new(&store)
+            .add(&SourceConfig::site("tampa", "https://127.0.0.1:9/"))
+            .await
+            .unwrap();
+        let ctx = Arc::new(Ctx::new(store));
+        let args = || RunArgs {
+            sources: vec!["tampa".into()],
+            ..Default::default()
+        };
+
+        let held = Lane::acquire(&ctx, args(), launch()).unwrap();
+        let refused = run_at_terminal(&ctx, args(), Cancel::none())
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("in flight"),
+            "a refused run names who holds the lane: {refused:#}"
+        );
+        // A plan is not a run: it answers while the lane is held, and leaves no attempt.
+        let plan = RunArgs {
+            dry_run: true,
+            ..args()
+        };
+        let planned = run_at_terminal(&ctx, plan, Cancel::none()).await.unwrap();
+        assert!(planned.dry_run);
+        assert!(Journal::new(&ctx.store).read().await.unwrap().is_empty());
+        drop(held);
+
+        // Interrupted before the first item, which also keeps this test off the network.
+        let (ctrl_c, interrupt) = Cancel::channel();
+        ctrl_c.cancel();
+        let stopped = run_at_terminal(&ctx, args(), interrupt).await.unwrap_err();
+        assert!(op::is_cancelled(&stopped), "{stopped:#}");
+
+        let journaled = Journal::new(&ctx.store).read().await.unwrap();
+        assert_eq!(journaled.len(), 1);
+        assert_eq!(journaled[0].outcome, Outcome::Interrupted);
+        assert_eq!(journaled[0].trigger, Trigger::Manual);
+        assert_eq!(journaled[0].sources, ["tampa"]);
+        assert!(
+            RunLock::current(&ctx.store).is_none(),
+            "the lane is released"
+        );
     }
 
     #[test]

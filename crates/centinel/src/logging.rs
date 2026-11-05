@@ -89,10 +89,10 @@ pub async fn invoke(
 
 /// [`invoke`], for a caller that may need to stop the work.
 ///
-/// A live token comes from the run lane ([`crate::lane`]), whose job the Stop button and
-/// a process shutdown both trip. The CLI's interruption is the process dying, and an
-/// HTTP or MCP caller hanging up cannot ask for a crawl to stop — it never had the
-/// authority to start one (SPEC scheduling §1.1).
+/// A live token comes from the run lane ([`crate::lane`]), whose job the Stop button, a
+/// process shutdown and ctrl-C at a terminal all trip. Every other CLI op is interrupted
+/// by the process dying, and an HTTP or MCP caller hanging up cannot ask for a crawl to
+/// stop — it never had the authority to start one (SPEC scheduling §1.1).
 pub async fn invoke_cancellable(
     surface: &'static str,
     def: &'static OpDef,

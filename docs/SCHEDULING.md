@@ -417,11 +417,12 @@ So: `<root>/run.lock`, written by **any** run from any surface, holding the pid,
 timestamp, the trigger and the arguments. A second run refuses:
 
 ```
-a run has been in flight since 03:00:12 (pid 4133, schedule tampa-daily) — 12 minutes
+a run has been in flight since 12 minutes ago (pid 4133, schedule `tampa-daily`)
 ```
 
-`--force` overrides for the case where the holder is genuinely dead in a way the pid check
-missed. A scheduled fire that finds the lock held by another process is recorded as
+A lock whose pid is no longer alive is reclaimed by the next run that asks for it; there is
+no override for a holder that is alive. A `--dry-run` is a plan, not a run, and takes no
+lock. A scheduled fire that finds the lock held by another process is recorded as
 `skipped: busy`, with the holder named — so "my cron never ran" has an answer in the
 journal rather than in a hunch.
 

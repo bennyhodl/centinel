@@ -27,8 +27,10 @@ $ curl -X POST localhost:8787/ops/list        # HTTP: JSON in, JSON out
 ```
 
 Registration is **link-time**, via `inventory`. There is nowhere to forget to add an op.
-The binary names no individual op; it iterates the registry — including for `--help`,
-which is why an op cannot exist and be invisible.
+The binary builds every surface by iterating the registry — including `--help`, which is
+why an op cannot exist and be invisible. Where it does name an op, it is to wrap or reuse
+one — the run lane around `run`, the schedule wizard, the offer after `investigate`, the
+workspace's stage actions — never to build a surface.
 
 **Why a proc macro** rather than build-time codegen or a runtime registry: codegen puts
 generated source in the tree and makes the definition site not the source of truth; a
