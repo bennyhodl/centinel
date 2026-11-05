@@ -14,6 +14,8 @@
   chunks.lance/                  DERIVED  LanceDB chunk vectors    — the vector arm
   workspace/workspace.db         TRUTH    classifier runs, answers, reviews, a person's overrides
   spend/YYYY-MM.jsonl            TRUTH    every model call, its tokens, and what it cost that day
+  run.lock                       RUNTIME  the collection run or maintenance job holding the lane
+  jobs/<job>.json, .stop         RUNTIME  each job any process is running or just finished, and a request that it stop
 ```
 
 Only the entries marked truth are. Blobs and logs are the evidence; `workspace.db` is what

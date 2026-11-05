@@ -40,8 +40,12 @@ function apply(job: JobState, event: JobEvent): JobState {
   }
 }
 
+/**
+ * Keeps the newest endings, as `Board::finish` does: by when each ended, and between two
+ * that ended in the same millisecond, the one the server heard of last.
+ */
 function trimFinished(jobs: JobState[]): JobState[] {
-  const finished = jobs.filter(job => job.outcome).sort((a, b) => (b.finished_at ?? 0) - (a.finished_at ?? 0))
+  const finished = jobs.filter(job => job.outcome).sort((a, b) => (b.finished_at ?? 0) - (a.finished_at ?? 0) || b.seq - a.seq)
   const kept = new Set(finished.slice(0, FINISHED).map(job => job.id))
   return jobs.filter(job => !job.outcome || kept.has(job.id))
 }

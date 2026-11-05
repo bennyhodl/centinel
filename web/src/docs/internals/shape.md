@@ -57,7 +57,7 @@ everything in this part is an instance of it:
 | content kinds | magic bytes: *(signature → kind)*, each element answering for itself |
 | readers | `readers_for(kind)` — an ordered list per content kind, tried in order |
 | strategies | each strategy tests the seed itself; nothing dispatches on a name |
-| ops | link-time registration; the binary names no individual op, it iterates |
+| ops | link-time registration; the binary iterates the registry to build every surface |
 
 The failure mode is identical every time it is got wrong: adding a case means edits in
 several places, and the compiler asks for none of them. One missing arm meant every

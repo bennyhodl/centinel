@@ -46,6 +46,15 @@ describe('foldJob', () => {
     expect(jobs[0]).toMatchObject({ step: 'embed', done: undefined, total: undefined })
   })
 
+  it('keeps the twenty newest endings, as the server does, ties included', () => {
+    // Twenty-one jobs that all end in one millisecond: the server keeps the twenty it
+    // heard end last, and so must the page, or a snapshot would contradict it.
+    const ended = Array.from({ length: 21 }, (_, n) => `job-${String(n).padStart(2, '0')}`)
+    const started = fold(ended.map(id => event(id, { type: 'started', kind: 'embed', label: 'cli' })))
+    const jobs = ended.reduce((all, id) => foldJob(all, { ...event(id, { type: 'finished', outcome: 'ok' }), at }), started)
+    expect(jobs.map(job => job.id).sort()).toEqual(ended.slice(1))
+  })
+
   it('ignores an event the snapshot already holds', () => {
     const late = event('run-3', { type: 'item', item: page('https://x.gov/a', 'ok') })
     const snapshot: JobState = { id: 'run-3', kind: 'run', label: 'schedule', started_at: at, seq: late.seq, ok: 1, failed: 0, log: [late] }

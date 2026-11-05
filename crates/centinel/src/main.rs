@@ -1,9 +1,11 @@
 //! The `centinel` binary.
 //!
-//! Three surfaces, one registry. Nothing in this crate names an individual op — the
-//! CLI's subcommands, the MCP tool list and the HTTP routes are all built by iterating
-//! [`centinel_core::op::all`]. Adding an op in the library makes it appear in all three
-//! without touching this file, which is the property ticket #9 was about.
+//! Three surfaces, one registry. The CLI's subcommands, the MCP tool list and the HTTP
+//! routes are all built by iterating [`centinel_core::op::all`], so adding an op in the
+//! library makes it appear in all three without touching this file, which is the property
+//! ticket #9 was about. Where this crate does name an op, it is to wrap or reuse one — the
+//! lane around `run` ([`lane`]), the wizard ([`wizard`]), the offer after an
+//! investigation ([`promote`]), the workspace's stage actions — never to build a surface.
 
 mod access;
 mod bundle;
@@ -365,7 +367,7 @@ async fn main() -> Result<()> {
     import_sources(&store, &matches).await?;
     let ctx = Arc::new(Ctx::new(store));
 
-    match name {
+    let result = match name {
         "serve" => {
             let bind = sub
                 .get_one::<String>("bind")
@@ -392,7 +394,15 @@ async fn main() -> Result<()> {
         }
         "mcp" => mcp::serve(ctx).await,
         op_name => run_op(ctx, op_name, sub, Output::detect(sub)).await,
+    };
+    // Stopped as asked is not a failure: no `Error:`, and the shell's code for ctrl-C.
+    if let Err(e) = &result
+        && op::is_cancelled(e)
+    {
+        eprintln!("{e}");
+        std::process::exit(STOPPED);
     }
+    result
 }
 
 /// Serves the read API, and — unless told not to — fires the configured schedules.
@@ -476,19 +486,27 @@ async fn serve(ctx: Arc<Ctx>, bind: &str, matches: &clap::ArgMatches) -> Result<
 /// Both, because they arrive from different places and mean the same thing here: a
 /// container stopping and somebody pressing ctrl-C both want the run journal to end with a
 /// record rather than with a stale lock.
+///
+/// The handlers are installed when this is called, not when the future is first polled: a
+/// signal that lands in between must be caught, not given its default action of killing
+/// the process.
 #[cfg(unix)]
-async fn terminate() {
+fn terminate() -> impl std::future::Future<Output = ()> {
     use tokio::signal::unix::{SignalKind, signal};
-    let mut term = match signal(SignalKind::terminate()) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "no SIGTERM handler; shutdown will not be graceful");
-            return std::future::pending().await;
+    let handlers = signal(SignalKind::terminate())
+        .and_then(|term| signal(SignalKind::interrupt()).map(|int| (term, int)));
+    async move {
+        let (mut term, mut int) = match handlers {
+            Ok(handlers) => handlers,
+            Err(e) => {
+                tracing::warn!(error = %e, "no signal handler; shutdown will not be graceful");
+                return std::future::pending().await;
+            }
+        };
+        tokio::select! {
+            _ = term.recv() => tracing::info!("SIGTERM"),
+            _ = int.recv() => tracing::info!("interrupted"),
         }
-    };
-    tokio::select! {
-        _ = term.recv() => tracing::info!("SIGTERM"),
-        _ = tokio::signal::ctrl_c() => tracing::info!("interrupted"),
     }
 }
 
@@ -496,6 +514,33 @@ async fn terminate() {
 async fn terminate() {
     let _ = tokio::signal::ctrl_c().await;
 }
+
+/// A token tripped by the first [`terminate`] signal, for a run typed at a terminal.
+///
+/// The first ctrl-C (or `SIGTERM`) asks the run to stop at its next item boundary, so the
+/// journal gets an `interrupted` record and the lane is released. A second one quits on
+/// the spot, for the stage that is a long way from its next boundary; the lock it leaves
+/// names a dead pid, which the next run reclaims. Either way the exit code is 130, what a
+/// shell reads as stopped by ctrl-C ([`main`]).
+fn interrupt() -> op::Cancel {
+    let (canceller, cancel) = op::Cancel::channel();
+    // Listening before the lane is taken. The second listener is made only once the
+    // first has fired: every listener hears every signal, so one made now would hear the
+    // first ctrl-C too and quit on it.
+    let first = terminate();
+    tokio::spawn(async move {
+        first.await;
+        tracing::info!("stopping at the next item boundary; interrupt again to quit now");
+        canceller.cancel();
+        terminate().await;
+        std::process::exit(STOPPED);
+    });
+    cancel
+}
+
+/// The exit code of a command stopped as asked: the one a shell gives a process ctrl-C
+/// ended.
+const STOPPED: i32 = 130;
 
 /// Re-reads the config on `SIGHUP`, so `schedule set` against a live server is not a
 /// restart.
@@ -678,8 +723,15 @@ async fn run_op(
     // Progress is the log, on stderr, so stdout stays a clean JSON stream for piping. No
     // sink is passed: [`logging::invoke`] hands the op one that writes each event as a
     // line, and the line is written before the op moves on, so nothing is left to drain
-    // when the report arrives.
-    let value = logging::invoke("cli", def, Arc::clone(&ctx), args, None).await?;
+    // when the report arrives. A collection run goes through the lane like a run from
+    // anywhere else, and its report reads back as the op's own value.
+    let value = if lane::takes_the_lane(def) {
+        let args = serde_json::from_value(args).context("reading the run's arguments")?;
+        let report = lane::run_at_terminal(&ctx, args, interrupt()).await?;
+        serde_json::to_value(report)?
+    } else {
+        logging::invoke("cli", def, Arc::clone(&ctx), args, None).await?
+    };
 
     if output.json {
         println!("{}", serde_json::to_string_pretty(&value)?);

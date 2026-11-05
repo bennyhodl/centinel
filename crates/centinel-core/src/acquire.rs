@@ -843,7 +843,7 @@ mod tests {
             .await
             .unwrap();
 
-        let jobs = Jobs::default();
+        let jobs = Jobs::on_disk(store.jobs_dir());
         let (_, mut rx) = jobs.subscribe();
         let job = jobs.start("collect", "test");
         let result = collect(

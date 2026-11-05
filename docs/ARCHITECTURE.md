@@ -189,7 +189,7 @@ The registry is what they share:
         └── render ───────────────► the report, in a terminal's idiom (CLI only)
 ```
 
-Registration is link-time via `inventory`, so there is nowhere to forget to add an op. The binary names no individual op; it iterates the registry.
+Registration is link-time via `inventory`, so there is nowhere to forget to add an op. The binary builds every surface by iterating the registry. Where it does name an op, it is to wrap or reuse one — the run lane around `run`, the schedule wizard, the offer after `investigate`, the workspace's stage actions — never to build a surface.
 
 **Why a proc macro** rather than build-time codegen or a runtime registry: codegen puts generated source in the tree and makes the definition site not the source of truth; a runtime registry needs an explicit `register(…)` call per op — exactly the central list this avoids, and exactly the thing people forget. *Accepted cost:* proc macros degrade error messages, mitigated by keeping expansion thin.
 

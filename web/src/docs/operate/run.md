@@ -27,6 +27,21 @@ loading weights than embedding. It also fixes an ordering hazard for free: `inde
 after *every* source has extracted, so a chunk that appears in two sources is placed
 against both.
 
+## One run at a time, from anywhere
+
+A run typed here, one a schedule fires, and one started from the Sources page all take the
+same lane, `run.lock` in the store. A second run is refused and told who holds it:
+
+```
+a run has been in flight since 12 minutes ago (pid 4133, schedule `tampa-daily`)
+```
+
+Every one of them is written to `centinel history`. Ctrl-C stops a run at its next item
+boundary and records it `interrupted`; the next run resumes from there. A second ctrl-C
+quits at once, and the lock it leaves names a dead process, which the next run reclaims.
+Either way the command exits 130, the code a shell gives ctrl-C. `--dry-run` is a plan, not
+a run: it takes no lock, records nothing, and answers while another run holds the lane.
+
 ## Incremental is inherited, not implemented
 
 Nothing in `run` diffs anything. Every stage already skips work it has done, and none of

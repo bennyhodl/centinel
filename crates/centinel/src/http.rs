@@ -10,7 +10,7 @@
 //! | `POST /ops/{name}/stream` | invoke with SSE progress, then the result |
 //! | `POST /mcp` | MCP JSON-RPC over HTTP |
 //! | `GET /workspace/classify/plan?source=&resource=&derived_sha=&questions=&model=` | what a classify run over that scope would send, and its cost |
-//! | `GET /workspace/jobs` | what this process is working on, and what it just finished |
+//! | `GET /workspace/jobs` | what every process on this store is working on, and what it just finished |
 //! | `GET /workspace/jobs/events` | the same, then every job event as it happens (SSE) |
 //! | `POST /workspace/jobs/{id}/stop` | ask a stoppable job to stop at its next item |
 //! | `GET /workspace/spend?since=` | every model call since then, by hour and model |
@@ -34,9 +34,11 @@
 //! scheduling (ticket #7), which owns resumability.
 //!
 //! What a watcher wants from a multi-hour crawl is not its result but its progress, and
-//! that is `/workspace/jobs/events`: every long-running op this process runs — a scheduled
-//! `run`, a classifier run started from the page — is a job in [`centinel_core::jobs`],
-//! and the stream opens on a snapshot of all of them before it follows. SSE rather than a
+//! that is `/workspace/jobs/events`: every long-running op on this store — a scheduled
+//! `run`, a classifier run started from the page, a `centinel run` typed in a terminal —
+//! is a job in [`centinel_core::jobs`], and the stream opens on a snapshot of all of them
+//! before it follows. Another process's jobs reach this board through the store, so Stop
+//! reaches them too. SSE rather than a
 //! WebSocket because nothing travels the other way: it is plain HTTP through any proxy
 //! in front of this one, and `EventSource` reconnects on its own.
 //!

@@ -364,12 +364,13 @@ page.
 
 ### Jobs, live
 
-Every long-running op the server process runs is a job: a scheduled `run` under
-`centinel serve`, and a classifier run started from the page (its job id is the run's id).
+Every long-running op on the store is a job, whichever process runs it: a scheduled
+`run` under `centinel serve`, a classifier run started from the page (its job id is the
+run's id), a `centinel run` typed in a terminal.
 The sidebar's **Working now** lists each active job with what it is doing (`Collecting
 tampa.gov`, `Embedding`), its count through the current stage, and the item in hand;
 clicking one opens its log: every page fetched, document read or document scored, on
-the server's clock, failures in their own colour. Nothing polls for this. The page holds
+the clock of the process that ran it, failures in their own colour. Nothing polls for this. The page holds
 one stream open and folds its events into the cache.
 
 | Route | Answers |
@@ -378,7 +379,8 @@ one stream open and folds its events into the cache.
 | `GET /workspace/jobs/events` | Server-Sent Events: one `snapshot` event (the same body), then a `job` event per change. `?job=<id>` narrows both to one job |
 
 A `job` event carries `seq` (grows by one per event across every job), `at`
-(milliseconds since the epoch, server clock), `job` (the id, which is the topic), and a
+(milliseconds since the epoch, on the clock of the process running the job), `job` (the
+id, which is the topic), and a
 `type`:
 
 | `type` | Fields | From |
@@ -393,9 +395,10 @@ A `job` event carries `seq` (grows by one per event across every job), `at`
 A `JobState` is those events folded: `step`, `done`, `total`, `current`, `ok` and
 `failed` item counts, `outcome`, and `log`, the last two hundred events other than
 `progress`. A client that falls behind the stream is sent a fresh `snapshot`; any event
-whose `seq` is not above its job's `seq` is already in it. Jobs live in the server's
-memory: a restart empties the list, and a `centinel run` typed in another terminal is
-another process and does not appear.
+whose `seq` is not above its job's `seq` is already in it. Every process on the store
+writes its jobs to `jobs/` and reads every other's, so a `centinel run` typed in another
+terminal appears beside the server's own, and Stop reaches it. A job whose process died
+reads as failed; a restarted server still lists what it finished before.
 
 The workspace has six views, in a sidebar grouped Archive, Classifiers, and Agent:
 

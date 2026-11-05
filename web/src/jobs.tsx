@@ -137,7 +137,7 @@ export function Bar({ job, thin }: { job: JobState; thin?: boolean }) {
 const verdictTone: Record<JobItem['verdict'], string> = { ok: 'text-[#8FB58A]', warn: 'text-[#E8A65A]', missing: 'text-[#E8A65A]', fail: 'text-[#E57D6E]' }
 
 /**
- * One job as it happens, line by line, on the server's clock: the stage it is in, the
+ * One job as it happens, line by line, on the clock of the process running it: the stage it is in, the
  * item in hand, how far through its work list, and every page or document it finished,
  * failures in their own colour. A classifier run also reads its answers from the run, so
  * a scored line says what Jev decided.
@@ -193,7 +193,7 @@ function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) {
         <div className="flex justify-between px-5 pb-2 font-sans text-[11px] text-[#B9AE98]"><span>Live log · {!running ? 'finished' : following ? 'following' : 'paused, scroll down to follow'}</span><span>{job?.step}</span></div>
         <div ref={log} onScroll={event => { const { scrollHeight, scrollTop, clientHeight } = event.currentTarget; setFollowing(scrollHeight - scrollTop - clientHeight < 24) }} className="min-h-0 flex-1 overflow-y-auto">
           {lines.map(line => <LogLine key={line.seq} line={line} answer={line.type === 'item' ? answers.get(line.item.address) : undefined} questions={questions} />)}
-          {!lines.length && <div className="px-5 text-[#B9AE98]">{job ? 'Waiting for the first event…' : 'This job is not running on this server.'}</div>}
+          {!lines.length && <div className="px-5 text-[#B9AE98]">{job ? 'Waiting for the first event…' : 'This job is not running on this store.'}</div>}
         </div>
       </div>
       <div className="flex items-center gap-3 border-t px-6 py-4">
@@ -217,7 +217,7 @@ export function StopJobButton({ id }: { id: string }) {
   </span>
 }
 
-/** One line of a job's log, on the server's clock. A scored line says what Jev decided when its answer and questions are given. */
+/** One line of a job's log, on the clock of the process that ran it. A scored line says what Jev decided when its answer and questions are given. */
 export function LogLine({ line, answer, questions = [] }: { line: JobEvent; answer?: RunResult; questions?: Parameters<typeof answerSummary>[0] }) {
   const row = (word: string, tone: string, body: ReactNode) => <div className="flex gap-3 px-5">
     <span className="w-16 shrink-0 text-[#6B6458]">{clock(line.at)}</span>
