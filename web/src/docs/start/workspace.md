@@ -39,8 +39,9 @@ The Admin section appears only for administrators. Graph is available to every a
 user; its Refuse, Allow and Investigate controls require an administrator. Opening a result takes you to the reader, which shows the document as it was collected
 beside the text that was extracted from it. [Reading a document](../use/read.md)
 
-At the foot of the sidebar, **Working now** lists whatever the server is doing, such as a
-classifier run or a collection. Click one to follow its log. Below it is your account: open
+At the foot of the sidebar, **Working now** lists whatever is running on this store, such as
+a classifier run or a collection — including a `centinel run` typed in a terminal. Click one
+to follow its log. Below it is your account: open
 it for documentation, the light and dark toggle and signing out.
 
 ## Administrator actions

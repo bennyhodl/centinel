@@ -21,6 +21,8 @@
 //!   current/<source>/…         DERIVED  URL-mirroring tree. Regenerable.
 //!   centinel.db                DERIVED  SQLite: metadata + FTS5   — the BM25 arm
 //!   chunks.lance/              DERIVED  LanceDB: chunk vectors    — the vector arm
+//!   run.lock                   RUNTIME  the collection run or maintenance job holding the lane
+//!   jobs/<job>.json, .stop     RUNTIME  each job any process runs or just finished, as it stands; a request to stop
 //!   serve.json                 RUNTIME  the `centinel serve` running on this store, if any
 //!   serve.log                  RUNTIME  what the installed service said
 //! ```
@@ -167,6 +169,19 @@ pub fn write_atomically(path: &Path, bytes: impl AsRef<[u8]>) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     renamed.map_err(io_at(path))
+}
+
+/// The process writing `path`, when it is one of [`write_atomically`]'s temp files —
+/// `.<file>.<pid>-<n>.tmp` — so a temp file left by a process that died mid-write can be
+/// told from one being written now. Beside the writer, so the name is read the way it is
+/// made.
+pub fn in_flight_writer(path: &Path) -> Option<u32> {
+    let name = path.file_name()?.to_str()?;
+    let (_, writer) = name
+        .strip_prefix('.')?
+        .strip_suffix(".tmp")?
+        .rsplit_once('.')?;
+    writer.split_once('-')?.0.parse().ok()
 }
 
 /// A handle on a Centinel store root.
@@ -460,6 +475,14 @@ impl Store {
     /// both surfaces give the *same* answer to "is a run happening right now".
     pub fn lock_path(&self) -> PathBuf {
         self.root.join("run.lock")
+    }
+
+    /// `jobs/` — every long-running job of every process on this store, one file each
+    /// holding it as it stands. On disk for the reason `run.lock` is: a `centinel run` typed in a terminal is
+    /// another process, and the page the server is serving should show it all the same.
+    /// See [`crate::jobs`].
+    pub fn jobs_dir(&self) -> PathBuf {
+        self.root.join("jobs")
     }
 
     /// `serve.json` — the `centinel serve` running on this store: its pid and the

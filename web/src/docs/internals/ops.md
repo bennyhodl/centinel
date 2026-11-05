@@ -115,7 +115,7 @@ The hardest case. Ops emit progress one way and never learn who called them.
 | CLI | progress bars on stderr when stderr is a terminal, plain lines when it is a pipe — so stdout carries only the report and stays a clean JSON stream whenever it is piped |
 | HTTP | `POST /ops/{name}/stream` → SSE progress frames, then a terminal `result` or `error` |
 | MCP | waits and returns once — base MCP has no streaming channel for tool results |
-| Workspace | one server-sent stream, `GET /workspace/jobs/events`, of every running job's events. The page folds it into **Working now** and each job's log. Jobs live in the server's memory, so a restart empties them |
+| Workspace | one server-sent stream, `GET /workspace/jobs/events`, of every running job's events. The page folds it into **Working now** and each job's log. Every process on the store keeps its jobs in `jobs/`, one file each, and reads the others', so a `centinel run` in a terminal shows beside the server's own and a restarted server still lists what finished |
 
 A `ProgressEvent` carries an optional **`id`** and a **`unit`**. Events sharing an `id` are
 one unit of work, so a renderer can keep a bar per file plus an aggregate beside it rather

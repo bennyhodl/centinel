@@ -135,7 +135,7 @@ function useSourceControls(id: string) {
   return { run, enable }
 }
 
-/** The run this server started that holds the lane, if one does: it can be watched and stopped. */
+/** The run that holds the lane, whichever process started it: it can be watched and stopped. */
 const useLaneJob = () => activeJobs(useJobs()).find(job => job.kind === 'run')
 
 function SourceAction({ source, action, lane }: { source: Pick<ListedSource, 'id'>; action: ReturnType<typeof nextAction>; lane: LaneHolder | null }) {
@@ -153,9 +153,8 @@ function SourceAction({ source, action, lane }: { source: Pick<ListedSource, 'id
 
 /**
  * The run holding the store's one lane. A second run waits for it; a click while it holds
- * says so. The job is this server's when the run started here (its id is the run id), and
- * then it can be watched and stopped; a `centinel run` in another terminal holds the lane
- * with no job to show.
+ * says so. Its job is on the board whichever process started it — the page, a schedule or
+ * a `centinel run` in a terminal — under the run id, so it can be watched and stopped.
  */
 function LaneBanner({ holder }: { holder: LaneHolder }) {
   const open = useOpenJob()

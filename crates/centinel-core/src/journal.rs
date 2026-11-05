@@ -406,28 +406,38 @@ impl Holder {
         }
     }
 
-    /// Whether the process that wrote this is still alive.
-    ///
-    /// `kill(pid, 0)` sends no signal and reports whether the pid is addressable. It can
-    /// be wrong in one direction — a recycled pid now belonging to something else reads
-    /// as alive — which is why `--force` exists and why the answer is only ever used to
-    /// decide whether to *reclaim*, never to decide whether to keep running.
-    #[cfg(unix)]
+    /// Whether the process that wrote this is still alive. See [`pid_is_alive`].
     pub fn is_alive(&self) -> bool {
-        // SAFETY: `kill` with signal 0 performs the permission and existence check and
-        // delivers nothing. It cannot affect this process or any other.
-        unsafe { libc::kill(self.pid as libc::pid_t, 0) == 0 }
+        pid_is_alive(self.pid)
     }
+}
 
-    /// Without a portable liveness check, a lock is only ever released by its owner.
-    ///
-    /// The consequence is that a killed run on this platform needs `--force`, which is a
-    /// worse day than on unix and a better one than reclaiming a lock from a process that
-    /// is still writing to the store.
-    #[cfg(not(unix))]
-    pub fn is_alive(&self) -> bool {
-        true
-    }
+/// Whether a process that wrote something into the store is still running.
+///
+/// `kill(pid, 0)` sends no signal and reports whether the pid is addressable. It can be
+/// wrong in one direction — a recycled pid now belonging to something else reads as
+/// alive — which is why the answer is only ever used to decide whether to *reclaim* what a
+/// process left, never whether it should keep running.
+#[cfg(unix)]
+pub fn pid_is_alive(pid: u32) -> bool {
+    // SAFETY: `kill` with signal 0 performs the permission and existence check and
+    // delivers nothing. It cannot affect this process or any other.
+    let addressable = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+    // `EPERM` is a process that exists and belongs to somebody else: alive, and not ours
+    // to reclaim from.
+    addressable || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Without a portable liveness check, no process is ever known to be gone, so nothing that
+/// waits on a writer's death is reclaimed.
+///
+/// The consequence is that a killed run on this platform leaves a lock somebody has to
+/// remove by hand, and a job it left unfinished stays running on every board — a worse day
+/// than on unix and a better one than reclaiming a lock from a process that is still
+/// writing to the store.
+#[cfg(not(unix))]
+pub fn pid_is_alive(_pid: u32) -> bool {
+    true
 }
 
 /// The single lane, held for the length of one collection run or maintenance job.

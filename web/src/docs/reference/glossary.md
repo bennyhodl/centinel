@@ -211,8 +211,8 @@ every later run and threshold change until a person says otherwise.
 **Run** — one classifier run: the questions it asked, the documents it covered, the model, and
 what it cost. A **preview** is a run that records nothing.
 
-**Job** — anything the server is doing that takes a while: a collection or a classifier run.
-Listed under *Working now*, in memory only.
+**Job** — anything that takes a while: a collection or a classifier run, started from the page,
+a schedule, or a terminal. Listed under *Working now*, whichever process on the store runs it.
 
 **Spend** — every model call, its tokens, and what it cost on the day it was made. Local
 models are priced as the cloud model with the same weights.

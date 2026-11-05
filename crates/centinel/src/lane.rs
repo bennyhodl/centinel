@@ -53,8 +53,8 @@ pub fn takes_the_lane(def: &OpDef) -> bool {
 /// process left no record at all. A lane already held is refused with who holds it.
 ///
 /// A `--dry-run` is a plan, not a run: it promises to touch neither the network nor the
-/// store, so it takes no lane and leaves no attempt, and answers while a run holds the
-/// lane — the same reason a `[[schedule]]` may not set it.
+/// store, so it takes no lane, leaves no attempt and is no job, and answers while a run
+/// holds the lane — the same reason a `[[schedule]]` may not set it.
 pub async fn run_at_terminal(
     ctx: &Arc<Ctx>,
     args: RunArgs,
@@ -64,7 +64,7 @@ pub async fn run_at_terminal(
         let def = op::find(OP).expect("`run` is always registered");
         let args = serde_json::to_value(&args).expect("RunArgs always serializes");
         let plan =
-            crate::logging::invoke_cancellable("cli", def, Arc::clone(ctx), args, None, interrupt)
+            crate::logging::invoke_as("cli", def, Arc::clone(ctx), args, None, interrupt, None)
                 .await?;
         return Ok(serde_json::from_value(plan)?);
     }
@@ -400,6 +400,20 @@ mod tests {
             sources: vec!["tampa".into()],
             ..Default::default()
         };
+        let plan = || RunArgs {
+            dry_run: true,
+            ..args()
+        };
+
+        // A plan touches nothing in the store: not the lane, not the journal, not the jobs.
+        assert!(
+            run_at_terminal(&ctx, plan(), Cancel::none())
+                .await
+                .unwrap()
+                .dry_run
+        );
+        assert!(!ctx.store.jobs_dir().exists(), "a plan is no job");
+        assert!(!ctx.store.lock_path().exists());
 
         let held = Lane::acquire(&ctx, args(), launch()).unwrap();
         let refused = run_at_terminal(&ctx, args(), Cancel::none())
@@ -410,11 +424,7 @@ mod tests {
             "a refused run names who holds the lane: {refused:#}"
         );
         // A plan is not a run: it answers while the lane is held, and leaves no attempt.
-        let plan = RunArgs {
-            dry_run: true,
-            ..args()
-        };
-        let planned = run_at_terminal(&ctx, plan, Cancel::none()).await.unwrap();
+        let planned = run_at_terminal(&ctx, plan(), Cancel::none()).await.unwrap();
         assert!(planned.dry_run);
         assert!(Journal::new(&ctx.store).read().await.unwrap().is_empty());
         drop(held);
