@@ -11,6 +11,7 @@
 //!   workspace/workspace.db     TRUTH    classifier runs, answers, reviews, usage overrides
 //!   workspace/vectors.lock     RUNTIME  the one writer of chunks.lance at a time
 //!   workspace/embed.lock       RUNTIME  the one `embed` run at a time
+//!   workspace/corrupt-blobs.jsonl RUNTIME blobs a run read and could not verify, for repair
 //!   spend/YYYY-MM.jsonl        TRUTH    every model call, its tokens and its cost
 //!   investigations/<id>/       RUNTIME  one web investigation: report.json and the bytes `check` saved
 //!   crumbs/<source>.jsonl      DERIVED  the off-host links each page dropped
@@ -101,8 +102,9 @@ pub enum StoreError {
     BlobNotFound(BlobSha),
 
     #[error(
-        "blob {sha} is corrupt: bytes on disk hash to {actual}. \
-         The pool is content-addressed, so this means the file was modified in place."
+        "blob {sha} is corrupt: bytes on disk hash to {actual}, read again after waiting. \
+         The pool is content-addressed, so the file was modified in place or the disk \
+         returns the wrong bytes."
     )]
     BlobCorrupt { sha: BlobSha, actual: BlobSha },
 
@@ -146,6 +148,17 @@ fn io_at(path: impl Into<PathBuf>) -> impl FnOnce(std::io::Error) -> StoreError 
 /// unique, so two writers of one path do not rename each other's file out from under them.
 /// Creates the parent directory.
 pub fn write_atomically(path: &Path, bytes: impl AsRef<[u8]>) -> Result<()> {
+    let tmp = temp_sibling(path)?;
+    let renamed = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
+    if renamed.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    renamed.map_err(io_at(path))
+}
+
+/// The dotted, unique name [`write_atomically`] writes beside `path` before the rename,
+/// with the parent directory created.
+fn temp_sibling(path: &Path) -> Result<PathBuf> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static WRITES: AtomicU64 = AtomicU64::new(0);
 
@@ -158,17 +171,118 @@ pub fn write_atomically(path: &Path, bytes: impl AsRef<[u8]>) -> Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(io_at(dir))?;
     }
-    let tmp = path.with_file_name(format!(
+    Ok(path.with_file_name(format!(
         ".{}.{}-{}.tmp",
         name.to_string_lossy(),
         std::process::id(),
         WRITES.fetch_add(1, Ordering::Relaxed)
-    ));
-    let renamed = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
-    if renamed.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    )))
+}
+
+/// Waits before each re-read of a blob that hashed wrong, about twenty seconds in all. See
+/// [`Store::reread_blob`].
+#[cfg(not(test))]
+const REREAD_BACKOFF_MS: [u64; 4] = [250, 1_000, 4_000, 15_000];
+#[cfg(test)]
+const REREAD_BACKOFF_MS: [u64; 4] = [1, 1, 1, 1];
+
+/// Waits before writing a blob again after it read back wrong: three writes in all. See
+/// [`write_verified`].
+#[cfg(all(target_os = "linux", not(test)))]
+const REWRITE_BACKOFF_MS: [u64; 2] = [250, 1_000];
+#[cfg(all(target_os = "linux", test))]
+const REWRITE_BACKOFF_MS: [u64; 2] = [1, 1];
+
+/// Reads a file after asking the kernel to drop its cached pages, so the bytes come from
+/// the disk and not from what an earlier read left in memory.
+///
+/// Linux only. Elsewhere this is a plain read, and a re-read can be served from the cache.
+fn read_uncached(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: `file` is an open descriptor for the whole call; the call only advises.
+        unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
     }
-    renamed.map_err(io_at(path))
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// [`write_atomically`], except the temp file is fsynced, read back from the disk and
+/// hashed before it is renamed to its address, and written again if the disk returned
+/// anything else.
+///
+/// **A disk can hand back the wrong bytes without an error.** A USB drive under a real
+/// store did exactly that: runs of about 1 MiB of other data, in bursts, with no I/O error
+/// and nothing in the kernel log. Reading back before the rename catches a bad write while
+/// the right bytes are still in hand, and means nothing reaches an address before it has
+/// read back right: no file at an address is ever removed, so a second writer of the same
+/// bytes is never raced. A blob that never reads back right is not stored at all. Its
+/// address stays empty and the error goes to the caller.
+///
+/// The fsync is what sends the read-back to the disk, since dropping cached pages skips
+/// dirty ones. It is not a durability promise: the directory is not synced.
+#[cfg(target_os = "linux")]
+fn write_verified(path: &Path, bytes: &[u8], want: &BlobSha) -> Result<()> {
+    use std::io::Write;
+
+    let tmp = temp_sibling(path)?;
+    let mut actual = want.clone();
+    let waits = std::iter::once(0).chain(REWRITE_BACKOFF_MS);
+    for (attempt, wait_ms) in waits.enumerate() {
+        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+        let read_back = std::fs::File::create(&tmp)
+            .and_then(|mut f| {
+                f.write_all(bytes)?;
+                f.sync_all()
+            })
+            .and_then(|()| read_uncached(&tmp));
+        match read_back {
+            Ok(back) => actual = BlobSha::from_bytes(&back),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(io_at(&tmp)(e));
+            }
+        }
+        if &actual == want {
+            let renamed = std::fs::rename(&tmp, path);
+            if renamed.is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            return renamed.map_err(io_at(path));
+        }
+        let attempt = attempt + 1;
+        tracing::warn!(sha = %want, %actual, attempt, "blob read back wrong after writing it");
+    }
+    let _ = std::fs::remove_file(&tmp);
+    Err(StoreError::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::other(format!(
+            "blob {want} read back as {actual} after {} writes",
+            REWRITE_BACKOFF_MS.len() + 1
+        )),
+    })
+}
+
+/// Off Linux the read-back would come from the page cache and prove nothing, while the
+/// fsync costs a full flush (`F_FULLFSYNC` on macOS). So it is [`write_atomically`].
+#[cfg(not(target_os = "linux"))]
+fn write_verified(path: &Path, bytes: &[u8], _want: &BlobSha) -> Result<()> {
+    write_atomically(path, bytes)
+}
+
+/// What a blob that failed its hash was, which decides how it is repaired. See
+/// [`Store::note_corrupt_blob`].
+#[derive(Debug, Clone, Copy)]
+pub enum CorruptBlob<'a> {
+    /// Bytes a collect fetched. Their address says where to fetch them again.
+    Source,
+    /// Text an extractor derived, rebuilt by extracting `from` again.
+    Derived { from: &'a BlobSha },
 }
 
 /// The process writing `path`, when it is one of [`write_atomically`]'s temp files —
@@ -416,6 +530,13 @@ impl Store {
         self.workspace_dir().join("questions.jsonl")
     }
 
+    /// `workspace/corrupt-blobs.jsonl` — blobs a run read and could not verify, appended by
+    /// [`Self::note_corrupt_blob`]. Kept beside the classifier state rather than in the
+    /// index for the same reason: a rebuild must not forget which bytes need repair.
+    pub fn corrupt_blobs_path(&self) -> PathBuf {
+        self.workspace_dir().join("corrupt-blobs.jsonl")
+    }
+
     /// `workspace/workspace.db` — every classifier run and its results, the latest answer
     /// per question, every review, a person's usage overrides, and what the current
     /// policy makes of them. See [`crate::workspace`].
@@ -589,8 +710,8 @@ impl Store {
 
         // A torn write must never be visible at a content address. Off the runtime's
         // threads, because a blob can be megabytes.
-        let (to, owned) = (dest.clone(), bytes.to_vec());
-        tokio::task::spawn_blocking(move || write_atomically(&to, owned))
+        let (to, owned, want) = (dest.clone(), bytes.to_vec(), sha.clone());
+        tokio::task::spawn_blocking(move || write_verified(&to, &owned, &want))
             .await
             .map_err(|e| io_at(&dest)(std::io::Error::other(e)))??;
 
@@ -658,12 +779,93 @@ impl Store {
 
         let actual = BlobSha::from_bytes(&bytes);
         if &actual != sha {
-            return Err(StoreError::BlobCorrupt {
-                sha: sha.clone(),
-                actual,
-            });
+            return self.reread_blob(sha, p, actual).await;
         }
         Ok(bytes)
+    }
+
+    /// The bytes did not hash to their address. Before calling the blob corrupt, read it
+    /// from the disk again, waiting longer each time.
+    ///
+    /// A bad read is not always a bad file: the drive that prompted this returned wrong
+    /// bytes in bursts, and the same file read seconds later hashed right. The hash still
+    /// decides. Only bytes that match their address are ever returned.
+    async fn reread_blob(&self, sha: &BlobSha, p: PathBuf, first: BlobSha) -> Result<Vec<u8>> {
+        let mut actual = first;
+        for wait_ms in REREAD_BACKOFF_MS {
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            let path = p.clone();
+            let bytes = match tokio::task::spawn_blocking(move || read_uncached(&path))
+                .await
+                .map_err(|e| io_at(&p)(std::io::Error::other(e)))?
+            {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(StoreError::BlobNotFound(sha.clone()));
+                }
+                Err(e) => return Err(StoreError::Io { path: p, source: e }),
+            };
+            actual = BlobSha::from_bytes(&bytes);
+            if &actual == sha {
+                tracing::warn!(%sha, wait_ms, "blob read back right after a bad read");
+                return Ok(bytes);
+            }
+        }
+        Err(StoreError::BlobCorrupt {
+            sha: sha.clone(),
+            actual,
+        })
+    }
+
+    /// Appends a blob that failed its hash, even after [`Self::reread_blob`], to
+    /// [`Self::corrupt_blobs_path`]: the sha, the Source, one address it was read for, and
+    /// what kind of blob it is.
+    ///
+    /// The list is what a repair works from: collected bytes are fetched again from the
+    /// address and checked against the sha, and extracted text is re-derived from the blob
+    /// it came `from`. [`Self::put_blob`] leaves a file already at an address alone, so a
+    /// repair moves the bad file out of the pool first. It is a log, not a set: every run
+    /// that meets the blob appends it again.
+    ///
+    /// Best effort: a list that cannot be written must not stop the run that found the
+    /// blob, and the warning in the log still names it.
+    pub async fn note_corrupt_blob(
+        &self,
+        sha: &BlobSha,
+        source: &str,
+        address: &str,
+        kind: CorruptBlob<'_>,
+    ) {
+        let mut entry = serde_json::json!({
+            "at": Timestamp::now().to_string(),
+            "sha": sha.as_str(),
+            "source": source,
+            "address": address,
+        });
+        match kind {
+            CorruptBlob::Source => entry["kind"] = "source".into(),
+            CorruptBlob::Derived { from } => {
+                entry["kind"] = "derived".into();
+                entry["from"] = from.as_str().into();
+            }
+        }
+        let line = entry.to_string() + "\n";
+        let path = self.corrupt_blobs_path();
+        let write = async {
+            tokio::fs::create_dir_all(self.workspace_dir()).await?;
+            let mut f = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .await?;
+            f.write_all(line.as_bytes()).await?;
+            // A tokio file finishes its write on a blocking thread, after the handle drops,
+            // unless flushed. A caller reading the list next must find the line there.
+            f.flush().await
+        };
+        if let Err(e) = write.await {
+            tracing::warn!(error = %e, path = %path.display(), "could not list a corrupt blob");
+        }
     }
 
     /// Reads at most `limit` bytes from the front of a blob, **without** verifying it.
@@ -1490,6 +1692,81 @@ mod tests {
         assert!(matches!(
             s.get_blob(&sha).await,
             Err(StoreError::BlobCorrupt { .. })
+        ));
+    }
+
+    /// A bad read is not a bad file. The disk that prompted this returned wrong bytes in
+    /// bursts, and the same file hashed right when read again.
+    #[tokio::test]
+    async fn a_re_read_that_hashes_right_returns_the_blob() {
+        let (_d, s) = store().await;
+        let sha = s.put_blob(b"original").await.unwrap();
+
+        // What `get_blob` holds after a read that came back wrong, with the file on disk
+        // intact by the time it looks again.
+        let wrong = BlobSha::from_bytes(b"what the disk returned once");
+        let bytes = s.reread_blob(&sha, s.blob_path(&sha), wrong).await.unwrap();
+        assert_eq!(bytes, b"original");
+    }
+
+    /// Two writers of the same bytes at once. Each writes and checks its own temp file, so
+    /// neither can remove or tear the blob the other placed.
+    #[tokio::test]
+    async fn concurrent_writers_of_one_blob_both_leave_it_readable() {
+        let (_d, s) = store().await;
+        let bytes = b"minutes of the regular meeting".repeat(4096);
+        let (a, b) = tokio::join!(s.put_blob(&bytes), s.put_blob(&bytes));
+        let sha = a.unwrap();
+        assert_eq!(sha, b.unwrap());
+        assert_eq!(s.get_blob(&sha).await.unwrap(), bytes);
+
+        let dir = s.blob_path(&sha).parent().unwrap().to_path_buf();
+        let names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [sha.as_str()], "no temp file is left beside it");
+    }
+
+    /// A corrupt blob is listed with what a repair needs: the sha to check against, and
+    /// the address to fetch it from again.
+    #[tokio::test]
+    async fn a_corrupt_blob_is_listed_for_repair() {
+        let (_d, s) = store().await;
+        let sha = BlobSha::from_bytes(b"agenda");
+        let text = BlobSha::from_bytes(b"# Agenda");
+        let address = "https://tampa.test/agenda.pdf";
+        s.note_corrupt_blob(&sha, "tampa", address, CorruptBlob::Source)
+            .await;
+        s.note_corrupt_blob(&text, "tampa", address, CorruptBlob::Derived { from: &sha })
+            .await;
+
+        let listed = std::fs::read_to_string(s.corrupt_blobs_path()).unwrap();
+        let lines: Vec<serde_json::Value> = listed
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["sha"], sha.as_str());
+        assert_eq!(lines[0]["source"], "tampa");
+        assert_eq!(lines[0]["address"], address);
+        assert_eq!(lines[0]["kind"], "source");
+        assert_eq!(lines[1]["sha"], text.as_str());
+        assert_eq!(lines[1]["kind"], "derived");
+        assert_eq!(lines[1]["from"], sha.as_str(), "what to extract again");
+    }
+
+    /// A blob that vanishes while it is being re-read is missing, not corrupt.
+    #[tokio::test]
+    async fn a_blob_removed_during_a_re_read_is_not_found() {
+        let (_d, s) = store().await;
+        let sha = s.put_blob(b"original").await.unwrap();
+        std::fs::remove_file(s.blob_path(&sha)).unwrap();
+
+        let wrong = BlobSha::from_bytes(b"what the disk returned once");
+        assert!(matches!(
+            s.reread_blob(&sha, s.blob_path(&sha), wrong).await,
+            Err(StoreError::BlobNotFound(_))
         ));
     }
 

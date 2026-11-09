@@ -15,7 +15,7 @@ use crate::domain::Underivable;
 use crate::extract::{self, Extracted};
 use crate::op::{ItemOutcome, Verdict};
 use crate::prelude::*;
-use crate::store::LogRecord;
+use crate::store::{CorruptBlob, LogRecord, StoreError};
 
 #[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ExtractArgs {
@@ -150,6 +150,11 @@ pub struct ExtractReport {
     pub by_kind: BTreeMap<String, usize>,
     /// Pages whose scans we could not read. Requires `pdftoppm` + `tesseract`.
     pub ocr_pages_pending: usize,
+    /// Blobs that failed their hash even after re-reads, skipped and listed in
+    /// `workspace/corrupt-blobs.jsonl` for repair. Nothing is recorded for them, so the
+    /// next run tries them again.
+    #[serde(default)]
+    pub corrupt_blobs: usize,
     pub unreadable: Vec<Unreadable>,
     pub sample: Vec<ExtractSample>,
 }
@@ -184,6 +189,7 @@ pub async fn extract(
         by_tool: BTreeMap::new(),
         by_kind: BTreeMap::new(),
         ocr_pages_pending: 0,
+        corrupt_blobs: 0,
         unreadable: Vec::new(),
         sample: Vec::new(),
     };
@@ -268,7 +274,29 @@ pub async fn extract(
             }
             report.attempted += 1;
 
-            let bytes = ctx.store.get_blob(&obs.blob_sha).await?;
+            // A blob that still fails its hash after `get_blob`'s re-reads is skipped and
+            // listed for repair. One bad file used to end the extract for its whole
+            // Source, and every run after it, until someone replaced the bytes by hand.
+            let bytes = match ctx.store.get_blob(&obs.blob_sha).await {
+                Err(StoreError::BlobCorrupt { sha, actual }) => {
+                    tracing::warn!(%sha, %actual, address = %resource.natural_key, "skipping corrupt blob");
+                    ctx.store
+                        .note_corrupt_blob(
+                            &sha,
+                            source.as_str(),
+                            &resource.natural_key,
+                            CorruptBlob::Source,
+                        )
+                        .await;
+                    report.corrupt_blobs += 1;
+                    continue;
+                }
+                other => other?,
+            };
+            // The head was read without verifying it. Classify again from bytes that passed
+            // their hash, so a bad read of the head cannot choose the extractor and file a
+            // permanent verdict against a document that reads fine.
+            let kind = ContentKind::classify(&obs.meta, &bytes[..bytes.len().min(SNIFF_BYTES)]);
             *report.by_kind.entry(kind.to_string()).or_default() += 1;
 
             // **A Derivation always has bytes**, and `derive` is where that invariant is
@@ -499,6 +527,17 @@ impl Render for ExtractReport {
                 p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
             }
 
+            // Only where it fired. These documents were neither extracted nor given up on,
+            // and the next run tries them again.
+            if self.corrupt_blobs > 0 {
+                p.blank()?;
+                let text = format!(
+                    "{} failed their hash and were skipped; listed in workspace/corrupt-blobs.jsonl",
+                    render::plural(self.corrupt_blobs, "blob", "blobs")
+                );
+                p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+            }
+
             if self.ocr_pages_pending > 0 {
                 p.blank()?;
                 let text = format!(
@@ -670,6 +709,38 @@ mod tests {
         assert_eq!(again.unextractable, 0);
         assert_eq!(again.already_unextractable, 1);
         assert!(again.unreadable.is_empty(), "not news twice");
+    }
+
+    /// The defect: one blob that failed its hash ended the extract for its whole Source,
+    /// so every document behind it waited on someone replacing the bytes by hand.
+    #[tokio::test]
+    async fn a_corrupt_blob_is_skipped_and_listed_and_the_rest_extract() {
+        const PAGE: &[u8] = b"<html><head><title>Agenda</title></head><body>\
+            <h1>Regular meeting</h1><p>The council will consider the budget.</p></body></html>";
+        let (_d, ctx) = store_with(AUDIO, "https://tampa.test/bad").await;
+        ctx.store
+            .record_observation(
+                &Resource::new(SourceId::new("tampa").unwrap(), "https://tampa.test/good"),
+                PAGE,
+                jiff::Timestamp::now(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let bad = BlobSha::from_bytes(AUDIO);
+        std::fs::write(ctx.store.blob_path_of(&bad), b"what the disk returned").unwrap();
+
+        let report = extract(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .expect("a corrupt blob must not end the run");
+        assert_eq!(report.corrupt_blobs, 1);
+        assert_eq!(report.extracted, 1, "the good page still extracts");
+
+        let listed = std::fs::read_to_string(ctx.store.corrupt_blobs_path()).unwrap();
+        let line: serde_json::Value = serde_json::from_str(listed.trim()).unwrap();
+        assert_eq!(line["sha"], bad.as_str());
+        assert_eq!(line["address"], "https://tampa.test/bad");
+        assert_eq!(line["kind"], "source");
     }
 
     /// A one-page PDF carrying no text at all. Whether `pdf-inspector` calls this a parse
