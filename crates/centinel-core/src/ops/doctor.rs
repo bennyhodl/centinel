@@ -70,10 +70,19 @@ pub struct Binary {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    /// Set when the binary is present but old enough that breakage is expected rather
-    /// than surprising.
+    /// The oldest version that will do, when one is pinned. Below it the binary counts as
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_version: Option<String>,
+    /// Set when the binary is present but old: below `min_version`, or old enough that
+    /// breakage is expected rather than surprising.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale: Option<String>,
+    /// The command that installs or updates it, from the package manager found on this
+    /// host. Absent when none was found, because a guessed one is wrong on most machines,
+    /// and for a binary nothing calls yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
 }
 
 impl Binary {
@@ -81,10 +90,160 @@ impl Binary {
         self.path.is_some()
     }
 
+    /// Present and new enough for what calls it.
+    fn usable(&self) -> bool {
+        self.found() && !self.too_old()
+    }
+
+    fn too_old(&self) -> bool {
+        match (&self.version, &self.min_version) {
+            (Some(version), Some(min)) => older(&short_version(version), min),
+            _ => false,
+        }
+    }
+
     /// Whether this binary's absence should make the machine read as not ready.
     fn gates_readiness(&self) -> bool {
         self.need == Need::Required
     }
+}
+
+/// What `doctor` checks a binary against: what calls it, which package carries it, and
+/// the oldest version that will do.
+struct Requirement {
+    name: &'static str,
+    need: Need,
+    purpose: &'static str,
+    package: Package,
+    min_version: Option<&'static str>,
+}
+
+/// The package a binary comes in, which is not always its own name.
+#[derive(Clone, Copy)]
+enum Package {
+    Poppler,
+    Tesseract,
+    Ffmpeg,
+    YtDlp,
+}
+
+impl Package {
+    fn name(self, manager: Manager) -> &'static str {
+        use Manager::*;
+        match (self, manager) {
+            (Self::Poppler, Brew | Pacman) => "poppler",
+            (Self::Poppler, Zypper) => "poppler-tools",
+            (Self::Poppler, Apt | Dnf | Apk) => "poppler-utils",
+            (Self::Tesseract, Brew | Dnf | Pacman) => "tesseract",
+            (Self::Tesseract, Apt | Zypper | Apk) => "tesseract-ocr",
+            (Self::Ffmpeg, _) => "ffmpeg",
+            (Self::YtDlp, _) => "yt-dlp",
+        }
+    }
+}
+
+/// A package manager on this host, found by asking for it, never assumed. The same list,
+/// in the same order, as `install.sh`'s.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Manager {
+    Brew,
+    Apt,
+    Dnf,
+    Pacman,
+    Zypper,
+    Apk,
+}
+
+impl Manager {
+    const ALL: [Self; 6] = [
+        Self::Brew,
+        Self::Apt,
+        Self::Dnf,
+        Self::Pacman,
+        Self::Zypper,
+        Self::Apk,
+    ];
+
+    fn command(self) -> &'static str {
+        match self {
+            Self::Brew => "brew",
+            Self::Apt => "apt-get",
+            Self::Dnf => "dnf",
+            Self::Pacman => "pacman",
+            Self::Zypper => "zypper",
+            Self::Apk => "apk",
+        }
+    }
+
+    fn install(self, package: &str) -> String {
+        match self {
+            Self::Brew => format!("brew install {package}"),
+            Self::Apt => format!("sudo apt-get install -y {package}"),
+            Self::Dnf => format!("sudo dnf install -y {package}"),
+            Self::Pacman => format!("sudo pacman -S --noconfirm {package}"),
+            Self::Zypper => format!("sudo zypper install -y {package}"),
+            Self::Apk => format!("sudo apk add {package}"),
+        }
+    }
+
+    fn upgrade(self, package: &str) -> String {
+        match self {
+            Self::Brew => format!("brew upgrade {package}"),
+            Self::Apt => {
+                format!("sudo apt-get update && sudo apt-get install --only-upgrade -y {package}")
+            }
+            Self::Dnf => format!("sudo dnf upgrade -y {package}"),
+            Self::Pacman => format!("sudo pacman -Syu --noconfirm {package}"),
+            Self::Zypper => format!("sudo zypper update -y {package}"),
+            Self::Apk => format!("sudo apk upgrade {package}"),
+        }
+    }
+
+    /// The first manager this host has, in `install.sh`'s order.
+    async fn find() -> Option<Self> {
+        let found = futures::future::join_all(Self::ALL.map(|m| which(m.command()))).await;
+        Self::ALL
+            .into_iter()
+            .zip(found)
+            .find_map(|(manager, path)| path.map(|_| manager))
+    }
+}
+
+/// What to run for a binary that is missing or old, when this host has a manager to run it
+/// with. Nothing for a binary nothing calls yet: naming a fix for it is nagging.
+fn fix(binary: &Binary, package: Package, manager: Option<Manager>) -> Option<String> {
+    let manager = manager?;
+    if binary.need == Need::Planned {
+        return None;
+    }
+    let package = package.name(manager);
+    if !binary.found() {
+        Some(manager.install(package))
+    } else if binary.stale.is_some() {
+        Some(manager.upgrade(package))
+    } else {
+        None
+    }
+}
+
+/// Whether dotted version `version` is older than `min`. Each part is read for its
+/// leading digits, so `8.0.1-3ubuntu2` is `8.0.1`; a missing part is a zero.
+fn older(version: &str, min: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.split('.')
+            .map(|part| {
+                let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+                digits.parse().unwrap_or(0)
+            })
+            .collect()
+    };
+    let (version, min) = (parts(version), parts(min));
+    let len = version.len().max(min.len());
+    let at = |v: &[u64], i: usize| v.get(i).copied().unwrap_or(0);
+    (0..len)
+        .map(|i| at(&version, i).cmp(&at(&min, i)))
+        .find(|order| order.is_ne())
+        .is_some_and(|order| order.is_lt())
 }
 
 /// A pipeline stage that a set of servers gates.
@@ -248,36 +407,9 @@ pub async fn doctor(ctx: &Ctx, _args: DoctorArgs) -> anyhow::Result<DoctorReport
     // each other — and `yt-dlp` is a Python program whose interpreter takes longer to
     // start than the other five answer in together, so a queue behind it is most of what
     // this op used to cost.
-    let mut binaries: Vec<Binary> = futures::future::join_all([
-        // Both of these are §3.1 requirements for a pipeline nobody has written. `extract`
-        // counts `pages_needing_ocr` and stops there; neither binary has a call site.
-        // Reporting them as required told a working machine it was broken, every time.
-        probe(
-            "pdftoppm",
-            Need::Planned,
-            "will rasterise PDF pages for OCR — ticket #12",
-        ),
-        probe(
-            "tesseract",
-            Need::Planned,
-            "will OCR scanned documents — ticket #12",
-        ),
-        // Optional, not planned: `extract` calls this one. Without it a PDF whose text
-        // layer `pdf-inspector` cannot decode yields nothing instead of its text — a
-        // degraded stage, which is exactly what Optional means.
-        probe(
-            "pdftotext",
-            Need::Optional,
-            "second reader for PDFs the primary makes nothing of",
-        ),
-        probe("yt-dlp", Need::Required, "YouTube acquisition"),
-        probe(
-            "ffmpeg",
-            Need::Required,
-            "decodes audio to 16 kHz WAV for the transcription server",
-        ),
-    ])
-    .await;
+    let manager = Manager::find().await;
+    let mut binaries: Vec<Binary> =
+        futures::future::join_all(REQUIREMENTS.iter().map(|r| probe(r, manager))).await;
     binaries.sort_by(|a, b| a.need.cmp(&b.need).then(a.name.cmp(&b.name)));
 
     let (services, configured, config_error) = match crate::config::Config::load() {
@@ -291,7 +423,7 @@ pub async fn doctor(ctx: &Ctx, _args: DoctorArgs) -> anyhow::Result<DoctorReport
     let vectors = vectors_status(&ctx.store, configured).await;
     let gates = gate_statuses(&services, vectors.as_ref());
 
-    let binaries_ready = binaries.iter().all(|b| !b.gates_readiness() || b.found());
+    let binaries_ready = binaries.iter().all(|b| !b.gates_readiness() || b.usable());
     let services_ready = config_error.is_none() && gates.iter().all(|g| g.ready);
 
     let sources = ctx
@@ -422,39 +554,101 @@ fn gate_statuses(services: &[Service], vectors: Option<&VectorsStatus>) -> Vec<G
         .collect()
 }
 
-/// Locates a binary and asks it for its version.
+/// Every binary Centinel shells out to (SPEC §3.1).
 ///
-/// Version strings are captured rather than parsed: SPEC §3 pins *minimum* versions,
-/// but the pinning table is owned by ticket #11 and does not exist yet. Recording the
-/// raw string now means the check can be added later without another round of probing.
-async fn probe(name: &str, need: Need, purpose: &str) -> Binary {
-    let path = which(name).await;
-    let version = if path.is_some() {
-        version_of(name).await
-    } else {
-        None
+/// A minimum is pinned where a version is known to matter. Poppler's is the oldest that a
+/// supported LTS distribution ships (22.02, Ubuntu 22.04): `pdftotext` is a fallback for
+/// PDFs the primary reader makes nothing of, so an older one is a reader nobody has run
+/// this pipeline against, not a known bug.
+const REQUIREMENTS: [Requirement; 5] = [
+    // Both of these are §3.1 requirements for a pipeline nobody has written. `extract`
+    // counts `pages_needing_ocr` and stops there; neither binary has a call site.
+    // Reporting them as required told a working machine it was broken, every time.
+    Requirement {
+        name: "pdftoppm",
+        need: Need::Planned,
+        purpose: "will rasterise PDF pages for OCR — ticket #12",
+        package: Package::Poppler,
+        min_version: Some(POPPLER_MIN),
+    },
+    Requirement {
+        name: "tesseract",
+        need: Need::Planned,
+        purpose: "will OCR scanned documents — ticket #12",
+        package: Package::Tesseract,
+        min_version: None,
+    },
+    // Optional, not planned: `extract` calls this one. Without it a PDF whose text layer
+    // `pdf-inspector` cannot decode yields nothing instead of its text — a degraded stage,
+    // which is exactly what Optional means.
+    Requirement {
+        name: "pdftotext",
+        need: Need::Optional,
+        purpose: "second reader for PDFs the primary makes nothing of",
+        package: Package::Poppler,
+        min_version: Some(POPPLER_MIN),
+    },
+    Requirement {
+        name: crate::youtube::YT_DLP,
+        need: Need::Required,
+        purpose: "YouTube acquisition",
+        package: Package::YtDlp,
+        min_version: None,
+    },
+    Requirement {
+        name: "ffmpeg",
+        need: Need::Required,
+        purpose: "decodes audio to 16 kHz WAV for the transcription server",
+        package: Package::Ffmpeg,
+        min_version: None,
+    },
+];
+
+const POPPLER_MIN: &str = "22.02";
+
+/// Locates a binary, asks it for its version, and says what to run if it is missing or
+/// old.
+async fn probe(requirement: &Requirement, manager: Option<Manager>) -> Binary {
+    let path = which(requirement.name).await;
+    let version = match &path {
+        Some(_) => version_of(requirement.name).await,
+        None => None,
     };
-    let stale = version.as_deref().and_then(|v| staleness(name, v));
-    Binary {
-        name: name.to_string(),
-        need,
-        purpose: purpose.to_string(),
+    let mut binary = Binary {
+        name: requirement.name.to_string(),
+        need: requirement.need,
+        purpose: requirement.purpose.to_string(),
         path,
         version,
-        stale,
-    }
+        min_version: requirement.min_version.map(str::to_string),
+        stale: None,
+        fix: None,
+    };
+    binary.stale = staleness(&binary);
+    binary.fix = fix(&binary, requirement.package, manager);
+    binary
 }
 
-/// Whether a present binary is old enough to expect trouble from.
+/// Whether a present binary is old enough to expect trouble from: below its pinned
+/// minimum, or, for `yt-dlp`, past the age at which it starts failing.
 ///
-/// Only `yt-dlp` answers, and only because it is the one dependency whose staleness is a
-/// **predictable** failure: it shipped 26 releases in 2025 in emergency clusters and warns
-/// at ninety days. `crate::youtube::STALE_AFTER_DAYS` was written down with a comment
-/// saying `doctor` would surface it, and then nothing read it — so a run failing against
-/// the bot wall could not say *"and your yt-dlp is four months old"*, which is the first
-/// thing anybody should check.
-fn staleness(name: &str, version: &str) -> Option<String> {
-    if name != crate::youtube::YT_DLP {
+/// `yt-dlp` is judged by its release date because its staleness is a **predictable**
+/// failure: it shipped 26 releases in 2025 in emergency clusters and warns at ninety days.
+/// `crate::youtube::STALE_AFTER_DAYS` was written down with a comment saying `doctor`
+/// would surface it, and then nothing read it — so a run failing against the bot wall
+/// could not say *"and your yt-dlp is four months old"*, which is the first thing anybody
+/// should check.
+fn staleness(binary: &Binary) -> Option<String> {
+    let version = binary.version.as_deref()?;
+    if let Some(min) = &binary.min_version
+        && binary.too_old()
+    {
+        return Some(format!(
+            "{} is older than {min}, the oldest this needs",
+            short_version(version)
+        ));
+    }
+    if binary.name != crate::youtube::YT_DLP {
         return None;
     }
     let days = crate::youtube::staleness_days(version, jiff::Timestamp::now())?;
@@ -488,12 +682,16 @@ async fn which(name: &str) -> Option<String> {
     (!path.is_empty()).then_some(path)
 }
 
-async fn version_of(name: &str) -> Option<String> {
-    // poppler's tools print their version to stderr under `-v`; most others use
-    // `--version` on stdout. Try both rather than special-casing per tool — and let
-    // `Output::first_line` be the one place that knows they disagree about the stream.
-    for arg in ["--version", "-v"] {
-        let Ok(out) = Tool::new(name)
+/// Asks a binary its version by each flag in turn, and takes the first answer from one
+/// that succeeded.
+///
+/// Most tools take `--version`; ffmpeg takes `-version`; poppler's take `-v` and print to
+/// stderr, and `Output::first_line` is the one place that knows the streams disagree. An
+/// answer only counts with a zero exit: poppler 26 reads `--version` as a file name and
+/// prints `I/O Error: Couldn't open file '--version'`, which this took for its version.
+async fn version_of(program: &str) -> Option<String> {
+    for arg in ["--version", "-version", "-v"] {
+        let Ok(out) = Tool::new(program)
             .arg(arg)
             .timeout(PROBE_TIMEOUT)
             .output()
@@ -501,6 +699,9 @@ async fn version_of(name: &str) -> Option<String> {
         else {
             continue;
         };
+        if !out.status.success() {
+            continue;
+        }
         if let Some(line) = out.first_line() {
             return Some(line);
         }
@@ -559,21 +760,16 @@ impl Render for DoctorReport {
         p.nest(|p| {
             let mut table = Table::bare(&[Align::Left, Align::Left, Align::Left, Align::Left]);
             for bin in &self.binaries {
-                let found = bin.found();
-                // Three states, because a missing binary costs three different things.
-                // A binary nothing calls yet is not a fault, and painting it red was how
-                // `doctor` told a correctly installed machine it was broken.
-                let mark = match (found, bin.need) {
-                    (true, _) if bin.stale.is_some() => Mark::Warn,
-                    (true, _) => Mark::Ok,
-                    (false, Need::Required) => Mark::Bad,
-                    (false, Need::Optional) => Mark::Warn,
-                    (false, Need::Planned) => Mark::None,
+                let usable = bin.usable();
+                // Present, new enough, but old enough to expect trouble from: a warning.
+                let mark = match status(usable, bin.need) {
+                    (Mark::Ok, _) if bin.stale.is_some() => Mark::Warn,
+                    (mark, _) => mark,
                 };
                 // A binary that answered but reports no version is *present*. Saying
                 // "missing" next to a green tick is the one thing this column must never
                 // do.
-                let version = match (&bin.version, found) {
+                let version = match (&bin.version, bin.found()) {
                     (Some(raw), _) => short_version(raw),
                     (None, true) => String::new(),
                     // A binary nothing calls yet is not missing in the sense that
@@ -581,27 +777,20 @@ impl Render for DoctorReport {
                     (None, false) if bin.need == Need::Planned => "not needed yet".into(),
                     (None, false) => "missing".to_string(),
                 };
-                let ink = match (found, bin.need) {
-                    (true, _) => Ink::Cyan,
-                    (false, Need::Required) => Ink::Red,
-                    (false, _) => Ink::Dim,
-                };
                 table.push(vec![
                     Cell::mark(mark),
                     Cell::plain(&bin.name),
-                    Cell::new(version, ink),
+                    Cell::new(version, status(usable, bin.need).1),
                     Cell::dim(render::truncate(&bin.purpose, 52)),
                 ]);
+                if let Some(stale) = &bin.stale {
+                    table.note(Cell::dim(stale));
+                }
+                if let Some(fix) = &bin.fix {
+                    table.note(Cell::plain(fix));
+                }
             }
-            p.table(&table)?;
-
-            // Below the table rather than in it: a stale binary is present and working,
-            // and the sentence that explains why it might not be is worth the width.
-            for bin in self.binaries.iter().filter(|b| b.stale.is_some()) {
-                let note = format!("{} {}", bin.name, bin.stale.as_deref().unwrap_or_default());
-                p.marked(Mark::Warn, p.paint(&note, Ink::Dim))?;
-            }
-            Ok(())
+            p.table(&table)
         })?;
 
         p.section("inference")?;
@@ -613,38 +802,22 @@ impl Render for DoctorReport {
                 Align::Left,
                 Align::Left,
             ]);
-            // The same three states as a binary: a reranker that is down degrades search,
-            // it does not stop it, and painting it red said otherwise.
-            let mark = |s: &Service| match (s.ready, s.need) {
-                (true, _) => Mark::Ok,
-                (false, Need::Required) => Mark::Bad,
-                (false, _) => Mark::Warn,
-            };
             for s in &self.services {
-                let ink = match (s.ready, s.need) {
-                    (true, _) => Ink::Cyan,
-                    (false, Need::Required) => Ink::Red,
-                    (false, _) => Ink::Dim,
-                };
+                // The same three states as a binary: a reranker that is down degrades
+                // search, it does not stop it, and painting it red said otherwise.
+                let (mark, ink) = status(s.ready, s.need);
                 table.push(vec![
-                    Cell::mark(mark(s)),
+                    Cell::mark(mark),
                     Cell::plain(&s.capability),
                     Cell::new(&s.model, ink),
                     Cell::dim(&s.base_url),
                     Cell::dim(s.gates.to_string()),
                 ]);
-            }
-            p.table(&table)?;
-            // Below the table rather than in it: the sentence that says what to do is worth
-            // the width. It repeats the capability's name because a table renders as one
-            // unit, and the row it belongs to may be three lines up.
-            for s in self.services.iter().filter(|s| !s.ready) {
-                if let Some(problem) = &s.problem {
-                    let note = format!("{}  {}", s.capability, p.paint(problem, Ink::Dim));
-                    p.marked(mark(s), note)?;
+                if let Some(problem) = s.problem.as_deref().filter(|_| !s.ready) {
+                    table.note(Cell::dim(problem));
                 }
             }
-            Ok(())
+            p.table(&table)
         })?;
 
         if let Some(v) = &self.vectors {
@@ -669,7 +842,10 @@ impl Render for DoctorReport {
                 let (mark, note) = if !gate.ready {
                     (Mark::Bad, format!("blocks {}", gate.blocks))
                 } else if !gate.degraded.is_empty() {
-                    (Mark::Warn, format!("runs without {}", gate.degraded.join(", ")))
+                    (
+                        Mark::Warn,
+                        format!("runs without {}", gate.degraded.join(", ")),
+                    )
                 } else {
                     (Mark::Ok, String::new())
                 };
@@ -682,6 +858,19 @@ impl Render for DoctorReport {
             }
             Ok(())
         })
+    }
+}
+
+/// The mark and ink for a dependency, by whether it is there and what its absence costs.
+/// Three states, because a missing one costs three different things: a stage stops, a
+/// stage degrades, or nothing calls it yet. Painting that last one red was how `doctor`
+/// told a correctly installed machine it was broken.
+fn status(ok: bool, need: Need) -> (Mark, Ink) {
+    match (ok, need) {
+        (true, _) => (Mark::Ok, Ink::Cyan),
+        (false, Need::Required) => (Mark::Bad, Ink::Red),
+        (false, Need::Optional) => (Mark::Warn, Ink::Dim),
+        (false, Need::Planned) => (Mark::None, Ink::Dim),
     }
 }
 
@@ -711,8 +900,159 @@ mod tests {
             purpose: "does a thing".into(),
             path: found.then(|| format!("/usr/bin/{name}")),
             version: version.map(str::to_string),
+            min_version: None,
             stale: None,
+            fix: None,
         }
+    }
+
+    /// `staleness` of a present binary at `version`, as `probe` would judge it.
+    fn stale_at(name: &str, version: &str) -> Option<String> {
+        staleness(&binary(name, Need::Required, true, Some(version)))
+    }
+
+    /// The poppler 26 defect: `--version` is read as a file name, and the error it prints
+    /// was taken for the version. A flag only answers when it succeeds.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_version_comes_from_the_flag_that_succeeded() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("pdftotext");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\ncase \"$1\" in\n\
+             -v) echo 'pdftotext version 26.01.0' >&2; exit 0 ;;\n\
+             *) echo \"I/O Error: Couldn't open file '$1': No such file or directory.\" >&2; exit 1 ;;\n\
+             esac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let version = version_of(fake.to_str().unwrap()).await.unwrap();
+        assert_eq!(version, "pdftotext version 26.01.0");
+        assert_eq!(short_version(&version), "26.01.0");
+    }
+
+    #[test]
+    fn versions_compare_by_number_not_by_text() {
+        assert!(older("0.86.1", "22.02"));
+        assert!(older("21.12.0", "22.02"));
+        assert!(!older("22.02", "22.02.0"));
+        assert!(!older("26.01.0", "22.02"));
+        assert!(!older("8.0.1-3ubuntu2", "8.0.1"));
+        assert!(older("9.0", "10.0"), "10 is not before 9 because '1' < '9'");
+    }
+
+    /// Below its minimum a binary counts as absent, and the fix is the upgrade the host's
+    /// own package manager runs, by the package's name there.
+    #[test]
+    fn a_binary_below_its_minimum_is_unusable_and_names_the_upgrade() {
+        let mut old = binary(
+            "pdftotext",
+            Need::Optional,
+            true,
+            Some("pdftotext version 0.86.1"),
+        );
+        old.min_version = Some(POPPLER_MIN.into());
+        old.stale = staleness(&old);
+        assert!(old.found() && !old.usable());
+        assert_eq!(
+            old.stale.as_deref(),
+            Some("0.86.1 is older than 22.02, the oldest this needs")
+        );
+        assert_eq!(
+            fix(&old, Package::Poppler, Some(Manager::Apt)).as_deref(),
+            Some("sudo apt-get update && sudo apt-get install --only-upgrade -y poppler-utils")
+        );
+        assert_eq!(
+            fix(&old, Package::Poppler, Some(Manager::Brew)).as_deref(),
+            Some("brew upgrade poppler")
+        );
+
+        let mut new = binary(
+            "pdftotext",
+            Need::Optional,
+            true,
+            Some("pdftotext version 26.01.0"),
+        );
+        new.min_version = Some(POPPLER_MIN.into());
+        new.stale = staleness(&new);
+        assert!(new.usable() && new.stale.is_none());
+        assert_eq!(fix(&new, Package::Poppler, Some(Manager::Apt)), None);
+    }
+
+    #[test]
+    fn a_missing_binary_names_the_install_and_only_from_a_manager_that_is_here() {
+        let missing = binary("yt-dlp", Need::Required, false, None);
+        assert_eq!(
+            fix(&missing, Package::YtDlp, Some(Manager::Apt)).as_deref(),
+            Some("sudo apt-get install -y yt-dlp")
+        );
+        assert_eq!(
+            fix(&missing, Package::YtDlp, None),
+            None,
+            "no manager, no guess"
+        );
+        let planned = binary("tesseract", Need::Planned, false, None);
+        assert_eq!(fix(&planned, Package::Tesseract, Some(Manager::Brew)), None);
+    }
+
+    /// What `doctor` printed twice: each server down was a row, and then a line after the
+    /// table naming it again. Its problem now sits under its row, and a fix under its
+    /// binary's.
+    #[test]
+    fn a_problem_prints_under_its_row_and_names_nothing_twice() {
+        let down = |capability: &str, need: Need| Service {
+            capability: capability.into(),
+            gates: Gate::Transcription,
+            need,
+            purpose: "does a thing".into(),
+            base_url: "http://127.0.0.1:8080/v1".into(),
+            model: format!("{capability}-model"),
+            ready: false,
+            problem: Some("nothing is answering".into()),
+        };
+        let mut yt_dlp = binary("yt-dlp", Need::Required, false, None);
+        yt_dlp.fix = Some("sudo apt-get install -y yt-dlp".into());
+        let report = DoctorReport {
+            store_root: "/tmp/store".into(),
+            config: Some("/tmp/centinel.toml".into()),
+            config_searched: vec![],
+            config_error: None,
+            sources: vec![],
+            binaries: vec![yt_dlp],
+            services: vec![down("transcribe", Need::Required)],
+            vectors: None,
+            gates: gate_statuses(&[down("transcribe", Need::Required)], None),
+            binaries_ready: false,
+            services_ready: false,
+            ready: false,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut p = Painter::new(&mut buf, false, 120);
+            report.render(&mut p).unwrap();
+        }
+        let out = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        let row = |name: &str| lines.iter().position(|l| l.contains(name)).unwrap();
+
+        assert!(
+            lines[row("transcribe-model") + 1].trim() == "nothing is answering",
+            "{out}"
+        );
+        assert_eq!(out.matches("nothing is answering").count(), 1, "{out}");
+        // The row, and the gate it shuts: nothing else says its name.
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("transcribe")).count(),
+            2,
+            "{out}"
+        );
+        assert!(
+            lines[row("yt-dlp") + 1].trim() == "sudo apt-get install -y yt-dlp",
+            "{out}"
+        );
     }
 
     /// The defect. `pdftoppm` and `tesseract` are SPEC §3.1 requirements for a pipeline
@@ -754,7 +1094,7 @@ mod tests {
     #[test]
     fn an_old_yt_dlp_is_named_as_old() {
         // Well past the ninety-day line, whenever this test runs.
-        let old = staleness(crate::youtube::YT_DLP, "2019.01.01").unwrap();
+        let old = stale_at(crate::youtube::YT_DLP, "2019.01.01").unwrap();
         assert!(old.contains("90"), "{old}");
         assert!(old.contains("days ago"), "{old}");
     }
@@ -765,12 +1105,12 @@ mod tests {
             .to_zoned(jiff::tz::TimeZone::UTC)
             .date();
         let fresh = format!("{}.{:02}.{:02}", today.year(), today.month(), today.day());
-        assert_eq!(staleness(crate::youtube::YT_DLP, &fresh), None);
+        assert_eq!(stale_at(crate::youtube::YT_DLP, &fresh), None);
 
         // Only yt-dlp answers: it is the one dependency whose staleness is a predictable
         // failure rather than a guess about somebody's package manager.
-        assert_eq!(staleness("ffmpeg", "1.0.0"), None);
-        assert_eq!(staleness(crate::youtube::YT_DLP, "nightly"), None);
+        assert_eq!(stale_at("ffmpeg", "1.0.0"), None);
+        assert_eq!(stale_at(crate::youtube::YT_DLP, "nightly"), None);
     }
 
     /// A stale binary is present and working. Painting it as missing would be a lie, and
@@ -778,7 +1118,7 @@ mod tests {
     #[test]
     fn a_stale_binary_reads_as_a_warning_not_a_fault() {
         let mut bin = binary("yt-dlp", Need::Required, true, Some("2019.01.01"));
-        bin.stale = staleness(crate::youtube::YT_DLP, "2019.01.01");
+        bin.stale = staleness(&bin);
         assert!(bin.stale.is_some());
         assert!(bin.found(), "it is installed and it works");
 

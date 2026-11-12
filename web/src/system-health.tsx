@@ -45,6 +45,7 @@ export function SystemHealthPage() {
               {binary.path && <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{binary.path}</p>}
               {binary.version && <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{binary.version}</p>}
               {binary.stale && <Problem>{binary.stale}</Problem>}
+              {binary.fix && <p className="mt-1 break-all font-mono text-xs">{binary.fix}</p>}
             </div>
           </div>)}
         </div>

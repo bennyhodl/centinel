@@ -250,10 +250,16 @@ impl<'w> Painter<'w> {
             self.line(cells.join(GUTTER).trim_end())?;
         }
 
+        // A note sits under the row's second column: the first is a mark or a figure, and
+        // the note is about what the row names.
+        let note_at = match widths.as_slice() {
+            [first, _, ..] => first + GUTTER.len(),
+            _ => 0,
+        };
         for row in &table.rows {
-            let mut cells = Vec::with_capacity(row.len());
-            let last = row.len() - 1;
-            for (i, cell) in row.iter().enumerate() {
+            let mut cells = Vec::with_capacity(row.cells.len());
+            let last = row.cells.len() - 1;
+            for (i, cell) in row.cells.iter().enumerate() {
                 let col = &table.cols[i];
                 // The final left-aligned column is not padded. Its padding would sit
                 // *inside* the colour span, where `trim_end` cannot reach it, and every
@@ -267,6 +273,12 @@ impl<'w> Painter<'w> {
                 cells.push(self.paint(&text, cell.ink));
             }
             self.line(cells.join(GUTTER).trim_end())?;
+            for note in &row.notes {
+                for line in wrap(&note.text, self.width().saturating_sub(note_at)) {
+                    let painted = self.paint(&line, note.ink);
+                    self.line(format!("{:note_at$}{painted}", ""))?;
+                }
+            }
         }
         Ok(())
     }
@@ -362,7 +374,15 @@ impl Cell {
 #[derive(Default)]
 pub struct Table {
     cols: Vec<Col>,
-    rows: Vec<Vec<Cell>>,
+    rows: Vec<Row>,
+}
+
+/// A row, and the lines that belong under it: a fix, an error, a warning. Kept with the
+/// row so they print beneath it, rather than in a list after the table that has to repeat
+/// each row's name to say which one it means.
+struct Row {
+    cells: Vec<Cell>,
+    notes: Vec<Cell>,
 }
 
 impl Table {
@@ -401,7 +421,17 @@ impl Table {
             self.cols.len(),
             "a row must have one cell per column"
         );
-        self.rows.push(cells);
+        self.rows.push(Row {
+            cells,
+            notes: Vec::new(),
+        });
+    }
+
+    /// A line under the row pushed last, wrapped to fit and aligned with its second
+    /// column.
+    pub fn note(&mut self, note: Cell) {
+        let row = self.rows.last_mut().expect("a note belongs to a row");
+        row.notes.push(note);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -420,7 +450,7 @@ impl Table {
             .map(|c| UnicodeWidthStr::width(c.title.as_str()))
             .collect();
         for row in &self.rows {
-            for (i, cell) in row.iter().enumerate() {
+            for (i, cell) in row.cells.iter().enumerate() {
                 let w = UnicodeWidthStr::width(cell.text.as_str());
                 if w > widths[i] {
                     widths[i] = w;
@@ -746,5 +776,35 @@ mod tests {
             p.table(&t)
         });
         assert_eq!(out, "live  190\n");
+    }
+
+    /// A row's note prints under it, aligned with the name, not after the table with the
+    /// name said again.
+    #[test]
+    fn a_note_prints_under_its_row_at_the_second_column() {
+        let out = render_to_string(false, |p| {
+            let mut t = Table::bare(&[Align::Left, Align::Left, Align::Left]);
+            t.push(vec![
+                Cell::plain("✓"),
+                Cell::plain("embed"),
+                Cell::plain("up"),
+            ]);
+            t.push(vec![
+                Cell::plain("!"),
+                Cell::plain("rerank"),
+                Cell::plain("down"),
+            ]);
+            t.note(Cell::dim("nothing is answering"));
+            t.push(vec![
+                Cell::plain("✓"),
+                Cell::plain("ffmpeg"),
+                Cell::plain("8.0"),
+            ]);
+            p.table(&t)
+        });
+        assert_eq!(
+            out,
+            "✓  embed   up\n!  rerank  down\n   nothing is answering\n✓  ffmpeg  8.0\n"
+        );
     }
 }
