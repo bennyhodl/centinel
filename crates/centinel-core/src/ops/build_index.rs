@@ -41,6 +41,12 @@ pub struct IndexArgs {
     pub overlap_chars: usize,
 }
 
+/// How much one transaction holds: this many documents, or this much text, whichever
+/// comes first. Large enough that a commit's cost is spread thin, small enough that a
+/// reader waiting on the write lock waits a moment and a cancel loses nothing to speak of.
+const WINDOW_DOCUMENTS: usize = 64;
+const WINDOW_BYTES: usize = 16 * 1024 * 1024;
+
 fn default_target() -> usize {
     crate::chunk::DEFAULT_TARGET_CHARS
 }
@@ -248,110 +254,147 @@ pub async fn index(
         report.boilerplate_lines += chrome.len();
 
         let total = derivations.len() as u64;
-        for (i, d) in derivations.iter().enumerate() {
-            // The item boundary is one document, which is also the write batch — so what
-            // stops here is exactly what the resume predicate will call done.
-            cancel.check()?;
-            if i % 25 == 0 {
-                progress.step(format!("{} chunks", report.chunks_written), i as u64, total);
-            }
-            // Resumption subtracts *placements*, not derived blobs. Keying it on the blob
-            // alone made "this text is somewhere in the index" stand in for "this text is
-            // in the index at this address", and the two differ for every address after
-            // the first that shares a derived blob with another.
-            let places = addresses.get(&d.from_sha).cloned().unwrap_or_default();
-            let mut pending = Vec::with_capacity(places.len());
-            for (resource, observed_at) in places {
-                if args.rebuild
-                    || !index.has_placement(source.as_str(), &resource, d.to_sha.as_str())?
-                {
-                    pending.push((resource, observed_at));
+        // A window of documents is read, then written under one transaction. Reading is
+        // the half that waits on the disk; writing is where a commit costs an FTS5 flush,
+        // and one flush per window rather than per document is most of what `index` saves.
+        let mut next = 0;
+        while next < derivations.len() {
+            let window = next;
+            let mut texts = Vec::new();
+            let mut held = 0;
+            while next < derivations.len() && texts.len() < WINDOW_DOCUMENTS && held < WINDOW_BYTES
+            {
+                // The item boundary. Nothing of this window is written yet, so what stops
+                // here is exactly what the resume predicate will call done.
+                cancel.check()?;
+                if next % 25 == 0 {
+                    progress.step(
+                        format!("{} chunks", report.chunks_written),
+                        next as u64,
+                        total,
+                    );
                 }
-            }
-            if pending.is_empty() {
-                report.already_indexed += 1;
-                continue;
-            }
-
-            let bytes = ctx.store.get_blob(&d.to_sha).await?;
-            let text = String::from_utf8_lossy(&bytes);
-            if text.trim().is_empty() {
-                report.empty_documents += 1;
-                note_empty(&mut report, &pending, "the derived text is empty");
-                continue;
-            }
-
-            // The extraction pipeline does not record a title on the Derivation, so it
-            // is recovered from the first heading — which is where both `htmd` and
-            // `pdf-inspector` put it. Taken from the text as derived: a title is a label
-            // for the document, not a passage in it, and it is wanted even on a page
-            // whose body turns out to be entirely chrome.
-            let title = first_heading(&text);
-
-            let stripped = chrome.strip(&text);
-            if stripped.dropped_anything() {
-                report.boilerplate_documents += 1;
-                report.boilerplate_chars += stripped.chars_dropped;
+                let d = &derivations[next];
+                // Read only a text that still has somewhere to go. The write below asks
+                // again, from inside the batch, and that answer is the one that counts.
+                let mut unplaced = false;
+                for (resource, _) in addresses.get(&d.from_sha).into_iter().flatten() {
+                    if args.rebuild
+                        || !index.has_placement(source.as_str(), resource, d.to_sha.as_str())?
+                    {
+                        unplaced = true;
+                        break;
+                    }
+                }
+                texts.push(match unplaced {
+                    true => {
+                        let bytes = ctx.store.get_blob(&d.to_sha).await?;
+                        held += bytes.len();
+                        Some(bytes)
+                    }
+                    false => None,
+                });
+                next += 1;
             }
 
-            let chunks = chunk_markdown(&stripped.text, &config);
-            if chunks.is_empty() {
-                // Counted, not dropped. Five `dunedin.gov` pages each extracted to the same
-                // 361-character site-wide banner and nothing else; the chrome pass correctly
-                // recognised that banner and stripped it, which left nothing to chunk, and
-                // all five vanished. They still read `✓ live` in `list`, still reported a
-                // successful extraction, and no search could reach them.
-                //
-                // The stripping is right and stays. What was wrong is that a pass which
-                // removes text has to say when it removed all of it — a document that
-                // leaves the index empty is a fact about the *extraction*, surfaced one
-                // stage too late to be noticed any other way.
-                report.empty_documents += 1;
-                let why = match stripped.dropped_anything() {
-                    true => "chrome was stripped and nothing else was there",
-                    false => "the text produced no chunks",
-                };
-                note_empty(&mut report, &pending, why);
-                continue;
-            }
-            report.documents_indexed += 1;
-
-            // One transaction for the whole document, not one per row. A commit is a WAL
-            // checkpoint and an FTS5 flush, so a corpus of 450,000 placements paid both
-            // 450,000 times. Safe at this boundary because resumption subtracts placements
-            // per address: a document lost to a crash mid-batch is one the next run redoes.
             let mut batch = index.batch()?;
-            for chunk in &chunks {
-                // Whether the *body* was new, which only the first placement of a shared
-                // chunk can report. Asking the index to count instead costs three full
-                // table scans per chunk, twice — see `index::Batch::insert`.
-                let mut body_is_new = false;
-                for (resource, observed_at) in &pending {
-                    body_is_new |= batch.insert(
-                        chunk,
-                        &Placement {
-                            source: source.to_string(),
-                            resource: resource.clone(),
-                            blob_sha: d.from_sha.to_string(),
-                            derived_sha: d.to_sha.to_string(),
-                            ordinal: chunk.ordinal,
-                            heading: chunk.heading.clone(),
-                            // Translated back into the derived text's own coordinates.
-                            // The stripped text is never written anywhere, so a span
-                            // measured against it points into nothing anyone can open.
-                            char_start: stripped.origin(chunk.char_start),
-                            char_end: stripped.origin(chunk.char_end),
-                            observed_at: observed_at.to_string(),
-                            tool: format!("{} {}", d.tool, d.version),
-                            title: title.clone(),
-                        },
-                    )?;
+            for (d, bytes) in derivations[window..next].iter().zip(&texts) {
+                // Resumption subtracts *placements*, not derived blobs. Keying it on the
+                // blob alone made "this text is somewhere in the index" stand in for "this
+                // text is in the index at this address", and the two differ for every
+                // address after the first that shares a derived blob with another.
+                let places = addresses.get(&d.from_sha).cloned().unwrap_or_default();
+                let mut pending = Vec::with_capacity(places.len());
+                for (resource, observed_at) in places {
+                    if args.rebuild
+                        || !batch.has_placement(source.as_str(), &resource, d.to_sha.as_str())?
+                    {
+                        pending.push((resource, observed_at));
+                    }
                 }
-                match body_is_new {
-                    true => report.chunks_written += 1,
-                    false => report.chunks_deduplicated += 1,
+                let (false, Some(bytes)) = (pending.is_empty(), bytes) else {
+                    report.already_indexed += 1;
+                    continue;
+                };
+
+                let text = String::from_utf8_lossy(bytes);
+                if text.trim().is_empty() {
+                    report.empty_documents += 1;
+                    note_empty(&mut report, &pending, "the derived text is empty");
+                    continue;
+                }
+
+                // The extraction pipeline does not record a title on the Derivation, so it
+                // is recovered from the first heading — which is where both `htmd` and
+                // `pdf-inspector` put it. Taken from the text as derived: a title is a label
+                // for the document, not a passage in it, and it is wanted even on a page
+                // whose body turns out to be entirely chrome.
+                let title = first_heading(&text);
+
+                let stripped = chrome.strip(&text);
+                if stripped.dropped_anything() {
+                    report.boilerplate_documents += 1;
+                    report.boilerplate_chars += stripped.chars_dropped;
+                }
+
+                let chunks = chunk_markdown(&stripped.text, &config);
+                if chunks.is_empty() {
+                    // Counted, not dropped. Five `dunedin.gov` pages each extracted to the same
+                    // 361-character site-wide banner and nothing else; the chrome pass correctly
+                    // recognised that banner and stripped it, which left nothing to chunk, and
+                    // all five vanished. They still read `✓ live` in `list`, still reported a
+                    // successful extraction, and no search could reach them.
+                    //
+                    // The stripping is right and stays. What was wrong is that a pass which
+                    // removes text has to say when it removed all of it — a document that
+                    // leaves the index empty is a fact about the *extraction*, surfaced one
+                    // stage too late to be noticed any other way.
+                    report.empty_documents += 1;
+                    let why = match stripped.dropped_anything() {
+                        true => "chrome was stripped and nothing else was there",
+                        false => "the text produced no chunks",
+                    };
+                    note_empty(&mut report, &pending, why);
+                    continue;
+                }
+                report.documents_indexed += 1;
+
+                for chunk in &chunks {
+                    // Whether the *body* was new, which only the first placement of a shared
+                    // chunk can report. Asking the index to count instead costs three full
+                    // table scans per chunk, twice — see `index::Batch::insert`.
+                    let mut body_is_new = false;
+                    for (resource, observed_at) in &pending {
+                        body_is_new |= batch.insert(
+                            chunk,
+                            &Placement {
+                                source: source.to_string(),
+                                resource: resource.clone(),
+                                blob_sha: d.from_sha.to_string(),
+                                derived_sha: d.to_sha.to_string(),
+                                ordinal: chunk.ordinal,
+                                heading: chunk.heading.clone(),
+                                // Translated back into the derived text's own coordinates.
+                                // The stripped text is never written anywhere, so a span
+                                // measured against it points into nothing anyone can open.
+                                char_start: stripped.origin(chunk.char_start),
+                                char_end: stripped.origin(chunk.char_end),
+                                observed_at: observed_at.to_string(),
+                                tool: format!("{} {}", d.tool, d.version),
+                                title: title.clone(),
+                            },
+                        )?;
+                    }
+                    match body_is_new {
+                        true => report.chunks_written += 1,
+                        false => report.chunks_deduplicated += 1,
+                    }
                 }
             }
+            // One transaction for the window, not one per document or per row. A commit is
+            // a WAL checkpoint and an FTS5 flush, so a corpus of 450,000 placements once
+            // paid both 450,000 times. Safe because resumption subtracts placements per
+            // address: a window lost to a crash is documents the next run redoes.
             batch.commit()?;
         }
     }
