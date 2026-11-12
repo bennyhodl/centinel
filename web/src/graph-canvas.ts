@@ -1,9 +1,8 @@
-import Sigma from 'sigma'
-import { drawDiscNodeLabel } from 'sigma/rendering'
-import { createNodeBorderProgram } from '@sigma/node-border'
+import Sigma, { DEFAULT_STYLES } from 'sigma'
+import { layerBorder } from '@sigma/node-border'
 import FA2Layout from 'graphology-layout-forceatlas2/worker'
 import forceAtlas2 from 'graphology-layout-forceatlas2'
-import { neighbourhood, positionsOf, toGraphology, type Drawn, type EdgeAttributes, type Hover, type NodeAttributes, type Palette, type Shown } from './graph-data'
+import { neighbourhood, positionsOf, toGraphology, type Drawn, type Hover, type Palette, type Shown } from './graph-data'
 
 /**
  * The renderer over the page's graph, and the layout that settles it. In its own module,
@@ -30,38 +29,64 @@ const CARD_WIDTH = 340
 
 export function mountGraph(container: HTMLElement, graph: Drawn, palette: Palette, on: Handlers): Canvas {
   let current: Hover | null = null
-  const renderer = new Sigma<NodeAttributes, EdgeAttributes>(graph, container, {
-    defaultNodeType: 'border',
-    nodeProgramClasses: {
-      border: createNodeBorderProgram({ borders: [{ size: { value: 0.18, mode: 'relative' }, color: { attribute: 'borderColor' } }, { size: { fill: true }, color: { attribute: 'color' } }] }),
+  const renderer = new Sigma(graph, container, {
+    primitives: {
+      nodes: {
+        // The border layer reads `borderColor` from the styled node, not the graph, so the
+        // fade below can recolour it.
+        variables: { borderColor: { type: 'color', default: palette.ink } },
+        layers: [layerBorder({ borders: [{ size: 0.18, mode: 'relative', color: { attribute: 'borderColor' } }, { size: 0, fill: true, color: { attribute: 'color' } }] })],
+        label: { font: { family: 'Inter Variable, sans-serif', weight: '500', size: 12 } },
+      },
     },
-    // The hover card is the page's; sigma draws only the label under the pointer.
-    defaultDrawNodeHover: (context, data, settings) => drawDiscNodeLabel(context, data, settings),
-    enableEdgeEvents: true,
-    labelFont: 'Inter Variable, sans-serif',
-    labelSize: 12,
-    labelWeight: '500',
-    labelColor: { color: palette.ink },
-    labelRenderedSizeThreshold: 7,
-    labelDensity: 0.4,
-    zIndex: true,
-    minCameraRatio: 0.03,
-    maxCameraRatio: 4,
-    // Under the pointer, a node and its neighbours keep their colour and the rest fade.
-    nodeReducer: (node, data) => {
-      if (!current) return data
-      if (current.lit.has(node)) return { ...data, zIndex: 2, highlighted: node === current.node }
-      return { ...data, color: palette.track, borderColor: palette.track, label: '', zIndex: 0 }
+    // What the pointer lights, held as state rather than written into the graph.
+    customNodeState: { isLit: false, isCurrent: false },
+    customEdgeState: { isLit: false },
+    customGraphState: { hasLit: false },
+    styles: {
+      nodes: [
+        DEFAULT_STYLES.nodes,
+        {
+          borderColor: { attribute: 'borderColor' },
+          labelColor: palette.ink,
+          // The hover card is the page's; sigma draws only the label of the node it is about.
+          labelVisibility: (node, state) => state.isHovered || state.isCurrent || node.forceLabel ? 'visible' : 'auto',
+          backdropVisibility: { whenState: ['isHovered', 'isCurrent'], then: 'visible', else: 'hidden' },
+          backdropColor: palette.paper,
+        },
+        // Under the pointer, a node and its neighbours keep their colour and the rest fade.
+        { when: (_node, state, graphState) => graphState.hasLit && !state.isLit, then: { color: palette.track, borderColor: palette.track, labelVisibility: 'hidden' } },
+        { whenState: 'isLit', then: { depth: 'topNodes' } },
+      ],
+      edges: [
+        DEFAULT_STYLES.edges,
+        { when: (_edge, _state, graphState) => graphState.hasLit, then: { color: palette.track } },
+        { whenState: 'isLit', then: { color: palette.strong, depth: 'topEdges' } },
+      ],
     },
-    edgeReducer: (edge, data) => {
-      if (!current) return data
-      const lit = current.edge === edge || (current.node !== undefined && graph.extremities(edge).includes(current.node))
-      return lit ? { ...data, color: palette.strong, zIndex: 1 } : { ...data, color: palette.track, zIndex: 0 }
+    settings: {
+      enableEdgeEvents: true,
+      // Sizes are in pixels, as they were before sigma 4 made graph units the default.
+      itemSizesReference: 'screen',
+      labelRenderedSizeThreshold: 7,
+      labelDensity: 0.4,
+      minCameraRatio: 0.03,
+      maxCameraRatio: 4,
     },
   })
 
+  // The nodes and edges the last light set, so the next one can put them out.
+  let litNodes: string[] = []
+  let litEdges: string[] = []
   const light = (next: Hover | null) => {
+    for (const node of litNodes) renderer.setNodeState(node, { isLit: false, isCurrent: false })
+    for (const edge of litEdges) renderer.setEdgeState(edge, { isLit: false })
     current = next && { ...next, flip: next.x > renderer.getDimensions().width - CARD_WIDTH }
+    litNodes = current ? [...current.lit] : []
+    litEdges = !current ? [] : current.edge ? [current.edge] : current.node ? graph.edges(current.node) : []
+    for (const node of litNodes) renderer.setNodeState(node, { isLit: true, isCurrent: node === current?.node })
+    for (const edge of litEdges) renderer.setEdgeState(edge, { isLit: true })
+    renderer.setGraphState({ hasLit: current !== null })
     on.hover(current)
     renderer.refresh({ skipIndexation: true })
   }

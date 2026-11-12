@@ -49,8 +49,6 @@ export type NodeAttributes = {
   color: string
   borderColor: string
   label: string
-  /** The node-border program draws every node; see `graph.tsx`. */
-  type: 'border'
   /** Everything is labelled but a host, which earns its label by size. */
   forceLabel: boolean
   node: DrawnNode
@@ -147,7 +145,7 @@ export function toGraphology(view: Shown, palette: Palette, kept: Map<string, { 
       const reach = 0.2 + 0.5 * hashOf(`${node.id}:r`)
       position = { x: centre.x * 1.3 + Math.cos(spin) * reach, y: centre.y * 1.3 + Math.sin(spin) * reach }
     }
-    graph.addNode(node.id, { ...position, ...paintOf(node, palette), size: sizeOf(node), label: labelOf(node), type: 'border', forceLabel: node.kind !== 'host', node })
+    graph.addNode(node.id, { ...position, ...paintOf(node, palette), size: sizeOf(node), label: labelOf(node), forceLabel: node.kind !== 'host', node })
   }
   for (const edge of view.edges) {
     if (!graph.hasNode(edge.from) || !graph.hasNode(edge.to) || graph.hasEdge(edge.from, edge.to)) continue
