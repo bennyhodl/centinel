@@ -615,19 +615,19 @@ pub async fn run(
         report.new_documents += source_run.new_documents();
         report.sources.push(source_run);
     }
-    let mut done = (built.len() * 2) as u64;
 
     // ── derive, once ──────────────────────────────────────────────────────────
     //
     // Scoped to the named sources when the caller named some, and to the whole store
     // otherwise. `embed` has no source axis at all — the vector table is keyed by chunk
     // hash, which is corpus-wide by construction.
-    for stage in derive_stages {
+    //
+    // The aggregate track counts on from the two acquisition stages of every source.
+    for (done, stage) in ((built.len() * 2) as u64..).zip(derive_stages) {
         cancel.check()?;
 
         progress.track(TOTAL_TRACK, stage.name(), done, total, Unit::Count);
         progress.say(stage.name());
-        done += 1;
 
         let outcome = if skip(stage) {
             StageRun::skipped(stage, "--skip")
