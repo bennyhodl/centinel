@@ -7,7 +7,11 @@ import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure
 import { createIdentity } from './auth'
 import { createHash, randomBytes } from 'node:crypto'
 import { serve } from '@hono/node-server'
+import { brotliCompressSync } from 'node:zlib'
 import { createGateway } from './gateway'
+
+const script = 'console.log("centinel")'
+const kept = 'public, max-age=31536000, immutable'
 
 const root = mkdtempSync(join(tmpdir(), 'centinel-auth-'))
 let gateway: Awaited<ReturnType<typeof createGateway>>
@@ -20,7 +24,12 @@ beforeAll(async () => {
     expect(request.headers.get('x-centinel-secret')).toBe('private-test-credential')
     expect(request.headers.get('x-centinel-role')).toBe('user')
     forwarded++
-    if (new URL(request.url).pathname.startsWith('/workspace/icons/')) return new Response('icon', { headers: { 'content-type': 'image/png', 'cache-control': 'private, max-age=604800' } })
+    const { pathname } = new URL(request.url)
+    if (pathname.startsWith('/workspace/icons/')) return new Response('icon', { headers: { 'content-type': 'image/png', 'cache-control': 'private, max-age=604800' } })
+    // The page's assets as the backend holds them: a script, and the brotli copy the build left beside it.
+    if (pathname === '/web/assets/app.js') return new Response(script, { headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': kept } })
+    if (pathname === '/web/assets/app.js.br') return new Response(brotliCompressSync(script), { headers: { 'content-type': 'application/octet-stream', 'cache-control': kept } })
+    if (pathname.startsWith('/web/assets/')) return new Response(null, { status: 404 })
     return Response.json({ result: 'corpus result' })
   } })
   server = serve({ hostname: '127.0.0.1', port: 0, fetch: async request => await gateway.handle(request) ?? new Response('page') })
@@ -137,3 +146,16 @@ test('signup approval, OAuth MCP access, and revocation share current account pe
   expect((await (await request('/api/account', undefined, nostrCookie)).json()).account).toMatchObject({ role: 'user', access: 'pending' })
   expect((await request('/api/auth/nostr/login', body, undefined, { authorization: authorizationHeader })).status).toBe(401)
 }, 30_000)
+
+test('a script goes out as the brotli copy the build made, to a browser that takes brotli', async () => {
+  const packed = await request('/web/assets/app.js', undefined, undefined, { 'accept-encoding': 'gzip, deflate, br' })
+  expect(packed.headers.get('content-encoding')).toBe('br')
+  expect(packed.headers.get('content-type')).toBe('text/javascript; charset=utf-8')
+  expect(packed.headers.get('cache-control')).toBe(kept)
+  expect(await packed.text()).toBe(script)
+  const plain = await request('/web/assets/app.js', undefined, undefined, { 'accept-encoding': 'identity' })
+  expect(plain.headers.get('content-encoding')).toBeNull()
+  expect(await plain.text()).toBe(script)
+  // An asset the build left no copy of, a font or an image, is sent as it is.
+  expect((await request('/web/assets/missing.css', undefined, undefined, { 'accept-encoding': 'br' })).status).toBe(404)
+})

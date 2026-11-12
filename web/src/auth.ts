@@ -1,28 +1,32 @@
-import { createAuthClient } from 'better-auth/react'
-import { nostrClient } from 'better-auth-nostr/client'
-
 /**
  * Signing in and out. The gateway in front of the API runs Better Auth; this is its browser
  * side. Who is signed in is read through `queries.account()`, like everything else.
+ *
+ * The client loads on first use. Only a sign-in or a sign-out needs it and its Nostr
+ * signing, so no page waits for either.
  */
-const client = createAuthClient({ plugins: [nostrClient()] })
+const load = () => Promise.all([import('better-auth/react'), import('better-auth-nostr/client')])
+  .then(([{ createAuthClient }, { nostrClient }]) => createAuthClient({ plugins: [nostrClient()] }))
+let loading: ReturnType<typeof load> | undefined
+const client = () => loading ??= load()
 
+type Client = Awaited<ReturnType<typeof load>>
 type Credentials = { email: string; password: string }
 
 /** Better Auth answers `{ data, error }`. The pages want a thrown error or nothing. */
-async function settle(call: Promise<{ error: { message?: string } | null }>, fallback: string) {
-  const { error } = await call
+async function settle(call: (client: Client) => Promise<{ error: { message?: string } | null }>, fallback: string) {
+  const { error } = await call(await client())
   if (error) throw new Error(error.message || fallback)
 }
 
-export const signIn = (credentials: Credentials) => settle(client.signIn.email(credentials), 'Sign-in failed')
-export const signUp = (credentials: Credentials & { name: string }) => settle(client.signUp.email(credentials), 'The account could not be created')
+export const signIn = (credentials: Credentials) => settle(auth => auth.signIn.email(credentials), 'Sign-in failed')
+export const signUp = (credentials: Credentials & { name: string }) => settle(auth => auth.signUp.email(credentials), 'The account could not be created')
 /** Signs with the browser's Nostr extension. The key never leaves it. */
-export const signInWithNostr = () => settle(client.signIn.nostr(), 'Nostr sign-in failed. Install a Nostr signer extension and try again.')
+export const signInWithNostr = () => settle(auth => auth.signIn.nostr(), 'Nostr sign-in failed. Install a Nostr signer extension and try again.')
 
 /** Ends the session and reloads from the sign-in page, so nothing read for this account stays cached. */
 export async function signOut() {
-  await client.signOut()
+  await (await client()).signOut()
   window.location.assign('/web/login')
 }
 

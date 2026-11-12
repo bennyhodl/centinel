@@ -1,10 +1,11 @@
 import React from 'react'
 import { Link } from '@tanstack/react-router'
 import { ChevronLeft, CircleHelp } from 'lucide-react'
-import { nip19 } from 'nostr-tools'
+import { npubEncode } from 'nostr-tools/nip19'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { Account, DocumentIdentity } from './api'
 import { decisionLabels, type Decision } from './policy'
 
@@ -37,7 +38,6 @@ export function SectionRule({ children, aside }: { children: React.ReactNode; as
   </div>
 }
 
-/** The first seven characters of a hash: what Centinel prints, and takes back. */
 /** An account's picture, else the first letter of its name. The caller sets the size. */
 export function Portrait({ account, className }: { account: Pick<Account, 'name' | 'image'>; className: string }) {
   if (account.image) return <img src={account.image} alt="" className={`shrink-0 rounded-full border object-cover ${className}`} />
@@ -45,13 +45,27 @@ export function Portrait({ account, className }: { account: Pick<Account, 'name'
 }
 
 /** How an account is told apart: its npub when it signed in with Nostr, else its email. */
-export const handle = (account: Pick<Account, 'email' | 'publicKey'>) => account.publicKey ? nip19.npubEncode(account.publicKey) : account.email
+export const handle = (account: Pick<Account, 'email' | 'publicKey'>) => account.publicKey ? npubEncode(account.publicKey) : account.email
 
+/** The first seven characters of a hash: what Centinel prints, and takes back. */
 export const shortSha = (sha: string) => sha.slice(0, 7)
+
 /** The way back to the Sources list, from a source or an investigation. */
 export function BackToSources() {
   return <Link to="/sources" className="mb-4 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground"><ChevronLeft className="size-3.5" />All sources</Link>
 }
+/**
+ * A button that is only its icon. What it does is said on hover and to a screen reader,
+ * never written on it. The hover works on a disabled one too, which is where a button
+ * says why it cannot be pressed.
+ */
+export function IconButton({ label, children, ...props }: { label: string } & React.ComponentProps<typeof Button>) {
+  return <Tooltip>
+    <TooltipTrigger asChild><span className="inline-flex"><Button size="icon" aria-label={label} {...props}>{children}</Button></span></TooltipTrigger>
+    <TooltipContent>{label}</TooltipContent>
+  </Tooltip>
+}
+
 export function ErrorBox({ error }: { error: Error }) { return <Alert variant="destructive" className="my-3"><AlertDescription>{error.message}</AlertDescription></Alert> }
 export function Empty({ children }: { children: React.ReactNode }) { return <div className="grid place-items-center gap-3 p-12 text-center text-sm text-muted-foreground [&_svg]:size-6"><CircleHelp /><p>{children}</p></div> }
 

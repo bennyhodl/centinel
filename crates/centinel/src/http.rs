@@ -140,17 +140,7 @@ fn asset(route: &str) -> Option<(&'static str, &'static [u8])> {
 /// built from source this always equals `CARGO_PKG_VERSION`. A release download cannot
 /// rebuild the bundle, so [`crate::web::check_bundle`] only checks it, early.
 pub fn web_version() -> Option<String> {
-    stamped_version(std::str::from_utf8(asset("/web")?.1).ok()?)
-}
-
-/// The `centinel-version` meta tag in a page, as the Start root route writes it.
-pub fn stamped_version(html: &str) -> Option<String> {
-    let start = html.find("name=\"centinel-version\"")?;
-    let rest = &html[start..];
-    let content = rest.find("content=\"")? + "content=\"".len();
-    let rest = &rest[content..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+    crate::bundle::stamped_version(std::str::from_utf8(asset("/web")?.1).ok()?)
 }
 
 /// The tailnet origin `serve --tailscale` published, e.g. `https://host.tailnet.ts.net`.
@@ -321,16 +311,30 @@ async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) 
 /// so nothing here learns a route by name — the UI calls `/ops/read` and `/ops/search`
 /// the same way the CLI does.
 async fn web_ui() -> Response {
-    asset_response("/web")
+    use axum::http::header;
+    match asset("/web") {
+        Some((mime, bytes)) => ([(header::CONTENT_TYPE, mime)], bytes).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
+/// A script, stylesheet, font or image of the page. Vite names each by a hash of its
+/// content, so a name never changes what it holds and a browser keeps it for good: a
+/// second visit fetches the shell and nothing else. The gateway serves the `.br` copy the
+/// build left beside a script or stylesheet under the plain name, so a cache between here
+/// and the browser has to key on the encoding.
 async fn web_asset(Path(path): Path<String>) -> Response {
-    asset_response(&format!("/web/assets/{path}"))
-}
-
-fn asset_response(route: &str) -> Response {
-    match asset(route) {
-        Some((mime, bytes)) => ([(axum::http::header::CONTENT_TYPE, mime)], bytes).into_response(),
+    use axum::http::header;
+    match asset(&format!("/web/assets/{path}")) {
+        Some((mime, bytes)) => (
+            [
+                (header::CONTENT_TYPE, mime),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+                (header::VARY, "accept-encoding"),
+            ],
+            bytes,
+        )
+            .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -339,7 +343,7 @@ async fn workspace_documents(
     State(ctx): State<Arc<Ctx>>,
     Query(query): Query<DocumentQuery>,
 ) -> Response {
-    workspace_response(Workspace::new(&ctx.store).documents(query))
+    workspace_read(ctx, move |workspace| workspace.documents(query)).await
 }
 
 async fn workspace_document(
@@ -456,7 +460,7 @@ async fn workspace_review_queue(
     State(ctx): State<Arc<Ctx>>,
     Query(query): Query<ReviewQuery>,
 ) -> Response {
-    workspace_response(Workspace::new(&ctx.store).review_queue(query))
+    workspace_read(ctx, move |workspace| workspace.review_queue(query)).await
 }
 
 /// A person's verdicts on one document. A write: it can restore or exclude the document
@@ -471,7 +475,7 @@ async fn workspace_review(State(ctx): State<Arc<Ctx>>, Json(review): Json<Review
 }
 
 async fn workspace_evaluation(State(ctx): State<Arc<Ctx>>) -> Response {
-    workspace_response(Workspace::new(&ctx.store).evaluation())
+    workspace_read(ctx, |workspace| workspace.evaluation()).await
 }
 
 #[derive(serde::Deserialize)]
@@ -520,7 +524,7 @@ async fn workspace_save_questions(
 }
 
 async fn workspace_runs(State(ctx): State<Arc<Ctx>>, Query(query): Query<RunQuery>) -> Response {
-    workspace_response(Workspace::new(&ctx.store).runs(query))
+    workspace_read(ctx, move |workspace| workspace.runs(query)).await
 }
 
 async fn workspace_run_detail(
@@ -528,7 +532,7 @@ async fn workspace_run_detail(
     Path(id): Path<String>,
     Query(query): Query<RunDetailQuery>,
 ) -> Response {
-    workspace_response(Workspace::new(&ctx.store).run_detail(&id, query))
+    workspace_read(ctx, move |workspace| workspace.run_detail(&id, query)).await
 }
 
 async fn workspace_run(State(ctx): State<Arc<Ctx>>, Json(request): Json<RunRequest>) -> Response {
@@ -713,6 +717,25 @@ async fn workspace_restore(
         Ok(report) => workspace.sync_vectors().await.map(|_| report),
         Err(error) => Err(error),
     })
+}
+
+/// Answers with a read of the workspace's index, made on the blocking pool.
+///
+/// These reads are synchronous SQLite, and a search over a large corpus can run for many
+/// seconds. On a request worker it would hold that worker the whole time, and a machine
+/// has as many of those as cores: two slow searches on a small server and every other
+/// request waits behind them, the job stream and the page's own polls included.
+async fn workspace_read<T>(
+    ctx: Arc<Ctx>,
+    read: impl FnOnce(Workspace<'_>) -> anyhow::Result<T> + Send + 'static,
+) -> Response
+where
+    T: serde::Serialize + Send + 'static,
+{
+    match tokio::task::spawn_blocking(move || read(Workspace::new(&ctx.store))).await {
+        Ok(result) => workspace_response(result),
+        Err(stopped) => workspace_error(anyhow::anyhow!("the read did not finish: {stopped}")),
+    }
 }
 
 fn workspace_response<T: serde::Serialize>(result: anyhow::Result<T>) -> Response {
@@ -1184,6 +1207,13 @@ mod tests {
             .unwrap();
         assert_eq!(asset.status(), StatusCode::OK, "{}", &shell[start..end]);
         assert_ne!(asset.headers()["content-type"], "text/html; charset=utf-8");
+        assert!(
+            asset.headers()["cache-control"]
+                .to_str()
+                .unwrap()
+                .contains("immutable"),
+            "an asset is named by its content, so a browser keeps it"
+        );
         for path in ["/web/", "/web/classifiers", "/web/runs", "/web/review"] {
             assert_eq!(
                 app.clone()

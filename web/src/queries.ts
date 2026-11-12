@@ -1,5 +1,5 @@
 import { keepPreviousData, queryOptions, skipToken } from '@tanstack/react-query'
-import { api, corpusParams, type CollectionHistoryFilters, type CorpusFilters, type DocumentIdentity, type GraphFilter, type JobState, type RolodexFilter, type RunDetailQuery } from './api'
+import { api, corpusParams, type CollectionHistoryFilters, type CorpusFilters, type DocumentIdentity, type GraphFilter, type JobState, type ResultOutcome, type RolodexFilter, type RunDetailQuery } from './api'
 
 /**
  * Every read the workspace makes, one builder each. A route's loader warms the cache
@@ -133,5 +133,8 @@ export const queries = {
     staleTime: Infinity,
   }),
 }
+
+/** The view a run's page opens on: its first hundred results under an outcome, by decision. */
+export const startView = (outcome: string): RunDetailQuery => ({ page: 1, page_size: 100, outcome: outcome as ResultOutcome, sort: 'decision', direction: '' })
 
 const noFilters: CorpusFilters = { search: '', address: '', source: '', usage: 'all', classifier: '', min_score: '', max_score: '' }

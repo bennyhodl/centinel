@@ -27,6 +27,16 @@ export const Route = createFileRoute('/_workspace')({
     if (account?.access !== 'approved') throw redirect({ to: '/login' })
     return { account }
   },
+  // What the rail counts is read beside the page's own data, not once the shell has drawn.
+  loader: ({ context: { queryClient, account } }) => {
+    void queryClient.prefetchQuery(queries.system())
+    void queryClient.prefetchQuery(queries.corpus({}, 1, 1))
+    void queryClient.prefetchQuery(queries.questions())
+    if (account.role !== 'admin') return
+    void queryClient.prefetchQuery(queries.sources())
+    void queryClient.prefetchQuery(queries.reviewQueue(1))
+    void queryClient.prefetchQuery(queries.runs(1, 10))
+  },
   pendingComponent: WorkspacePending,
   component: Workspace,
 })

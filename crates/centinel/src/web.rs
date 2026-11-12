@@ -29,8 +29,9 @@ use centinel_core::op::Ctx;
 /// is refused before a browser opens.
 pub async fn open(ctx: Arc<Ctx>, bind: &str, rebuilt: bool, config: Option<&str>) -> Result<()> {
     check_bundle()?;
+    // With the slash: the page lives at `/web/`, and `/web` only redirects there.
     let url = format!(
-        "{}/web",
+        "{}/web/",
         crate::http::public_url().unwrap_or_else(|| format!("http://{bind}"))
     );
     let system_url = format!("http://{bind}/health");
@@ -72,7 +73,7 @@ pub async fn open(ctx: Arc<Ctx>, bind: &str, rebuilt: bool, config: Option<&str>
         tracing::info!(url = %format!("http://{bind}"), "already serving; opening the browser");
         let url = body["public_url"]
             .as_str()
-            .map(|origin| format!("{origin}/web"))
+            .map(|origin| format!("{origin}/web/"))
             .unwrap_or(url);
         open_browser(url).await;
         return Ok(());
@@ -156,7 +157,7 @@ pub fn rebuild_bundle() -> Result<()> {
         .iter()
         .find(|file| file.0 == "/web")
         .with_context(|| format!("{} has no index.html", dist.display()))?;
-    let stamped = super::http::stamped_version(std::str::from_utf8(&page.2).unwrap_or(""));
+    let stamped = crate::bundle::stamped_version(std::str::from_utf8(&page.2).unwrap_or(""));
     match stamped.as_deref() {
         Some(stamped) if stamped == version => {}
         Some(stamped) => bail!(
@@ -189,13 +190,13 @@ pub async fn open_remote(server: &str, _bind: &str) -> Result<()> {
         .json()
         .await?;
     anyhow::ensure!(health["product"] == "centinel", "not a Centinel server");
-    open_browser(format!("{origin}/web")).await;
+    open_browser(format!("{origin}/web/")).await;
     Ok(())
 }
 
 fn spawn_browser(url: String) {
     tokio::spawn(async move {
-        let health = url.trim_end_matches("/web").to_string() + "/health";
+        let health = url.trim_end_matches("/web/").to_string() + "/health";
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(1))
             .build()

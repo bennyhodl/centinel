@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { queries } from '../../../queries'
-import { Review, REVIEW_QUEUE, ReviewSkeleton } from '../../../review'
+import { Review, ReviewSkeleton } from '../../../review'
+import { REVIEW_QUEUE } from '../../../review-logic'
 
 export const Route = createFileRoute('/_workspace/_admin/review')({
   loader: ({ context: { queryClient } }) => {

@@ -1,13 +1,12 @@
 import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link, createFileRoute, type SearchSchemaInput } from '@tanstack/react-router'
+import { Link, createFileRoute, stripSearchParams, type SearchSchemaInput } from '@tanstack/react-router'
 import { ArrowUp, ChevronDown, ChevronLeft, ChevronRight, X } from 'lucide-react'
 import type { CorpusFacets, CorpusFilters, Document, Question } from '../../api'
-import { classifierOptions } from '../../classify'
 import { Candle, useElapsed, useShownInPlace } from '../../feedback'
 import { characters, compact, number, tail } from '../../format'
 import { SourceIcon } from '../../host-icon'
-import { classificationBadges, hasScores } from '../../policy'
+import { classificationBadges, classifierOptions, hasScores } from '../../policy'
 import { queries } from '../../queries'
 import { DocumentLink, documentTransition, Empty, ErrorBox, shortSha } from '../../ui'
 import { Button } from '@/components/ui/button'
@@ -15,14 +14,17 @@ import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Skeleton } from '@/components/ui/skeleton'
 
+/** Nothing asked. Every param has this default, so a link may name none and the address carries only what differs. */
+const cleared = { text: '', address: '', page: 1, source: '', usage: 'all', classifier: '', minScore: '0.5', maxScore: '' }
+
 export const Route = createFileRoute('/_workspace/')({
-  // Every param has a default, so a link may name none of them.
   validateSearch: (search: Record<string, unknown> & SearchSchemaInput) => ({
-    text: String(search.text || ''), address: String(search.address || ''),
-    page: Math.max(1, Number(search.page || 1)), source: String(search.source || ''),
-    usage: String(search.usage || 'all'), classifier: String(search.classifier || ''),
-    minScore: String(search.minScore || '0.5'), maxScore: String(search.maxScore || ''),
+    text: String(search.text || cleared.text), address: String(search.address || cleared.address),
+    page: Math.max(1, Number(search.page || cleared.page)), source: String(search.source || cleared.source),
+    usage: String(search.usage || cleared.usage), classifier: String(search.classifier || cleared.classifier),
+    minScore: String(search.minScore || cleared.minScore), maxScore: String(search.maxScore || cleared.maxScore),
   }),
+  search: { middlewares: [stripSearchParams(cleared)] },
   loaderDeps: ({ search }) => search,
   // A search can take half a minute, so the page never waits on one: the box stays, and
   // the results wait in place. Only the opening counts are worth holding the page for.
@@ -45,7 +47,6 @@ const asking = (search: Search) => Boolean(search.text || search.address || sear
 /** The whole corpus in one row: its counts and facets, for the opening page and the filters. */
 const everything = queries.corpus({}, 1, 1)
 const sourcesIn = (value: string) => value.split(',').map(source => source.trim()).filter(Boolean)
-const cleared: Search = { text: '', address: '', page: 1, source: '', usage: 'all', classifier: '', minScore: '0.5', maxScore: '' }
 
 /** One colour per kind of filter, so a chip says what it narrows by. */
 const tone = {

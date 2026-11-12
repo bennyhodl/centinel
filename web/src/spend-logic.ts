@@ -10,6 +10,13 @@ export type Metric = 'cost' | 'tokens'
 export const WINDOWS = [1, 7, 30, 90] as const
 export type WindowDays = (typeof WINDOWS)[number]
 
+/** What the page's address carries. Anything else in it falls back to cost over 30 days. */
+export type SpendSearch = { metric: Metric; days: WindowDays }
+export const spendSearch = (search: Record<string, unknown>): SpendSearch => ({
+  metric: search.metric === 'tokens' ? 'tokens' : 'cost',
+  days: WINDOWS.find(days => days === Number(search.days)) ?? 30,
+})
+
 export type Window = {
   /** RFC 3339, what the server reads from. */
   since: string

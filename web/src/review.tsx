@@ -8,11 +8,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
 import { characters, number, plural, tail } from './format'
 import { isChoice } from './policy'
-import { type Answers, buildReview, decidingScore, modelAnswers, swipe, unsure } from './review-logic'
+import { type Answers, buildReview, decidingScore, modelAnswers, REVIEW_QUEUE, swipe, unsure } from './review-logic'
 import { DocumentLink, Empty, ErrorBox, PageHeader, SectionRule, shortSha, Spinner } from './ui'
-
-/** How many cards Review takes at once. The route's loader warms the same page. */
-export const REVIEW_QUEUE = 20
 
 const detail = 'See how the model read a document, and say where it is wrong.'
 

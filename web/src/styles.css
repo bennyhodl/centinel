@@ -3,7 +3,7 @@
 @import "shadcn/tailwind.css";
 /* Here, not imported from tree.tsx: the page links only this stylesheet. */
 @import "@xyflow/react/dist/style.css";
-/* Latin only: every font is inlined into the stylesheet the binary embeds. */
+/* Latin only: the binary embeds every font file the stylesheet names. */
 @import "@fontsource/im-fell-english/latin-400.css";
 @import "@fontsource/im-fell-english/latin-400-italic.css";
 @import "@fontsource/im-fell-english-sc/latin-400.css";

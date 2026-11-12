@@ -1,4 +1,4 @@
-import { createFileRoute, type SearchSchemaInput } from '@tanstack/react-router'
+import { createFileRoute, stripSearchParams, type SearchSchemaInput } from '@tanstack/react-router'
 import type { RolodexFilter } from '../../api'
 import { queries } from '../../queries'
 import { RolodexPage, RolodexSkeleton } from '../../rolodex'
@@ -9,6 +9,7 @@ export const Route = createFileRoute('/_workspace/rolodex/')({
     name: typeof search.name === 'string' ? search.name : '',
     source: typeof search.source === 'string' ? search.source : '',
   }),
+  search: { middlewares: [stripSearchParams({ name: '', source: '' })] },
   loaderDeps: ({ search }) => search,
   loader: ({ context: { queryClient }, deps }) => queryClient.ensureQueryData(queries.rolodex(deps)),
   pendingComponent: RolodexSkeleton,

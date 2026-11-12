@@ -28,7 +28,17 @@ const apiProxy = (): ProxyOptions => ({
 })
 
 export default defineConfig({
-  plugins: [tailwindcss(), tanstackStart({ srcDirectory: 'web/src', router: { basepath: '/web' }, spa: { enabled: true, prerender: { outputPath: '/index.html' } } }), react({ babel: { plugins: ['babel-plugin-react-compiler'] } })],
+  plugins: [
+    tailwindcss(),
+    tanstackStart({
+      srcDirectory: 'web/src',
+      // A page and its skeleton load as one chunk. Most skeletons are exported beside
+      // their page, so splitting the page alone would keep every page in the entry.
+      router: { basepath: '/web', codeSplittingOptions: { defaultBehavior: [['component', 'pendingComponent'], ['errorComponent'], ['notFoundComponent']] } },
+      spa: { enabled: true, prerender: { outputPath: '/index.html' } },
+    }),
+    react({ babel: { plugins: ['babel-plugin-react-compiler'] } }),
+  ],
   define: { __CENTINEL_VERSION__: JSON.stringify(version) },
   base: '/web/',
   resolve: {
@@ -43,10 +53,13 @@ export default defineConfig({
       '/mcp': apiProxy(),
     },
   },
-  environments: { client: { build: { cssCodeSplit: false, rollupOptions: { output: { inlineDynamicImports: true } } } } },
+  // One stylesheet, linked by the shell, so no page waits on a second one. Scripts split
+  // by route and fonts and images stay files: each is fetched once and kept by its hash.
+  // An icon two pages share would otherwise be a request of its own; anything this small
+  // rides with a chunk that needs it.
+  environments: { client: { build: { cssCodeSplit: false, rollupOptions: { output: { experimentalMinChunkSize: 10_000 } } } } },
   build: {
     outDir: '.start',
     emptyOutDir: true,
-    assetsInlineLimit: 100_000_000
   },
 })

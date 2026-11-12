@@ -48,7 +48,7 @@ fn main() {
         );
     }
     let html = fs::read_to_string(&index).unwrap();
-    match stamped_version(&html) {
+    match bundle::stamped_version(&html) {
         Some(stamped) if stamped == version => {}
         Some(stamped) => panic!(
             "web-dist/index.html is stamped v{stamped} but Centinel is v{version}; \
@@ -108,16 +108,6 @@ fn run(root: &Path, program: &str, args: &[&str], version: &str) {
 
 fn warn(line: &str) {
     println!("cargo:warning=web: {line}");
-}
-
-/// The version the Start root route stamped into the page head.
-fn stamped_version(html: &str) -> Option<String> {
-    let start = html.find("name=\"centinel-version\"")?;
-    let rest = &html[start..];
-    let content = rest.find("content=\"")? + "content=\"".len();
-    let rest = &rest[content..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
 }
 
 fn modified(path: &Path) -> Option<std::time::SystemTime> {
