@@ -35,11 +35,11 @@ use html::{html_marked, html_readability, html_whole_page};
 /// Manually synced with `Cargo.toml` — a wart, but a deliberate one: deriving them at
 /// build time needs a build script, and being wrong here only costs an unnecessary
 /// re-extraction, never a wrong answer.
-const HTMD_VERSION: &str = "0.5.5";
-const DOM_SMOOTHIE_VERSION: &str = "0.18.0";
-const PDF_INSPECTOR_VERSION: &str = "0.1.7";
+const HTMD_VERSION: &str = "0.5.6";
+const DOM_SMOOTHIE_VERSION: &str = "0.19.0";
+const PDF_INSPECTOR_VERSION: &str = "1.25.2";
 const CALAMINE_VERSION: &str = "0.36.1";
-const ANYDOC_VERSION: &str = "0.1.3";
+const ANYDOC_VERSION: &str = "0.2.4";
 
 /// Text derived from a blob, with the provenance needed to explain it later.
 #[derive(Clone, Debug, Serialize, Deserialize)]

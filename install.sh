@@ -38,7 +38,7 @@
 set -eu
 
 # The workspace `rust-version`. LanceDB sets it; see the root Cargo.toml.
-MSRV="1.91"
+MSRV="1.94"
 
 PKG_MAIN="centinel"
 
@@ -203,9 +203,9 @@ esac
 
 # ---------------------------------------------------------------- package manager
 
-# Only ever names a manager that is actually installed here. `doctor` leaves the fix for
-# ffmpeg and yt-dlp empty on purpose — a guessed `brew install` is wrong on most machines —
-# and a detected manager is not a guess.
+# Only ever names a manager that is actually installed here: a guessed `brew install` is
+# wrong on most machines, and a detected manager is not a guess. `doctor` finds one the same
+# way, in the same order, before it names a fix.
 PM=""
 PM_INSTALL=""
 if   have brew;    then PM=brew;   PM_INSTALL="brew install"

@@ -11,8 +11,10 @@
 //! **How much.** Info on every surface, with no flag. Info is what a person watching
 //! wants to see — this source, this page, this batch, done — and it is the same lines
 //! whether they are watching a terminal, a scheduled run's journal, or an MCP client's
-//! captured stderr. `-v` adds the internals (which calls were made, how big, how long,
-//! which device) and `-q` keeps only warnings. `RUST_LOG` beats all three, because it is
+//! captured stderr. The one exception is the line each call starts and ends with: a quick
+//! command at a terminal prints its result, and bracketing it says nothing the result does
+//! not, so there those two are debug. `-v` adds the internals (which calls were made, how
+//! big, how long, which device) and `-q` keeps only warnings. `RUST_LOG` beats all three, because it is
 //! the only way to name a single module or a vendored library.
 //!
 //! **What one call looks like.** [`invoke`] is this crate's only call site of
@@ -122,10 +124,18 @@ pub async fn invoke_as(
     // own field rather than its name so `op{run cli}` reads as one thing across a run
     // that nests stages under it.
     let span = tracing::info_span!("op", name = def.name, surface);
+    // A journal is read for when each call started and ended, and so is a long run at a
+    // terminal. A quick command at a terminal prints its own result; a line before it and
+    // a line after it only push the result down the screen, so they go to `-v`.
+    let bracket = surface != "cli" || def.long_running;
     async move {
         let progress = progress.unwrap_or_else(Progress::logged);
 
-        tracing::info!(args = %one_line(&args), "started");
+        if bracket {
+            tracing::info!(args = %one_line(&args), "started");
+        } else {
+            tracing::debug!(args = %one_line(&args), "started");
+        }
         let started = Instant::now();
 
         let progress = match &job {
@@ -140,7 +150,8 @@ pub async fn invoke_as(
 
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match &result {
-            Ok(_) => tracing::info!(elapsed_ms, "finished"),
+            Ok(_) if bracket => tracing::info!(elapsed_ms, "finished"),
+            Ok(_) => tracing::debug!(elapsed_ms, "finished"),
             Err(e) => tracing::warn!(elapsed_ms, error = %format!("{e:#}"), "failed"),
         }
         result

@@ -84,19 +84,35 @@ predictable rather than surprising: YouTube changes something and it ships relea
 emergency clusters. `doctor` warns once yours is past ninety days. A channel source with a
 stale `yt-dlp` does not degrade — it stops.
 
+Poppler's tools, `pdftotext` and `pdftoppm`, have a **minimum version**, 22.02. Below it a
+binary counts as missing. When something is missing or old, the line under its row is the
+command that fixes it, written for the package manager this host has:
+
+```
+binaries
+  ✗  yt-dlp     missing  YouTube acquisition
+     sudo apt-get install -y yt-dlp
+  !  pdftotext  0.86.1   second reader for PDFs the primary makes nothing of
+     0.86.1 is older than 22.02, the oldest this needs
+     sudo apt-get update && sudo apt-get install --only-upgrade -y poppler-utils
+```
+
+`doctor` looks for `brew`, `apt-get`, `dnf`, `pacman`, `zypper` and `apk`, in that order,
+the same as the installer. With none of them it names no command rather than guess one.
+
 ---
 
 ## `inference` — which servers are answering
 
 Centinel runs no model itself; each capability is a server the `[inference]` block names.
 `doctor` opens a TCP connection to each — all at once, a few seconds at most — and sends no
-request, because a request would cost a model call. A row that is not answering says where
-it looked and what to do:
+request, because a request would cost a model call. Under a row that is not answering is
+where it looked and what to do:
 
 ```
   ✗  embed       qwen3-embedding-4b      http://127.0.0.1:8080/v1  search
-  ✗  embed  nothing is answering at http://127.0.0.1:8080/v1 (Connection refused) — start a
-            server for qwen3-embedding-4b there, or point [inference] at one
+     nothing is answering at http://127.0.0.1:8080/v1 (Connection refused) — start a server
+     for qwen3-embedding-4b there, or point [inference] at one
 ```
 
 A key the config names and the environment lacks is reported instead of the connection —
@@ -137,9 +153,24 @@ gates
   ✓ transcription
 ```
 
-A gate is a **stage**: *search* needs the embed and rerank servers, *transcription* the
-transcription server. Reporting them apart is what lets a crawl-only machine with no
-transcription server read as able to search.
+A gate is a **stage**: *search* needs the embed server, *transcription* the transcription
+server. Reporting them apart is what lets a crawl-only machine with no transcription server
+read as able to search.
+
+The rerank server is optional. Search runs without it, in a worse order, and says
+`no_rerank` on every result. So a reranker that is not answering is a warning, not a shut
+gate. That is the usual state on a machine that only reaches OpenRouter:
+
+```
+inference
+  ✓  embed       qwen/qwen3-embedding-8b  https://openrouter.ai/api/v1  search
+  !  rerank      qwen3-reranker-0.6b      http://127.0.0.1:8080/v1      search
+     nothing is answering at http://127.0.0.1:8080/v1 (Connection refused) — start a server
+     for qwen3-reranker-0.6b there, or point [inference] at one
+
+gates
+  ! search          runs without rerank
+```
 
 **A closed gate does not fail a run. It skips a stage.** An hour of crawling must never be
 thrown away over a server that was not started, so `run` checks each stage's server before

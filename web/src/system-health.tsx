@@ -45,6 +45,7 @@ export function SystemHealthPage() {
               {binary.path && <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{binary.path}</p>}
               {binary.version && <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{binary.version}</p>}
               {binary.stale && <Problem>{binary.stale}</Problem>}
+              {binary.fix && <p className="mt-1 break-all font-mono text-xs">{binary.fix}</p>}
             </div>
           </div>)}
         </div>
@@ -55,7 +56,7 @@ export function SystemHealthPage() {
         <p className="mt-3 text-xs text-muted-foreground">Doctor checks configured keys and server reachability without making model calls.</p>
         <div className="divide-y divide-border">
           {doctor.services.map(service => <div key={service.capability} className="grid gap-2 py-4 sm:grid-cols-[10rem_minmax(0,1fr)]">
-            <div><h3 className="text-sm capitalize">{service.capability}</h3><Readiness ready={service.ready} /></div>
+            <div><h3 className="text-sm capitalize">{service.capability}</h3>{service.ready || service.need === 'required' ? <Readiness ready={service.ready} /> : <span className="text-xs font-medium text-muted-foreground">Unavailable · optional</span>}</div>
             <div className="min-w-0 text-sm">
               <p className="break-all font-mono text-xs">{service.model}</p>
               <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{service.base_url}</p>
@@ -66,7 +67,7 @@ export function SystemHealthPage() {
           {!doctor.services.length && <p className="py-4 text-sm text-muted-foreground">Model server status is unavailable. Check the configuration details above.</p>}
           {doctor.vectors && <div className="py-4 text-sm"><div className="flex items-center gap-3"><h3>Stored vectors</h3><Readiness ready={doctor.vectors.ready} /></div><p className="mt-1 break-all font-mono text-xs text-muted-foreground">{doctor.vectors.path}</p>{doctor.vectors.problem && <Problem>{doctor.vectors.problem}</Problem>}</div>}
         </div>
-        <dl className="divide-y divide-border text-sm">{doctor.gates.map(gate => <Detail key={gate.gate} label={gate.gate}><Readiness ready={gate.ready} /><p className="mt-1 text-xs text-muted-foreground">{gate.ready ? 'Available' : 'Blocked'}: {gate.blocks}{gate.missing?.length ? `. Missing: ${gate.missing.join(', ')}` : ''}</p></Detail>)}</dl>
+        <dl className="divide-y divide-border text-sm">{doctor.gates.map(gate => <Detail key={gate.gate} label={gate.gate}><Readiness ready={gate.ready} /><p className="mt-1 text-xs text-muted-foreground">{gate.ready ? 'Available' : 'Blocked'}: {gate.blocks}{gate.missing?.length ? `. Missing: ${gate.missing.join(', ')}` : ''}{gate.ready && gate.degraded?.length ? `. Runs without ${gate.degraded.join(', ')}` : ''}</p></Detail>)}</dl>
       </section>
 
       <section>

@@ -1,5 +1,6 @@
 import { defineConfig, type ProxyOptions } from 'vite'
-import react from '@vitejs/plugin-react'
+import react, { reactCompilerPreset } from '@vitejs/plugin-react'
+import babel from '@rolldown/plugin-babel'
 import { tanstackStart } from '@tanstack/react-start/plugin/vite'
 import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath, URL } from 'node:url'
@@ -37,7 +38,9 @@ export default defineConfig({
       router: { basepath: '/web', codeSplittingOptions: { defaultBehavior: [['component', 'pendingComponent'], ['errorComponent'], ['notFoundComponent']] } },
       spa: { enabled: true, prerender: { outputPath: '/index.html' } },
     }),
-    react({ babel: { plugins: ['babel-plugin-react-compiler'] } }),
+    react(),
+    // plugin-react 6 has no Babel of its own; the React Compiler is the one Babel pass left.
+    babel({ presets: [reactCompilerPreset()] }),
   ],
   define: { __CENTINEL_VERSION__: JSON.stringify(version) },
   base: '/web/',
@@ -55,9 +58,9 @@ export default defineConfig({
   },
   // One stylesheet, linked by the shell, so no page waits on a second one. Scripts split
   // by route and fonts and images stay files: each is fetched once and kept by its hash.
-  // An icon two pages share would otherwise be a request of its own; anything this small
-  // rides with a chunk that needs it.
-  environments: { client: { build: { cssCodeSplit: false, rollupOptions: { output: { experimentalMinChunkSize: 10_000 } } } } },
+  // An icon two pages share would otherwise be a request of its own; a shared chunk this
+  // small is inlined into each chunk that imports it instead.
+  environments: { client: { build: { cssCodeSplit: false, rolldownOptions: { output: { codeSplitting: { experimentalInlineCommonChunks: { maxSize: 10_000 } } } } } } },
   build: {
     outDir: '.start',
     emptyOutDir: true,

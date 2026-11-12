@@ -233,8 +233,9 @@ Still a failure, and it keeps the numbers of the calls that worked.
 
 **Need** — what a missing binary costs: `required`, `optional`, or `planned`.
 
-**Gate** — a pipeline stage that a set of weights blocks: search, or transcription. Rolled
-up per role.
+**Gate** — a pipeline stage that a set of servers blocks: search, or transcription. Rolled
+up per role. A required server that is down shuts it; an optional one (the reranker) only
+degrades it.
 
 **Stale** — a binary that is present and working but old enough that breakage is expected.
 Only `yt-dlp` answers.

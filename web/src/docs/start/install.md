@@ -9,7 +9,7 @@ One command installs and updates. It downloads a release binary when the latest 
 carries one this host can run, and builds from source when it does not — which is most
 hosts, and every host until binary releases are switched on.
 
-A download needs no Rust and no toolchain. A build needs Rust 1.91+, a C compiler and
+A download needs no Rust and no toolchain. A build needs Rust 1.94+, a C compiler and
 `protoc`; the script checks for each before it starts, and names the command for whatever is
 missing rather than installing a toolchain behind your back.
 
@@ -195,8 +195,8 @@ centinel doctor         # what this machine is missing, and which servers are an
 ```
 
 Run `doctor` first and after every step. It names the fix beside each gap it finds. Search
-works on keywords alone; the vector half and the reranker need an embedding and a rerank
-server, and the transcribe stage needs a transcription server. [Inference
+works on keywords alone; the vector half needs an embedding server, the reranker (optional,
+search runs without it) a rerank server, and the transcribe stage a transcription server. [Inference
 servers](../reference/inference.md) has the commands that start them.
 
 Then open the workspace, which is how most of Centinel is used:

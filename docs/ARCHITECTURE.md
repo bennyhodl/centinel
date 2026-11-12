@@ -316,7 +316,7 @@ not count as changed.
 
 ## Requirements
 
-Rust 1.85+, a C compiler and `protoc` to build. Corpus processing shells out to standalone binaries. The authenticated web gateway separately runs Node.js. Every call goes through `tool`, the module that owns child processes: each child is killed when its caller is dropped, carries a deadline sized for what it is doing, and never inherits our stdin. `open`'s launcher is the stated exception — it may be somebody's editor, so it takes the terminal and waits.
+Rust 1.94+, a C compiler and `protoc` to build. Corpus processing shells out to standalone binaries. The authenticated web gateway separately runs Node.js. Every call goes through `tool`, the module that owns child processes: each child is killed when its caller is dropped, carries a deadline sized for what it is doing, and never inherits our stdin. `open`'s launcher is the stated exception — it may be somebody's editor, so it takes the terminal and waits.
 
 | Binary | Needed for | Required |
 |---|---|---|
@@ -382,9 +382,11 @@ caller, which splits the batch to find the chunk.
 server's host and port and sends nothing, because a request would cost a model call.
 `run` uses it to skip a stage whose server is down; `doctor` uses it to report one
 `services` row per capability — `base_url`, `model`, `ready`, `problem` — beside the
-binary probes, and gates Search on embed and rerank and Transcription on transcribe. A
+binary probes, and gates Search on embed and Transcription on transcribe. A
 server not answering stops a stage exactly like a missing binary does, which is why they
-sit side by side. Readiness is split — `binaries_ready`, `services_ready`, and `ready` as
+sit side by side. The reranker is the exception, and `optional` like a binary that only
+degrades a stage: search runs without it and says `no_rerank`, so its absence is a
+warning on the Search gate (`degraded`), never a shut one. Readiness is split — `binaries_ready`, `services_ready`, and `ready` as
 their conjunction with a config that loads — because a machine can crawl and extract with
 no server at all; it simply cannot search. A config that fails to load is reported as
 `config_error` rather than failing the op — over HTTP and MCP, and on the CLI under

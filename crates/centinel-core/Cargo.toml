@@ -37,27 +37,29 @@ roxmltree = "0.21.1"
 flate2 = "1.1.9"
 url = "2.5.8"
 governor = "0.10.4"
-htmd = "0.5.5"
+htmd = "0.5.6"
 html-escape = "0.2.15"
 # htmd's own DOM types, so `extract` can render a `<table>` itself. Pinned to the version
 # htmd re-exports `Node` from: a different one compiles and then fails to unify, because
 # the handler is handed htmd's `Rc<Node>` and would be reading a second crate's.
 markup5ever_rcdom = "=0.38.0"
-dom_smoothie = "0.18.0"
+dom_smoothie = "0.19.0"
 # CSS selectors, for the `marked` read strategy to find a page's own content region.
 # Already in the tree as dom_smoothie's own dependency, so this adds no crate — it is
 # declared because `strategies::read::marked` uses it directly, and an undeclared
 # transitive dependency breaks the day dom_smoothie changes its mind.
-dom_query = "0.28.0"
-pdf-inspector = "0.1.7"
+dom_query = "0.29.0"
+pdf-inspector = "1.25.2"
 # Office formats, and only those. PDFs stay on `pdf-inspector` directly: anydoc wraps the
 # same crate but collapses its result to a `String`, and `pages_needing_ocr` is the whole
 # reason a 300-page budget with two scanned exhibits still yields 298 searchable pages.
-anydoc = "0.1.3"
-# Held at anydoc's requirement so one copy of calamine is in the tree, not two.
+anydoc = "0.2.4"
+# Held at 0.36: calamine 0.37 moved to zip 9 and quick-xml 0.42, and anydoc 0.2 is on zip 8.6
+# and quick-xml 0.41, so a newer calamine puts two copies of each in the tree. anydoc no
+# longer uses calamine itself; spreadsheets are ours, in `extract_spreadsheet`.
 calamine = "0.36.1"
-rusqlite = { version = "0.37", features = ["bundled"] }
-toml = "1.1.4"
+rusqlite = { version = "0.42", features = ["bundled"] }
+toml = "1.2.1"
 # yt-dlp writes files and the store wants bytes; each video gets a scratch directory
 # that is removed with it, so nothing outlives the conversion.
 tempfile = "3"
@@ -65,13 +67,13 @@ tempfile = "3"
 # ANN over the embedding cache (SPEC §5.1). Its default features are the S3, GCS, Azure
 # and OSS object stores — every one of them a network path out of a machine that §2.1
 # says nothing leaves. Local tables need none of them.
-lancedb = { version = "0.33.0", default-features = false }
+lancedb = { version = "0.41.0", default-features = false }
 # `VectorTable::repair` drops an unreadable fragment from the table's manifest. That is a
 # raw Lance transaction, and lancedb exposes no delete-by-fragment-id. Pinned to the exact
 # version lancedb already requires, so this names a crate that is in the tree rather than
 # adding a second copy of it; `default-features = false` for the same reason as lancedb
 # above: the defaults are the object stores this machine never talks to.
-lance = { version = "=9.0.0", default-features = false }
+lance = { version = "=14.0.2", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

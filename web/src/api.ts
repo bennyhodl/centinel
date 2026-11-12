@@ -460,9 +460,9 @@ export type SystemHealth = {
     ready: boolean
     binaries_ready: boolean
     services_ready: boolean
-    binaries: Array<{ name: string; need: 'required' | 'optional' | 'planned'; purpose: string; path?: string; version?: string; stale?: string }>
-    services: Array<{ capability: string; gates: string; purpose: string; base_url: string; model: string; ready: boolean; problem?: string }>
-    gates: Array<{ gate: string; ready: boolean; blocks: string; missing?: string[] }>
+    binaries: Array<{ name: string; need: 'required' | 'optional' | 'planned'; purpose: string; path?: string; version?: string; min_version?: string; stale?: string; fix?: string }>
+    services: Array<{ capability: string; gates: string; need: 'required' | 'optional'; purpose: string; base_url: string; model: string; ready: boolean; problem?: string }>
+    gates: Array<{ gate: string; ready: boolean; blocks: string; missing?: string[]; degraded?: string[] }>
     vectors?: { path: string; ready: boolean; problem?: string }
   }
   corpus: { store_root: string; sources: Array<{ source: string; total: number; bytes: number }>; kinds: Record<string, number>; total: number; bytes: number; missing_blobs: number }
