@@ -2,12 +2,13 @@ import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState
 import { Link } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query'
 import { Square } from 'lucide-react'
-import { api, jobEventsUrl, type JobEvent, type JobItem, type JobState, type RunResult } from './api'
-import { activeJobs, foldJob, jobTitle, succeeded } from './job-state'
+import { api, jobEventsUrl, type JobEvent, type JobItem, type JobPart, type JobState, type RunResult } from './api'
+import { activeJobs, activeParts, foldJob, jobTitle, partOver, partStage, succeeded } from './job-state'
 import { clock, number, seconds, tail } from './format'
+import { SourceIcon } from './host-icon'
 import { answerSummary } from './live'
 import { queries } from './queries'
-import { DocumentLink, Spinner } from './ui'
+import { DocumentLink, IconButton, Spinner } from './ui'
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar'
@@ -98,7 +99,12 @@ export function WorkingNow() {
       <span className="mb-1 inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-flame-ink"><span className="size-1.5 rounded-full bg-flame shadow-[0_0_0_3px_var(--flame-halo)]" />Working now</span>
       {running.map(job => <button key={job.id} type="button" onClick={() => open(job.id)} className="grid gap-1 rounded-md px-1.5 py-1 text-left text-[13px] hover:bg-background">
         <span className="flex justify-between gap-2"><span className="truncate">{jobTitle(job)}</span><span className="shrink-0 font-mono text-xs text-muted-foreground">{count(job)}</span></span>
-        <Bar job={job} thin />
+        {apart(job)
+          ? activeParts(job).map(part => <span key={part.name} className="grid gap-0.5">
+            <span className="flex justify-between gap-2 text-xs"><span className="truncate text-muted-foreground">{part.name}</span><span className="shrink-0 font-mono text-[11px] text-muted-foreground">{count(part) || partStage(part)}</span></span>
+            <Bar job={part} thin />
+          </span>)
+          : <Bar job={job} thin />}
         {job.current && <span className="truncate font-mono text-[11px] text-muted-foreground">{tail(job.current)}</span>}
       </button>)}
     </div>
@@ -124,10 +130,16 @@ function Ring({ job }: { job: JobState }) {
   </span>
 }
 
-const count = (job: JobState) => job.total ? `${number(job.done ?? 0)}/${number(job.total)}` : ''
+/** How far a job or one of its parts is through its work list. */
+type Counted = Pick<JobState, 'done' | 'total' | 'outcome'>
 
-/** How far through its work list a job is. */
-export function Bar({ job, thin }: { job: JobState; thin?: boolean }) {
+const count = (job: Counted) => job.total ? `${number(job.done ?? 0)}/${number(job.total)}` : ''
+
+/** Whether a job is being followed part by part right now: parts under way, and no stage of its own yet. */
+const apart = (job: JobState) => !job.step && !job.outcome && activeParts(job).length > 0
+
+/** How far through its work list a job, or one part of it, is. */
+export function Bar({ job, thin }: { job: Counted; thin?: boolean }) {
   const width = job.total ? (job.done ?? 0) / job.total * 100 : 0
   return <span className={`block rounded-full bg-track ${thin ? 'h-1' : 'h-1.5'}`}>
     <i className="block h-full rounded-full bg-foreground transition-[width] duration-(--motion-progress) ease-out" style={{ width: `${job.outcome ? 100 : width}%` }} />
@@ -151,7 +163,10 @@ function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) {
   const questions = run ? (run.effective_questions?.length ? run.effective_questions : run.questions) : []
   const answers = new Map((run?.view?.recent || []).map(result => [result.resource, result]))
   const running = !job || !job.outcome
-  const lines = job?.log || []
+  // One part's lines alone, when the reader picks a part.
+  const [only, setOnly] = useState<string>()
+  const parts = job?.parts ?? []
+  const lines = (job?.log || []).filter(line => !only || line.part === only)
   // Oldest first, like a terminal: the newest line lands at the bottom, and the log follows
   // it until the reader scrolls up, and again once they scroll back down.
   const log = useRef<HTMLDivElement>(null)
@@ -162,7 +177,8 @@ function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) {
   }, [following, latest, detail.dataUpdatedAt])
 
   return <Sheet open onOpenChange={open => !open && onClose()}>
-    <SheetContent side="right" className="flex w-full flex-col gap-0 p-0 sm:max-w-[560px]">
+    {/* The drawer takes the focus, not its first button: a ring on the first source read as that source being picked. */}
+    <SheetContent side="right" onOpenAutoFocus={event => { event.preventDefault(); (event.currentTarget as HTMLElement).focus() }} className="flex w-full flex-col gap-0 p-0 outline-none sm:max-w-[560px]">
       <div className="grid gap-3.5 border-b px-6 pt-6 pb-5">
         <span className={`inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] ${running ? 'text-flame-ink' : job.outcome === 'failed' ? 'text-destructive' : 'text-muted-foreground'}`}>
           {running && <span className="size-2 rounded-full bg-flame shadow-[0_0_0_4px_var(--flame-halo)]" />}
@@ -170,7 +186,7 @@ function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) {
         </span>
         <SheetTitle className="font-serif text-[30px] leading-8 font-normal">{job ? jobTitle(job) : 'Job'}</SheetTitle>
         <SheetDescription className="font-mono text-xs">{id}{job && ` · ${job.label}`}</SheetDescription>
-        {job && <Bar job={job} />}
+        {job && !apart(job) && <Bar job={job} />}
         <div className="flex flex-wrap gap-6">
           {job?.total != null && <Count value={`${number(job.done ?? 0)} / ${number(job.total)}`} label={job.message || 'done'} />}
           {totals
@@ -188,12 +204,15 @@ function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) {
         </div>
         {job?.current && <div className="grid gap-0.5 text-xs"><span className="text-muted-foreground">In hand</span><span className="truncate font-mono" title={job.current}>{job.current}</span></div>}
         {job?.error && <p className="text-[13px] text-destructive">{job.error}</p>}
+        {parts.length > 0 && <ul className="-mx-2 grid max-h-56 gap-0.5 overflow-y-auto" aria-label="Sources in this run">
+          {parts.map(part => <li key={part.name}><PartRow part={part} selected={only === part.name} onSelect={() => setOnly(only === part.name ? undefined : part.name)} /></li>)}
+        </ul>}
       </div>
       <div className="flex min-h-0 flex-1 flex-col bg-terminal py-3 font-mono text-xs leading-[22px]">
-        <div className="flex justify-between px-5 pb-2 font-sans text-[11px] text-[#B9AE98]"><span>Live log · {!running ? 'finished' : following ? 'following' : 'paused, scroll down to follow'}</span><span>{job?.step}</span></div>
+        <div className="flex justify-between px-5 pb-2 font-sans text-[11px] text-[#B9AE98]"><span>Live log · {!running ? 'finished' : following ? 'following' : 'paused, scroll down to follow'}{only && <> · {only} only <button type="button" className="underline underline-offset-2 hover:text-terminal-ink" onClick={() => setOnly(undefined)}>show all</button></>}</span><span>{job?.step}</span></div>
         <div ref={log} onScroll={event => { const { scrollHeight, scrollTop, clientHeight } = event.currentTarget; setFollowing(scrollHeight - scrollTop - clientHeight < 24) }} className="min-h-0 flex-1 overflow-y-auto">
-          {lines.map(line => <LogLine key={line.seq} line={line} answer={line.type === 'item' ? answers.get(line.item.address) : undefined} questions={questions} />)}
-          {!lines.length && <div className="px-5 text-[#B9AE98]">{job ? 'Waiting for the first event…' : 'This job is not running on this store.'}</div>}
+          {lines.map(line => <LogLine key={line.seq} line={line} part={parts.length > 1 && !only ? line.part : undefined} answer={line.type === 'item' ? answers.get(line.item.address) : undefined} questions={questions} />)}
+          {!lines.length && <div className="px-5 text-[#B9AE98]">{!job ? 'This job is not running on this store.' : only ? `Nothing from ${only} in the latest lines.` : 'Waiting for the first event…'}</div>}
         </div>
       </div>
       <div className="flex items-center gap-3 border-t px-6 py-4">
@@ -205,10 +224,30 @@ function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) {
   </Sheet>
 }
 
+/**
+ * One source of a run over several: what it is doing, how far through, how its items
+ * went, and the address it has in hand. A click shows its lines of the log alone.
+ */
+function PartRow({ part, selected, onSelect }: { part: JobPart; selected: boolean; onSelect: () => void }) {
+  const over = partOver(part)
+  return <button type="button" aria-pressed={selected} onClick={onSelect} className={`grid w-full gap-1 rounded-md px-2 py-1.5 text-left hover:bg-hover ${selected ? 'bg-muted shadow-[inset_0_0_0_1px_var(--rule)]' : ''}`}>
+    <span className="flex items-center gap-2 text-[13px]">
+      <SourceIcon source={part.name} size={14} />
+      <span className="min-w-0 flex-1 truncate font-medium">{part.name}</span>
+      <span className={`shrink-0 text-xs ${over ? 'text-muted-foreground' : 'text-flame-ink'}`}>{partStage(part)}</span>
+      <span className="w-20 shrink-0 text-right font-mono text-xs text-muted-foreground">{count(part) || `${number(part.ok)} ok`}</span>
+      {part.failed > 0 && <span className="shrink-0 font-mono text-xs text-destructive">{number(part.failed)} failed</span>}
+    </span>
+    {!over && <Bar job={part} thin />}
+    {part.current && <span className="truncate font-mono text-[11px] text-muted-foreground" title={part.current}>{tail(part.current)}</span>}
+  </button>
+}
+
 /** Requests cancellation through the job's own token, at its next item boundary. */
-export function StopJobButton({ id }: { id: string }) {
+export function StopJobButton({ id, icon }: { id: string; /** Only the icon, named on hover. */ icon?: boolean }) {
   const stop = useMutation({ mutationFn: () => api.stopJob(id) })
   const stopping = stop.isPending || stop.isSuccess
+  if (icon) return <IconButton label={stop.error?.message ?? (stopping ? 'Stopping at the next page' : 'Stop the run')} variant="outline" disabled={stopping} onClick={() => stop.mutate()}>{stopping ? <Spinner /> : <Square />}</IconButton>
   return <span className="grid gap-1">
     <Button size="sm" variant="outline" disabled={stopping} onClick={() => stop.mutate()}>
       {stopping ? <Spinner /> : <Square />}{stopping ? 'Stopping' : 'Stop'}
@@ -218,9 +257,16 @@ export function StopJobButton({ id }: { id: string }) {
 }
 
 /** One line of a job's log, on the clock of the process that ran it. A scored line says what Jev decided when its answer and questions are given. */
-export function LogLine({ line, answer, questions = [] }: { line: JobEvent; answer?: RunResult; questions?: Parameters<typeof answerSummary>[0] }) {
+export function LogLine({ line, part, answer, questions = [] }: {
+  line: JobEvent
+  /** The part the line came from, shown when a log mixes several. */
+  part?: string
+  answer?: RunResult
+  questions?: Parameters<typeof answerSummary>[0]
+}) {
   const row = (word: string, tone: string, body: ReactNode) => <div className="flex gap-3 px-5">
     <span className="w-16 shrink-0 text-[#6B6458]">{clock(line.at)}</span>
+    {part && <span className="w-20 shrink-0 truncate text-[#6B6458]" title={part}>{part}</span>}
     <span className={`w-16 shrink-0 truncate ${tone}`}>{word}</span>
     <span className="flex min-w-0 flex-1 gap-3 text-[#B9AE98]">{body}</span>
   </div>

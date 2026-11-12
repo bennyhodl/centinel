@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { JobEvent, JobItem, JobState } from './api'
-import { activeJobs, foldJob, jobTitle } from './job-state'
+import { activeJobs, activeParts, foldJob, jobTitle, partStage } from './job-state'
 
 let seq = 0
 const at = 1_760_000_000_000
@@ -10,6 +10,37 @@ const page = (address: string, verdict: JobItem['verdict']): JobItem => ({ addre
 const fold = (events: JobEvent[], from: JobState[] = []) => events.reduce(foldJob, from)
 
 describe('foldJob', () => {
+  // The same events as `a_job_in_parts_keeps_each_parts_stage_and_count` in `jobs.rs`: the two folds must agree.
+  it('follows a run over several sources source by source', () => {
+    const [job] = fold([
+      event('run-2', { type: 'started', kind: 'run', label: 'tampa, orlando' }),
+      event('run-2', { part: 'tampa', type: 'step', step: 'tampa · collect' }),
+      event('run-2', { part: 'orlando', type: 'step', step: 'orlando · discover' }),
+      event('run-2', { part: 'tampa', type: 'progress', message: '1 stored, 0 failed', done: 1, total: 10, current: 'https://tampa.gov/a' }),
+      event('run-2', { part: 'tampa', type: 'item', item: page('https://tampa.gov/a', 'ok') }),
+      event('run-2', { part: 'orlando', type: 'item', item: page('https://orlando.gov/x', 'fail') }),
+    ])
+    // The job's own stage and count are left alone; every item still counts toward it.
+    expect(job).toMatchObject({ ok: 1, failed: 1 })
+    expect([job.step, job.done, job.total]).toEqual([undefined, undefined, undefined])
+    expect(job.parts).toEqual([
+      { name: 'tampa', step: 'tampa · collect', message: '1 stored, 0 failed', done: 1, total: 10, current: 'https://tampa.gov/a', ok: 1, failed: 0 },
+      { name: 'orlando', step: 'orlando · discover', message: undefined, done: undefined, total: undefined, current: undefined, ok: 0, failed: 1 },
+    ])
+    expect(job.log.map(line => line.part)).toEqual([undefined, 'tampa', 'orlando', 'tampa', 'orlando'])
+    expect(jobTitle(job)).toBe('Collecting 2 sources')
+    expect(job.parts!.map(partStage)).toEqual(['Collecting', 'Discovering'])
+
+    // A source says when its stages are over. One left walking is the one the job names.
+    const [later] = fold([event('run-2', { part: 'tampa', type: 'step', step: 'tampa · done' })], [job])
+    expect(activeParts(later).map(part => part.name)).toEqual(['orlando'])
+    expect(partStage(later.parts![0])).toBe('Done')
+    expect(jobTitle(later)).toBe('Discovering orlando')
+    // The corpus-wide stages after them are the job's own.
+    const [deriving] = fold([event('run-2', { type: 'step', step: 'extract' })], [later])
+    expect(jobTitle(deriving)).toBe('Extracting')
+  })
+
   it('follows a collection from start to finish', () => {
     const jobs = fold([
       event('run-1', { type: 'started', kind: 'run', label: 'schedule' }),

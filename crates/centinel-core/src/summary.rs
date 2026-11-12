@@ -44,6 +44,12 @@ pub struct Summary {
     pub observations: usize,
     /// Addresses per liveness state, keyed by `live` / `gone` / `blocked` / `error`.
     pub liveness: BTreeMap<String, usize>,
+    /// Addresses holding bytes: each address the source has collected, once.
+    pub collected: usize,
+    /// Of those, the ones whose latest bytes have been read into text.
+    pub read: usize,
+    /// Of those, the ones nothing could read, as the current readers judged them.
+    pub unreadable: usize,
     /// How the source was most recently enumerated; empty if never.
     pub discovery_method: String,
     /// Hosts this Source's Observations answer for, so a crumb pointing at one is already
@@ -69,8 +75,28 @@ impl Summary {
         for status in replay.statuses().values() {
             *liveness.entry(status.state.to_string()).or_default() += 1;
         }
+        // The same two questions `extract` asks of each blob before it reads it.
+        let derived: std::collections::HashSet<_> = replay
+            .derivations()
+            .filter(|d| !d.to_sha.is_of_nothing())
+            .map(|d| &d.from_sha)
+            .collect();
+        let given_up =
+            replay.underivable_by(crate::extract::PIPELINE, crate::extract::PIPELINE_VERSION);
+        let latest = replay.latest_observations();
+        let read = latest
+            .values()
+            .filter(|o| derived.contains(&o.blob_sha))
+            .count();
+        let unreadable = latest
+            .values()
+            .filter(|o| !derived.contains(&o.blob_sha) && given_up.contains(&o.blob_sha))
+            .count();
         Self {
             log,
+            collected: latest.len(),
+            read,
+            unreadable,
             resources: replay.resources().len(),
             observations: replay
                 .records()
@@ -119,6 +145,37 @@ impl<'a> Summaries<'a> {
         )
         .await
     }
+}
+
+/// How many documents of each source have vectors, by source id: one scan of the vector
+/// table's two address columns, kept until the table changes.
+///
+/// `None` when the store has no vector table to read. A store that has never embedded
+/// anything is not behind on embedding, and saying so of every source would be noise.
+pub async fn embedded(store: &Store) -> Option<BTreeMap<String, usize>> {
+    #[derive(Serialize, serde::Deserialize)]
+    struct Embedded {
+        /// The table version this was counted at.
+        version: u64,
+        documents: BTreeMap<String, usize>,
+    }
+    let table = crate::vectors::VectorTable::open_existing(&store.vectors_db())
+        .await
+        .ok()?;
+    let version = table.version().await.ok()?;
+    cached(
+        &store.embedded_summary_path(),
+        |kept: &Embedded| kept.version == version,
+        async {
+            Ok(Embedded {
+                version,
+                documents: table.documents_by_source().await?,
+            })
+        },
+    )
+    .await
+    .ok()
+    .map(|embedded| embedded.documents)
 }
 
 /// A derived value kept in a file, trusted while `is_current` says it still answers.

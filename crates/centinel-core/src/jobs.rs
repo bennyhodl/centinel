@@ -186,8 +186,62 @@ pub struct Stamped {
     /// Milliseconds since the Unix epoch, on the clock of the process that ran the job.
     pub at: i64,
     pub job: String,
+    /// The part of the job this came from, when the job does several at once: a source
+    /// in a `run`. See [`crate::op::Progress::part`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
     #[serde(flatten)]
     pub event: JobEvent,
+}
+
+/// One part of a job that does several at once, as it stands: a source in a `run`, with
+/// its own stage, its own count and the item it has in hand.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct JobPart {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    pub ok: u64,
+    pub failed: u64,
+}
+
+impl JobPart {
+    /// Folds one of this part's events in, as [`JobState::apply`] folds a job's.
+    fn apply(&mut self, event: &JobEvent) {
+        match event {
+            JobEvent::Step { step } => {
+                self.step = Some(step.clone());
+                self.message = None;
+                self.done = None;
+                self.total = None;
+                self.current = None;
+            }
+            JobEvent::Progress {
+                message,
+                done,
+                total,
+                current,
+            } => {
+                self.message = Some(message.clone());
+                self.done = Some(*done);
+                self.total = Some(*total);
+                self.current = current.clone();
+            }
+            JobEvent::Item { item } => match item.succeeded() {
+                true => self.ok += 1,
+                false => self.failed += 1,
+            },
+            JobEvent::Started { .. } | JobEvent::Note { .. } | JobEvent::Finished { .. } => {}
+        }
+    }
 }
 
 /// A job as it stands: the fold of every event it has had, and the tail of the readable
@@ -222,6 +276,10 @@ pub struct JobState {
     pub outcome: Option<Outcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The parts of a job that does several at once, in the order each first spoke. Empty
+    /// for a job that is one piece of work.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<JobPart>,
     /// The latest readable events, oldest first.
     pub log: VecDeque<Stamped>,
 }
@@ -245,16 +303,35 @@ impl JobState {
             failed: 0,
             outcome: None,
             error: None,
+            parts: Vec::new(),
             log: VecDeque::new(),
         }
     }
 
     /// Folds one event in. The web client folds the same events the same way, in
     /// `web/src/job-state.ts`; the two must agree.
+    ///
+    /// An event from a part moves that part: its stage and its count are its own, and the
+    /// job's are left to the stages the job runs as one. Its items still count toward the
+    /// job, which counts every item whoever finished it.
     fn apply(&mut self, event: &Stamped) {
         self.seq = event.seq;
+        if let Some(name) = &event.part {
+            let at = match self.parts.iter().position(|part| &part.name == name) {
+                Some(at) => at,
+                None => {
+                    self.parts.push(JobPart {
+                        name: name.clone(),
+                        ..Default::default()
+                    });
+                    self.parts.len() - 1
+                }
+            };
+            self.parts[at].apply(&event.event);
+        }
         match &event.event {
             JobEvent::Started { .. } | JobEvent::Note { .. } => {}
+            JobEvent::Step { .. } | JobEvent::Progress { .. } if event.part.is_some() => {}
             JobEvent::Step { step } => {
                 // A new stage counts a new work list; the last one's numbers would read
                 // as this one's until its first tick.
@@ -429,7 +506,13 @@ impl Board {
 
     /// Stamps and folds one event. `None` for an event about a job that has already
     /// finished: a task the op left behind is not news about the job.
-    fn fold(&mut self, job: &str, at: i64, event: JobEvent) -> Option<Stamped> {
+    fn fold(
+        &mut self,
+        job: &str,
+        at: i64,
+        part: Option<String>,
+        event: JobEvent,
+    ) -> Option<Stamped> {
         if !matches!(event, JobEvent::Started { .. }) && !self.active.iter().any(|j| j.id == job) {
             return None;
         }
@@ -438,6 +521,7 @@ impl Board {
             seq: self.seq,
             at,
             job: job.to_string(),
+            part,
             event,
         };
         if let JobEvent::Started {
@@ -613,16 +697,16 @@ impl Jobs {
     /// Stamps, folds and sends one event, and marks one of this board's own jobs as owed
     /// to the shelf: written at once when it starts or ends, at the next look otherwise.
     fn publish(&self, job: &str, event: JobEvent) {
-        self.publish_at(job, jiff::Timestamp::now().as_millisecond(), event);
+        self.publish_at(job, jiff::Timestamp::now().as_millisecond(), None, event);
     }
 
     /// [`Jobs::publish`], at a time the caller knows better than the clock: when another
     /// process's job last moved, for one that board ends on its behalf.
-    fn publish_at(&self, job: &str, at: i64, event: JobEvent) {
+    fn publish_at(&self, job: &str, at: i64, part: Option<String>, event: JobEvent) {
         let now = matches!(event, JobEvent::Started { .. } | JobEvent::Finished { .. });
         let mine = {
             let mut board = self.board();
-            let Some(stamped) = board.fold(job, at, event) else {
+            let Some(stamped) = board.fold(job, at, part, event) else {
                 return;
             };
             // The fold moved the job to a later version, which is what makes it owed.
@@ -717,6 +801,7 @@ impl Jobs {
             self.publish_at(
                 &id,
                 at,
+                None,
                 JobEvent::Finished {
                     outcome: Outcome::Failed,
                     error: Some(why),
@@ -742,7 +827,7 @@ impl Jobs {
         let seen = board.foreign.get(&id).map(|f| f.seen);
         let news = |e: &&Stamped| seen.is_none_or(|s| e.seq > s);
 
-        let mut events: Vec<(i64, JobEvent)> = Vec::new();
+        let mut events: Vec<(i64, Option<String>, JobEvent)> = Vec::new();
         let starts_in_tail = theirs
             .log
             .front()
@@ -751,6 +836,7 @@ impl Jobs {
             // Older than its tail: say it started, then what the tail still holds.
             events.push((
                 theirs.started_at,
+                None,
                 JobEvent::Started {
                     kind: theirs.kind.clone(),
                     label: theirs.label.clone(),
@@ -762,7 +848,7 @@ impl Jobs {
         for e in theirs.log.iter().filter(news) {
             match e.event {
                 JobEvent::Finished { .. } => ending = Some((e.at, e.event.clone())),
-                _ => events.push((e.at, e.event.clone())),
+                _ => events.push((e.at, e.part.clone(), e.event.clone())),
             }
         }
         board.foreign.insert(
@@ -772,8 +858,8 @@ impl Jobs {
                 seen: theirs.seq,
             },
         );
-        for (at, event) in events {
-            if let Some(stamped) = board.fold(&id, at, event) {
+        for (at, part, event) in events {
+            if let Some(stamped) = board.fold(&id, at, part, event) {
                 let _ = self.inner.tx.send(stamped);
             }
         }
@@ -784,7 +870,8 @@ impl Jobs {
                 .active
                 .iter()
                 .any(|ours| ours.id == id && ours.step.as_ref() != Some(step))
-            && let Some(stamped) = board.fold(&id, latest, JobEvent::Step { step: step.clone() })
+            && let Some(stamped) =
+                board.fold(&id, latest, None, JobEvent::Step { step: step.clone() })
         {
             let _ = self.inner.tx.send(stamped);
         }
@@ -812,12 +899,33 @@ impl Jobs {
                         theirs.current.as_ref(),
                     )
             })
-            && let Some(stamped) = board.fold(&id, latest, progress)
+            && let Some(stamped) = board.fold(&id, latest, None, progress)
         {
             let _ = self.inner.tx.send(stamped);
         }
+        // The same for each part: its stage came with the tail, its count did not.
+        for part in &theirs.parts {
+            let (Some(message), Some(done), Some(total)) = (&part.message, part.done, part.total)
+            else {
+                continue;
+            };
+            let moved = board
+                .find(&id)
+                .is_some_and(|ours| !ours.parts.contains(part));
+            let progress = JobEvent::Progress {
+                message: message.clone(),
+                done,
+                total,
+                current: part.current.clone(),
+            };
+            if moved
+                && let Some(stamped) = board.fold(&id, latest, Some(part.name.clone()), progress)
+            {
+                let _ = self.inner.tx.send(stamped);
+            }
+        }
         if let Some((at, event)) = ending
-            && let Some(stamped) = board.fold(&id, at, event)
+            && let Some(stamped) = board.fold(&id, at, None, event)
         {
             let _ = self.inner.tx.send(stamped);
         }
@@ -827,6 +935,7 @@ impl Jobs {
         if let Some(ours) = board.find_mut(&id) {
             ours.ok = theirs.ok;
             ours.failed = theirs.failed;
+            ours.parts = theirs.parts;
             ours.step = theirs.step;
             ours.message = theirs.message;
             ours.done = theirs.done;
@@ -856,7 +965,12 @@ pub(crate) struct JobSink {
 
 impl JobSink {
     pub(crate) fn record(&self, event: &ProgressEvent) {
-        self.jobs.publish(&self.id, JobEvent::from(event));
+        self.jobs.publish_at(
+            &self.id,
+            jiff::Timestamp::now().as_millisecond(),
+            event.part.clone(),
+            JobEvent::from(event),
+        );
     }
 }
 
@@ -942,6 +1056,65 @@ mod tests {
                 JobEvent::Finished { .. } => "finished",
             })
             .collect()
+    }
+
+    /// A run over several sources is followed source by source. What a part says moves
+    /// that part and leaves the job's own stage and count alone, every item still counts
+    /// toward the job, and each line of the log says which part it came from.
+    #[tokio::test]
+    async fn a_job_in_parts_keeps_each_parts_stage_and_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs = Jobs::on_disk(dir.path().to_path_buf());
+        let job = jobs.start("run", "tampa, orlando");
+        let progress = job.watch(Progress::none());
+        let (tampa, orlando) = (progress.part("tampa"), progress.part("orlando"));
+
+        tampa.track(TOTAL_TRACK, "tampa · collect", 0, 6, Unit::Count);
+        orlando.track(TOTAL_TRACK, "orlando · discover", 1, 6, Unit::Count);
+        tampa.step_on("1 stored, 0 failed", 1, 10, "https://tampa.gov/a");
+        tampa.item(page("https://tampa.gov/a", Verdict::Ok));
+        orlando.item(page("https://orlando.gov/x", Verdict::Fail));
+
+        let (states, _) = jobs.subscribe();
+        let state = &states[0];
+        assert_eq!(
+            (state.step.as_deref(), state.done, state.total),
+            (None, None, None)
+        );
+        assert_eq!((state.ok, state.failed), (1, 1));
+        assert_eq!(
+            state.parts,
+            [
+                JobPart {
+                    name: "tampa".into(),
+                    step: Some("tampa · collect".into()),
+                    message: Some("1 stored, 0 failed".into()),
+                    done: Some(1),
+                    total: Some(10),
+                    current: Some("https://tampa.gov/a".into()),
+                    ok: 1,
+                    failed: 0,
+                },
+                JobPart {
+                    name: "orlando".into(),
+                    step: Some("orlando · discover".into()),
+                    failed: 1,
+                    ..Default::default()
+                },
+            ]
+        );
+        let said_by: Vec<Option<&str>> = state.log.iter().map(|e| e.part.as_deref()).collect();
+        assert_eq!(
+            said_by,
+            [
+                None,
+                Some("tampa"),
+                Some("orlando"),
+                Some("tampa"),
+                Some("orlando")
+            ]
+        );
+        job.finish(&anyhow::Ok(()));
     }
 
     /// What an op says into its `Progress` reaches a subscriber as the job's events, in
@@ -1108,6 +1281,7 @@ mod tests {
             seq: 7,
             at: 1_760_000_000_000,
             job: "run-1".into(),
+            part: None,
             event: JobEvent::Step {
                 step: "embed".into(),
             },
@@ -1144,6 +1318,7 @@ mod tests {
                 seq,
                 at,
                 job: id.into(),
+                part: None,
                 event,
             }
         };
@@ -1445,6 +1620,7 @@ mod tests {
             board.fold(
                 id,
                 at,
+                None,
                 JobEvent::Started {
                     kind: "embed".into(),
                     label: "cli".into(),
@@ -1456,6 +1632,7 @@ mod tests {
             board.fold(
                 id,
                 at,
+                None,
                 JobEvent::Finished {
                     outcome: Outcome::Ok,
                     error: None,

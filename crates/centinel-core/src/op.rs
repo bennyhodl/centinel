@@ -202,6 +202,11 @@ pub struct ProgressEvent {
     /// waiting on; the outcome itself still arrives as an `item`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<String>,
+    /// The part of a larger job this came from, when the job does several at once: a
+    /// source in a `run`. Stamped by the sink the part reports into ([`Progress::part`]),
+    /// never by the code doing the part's work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
 }
 
 /// The sink an op reports progress into.
@@ -220,6 +225,8 @@ pub struct Progress {
     job: Option<crate::jobs::JobSink>,
     /// Whether each event is also a line in the log. See [`Progress::logged`].
     log: bool,
+    /// The part of the job this sink reports for. See [`Progress::part`].
+    part: Option<String>,
 }
 
 impl Progress {
@@ -260,11 +267,27 @@ impl Progress {
         self
     }
 
+    /// This sink, reporting as one named part of the job: a source in a `run`.
+    ///
+    /// For an op that does several pieces of work at once. Each piece reports into its
+    /// own sink exactly as it would alone, and every event it sends says which piece it
+    /// came from, so a watcher can follow each one. A piece already inside a part keeps
+    /// the name it has.
+    pub fn part(&self, name: impl Into<String>) -> Self {
+        Self {
+            part: self.part.clone().or_else(|| Some(name.into())),
+            ..self.clone()
+        }
+    }
+
     /// Reports progress. Never blocks, never fails — a dropped receiver is not an
     /// op's problem, and must not turn into an error in the op's own result.
-    pub fn send(&self, event: ProgressEvent) {
+    pub fn send(&self, mut event: ProgressEvent) {
         if self.log {
             log_event(&event);
+        }
+        if event.part.is_none() {
+            event.part.clone_from(&self.part);
         }
         if let Some(job) = &self.job {
             job.record(&event);

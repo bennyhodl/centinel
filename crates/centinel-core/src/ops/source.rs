@@ -42,6 +42,10 @@ pub enum SourceAction {
     Enable(IdArgs),
     /// Leave a source out of a bare `centinel run`. Naming it still runs it.
     Disable(IdArgs),
+    /// Hide a source and never run it again. Everything it collected stays in the record.
+    Remove(IdArgs),
+    /// Bring a removed source back, as it was.
+    Restore(IdArgs),
 }
 
 #[derive(Clone, Debug, Default, clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -119,6 +123,12 @@ pub struct ListedSource {
     pub kind: SourceKind,
     pub target: String,
     pub enabled: bool,
+    /// Removed by the operator: hidden, and never run again. Its record stays.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub removed: bool,
+    /// How far what it holds has been taken through the pipeline.
+    #[serde(default)]
+    pub stages: Stages,
     /// Addresses the log knows under this id, discovered or collected — the same count
     /// `centinel list` reports. Zero means defined and never run, the state a fresh
     /// `source add` leaves behind.
@@ -135,6 +145,24 @@ pub struct ListedSource {
     /// The latest run that covered it, from the journal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<LastRun>,
+}
+
+/// How far a source's documents have been taken, stage by stage. Each counts addresses, so
+/// the four read as one line: this many collected, this many of them read, and so on.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Stages {
+    /// Addresses holding bytes.
+    pub collected: usize,
+    /// Read into text.
+    pub read: usize,
+    /// Collected, and nothing could read them: a scan with no text, a format with none.
+    pub unreadable: usize,
+    /// In the keyword index.
+    pub indexed: usize,
+    /// Holding vectors, so search by meaning reaches them. Absent when the store has no
+    /// vector table: nothing has ever been embedded here, for any source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded: Option<usize>,
 }
 
 /// A run, as a row of the source list needs it.
@@ -168,6 +196,10 @@ pub enum SourceReport {
         source: String,
         enabled: bool,
     },
+    Removed {
+        source: String,
+        removed: bool,
+    },
     Update {
         source: String,
     },
@@ -190,6 +222,8 @@ pub async fn source(
         SourceAction::List => list(ctx).await,
         SourceAction::Enable(a) => toggle(ctx, &a.id, true).await,
         SourceAction::Disable(a) => toggle(ctx, &a.id, false).await,
+        SourceAction::Remove(a) => set_removed(ctx, &a.id, true).await,
+        SourceAction::Restore(a) => set_removed(ctx, &a.id, false).await,
     }
 }
 
@@ -230,6 +264,7 @@ async fn add(
     }
 
     let source = SourceConfig {
+        removed: None,
         id: args.id.clone(),
         site,
         channel,
@@ -278,9 +313,10 @@ async fn add(
 }
 
 async fn list(ctx: &Ctx) -> anyhow::Result<SourceReport> {
-    Ok(SourceReport::List {
-        sources: listed(ctx, None).await?,
-    })
+    // A removed source is in the record, not in the list.
+    let mut sources = listed(ctx, None).await?;
+    sources.retain(|source| !source.removed);
+    Ok(SourceReport::List { sources })
 }
 
 /// The rows of the source list: every source the store defines, or the one named. The one
@@ -293,10 +329,18 @@ pub async fn listed(ctx: &Ctx, only: Option<&str>) -> anyhow::Result<Vec<ListedS
         None => catalog.list().await?,
     };
     let summaries = crate::summary::Summaries::new(&ctx.store);
+    // Each stage keeps its own account, and each is asked once for every source: the log's
+    // summary for what was collected and read, the index and the vector table for the rest.
+    // The index is opened and dropped inside this block, never held across an await.
+    let indexed = match ctx.store.require_index() {
+        Ok(path) => crate::index::Index::open(path)?.documents_by_source()?,
+        Err(_) => Default::default(),
+    };
+    let embedded = crate::summary::embedded(&ctx.store).await;
     let holder = crate::journal::RunLock::current(&ctx.store);
-    // Newest first, read once: every row looks for its latest run in the same list.
-    let mut attempts = crate::journal::Journal::new(&ctx.store).read().await?;
-    attempts.reverse();
+    // Newest first, as the journal reads: every row looks for its latest run in the same
+    // list, and the first one that covers it is the latest.
+    let attempts = crate::journal::Journal::new(&ctx.store).read().await?;
     let mut out = Vec::with_capacity(defined.len());
     for source in defined {
         let acquisition = source.acquisition()?;
@@ -321,6 +365,16 @@ pub async fn listed(ctx: &Ctx, only: Option<&str>) -> anyhow::Result<Vec<ListedS
             kind: acquisition.kind(),
             target: acquisition.target().to_string(),
             enabled: source.is_enabled(),
+            removed: source.is_removed(),
+            stages: Stages {
+                collected: summary.collected,
+                read: summary.read,
+                unreadable: summary.unreadable,
+                indexed: indexed.get(&source.id).copied().unwrap_or_default(),
+                embedded: embedded
+                    .as_ref()
+                    .map(|by_source| by_source.get(&source.id).copied().unwrap_or_default()),
+            },
             resources: summary.resources,
             liveness: summary.liveness,
             collecting: holder
@@ -337,6 +391,14 @@ async fn toggle(ctx: &Ctx, id: &str, enabled: bool) -> anyhow::Result<SourceRepo
     Ok(SourceReport::Toggle {
         source: source.id,
         enabled,
+    })
+}
+
+async fn set_removed(ctx: &Ctx, id: &str, removed: bool) -> anyhow::Result<SourceReport> {
+    let source = Sources::new(&ctx.store).set_removed(id, removed).await?;
+    Ok(SourceReport::Removed {
+        source: source.id,
+        removed,
     })
 }
 
@@ -377,6 +439,18 @@ impl Render for SourceReport {
                     }
                 }
             }
+
+            Self::Removed { source, removed } => p.marked(
+                Mark::Ok,
+                format!(
+                    "{} {}",
+                    p.paint(source, Ink::Bold),
+                    match removed {
+                        true => "is removed: hidden and never run. What it collected stays",
+                        false => "is back, as it was",
+                    }
+                ),
+            ),
 
             Self::Toggle { source, enabled } => p.marked(
                 Mark::Ok,
@@ -458,6 +532,61 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
+    /// A row's last run is the newest run that covered the source. The journal reads
+    /// newest first, and this once reversed it and showed every source its oldest run.
+    #[tokio::test]
+    async fn a_listed_source_carries_its_newest_run() {
+        use crate::journal::{Added, Attempt, Journal, Outcome, Subtracted, Trigger};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(Store::open(dir.path()).await.unwrap());
+        let add = SourceAction::Add(AddArgs {
+            id: "tampa".into(),
+            site: Some("https://www.tampa.gov".into()),
+            ..Default::default()
+        });
+        source(
+            &ctx,
+            SourceArgs { action: add },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+        let journal = Journal::new(&ctx.store);
+        for (at, outcome) in [
+            ("2026-10-01T02:00:00Z", Outcome::Failed),
+            ("2026-10-02T02:00:00Z", Outcome::Ok),
+        ] {
+            journal
+                .append(&Attempt {
+                    run_id: at.into(),
+                    schedule: None,
+                    sources: vec!["tampa".into()],
+                    trigger: Trigger::Manual,
+                    due_at: None,
+                    started_at: at.into(),
+                    finished_at: at.into(),
+                    outcome,
+                    detail: None,
+                    added: Added::default(),
+                    subtracted: Subtracted::default(),
+                    report: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let row = super::listed(&ctx, Some("tampa"))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let last = row.last_run.expect("the journal holds two runs of it");
+        assert_eq!(last.started_at, "2026-10-02T02:00:00Z");
+        assert_eq!(last.outcome, Outcome::Ok);
+    }
+
     #[test]
     fn adding_without_run_prints_the_command_that_runs_it() {
         let out = render_to_string(&SourceReport::Add {
@@ -476,6 +605,8 @@ mod tests {
             kind: SourceKind::Site,
             target: format!("https://{id}.gov"),
             enabled: true,
+            removed: false,
+            stages: Stages::default(),
             resources,
             liveness: Default::default(),
             collecting: false,

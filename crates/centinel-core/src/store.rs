@@ -356,6 +356,12 @@ impl Store {
         self.summaries_dir().join(format!("{source}.json"))
     }
 
+    /// `summaries/.embedded.json` — how many documents of each source have vectors, as of
+    /// one version of the vector table. Dotted, so no source's summary can take its name.
+    pub fn embedded_summary_path(&self) -> PathBuf {
+        self.summaries_dir().join(".embedded.json")
+    }
+
     /// `icons/` — the favicon of each host the web has shown, fetched once when first asked
     /// for. **Derived**, and safe to delete: the next request for a host finds its icon
     /// again. Not corpus — no Observation, no log line — which is why it sits beside

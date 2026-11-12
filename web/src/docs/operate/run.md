@@ -21,6 +21,10 @@ is the command you actually use.
 Acquisition is **per source** because politeness is per host, and because a 403 on one
 site must not stop the next.
 
+Sources on different hosts are walked at the same time, up to sixteen hosts at once, so a
+site paced at ten seconds a page does not hold up the sources named after it. Sources
+that share a host take turns: that host is never asked faster than one source's `rps`.
+
 Derivation is **corpus-wide** because `transcribe` and `embed` each build a
 multi-gigabyte model. With twenty sources, naive per-source chaining spends more time
 loading weights than embedding. It also fixes an ordering hazard for free: `index` runs

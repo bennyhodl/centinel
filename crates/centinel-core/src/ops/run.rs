@@ -29,7 +29,9 @@
 //! live in search as it lands.
 //!
 //! Acquisition is per source because politeness is per host and a 403 on one site must
-//! not stop the next. Derivation is corpus-wide because `embed` costs per call what no
+//! not stop the next. Hosts are walked at once and the sources of one host in turn: a
+//! source spends its time waiting on its own host's pacer, and nothing about another
+//! host is worth waiting for. Derivation is corpus-wide because `embed` costs per call what no
 //! source pays for alone — a scan of every stored key to work out what is missing, and a
 //! compaction of the table afterwards — and doing that once beats doing it per source:
 //! with twenty sources the naive chaining spends more time maintaining the table than
@@ -52,6 +54,7 @@ use crate::inference::Capability;
 use crate::op::TOTAL_TRACK;
 use crate::prelude::*;
 use crate::sources::{self, Overrides};
+use futures::StreamExt;
 
 use super::{EmbedArgs, ExtractArgs, IndexArgs, TranscribeArgs};
 
@@ -490,65 +493,129 @@ pub async fn run(
     .filter(|s| *s != Stage::Transcribe || yields_audio)
     .collect();
     let total = (built.len() * 2 + derive_stages.len()) as u64;
-    let mut done = 0u64;
 
-    // ── acquire, per source ───────────────────────────────────────────────────
-    for (definition, source) in selected.iter().zip(&built) {
-        // Between sources as well as inside them. A source whose stages all finished is
-        // wholly recorded, so this is the cleanest place a shutdown can land.
-        cancel.check()?;
+    // ── acquire: hosts at once, a host's sources in turn ──────────────────────
+    //
+    // A source waits on its host's pacer between requests, so walked one after another
+    // the sources of a run cost the sum of their waits: a site paced at ten seconds a
+    // page held up every source named after it. Different hosts have nothing to wait on
+    // each other for, so they are walked at once. Sources that share a host still take
+    // turns, which keeps that host's request rate what one source's pacing says it is.
+    //
+    // Walked together, they are watched apart: each source of a run over several reports
+    // as a part of the job, with its own stage and its own count. One source alone is the
+    // job, and reports as it always did.
+    let begun = std::sync::atomic::AtomicU64::new(0);
+    let several = built.len() > 1;
+    let walked: Vec<anyhow::Result<Vec<(usize, SourceRun)>>> =
+        futures::stream::iter(by_host(built.iter().map(|source| source.target())))
+            .map(|sources| {
+                let (begun, selected, built, args) = (&begun, &selected, &built, &args);
+                async move {
+                    let mut runs = Vec::with_capacity(sources.len());
+                    for at in sources {
+                        // Between sources as well as inside them. A source whose stages
+                        // all finished is wholly recorded, so this is the cleanest place
+                        // a shutdown can land.
+                        cancel.check()?;
 
-        let source_started = Instant::now();
-        let id = source.id().to_string();
+                        let (definition, source) = (&selected[at], &built[at]);
+                        let source_started = Instant::now();
+                        let id = source.id().to_string();
+                        let watched = match several {
+                            true => progress.part(&id),
+                            false => progress.clone(),
+                        };
+                        let begin = |step: &str| {
+                            let begun = begun.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            watched.track(
+                                TOTAL_TRACK,
+                                format!("{id} · {step}"),
+                                begun,
+                                total,
+                                Unit::Count,
+                            );
+                        };
 
-        let mut stages = Vec::new();
-        for stage in [Stage::Discover, Stage::Collect] {
-            progress.track(
-                TOTAL_TRACK,
-                format!("{id} · {}", stage.name()),
-                done,
-                total,
-                Unit::Count,
-            );
-            progress.say(format!("{id} · {}", stage.name()));
-            done += 1;
+                        let mut stages = Vec::new();
+                        for stage in [Stage::Discover, Stage::Collect] {
+                            begin(stage.name());
+                            watched.say(format!("{id} · {}", stage.name()));
 
-            let outcome = if skip(stage) {
-                StageRun::skipped(stage, "--skip")
-            } else if args.dry_run {
-                StageRun::skipped(stage, "--dry-run")
-            } else if stage == Stage::Collect && stages.iter().any(StageRun::is_failure) {
-                // Collecting against a discovery that just failed would acquire the
-                // *previous* snapshot and report success. Better to say why it stopped.
-                StageRun::skipped(stage, "discover failed")
-            } else {
-                // A span per stage, so every line a crawl writes says which source and
-                // which stage it belongs to without each site repeating it.
-                run_acquisition(
-                    ctx,
-                    source.as_ref(),
-                    &args,
-                    stage,
-                    &definition.matches,
-                    progress,
-                    cancel,
-                )
-                .instrument(tracing::info_span!("stage", source = %id, stage = stage.name()))
-                .await?
-            };
-            stages.push(outcome);
-        }
+                            let outcome = if skip(stage) {
+                                StageRun::skipped(stage, "--skip")
+                            } else if args.dry_run {
+                                StageRun::skipped(stage, "--dry-run")
+                            } else if stage == Stage::Collect
+                                && stages.iter().any(StageRun::is_failure)
+                            {
+                                // Collecting against a discovery that just failed would
+                                // acquire the *previous* snapshot and report success.
+                                // Better to say why it stopped.
+                                StageRun::skipped(stage, "discover failed")
+                            } else {
+                                // A span per stage, so every line a crawl writes says
+                                // which source and which stage it belongs to without each
+                                // site repeating it.
+                                run_acquisition(
+                            ctx,
+                            source.as_ref(),
+                            args,
+                            stage,
+                            &definition.matches,
+                            &watched,
+                            cancel,
+                        )
+                        .instrument(
+                            tracing::info_span!("stage", source = %id, stage = stage.name()),
+                        )
+                        .await?
+                            };
+                            stages.push(outcome);
+                        }
+                        if several {
+                            // Said, so a watcher can tell a source that is finished from one
+                            // that is quiet. It is not a stage, and counts as none.
+                            watched.track(
+                                TOTAL_TRACK,
+                                format!("{id} · {OVER}"),
+                                begun.load(std::sync::atomic::Ordering::Relaxed),
+                                total,
+                                Unit::Count,
+                            );
+                        }
 
-        let source_run = SourceRun {
-            source: id,
-            kind: source.kind(),
-            target: source.target().to_string(),
-            stages,
-            elapsed_secs: source_started.elapsed().as_secs_f64(),
-        };
+                        runs.push((
+                            at,
+                            SourceRun {
+                                source: id,
+                                kind: source.kind(),
+                                target: source.target().to_string(),
+                                stages,
+                                elapsed_secs: source_started.elapsed().as_secs_f64(),
+                            },
+                        ));
+                    }
+                    anyhow::Ok(runs)
+                }
+            })
+            .buffer_unordered(HOSTS_AT_ONCE)
+            // Every host is waited for, not dropped at the first to stop. A cancel reaches
+            // each of them through the same token and each stops at its own next item
+            // boundary, which is the only place a walk may stop.
+            .collect()
+            .await;
+    let mut runs = Vec::with_capacity(built.len());
+    for host in walked {
+        runs.extend(host?);
+    }
+    // As named, not as finished.
+    runs.sort_by_key(|(at, _)| *at);
+    for (_, source_run) in runs {
         report.new_documents += source_run.new_documents();
         report.sources.push(source_run);
     }
+    let mut done = (built.len() * 2) as u64;
 
     // ── derive, once ──────────────────────────────────────────────────────────
     //
@@ -582,6 +649,32 @@ pub async fn run(
     report.failed_stages = report.all_stages().filter(|s| s.is_failure()).count() as u64;
     report.elapsed_secs = started.elapsed().as_secs_f64();
     Ok(report)
+}
+
+/// The step a source of a several-source run is in once both its stages are over.
+pub const OVER: &str = "done";
+
+/// How many hosts a run walks at once. Acquisition waits on the network and on each
+/// host's pacer far more than it computes, so the bound is what one run should hold open
+/// at a time, not how many cores there are.
+const HOSTS_AT_ONCE: usize = 16;
+
+/// The sources of a run by the host they ask, as indexes into `targets`: one group per
+/// host, groups and their members in the order the sources were named.
+fn by_host<'a>(targets: impl Iterator<Item = &'a str>) -> Vec<Vec<usize>> {
+    let mut hosts: Vec<(String, Vec<usize>)> = Vec::new();
+    for (at, target) in targets.enumerate() {
+        // An address with no host to read is its own host: nothing shares it.
+        let host = url::Url::parse(target)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+            .unwrap_or_else(|| target.to_string());
+        match hosts.iter_mut().find(|(known, _)| *known == host) {
+            Some((_, group)) => group.push(at),
+            None => hosts.push((host, vec![at])),
+        }
+    }
+    hosts.into_iter().map(|(_, group)| group).collect()
 }
 
 /// Runs one acquisition stage, converting either outcome into a [`StageRun`].
@@ -1245,6 +1338,24 @@ mod tests {
             report.render(&mut p).unwrap();
         }
         String::from_utf8(buf).unwrap()
+    }
+
+    /// The promise that makes walking hosts at once polite: two sources on one host are
+    /// one group and take turns, so that host is never asked faster than one source's
+    /// pacing allows. Everything else is its own group, in the order it was named.
+    #[test]
+    fn sources_sharing_a_host_take_turns_and_other_hosts_go_at_once() {
+        let groups = by_host(
+            [
+                "https://www.tampa.gov",
+                "https://www.youtube.com/@CityofTampa",
+                "https://WWW.TAMPA.GOV/city-clerk",
+                "https://www.orlando.gov",
+                "https://www.youtube.com/@CityofOrlando",
+            ]
+            .into_iter(),
+        );
+        assert_eq!(groups, vec![vec![0, 2], vec![1, 4], vec![3]]);
     }
 
     /// The whole point of a scheduled run: a second one says so in one word.

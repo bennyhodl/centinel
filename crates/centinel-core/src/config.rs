@@ -483,6 +483,12 @@ pub struct SourceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 
+    /// Removed by the operator: left out of every list and never run again, named or
+    /// not. Everything it collected stays in the record, and `source restore` brings the
+    /// source back as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<bool>,
+
     /// Overrides [`Defaults::rps`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rps: Option<f64>,
@@ -692,8 +698,13 @@ impl SourceConfig {
         Ok(())
     }
 
+    /// Whether a bare `run` walks it. A removed source is never enabled.
     pub fn is_enabled(&self) -> bool {
-        self.enabled.unwrap_or(true)
+        self.enabled.unwrap_or(true) && !self.is_removed()
+    }
+
+    pub fn is_removed(&self) -> bool {
+        self.removed.unwrap_or(false)
     }
 
     /// The host this source collects from: `tampa.gov` for `https://tampa.gov/a`, and

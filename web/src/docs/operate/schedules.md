@@ -107,7 +107,9 @@ centinel history --run 8f3c         # one run, by id or unambiguous prefix — t
 
 While a run is going — scheduled, started from the page, or typed in a terminal — the
 workspace shows it under **Working now**, with its stage, its count, a live log and a Stop
-button, whichever process on the store is running it. `history` is what is left afterwards.
+button, whichever process on the store is running it. A run over several sources shows
+each one on a row of its own, with its own stage and count; in the run's drawer, clicking a
+source shows only its lines of the log. `history` is what is left afterwards.
 See [The server](serve.md).
 
 One record per **attempt**, not per success. A crash leaves evidence: the record is

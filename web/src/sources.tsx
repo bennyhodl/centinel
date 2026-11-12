@@ -1,57 +1,124 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
-import { Ellipsis, Play, Plus, Search } from 'lucide-react'
-import { api, type JobState, type LaneHolder, type ListedSource, type NewSource, type RunAttempt, type SourceDetail } from './api'
+import { Link, useNavigate } from '@tanstack/react-router'
+import { CircleCheck, CirclePlay, Ellipsis, ListChecks, Microscope, Pause, Play, Plus, ScrollText, Search, Settings, Trash2, Undo2, X } from 'lucide-react'
+import { api, type JobPart, type JobState, type LaneHolder, type ListedSource, type NewSource, type RunAttempt, type SourceDetail, type SourceStage } from './api'
 import { AddSource } from './add-source'
 import { SourceSettings } from './source-settings'
 import { InvestigateDialog, useInvestigate } from './investigate'
 import { queries } from './queries'
 import { Bar, LogLine, StopJobButton as StopButton, useJobs, useOpenJob } from './jobs'
-import { SourceStages } from './source-stages'
-import { activeJobs, jobTitle } from './job-state'
-import { number, plural, when } from './format'
+import { activeJobs, activeParts, jobTitle, partStage } from './job-state'
+import { number, plural, tail, when } from './format'
 import { SourceIcon } from './host-icon'
-import { inTab, nextAction, runAction, sourceState, TABS, type SourceState, type Tab } from './source-state'
-import { BackToSources, Empty, ErrorBox, PageHeader, Pulse, SectionRule, Spinner } from './ui'
+import { behind, needsYou, runAction, standing, type Standing } from './source-state'
+import { BackToSources, Empty, ErrorBox, IconButton, PageHeader, Pulse, SectionRule, Spinner } from './ui'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
-const listDetail = 'What this archive collects. Investigate an address before adding it, run a source when you want it fresh, and see what each one holds.'
+/** The run that holds the lane, whichever process started it: it can be watched and stopped. */
+const useLaneJob = () => activeJobs(useJobs()).find(job => job.kind === 'run')
+
+/** Keeps the list and every source's page current after something changed them. */
+function useRefresh() {
+  const client = useQueryClient()
+  return () => { client.invalidateQueries({ queryKey: ['source'] }); client.invalidateQueries({ queryKey: ['sources'] }) }
+}
 
 // ── the list ───────────────────────────────────────────────────────────────
 
+/** The two acquisition stages. A run that skips both fetches nothing and finishes what is stored. */
+const ACQUIRE = ['discover', 'collect']
+
 export function Sources() {
   const { data, error } = useQuery(queries.sources())
+  const job = useLaneJob()
+  const open = useOpenJob()
+  const refresh = useRefresh()
   const [adding, setAdding] = useState<NewSource | null>(null)
   const [investigating, setInvestigating] = useState(false)
-  const [tab, setTab] = useState<Tab>('all')
-  const rows = (data?.sources ?? []).map(source => ({ source, state: sourceState(source) }))
-  const shown = rows.filter(row => inTab(tab, row.state))
+  const [find, setFind] = useState('')
+  const [onlyNeedsYou, setOnlyNeedsYou] = useState(false)
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
+  const [removing, setRemoving] = useState(false)
+
+  const all = data?.sources ?? []
+  const rows = all.filter(source => !source.removed).map(source => ({ source, standing: standing(source, job) }))
+  const removed = all.filter(source => source.removed)
+  const waiting = rows.filter(row => needsYou(row.standing))
+  const words = find.trim().toLowerCase()
+  const shown = (onlyNeedsYou ? waiting : rows).filter(({ source }) => !words || source.id.toLowerCase().includes(words) || source.target.toLowerCase().includes(words))
+  // A selection is of sources still here; one removed or renamed elsewhere drops out of it.
+  const picked = rows.filter(({ source }) => selected.has(source.id)).map(({ source }) => source)
+  const lane = data?.running ?? null
+
+  const pick = (id: string, on: boolean) => setSelected(current => { const next = new Set(current); if (on) next.add(id); else next.delete(id); return next })
+  const clear = () => { setSelected(new Set()); setRemoving(false) }
+  // The run's id is its job's id, so the drawer opens on it the moment it is accepted.
+  const run = useMutation({
+    mutationFn: ({ sources, skip }: { sources: string[]; skip?: string[] }) => api.runSources(sources, { skip }),
+    onSuccess: ({ run_id }) => { open(run_id); clear(); refresh() },
+  })
+  const each = useMutation({
+    mutationFn: (change: (id: string) => Promise<unknown>) => Promise.all(picked.map(source => change(source.id))),
+    onSuccess: () => { clear(); refresh() },
+  })
+  const enabled = rows.filter(({ source }) => source.enabled).map(({ source }) => source.id)
+  const allPaused = picked.length > 0 && picked.every(source => !source.enabled)
+  const busy = Boolean(lane) || run.isPending
+  const held = lane ? 'Another run holds the lane. It can start when that one finishes.' : undefined
+
   return <>
-    <PageHeader title="Sources" detail={listDetail}>
-      <div className="flex shrink-0 gap-2">
-        <Button variant="outline" onClick={() => setInvestigating(true)}><Search />Investigate an address</Button>
-        <Button onClick={() => setAdding({ id: '', site: '' })}><Plus />Add a source</Button>
+    <PageHeader title="Sources" detail={data ? `${plural(rows.length, 'source')} · ${plural(rows.reduce((sum, { source }) => sum + source.stages.collected, 0), 'document')}` : undefined}>
+      <div className="flex w-full max-w-2xl items-center gap-2">
+        <label className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input value={find} onChange={event => setFind(event.target.value)} placeholder="Find a source" aria-label="Find a source by name or address" className="pl-8" />
+        </label>
+        <button type="button" aria-pressed={onlyNeedsYou} onClick={() => setOnlyNeedsYou(!onlyNeedsYou)} className={`inline-flex h-9 shrink-0 items-center gap-2 rounded-full px-3 text-[13px] shadow-[inset_0_0_0_1px_var(--rule)] ${onlyNeedsYou ? 'bg-flame-soft text-flame-ink shadow-[inset_0_0_0_1px_var(--flame-line)]' : 'text-muted-foreground hover:text-foreground'}`}>
+          <span className="size-1.5 rounded-full bg-flame" />Needs you<span className="tabular-nums">{waiting.length}</span>
+        </button>
+        <IconButton label="Investigate an address" variant="outline" onClick={() => setInvestigating(true)}><Microscope /></IconButton>
+        <IconButton label="Add a source" variant="outline" onClick={() => setAdding({ id: '', site: '' })}><Plus /></IconButton>
+        {job && <IconButton label="Open the log" variant="outline" onClick={() => open(job.id)}><ScrollText /></IconButton>}
+        {/* The one button that starts everything is the one that stops it while it runs. */}
+        {job?.stoppable
+          ? <StopButton id={job.id} icon />
+          : <IconButton label={held ?? 'Run every source'} disabled={busy || !enabled.length} onClick={() => run.mutate({ sources: enabled })}>{run.isPending ? <Spinner /> : <Play />}</IconButton>}
       </div>
     </PageHeader>
-    <div className="grid max-w-5xl gap-10">
-      {data?.running && <LaneBanner holder={data.running} />}
+    <div className="grid max-w-5xl gap-6">
+      {job ? <WorkingNow job={job} /> : lane && <LaneBanner holder={lane} />}
+      {[error, run.error, each.error].map((error, i) => error && <ErrorBox key={i} error={error} />)}
       <section className="grid">
-        <Tabs value={tab} onValueChange={value => setTab(value as Tab)}>
-          <TabsList variant="line">
-            {TABS.map(([value, label]) => <TabsTrigger key={value} value={value}>{label}<span className="tabular-nums text-muted-foreground">{rows.filter(row => inTab(value, row.state)).length}</span></TabsTrigger>)}
-          </TabsList>
-        </Tabs>
-        <ListHeader />
-        {error && <ErrorBox error={error} />}
-        {shown.map(({ source, state }) => <SourceRow key={source.id} source={source} state={state} lane={data?.running ?? null} />)}
+        {picked.length > 0
+          ? <div className="flex h-11 items-center gap-2 rounded-lg bg-muted px-3 text-sm shadow-[inset_0_0_0_1px_var(--rule)]">
+            <input type="checkbox" checked aria-label="Clear the selection" onChange={clear} className="size-3.5 accent-foreground" />
+            <b className="font-semibold">{number(picked.length)} selected</b>
+            <span className="flex-1" />
+            {removing
+              ? <>
+                <span className="text-muted-foreground">Hide {picked.length === 1 ? 'it' : 'them'} and never run {picked.length === 1 ? 'it' : 'them'} again? What {picked.length === 1 ? 'it' : 'they'} collected stays.</span>
+                <IconButton size="icon-sm" label={`Remove ${plural(picked.length, 'source')}`} variant="destructive" disabled={each.isPending} onClick={() => each.mutate(id => api.setSourceRemoved(id, true))}><Trash2 /></IconButton>
+                <IconButton size="icon-sm" label="Keep them" variant="ghost" onClick={() => setRemoving(false)}><X /></IconButton>
+              </>
+              : <>
+                <IconButton size="icon-sm" label={held ?? (picked.length === 1 ? 'Run it' : `Run these ${number(picked.length)} together`)} disabled={busy} onClick={() => run.mutate({ sources: picked.map(source => source.id) })}><Play /></IconButton>
+                <IconButton size="icon-sm" label={held ?? 'Finish processing: read, index and embed what is collected. Nothing is fetched.'} variant="outline" disabled={busy} onClick={() => run.mutate({ sources: picked.map(source => source.id), skip: ACQUIRE })}><ListChecks /></IconButton>
+                <IconButton size="icon-sm" label={allPaused ? 'Unpause' : 'Pause: a run over every source skips them'} variant="outline" disabled={each.isPending} onClick={() => each.mutate(id => api.setSourceEnabled(id, allPaused))}>{allPaused ? <CirclePlay /> : <Pause />}</IconButton>
+                <IconButton size="icon-sm" label="Remove: hide them and never run them again" variant="outline" className="text-destructive" onClick={() => setRemoving(true)}><Trash2 /></IconButton>
+                <IconButton size="icon-sm" label="Clear the selection" variant="ghost" onClick={clear}><X /></IconButton>
+              </>}
+          </div>
+          : <ListHeader all={shown.length > 0 && <input type="checkbox" checked={false} aria-label="Select every source shown" onChange={() => setSelected(new Set(shown.map(({ source }) => source.id)))} className="size-3.5 accent-foreground" />} />}
+        {shown.map(({ source, standing }) => <SourceRow key={source.id} source={source} standing={standing} selected={selected.has(source.id)} onSelect={on => pick(source.id, on)} />)}
         {data && !rows.length && <Empty>No sources yet. Investigate an address, then add it.</Empty>}
-        {data && rows.length > 0 && !shown.length && <p className="py-6 text-sm text-muted-foreground">No source is here.</p>}
+        {data && rows.length > 0 && !shown.length && <p className="py-6 text-sm text-muted-foreground">{onlyNeedsYou && !words ? 'Nothing needs you.' : 'No source matches.'}</p>}
       </section>
+      {removed.length > 0 && <Removed sources={removed} />}
     </div>
     {adding && <AddSource initial={adding} onClose={() => setAdding(null)} />}
     {investigating && <InvestigateDialog onClose={() => setInvestigating(false)} />}
@@ -60,95 +127,118 @@ export function Sources() {
 
 export function SourcesSkeleton() {
   return <>
-    <PageHeader title="Sources" detail={listDetail}>
-      <div className="flex shrink-0 gap-2"><Button variant="outline" disabled><Search />Investigate an address</Button><Button disabled><Plus />Add a source</Button></div>
+    <PageHeader title="Sources" detail=" ">
+      <div className="flex w-full max-w-2xl items-center gap-2"><Skeleton className="h-9 min-w-0 flex-1 rounded-md" /><Skeleton className="h-9 w-28 rounded-full" /><Button variant="outline" size="icon" disabled><Microscope /></Button><Button variant="outline" size="icon" disabled><Plus /></Button><Button size="icon" disabled><Play /></Button></div>
     </PageHeader>
-    <div aria-busy className="grid max-w-5xl gap-10">
+    <div aria-busy className="grid max-w-5xl gap-6">
       <section className="grid">
-        <div className="flex h-9 gap-4">{TABS.map(([value, label]) => <span key={value} className="py-2 text-sm"><Skeleton mask={`${label} 16`} /></span>)}</div>
         <ListHeader />
-        {Array.from({ length: 6 }, (_, i) => <div key={i} className="flex items-center gap-6 border-b py-3.5">
-          <Skeleton className="size-5 rounded-[4px]" />
-          <span className="grid min-w-0 flex-1 gap-1"><b className="text-sm"><Skeleton mask="hillsborough-transportation" /></b><span className="text-xs"><Skeleton mask="site · https://www.hillsboroughcounty.org" /></span></span>
-          <span className="grid w-48 gap-1"><Skeleton className="h-1.5 rounded-full" /><span className="text-xs"><Skeleton mask="19,330 live of 19,400" /></span></span>
-          <span className="grid w-36 gap-1 text-sm"><Skeleton mask="2026-10-13 12:00" /><span className="text-xs"><Skeleton mask="nothing new" /></span></span>
-          <Skeleton className="h-8 w-20 rounded-md" />
+        {Array.from({ length: 6 }, (_, i) => <div key={i} className={ROW}>
+          <span />
+          <span className="flex min-w-0 items-center gap-3"><Skeleton className="size-5 rounded-[4px]" /><span className="grid min-w-0 gap-1"><b className="text-sm"><Skeleton mask="hillsborough-transportation" /></b><span className="text-xs"><Skeleton mask="planhillsborough.org" /></span></span></span>
+          <span className="text-sm"><Skeleton mask="Interrupted before the first page" /></span>
+          <span className="justify-self-end text-sm"><Skeleton mask="19,330" /></span>
+          <span className="justify-self-end text-sm"><Skeleton mask="Oct 13" /></span>
         </div>)}
       </section>
     </div>
   </>
 }
 
-function ListHeader() {
-  return <div className="flex gap-6 border-b pt-4 pb-2 text-xs text-muted-foreground">
-    <span className="flex-1 pl-11">Source</span>
-    <span className="w-48">Holds</span>
-    <span className="w-36">Last run</span>
-    <span className="w-24" />
+/** One row of the list and its header share these columns: tick, source, state, documents, collected. */
+const ROW = 'grid grid-cols-[14px_minmax(0,1fr)_minmax(0,1.3fr)_96px_72px] items-center gap-4 border-b px-2 py-3'
+
+function ListHeader({ all }: { all?: ReactNode }) {
+  return <div className={`${ROW} h-11 py-0 text-xs text-muted-foreground`}>
+    <span className="flex">{all}</span>
+    <span>Source</span>
+    <span>State</span>
+    <span className="justify-self-end">Documents</span>
+    <span className="justify-self-end">Collected</span>
   </div>
 }
 
-/** A row is a link to the source's page; its one button sits above the link, so a click on it does not navigate. */
-function SourceRow({ source, state, lane }: { source: ListedSource; state: SourceState; lane: LaneHolder | null }) {
-  return <div className="relative flex items-center gap-6 border-b py-3.5 hover:bg-hover">
-    <SourceIcon source={source.id} size={20} />
-    <span className="grid min-w-0 flex-1 gap-0.5">
-      <Link to="/sources/$id" params={{ id: source.id }} className={`truncate text-sm font-semibold after:absolute after:inset-0 ${source.enabled ? '' : 'text-muted-foreground'}`}>{source.id}</Link>
-      <span className="truncate text-xs text-muted-foreground">{source.kind} · {source.target}</span>
+/** A row is a link to the source's page; its tick sits above the link, so ticking it does not navigate. */
+function SourceRow({ source, standing, selected, onSelect }: { source: ListedSource; standing: Standing; selected: boolean; onSelect: (on: boolean) => void }) {
+  return <div className={`relative ${ROW} hover:bg-hover ${selected ? 'bg-muted' : ''}`}>
+    <input type="checkbox" checked={selected} aria-label={`Select ${source.id}`} onChange={event => onSelect(event.target.checked)} className="relative z-10 size-3.5 accent-foreground" />
+    <span className="flex min-w-0 items-center gap-3">
+      <SourceIcon source={source.id} size={20} />
+      <span className="grid min-w-0 gap-0.5">
+        <Link to="/sources/$id" params={{ id: source.id }} className={`truncate text-sm font-semibold after:absolute after:inset-0 ${source.enabled ? '' : 'text-muted-foreground'}`}>{source.id}</Link>
+        <span className="truncate text-xs text-muted-foreground">{hostOf(source.target)}</span>
+      </span>
     </span>
-    <Holds resources={source.resources} liveness={source.liveness} className="w-48" />
-    <span className="grid w-36 gap-0.5 text-sm">
-      {source.last_run
-        ? <><span className={outcomeTone[source.last_run.outcome]}>{when(source.last_run.started_at)}</span><span className="text-xs text-muted-foreground">{source.last_run.outcome === 'ok' ? source.last_run.documents ? `${number(source.last_run.documents)} new documents` : 'nothing new' : source.last_run.outcome}</span></>
-        : <span className="text-muted-foreground">never</span>}
-    </span>
-    <span className="relative z-10 flex w-24 justify-end"><SourceAction source={source} action={nextAction(state, source)} lane={lane} /></span>
+    <StandingLine standing={standing} />
+    <span className="justify-self-end text-sm tabular-nums text-muted-foreground">{source.stages.collected ? number(source.stages.collected) : '—'}</span>
+    <span className="justify-self-end text-sm text-muted-foreground">{source.last_run ? day(source.last_run.started_at) : '—'}</span>
   </div>
 }
 
-/** How much of what a source knows is live: one bar, collected states in order, the not-yet-collected rest as track. */
-function Holds({ resources, liveness, className = '' }: { resources: number; liveness: Record<string, number>; className?: string }) {
-  const { live = 0, gone = 0, blocked = 0, error = 0 } = liveness
-  const parts: Array<[number, string, string]> = [
-    [live, 'bg-foreground', 'live'],
-    [gone, 'bg-muted-foreground/50', 'gone'],
-    [blocked + error, 'bg-flame', 'blocked or failing'],
-    [Math.max(0, resources - live - gone - blocked - error), 'bg-track', 'not collected yet'],
-  ]
-  const said = parts.filter(([n]) => n).map(([n, , label]) => `${number(n)} ${label}`).join(' · ')
-  return <span className={`grid gap-1 ${className}`} title={said}>
-    <span className="flex h-1.5 overflow-hidden rounded-full bg-track">
-      {resources > 0 && parts.map(([n, tone, label]) => n > 0 && <i key={label} className={`block h-full ${tone}`} style={{ width: `${n / resources * 100}%` }} />)}
-    </span>
-    <span className="text-xs tabular-nums text-muted-foreground">{resources ? `${number(live)} live of ${number(resources)}` : 'nothing yet'}</span>
+/** A source's mark and the few words beside it: a turning ring while it works, a check when it is done, a dot when it waits or is stuck. */
+function StandingLine({ standing }: { standing: Standing }) {
+  const mark = {
+    working: <span className="grid size-4 shrink-0 place-items-center text-flame"><Spinner /></span>,
+    done: <CircleCheck className="size-4 shrink-0 text-moss" aria-hidden />,
+    waiting: <span className="grid size-4 shrink-0 place-items-center"><span className="size-1.5 rounded-full bg-flame" /></span>,
+    blocked: <span className="grid size-4 shrink-0 place-items-center"><span className="size-1.5 rounded-full bg-destructive" /></span>,
+    paused: <span className="grid size-4 shrink-0 place-items-center"><span className="size-1.5 rounded-full bg-stone" /></span>,
+  }[standing.mark]
+  const tone = standing.mark === 'working' ? 'text-flame-ink' : standing.mark === 'done' || standing.mark === 'paused' ? 'text-muted-foreground' : ''
+  return <span className="flex min-w-0 items-center gap-2 text-sm">
+    {mark}
+    <span className={`truncate ${tone}`} title={standing.words}>{standing.words}</span>
+    {standing.count && <span className="shrink-0 font-mono text-xs text-muted-foreground">{standing.count}</span>}
   </span>
 }
 
-/** Starts, stops, resumes or enables one source, and keeps the list and its page current. */
-function useSourceControls(id: string) {
-  const client = useQueryClient()
+/** An address without its scheme or trailing slash: `www.tampa.gov`, `www.youtube.com/@CityofTampa`. */
+const hostOf = (target: string) => target.replace(/^https?:\/\//, '').replace(/\/$/, '')
+
+/** A server timestamp as a short day: `Nov 6`. */
+const day = (at: string) => new Date(at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+
+/**
+ * The run under way, source by source: what each is doing, how far through, and the
+ * address it has in hand. After collection the run reads, indexes and embeds for every
+ * source at once, and that is one card. A click opens the run's drawer.
+ */
+function WorkingNow({ job }: { job: JobState }) {
   const open = useOpenJob()
-  const refresh = () => { client.invalidateQueries({ queryKey: ['source', id] }); client.invalidateQueries({ queryKey: ['sources'] }) }
-  // The run's id is its job's id, so the drawer opens on it the moment it is accepted.
-  const run = useMutation({ mutationFn: (skip: string[]) => api.runSource(id, { skip }), onSuccess: ({ run_id }) => { open(run_id); refresh() } })
-  const enable = useMutation({ mutationFn: (enabled: boolean) => api.setSourceEnabled(id, enabled), onSuccess: refresh })
-  return { run, enable }
+  const parts = activeParts(job)
+  const cards: Array<{ key: string; name: ReactNode; at: Pick<JobPart, 'done' | 'total' | 'current' | 'message'> }> = !job.step && parts.length
+    ? parts.map(part => ({ key: part.name, name: <><SourceIcon source={part.name} size={18} /><span className="truncate">{part.name}</span><span className="shrink-0 text-xs font-normal text-flame-ink">{partStage(part)}</span></>, at: part }))
+    : [{ key: job.id, name: <span className="truncate">{jobTitle(job)}</span>, at: job }]
+  return <section className="grid gap-2.5">
+    <div className="flex items-center gap-2.5">
+      <span className="text-flame"><Pulse /></span>
+      <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-flame-ink">Working now</span>
+      <span className="min-w-0 flex-1 truncate text-[13px] text-muted-foreground">{job.label}</span>
+    </div>
+    <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+      {cards.map(({ key, name, at }) => <button key={key} type="button" onClick={() => open(job.id)} className="grid content-start gap-2 rounded-lg border bg-card p-3 text-left hover:bg-hover">
+        <span className="flex min-w-0 items-center gap-2 text-sm font-semibold">{name}<span className="flex-1" /><span className="shrink-0 font-mono text-xs font-normal text-muted-foreground">{at.total ? `${number(at.done ?? 0)} / ${number(at.total)}` : ''}</span></span>
+        <Bar job={at} thin />
+        <span className="truncate font-mono text-[11px] text-muted-foreground">{at.current ? tail(at.current) : at.message ?? ' '}</span>
+      </button>)}
+    </div>
+  </section>
 }
 
-/** The run that holds the lane, whichever process started it: it can be watched and stopped. */
-const useLaneJob = () => activeJobs(useJobs()).find(job => job.kind === 'run')
-
-function SourceAction({ source, action, lane }: { source: Pick<ListedSource, 'id'>; action: ReturnType<typeof nextAction>; lane: LaneHolder | null }) {
-  const job = useLaneJob()
-  const { run, enable } = useSourceControls(source.id)
-  const error = run.error ?? enable.error
-  switch (action) {
-    case 'stop': return job?.stoppable ? <StopButton id={job.id} /> : <Badge className="bg-flame-soft text-flame-ink">Collecting</Badge>
-    case 'enable': return <Button size="sm" variant="outline" disabled={enable.isPending} title={error?.message} onClick={() => enable.mutate(true)}>Enable</Button>
-    default: return <Button size="sm" variant={action === 'resume' ? 'default' : 'outline'} disabled={Boolean(lane) || run.isPending} title={lane ? 'Another operation holds the collection lane' : error?.message} onClick={() => run.mutate([])}>
-      {run.isPending ? <Spinner /> : <Play />}{action === 'resume' ? 'Resume' : 'Run'}
-    </Button>
-  }
+/** What was removed: hidden from the list and never run, with everything collected kept. Each can be brought back. */
+function Removed({ sources }: { sources: ListedSource[] }) {
+  const refresh = useRefresh()
+  const restore = useMutation({ mutationFn: (id: string) => api.setSourceRemoved(id, false), onSuccess: refresh })
+  return <details className="group text-sm">
+    <summary className="flex cursor-pointer list-none items-center gap-2 text-muted-foreground hover:text-foreground"><span className="transition-transform group-open:rotate-90">›</span>Removed<span className="tabular-nums">{sources.length}</span></summary>
+    <p className="pt-2 pb-1 text-[13px] text-muted-foreground">Hidden and never run. Everything they collected is still in the archive and in search.</p>
+    {sources.map(source => <div key={source.id} className="flex items-center gap-3 border-b py-2.5">
+      <SourceIcon source={source.id} size={18} />
+      <span className="min-w-0 flex-1 truncate text-muted-foreground"><Link to="/sources/$id" params={{ id: source.id }} className="font-medium text-foreground hover:underline">{source.id}</Link> · {hostOf(source.target)} · {plural(source.stages.collected, 'document')}</span>
+      <IconButton size="icon-sm" label={`Restore ${source.id}`} variant="outline" disabled={restore.isPending} onClick={() => restore.mutate(source.id)}><Undo2 /></IconButton>
+    </div>)}
+    {restore.error && <ErrorBox error={restore.error} />}
+  </details>
 }
 
 /**
@@ -162,8 +252,8 @@ function LaneBanner({ holder }: { holder: LaneHolder }) {
   return <div className="flex items-center gap-3 rounded-lg bg-flame-soft px-4 py-3 text-sm text-flame-ink shadow-[inset_0_0_0_1px_var(--flame-line)]">
     <span className="size-2 shrink-0 animate-pulse rounded-full bg-flame" />
     <span className="flex-1">{holder.operation ? `${holder.operation} is processing` : 'A run is collecting'} {holder.sources?.length ? holder.sources.join(', ') : 'every enabled source'}, started {when(holder.started_at)}{holder.schedule ? ` by the ${holder.schedule} schedule` : ''}. Another waits for it to finish.</span>
-    {job && <Button size="sm" variant="outline" onClick={() => open(job.id)}>Watch</Button>}
-    {job?.stoppable && <StopButton id={job.id} />}
+    {job && <IconButton size="icon-sm" label="Open the log" variant="outline" onClick={() => open(job.id)}><ScrollText /></IconButton>}
+    {job?.stoppable && <StopButton id={job.id} icon />}
   </div>
 }
 
@@ -178,79 +268,95 @@ export function SourcePage({ id }: { id: string }) {
 
 function SourceView({ id, detail }: { id: string; detail: SourceDetail }) {
   const [settings, setSettings] = useState(false)
-  const definition = detail.definition
-  const { source, summary } = detail
-  const target = source.target
-  const state = sourceState(source)
+  const navigate = useNavigate()
+  const open = useOpenJob()
+  const refresh = useRefresh()
+  const { source, summary, definition } = detail
   const job = useLaneJob()
-  const { run, enable } = useSourceControls(id)
+  const here = standing(source, job)
+  const lane = detail.running
+  const held = lane ? 'Another run holds the lane. It can start when that one finishes.' : undefined
+  // The run's id is its job's id, so the drawer opens on it the moment it is accepted.
+  const run = useMutation({ mutationFn: (skip: string[]) => api.runSource(id, { skip }), onSuccess: ({ run_id }) => { open(run_id); refresh() } })
+  const stage = useMutation({ mutationFn: ({ stage, again }: { stage: SourceStage; again?: boolean }) => api.startSourceStage(id, stage, again), onSuccess: ({ id: job }) => { open(job); refresh() } })
+  const enable = useMutation({ mutationFn: (enabled: boolean) => api.setSourceEnabled(id, enabled), onSuccess: refresh })
+  const remove = useMutation({ mutationFn: (removed: boolean) => api.setSourceRemoved(id, removed), onSuccess: (_, removed) => { refresh(); if (removed) void navigate({ to: '/sources' }) } })
   const investigate = useInvestigate()
+  const busy = Boolean(lane) || run.isPending || stage.isPending
   const { live = 0, gone = 0, blocked = 0, error = 0 } = source.liveness
-  const last = detail.runs[0]
+  const notLive = gone + blocked + error
+
   return <>
     <BackToSources />
-    <PageHeader eyebrow={<span className="inline-flex items-center gap-2"><SourceIcon source={id} size={16} />{source.kind === 'channel' ? 'Channel' : 'Website'}</span>} title={id} detail={target}>
+    <PageHeader eyebrow={<span className="inline-flex items-center gap-2"><SourceIcon source={id} size={16} />{source.kind === 'channel' ? 'Channel' : 'Website'} · {hostOf(source.target)}</span>} title={id}>
       <div className="flex shrink-0 flex-wrap gap-2">
-        <Button variant="outline" onClick={() => setSettings(true)}>Settings</Button>
-        <Button variant="outline" disabled={enable.isPending} onClick={() => enable.mutate(!source.enabled)}>{source.enabled ? 'Disable' : 'Enable'}</Button>
-        <SourceAction source={source} action={state === 'collecting' ? 'stop' : runAction(source)} lane={detail.running} />
+        {source.removed
+          ? <IconButton label="Restore it, as it was" disabled={remove.isPending} onClick={() => remove.mutate(false)}><Undo2 /></IconButton>
+          : here.mark === 'working'
+            ? job?.stoppable ? <StopButton id={job.id} icon /> : null
+            : <IconButton label={held ?? (runAction(source) === 'resume' ? 'Resume where it stopped' : 'Run it')} disabled={busy} onClick={() => run.mutate([])}>{run.isPending ? <Spinner /> : <Play />}</IconButton>}
+        <IconButton label="Settings" variant="outline" onClick={() => setSettings(true)}><Settings /></IconButton>
         <DropdownMenu>
           <DropdownMenuTrigger asChild><Button variant="outline" size="icon" aria-label="More"><Ellipsis /></Button></DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem disabled={Boolean(detail.running) || run.isPending} onSelect={() => run.mutate(['embed'])}>Run without embedding</DropdownMenuItem>
-            <DropdownMenuItem disabled={source.kind !== 'site' || investigate.isPending} onSelect={() => investigate.mutate(target)}>Investigate it again</DropdownMenuItem>
+            <DropdownMenuItem disabled={busy || source.removed} onSelect={() => run.mutate(['embed'])}>Run without embedding</DropdownMenuItem>
+            <DropdownMenuItem disabled={busy} onSelect={() => stage.mutate({ stage: 'extract', again: true })}>Read everything again</DropdownMenuItem>
+            {source.kind === 'channel' && <DropdownMenuItem disabled={busy} onSelect={() => stage.mutate({ stage: 'transcribe' })}>Transcribe recordings</DropdownMenuItem>}
+            <DropdownMenuItem disabled={source.kind !== 'site' || investigate.isPending} onSelect={() => investigate.mutate(source.target)}>Investigate it again</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            {!source.removed && <DropdownMenuItem disabled={enable.isPending} onSelect={() => enable.mutate(!source.enabled)}>{source.enabled ? 'Pause' : 'Unpause'}</DropdownMenuItem>}
+            {!source.removed && <DropdownMenuItem variant="destructive" disabled={remove.isPending} onSelect={() => remove.mutate(true)}>Remove</DropdownMenuItem>}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
     </PageHeader>
-    <div className="grid max-w-5xl gap-10">
-      {detail.running && !(state === 'collecting' && job) && <LaneBanner holder={detail.running} />}
-      {[run.error, enable.error, investigate.error].map((error, i) => error && <ErrorBox key={i} error={error} />)}
-      {!source.enabled && <p className="text-sm text-muted-foreground">Disabled: a run over every source skips it. Run starts it anyway.</p>}
+    <div className="grid max-w-5xl gap-9">
+      <div className="-mt-3 grid gap-3">
+        {source.removed
+          ? <p className="text-sm text-muted-foreground">Removed: hidden from the list and never run. Everything it collected is still in the archive. Restore brings it back as it was.</p>
+          : <StandingLine standing={here.mark === 'paused' ? { mark: 'paused', words: 'Paused: a run over every source skips it. Run starts it anyway.' } : here} />}
+        {lane && here.mark !== 'working' && <LaneBanner holder={lane} />}
+        {[run.error, stage.error, enable.error, remove.error, investigate.error].map((error, i) => error && <ErrorBox key={i} error={error} />)}
+      </div>
 
-      <section className="grid gap-4">
-        <div className="grid grid-cols-4 border-y">
-          <Figure label="Addresses" value={number(source.resources)} />
-          <Figure label="Live" value={number(live)} />
-          <Figure label="Not live" value={number(gone + blocked + error)} detail={[gone && `${number(gone)} gone`, blocked && `${number(blocked)} blocked`, error && `${number(error)} failing`].filter(Boolean).join(' · ')} />
-          <Figure label="Last run" value={last ? when(last.started_at) : 'never'} detail={last && (last.schedule ? `${last.outcome} · ${last.schedule} schedule` : `${last.outcome} · ${last.trigger}`)} />
-        </div>
-        <Holds resources={source.resources} liveness={source.liveness} />
+      <section className="grid">
+        <SectionRule aside={source.last_run ? `collected ${when(source.last_run.started_at)}` : undefined}>Where it stands</SectionRule>
+        <Stand label="Collected" of={source.resources} got={live + notLive} main={source.resources ? `${number(live)} of ${plural(source.resources, 'address', 'addresses')} live` : 'Nothing yet'}
+          detail={[gone && `${number(gone)} gone`, blocked && `${number(blocked)} blocked`, error && `${number(error)} failing`, source.resources > live + notLive && `${number(source.resources - live - notLive)} not collected yet`]} />
+        <StagesOf source={source} busy={busy} held={held} pending={stage.isPending ? stage.variables.stage : undefined} onStart={which => stage.mutate({ stage: which })} />
       </section>
-
-      <section className="grid gap-3">
-        <SectionRule>How it is collected</SectionRule>
-        <Facts rows={[
-          ['Method', definition.strategy ? `${definition.strategy} (pinned)` : 'asked on every run'],
-          ['Last discovery', summary?.last_discovery ? `${when(summary.last_discovery.at)} · ${summary.last_discovery.method} · ${plural(summary.last_discovery.addresses, 'address', 'addresses')}` : 'never'],
-          ['Collected', summary ? plural(summary.observations, 'observation') : '—'],
-          ['Links off-site', <CrumbsFact key="crumbs" id={id} />],
-          ...(definition.rps ? [['Requests a second', String(definition.rps)] as [string, string]] : []),
-          ...(definition.matches?.length ? [['Only addresses containing', definition.matches.join(', ')] as [string, string]] : []),
-          ...(source.kind === 'channel' ? [
-            ['Language', definition.lang ?? `default (${detail.settings_options.defaults.lang})`] as [string, string],
-            ['Audio fallback', definition.audio_if_no_captions === false ? 'never' : 'when captions are missing'] as [string, string],
-          ] : []),
-        ]} />
-      </section>
-
-      <SourceStages id={id} lane={detail.running} />
-
-      {summary?.problems.length ? <section className="grid">
-        <SectionRule aside={plural(summary.problems.length + (summary.problems_truncated ?? 0), 'address', 'addresses')}>Not live</SectionRule>
-        {summary.problems.map(problem => <div key={problem.natural_key} className="grid gap-0.5 border-b py-2.5">
-          <span className="flex items-baseline gap-2"><Badge variant="outline">{problem.state}</Badge><span className="min-w-0 truncate font-mono text-[13px]">{problem.natural_key}</span></span>
-          <span className="text-xs text-muted-foreground">{plural(problem.consecutive_failures, 'failure')} since {when(problem.since)}{problem.detail ? ` · ${problem.detail}` : ''}</span>
-        </div>)}
-      </section> : null}
 
       <section className="grid">
         <SectionRule aside={detail.runs.length ? `last ${detail.runs.length}` : undefined}>Runs</SectionRule>
         {detail.runs.map(attempt => <RunRow key={attempt.run_id} attempt={attempt} />)}
-        {!detail.runs.length && <p className="py-4 text-sm text-muted-foreground">No run of this source is in the journal yet.</p>}
+        {!detail.runs.length && <p className="py-3 text-sm text-muted-foreground">No run of this source is in the journal yet.</p>}
       </section>
 
-      {state === 'collecting' && job && <RunStrip job={job} />}
+      <section className="grid">
+        <More title="How it is collected" aside={definition.strategy ? `${definition.strategy}, pinned` : summary?.last_discovery?.method}>
+          <Facts rows={[
+            ['Address', source.target],
+            ['Method', definition.strategy ? `${definition.strategy} (pinned)` : 'asked on every run'],
+            ['Last discovery', summary?.last_discovery ? `${when(summary.last_discovery.at)} · ${summary.last_discovery.method} · ${plural(summary.last_discovery.addresses, 'address', 'addresses')}` : 'never'],
+            ['Collected', summary ? plural(summary.observations, 'observation') : '—'],
+            ...(definition.rps ? [['Requests a second', String(definition.rps)] as [string, string]] : []),
+            ...(definition.matches?.length ? [['Only addresses containing', definition.matches.join(', ')] as [string, string]] : []),
+            ...(source.kind === 'channel' ? [
+              ['Language', definition.lang ?? `default (${detail.settings_options.defaults.lang})`] as [string, string],
+              ['Audio fallback', definition.audio_if_no_captions === false ? 'never' : 'when captions are missing'] as [string, string],
+            ] : []),
+          ]} />
+        </More>
+        {summary?.problems.length ? <More title={`${plural(summary.problems.length + (summary.problems_truncated ?? 0), 'address', 'addresses')} not live`}>
+          {summary.problems.map(problem => <div key={problem.natural_key} className="grid gap-0.5 border-t py-2.5">
+            <span className="flex items-baseline gap-2"><Badge variant="outline">{problem.state}</Badge><span className="min-w-0 truncate font-mono text-[13px]">{problem.natural_key}</span></span>
+            <span className="text-xs text-muted-foreground">{plural(problem.consecutive_failures, 'failure')} since {when(problem.since)}{problem.detail ? ` · ${problem.detail}` : ''}</span>
+          </div>)}
+        </More> : null}
+        <More title="Links that leave this site"><div className="border-t py-2.5 text-sm"><CrumbsFact id={id} /></div></More>
+      </section>
+
+      {here.mark === 'working' && job && <RunStrip job={job} part={job.parts?.find(part => part.name === id)} />}
     </div>
     {settings && <SourceSettings definition={definition} options={detail.settings_options} onClose={() => setSettings(false)} />}
   </>
@@ -260,35 +366,67 @@ export function SourceSkeleton({ id }: { id?: string }) {
   return <>
     <BackToSources />
     <PageHeader eyebrow="Website" title={id ?? '…'}>
-      <div className="flex shrink-0 gap-2"><Button variant="outline" disabled>Disable</Button><Button size="sm" variant="outline" disabled><Play />Run</Button><Button variant="outline" size="icon" disabled><Ellipsis /></Button></div>
+      <div className="flex shrink-0 gap-2"><Button size="icon" disabled><Play /></Button><Button variant="outline" size="icon" disabled><Settings /></Button><Button variant="outline" size="icon" disabled><Ellipsis /></Button></div>
     </PageHeader>
-    <div aria-busy className="grid max-w-5xl gap-10">
-      <section className="grid gap-4"><Skeleton className="h-[74px] rounded-none" /><Skeleton className="h-6" /></section>
-      <section className="grid gap-3"><SectionRule>How it is collected</SectionRule><Skeleton className="h-40 rounded-md" /></section>
-      <section className="grid"><SectionRule>Runs</SectionRule>{Array.from({ length: 3 }, (_, i) => <Skeleton key={i} className="my-2.5 h-9" />)}</section>
+    <div aria-busy className="grid max-w-5xl gap-9">
+      <section className="grid"><SectionRule>Where it stands</SectionRule>{Array.from({ length: 4 }, (_, i) => <Skeleton key={i} className="my-2.5 h-6" />)}</section>
+      <section className="grid"><SectionRule>Runs</SectionRule>{Array.from({ length: 3 }, (_, i) => <Skeleton key={i} className="my-2.5 h-6" />)}</section>
     </div>
   </>
 }
 
-function Figure({ label, value, detail }: { label: string; value: string; detail?: string | false }) {
-  return <span className="grid content-start gap-0.5 border-l py-3 pl-4 first:border-l-0 first:pl-0">
-    <span className="text-xs text-muted-foreground">{label}</span>
-    <b className="text-lg leading-6 font-semibold tabular-nums">{value}</b>
-    {detail && <span className="truncate text-xs text-muted-foreground">{detail}</span>}
-  </span>
+/**
+ * The three stages after collection, each against the one before it: how many documents
+ * got this far, how many wait, and a button on the stage that has work left. Only that
+ * one: a stage ahead of it has nothing to do until it runs.
+ */
+function StagesOf({ source, busy, held, pending, onStart }: { source: ListedSource; busy: boolean; held?: string; pending?: SourceStage; onStart: (stage: SourceStage) => void }) {
+  const { stages } = source
+  const left = behind(stages)
+  const next: SourceStage | undefined = left.read ? 'extract' : left.indexed ? 'index' : left.embedded || (stages.embedded === undefined && stages.indexed) ? 'embed' : undefined
+  const start = (stage: SourceStage, label: string) => next === stage && !source.removed && <IconButton size="icon-sm" label={held ?? label} variant={stages.embedded === undefined && stage === 'embed' ? 'outline' : 'default'} disabled={busy} onClick={() => onStart(stage)}>{pending === stage ? <Spinner /> : <Play />}</IconButton>
+  return <>
+    <Stand label="Read" of={stages.collected} got={stages.read + stages.unreadable} main={plural(stages.read, 'document')}
+      detail={[stages.unreadable && `${number(stages.unreadable)} could not be read`, left.read && `${number(left.read)} waiting`]} action={start('extract', 'Read the rest')} />
+    <Stand label="Indexed" of={stages.read} got={stages.indexed} main={plural(stages.indexed, 'document')}
+      detail={[stages.indexed > 0 && 'searchable by keyword', left.indexed && `${number(left.indexed)} waiting`]} action={start('index', 'Index the rest')} />
+    <Stand label="Embedded" of={stages.indexed} got={stages.embedded ?? 0} main={stages.embedded === undefined ? 'Nothing in this archive is embedded yet' : plural(stages.embedded, 'document')}
+      detail={[stages.embedded ? 'searchable by meaning' : false, left.embedded && `${number(left.embedded)} waiting`]} action={start('embed', stages.embedded ? 'Embed the rest' : 'Embed')} />
+  </>
 }
 
-const outcomeTone: Record<RunAttempt['outcome'], string> = { ok: '', partial: 'text-flame-ink', failed: 'text-destructive', skipped: 'text-muted-foreground', interrupted: 'text-muted-foreground' }
+/** One stage of a source: a bar for how much of the stage before it got this far, what that is in words, and what is missing. */
+function Stand({ label, of, got, main, detail, action }: { label: string; of: number; got: number; main: string; detail: Array<string | false | 0>; action?: ReactNode }) {
+  const share = of ? Math.min(1, got / of) : 0
+  const said = detail.filter(Boolean).join(' · ')
+  return <div className="grid min-h-12 grid-cols-[88px_140px_minmax(0,1fr)_auto] items-center gap-4 border-b py-2">
+    <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{label}</span>
+    <span className="block h-1 rounded-full bg-track"><i className={`block h-full rounded-full ${share < 1 && of ? 'bg-flame' : 'bg-foreground'}`} style={{ width: `${share * 100}%` }} /></span>
+    <span className="truncate text-sm" title={said}><b className="font-semibold">{main}</b>{said && <span className="text-muted-foreground"> · {said}</span>}</span>
+    {action || <span />}
+  </div>
+}
 
+/** A part of the page that stays shut until asked for. */
+function More({ title, aside, children }: { title: string; aside?: string; children: ReactNode }) {
+  return <details className="group border-b">
+    <summary className="flex cursor-pointer list-none items-center gap-2.5 py-2.5 text-sm text-muted-foreground hover:text-foreground"><span className="w-2 transition-transform group-open:rotate-90">›</span>{title}{aside && <span className="text-xs">· {aside}</span>}</summary>
+    <div className="pb-3 pl-[18px]">{children}</div>
+  </details>
+}
+
+const outcomeDot: Record<RunAttempt['outcome'], string> = { ok: 'bg-moss', partial: 'bg-flame', failed: 'bg-destructive', skipped: 'bg-stone', interrupted: 'bg-flame' }
+
+/** One run in a line: when, how it ended, and what it added or lost. */
 function RunRow({ attempt }: { attempt: RunAttempt }) {
   const added = attempt.added
   const lost = attempt.subtracted
-  return <div className="flex items-center gap-6 border-b py-3">
-    <span className="grid w-40 shrink-0 gap-0.5"><b className="text-sm font-semibold">{when(attempt.started_at)}</b><span className="text-xs text-muted-foreground">{attempt.schedule ? `${attempt.schedule} schedule` : attempt.trigger}</span></span>
-    <span className={`w-24 shrink-0 text-sm ${outcomeTone[attempt.outcome]}`}>{attempt.outcome === 'interrupted' ? 'stopped' : attempt.outcome}</span>
-    <span className="min-w-0 flex-1 truncate text-[13px] text-muted-foreground" title={attempt.detail}>
-      {[added.documents && `${number(added.documents)} new documents`, added.chunks && `${number(added.chunks)} chunks`, lost.gone && `${number(lost.gone)} gone`, lost.blocked && `${number(lost.blocked)} blocked`, lost.errored && `${number(lost.errored)} errors`].filter(Boolean).join(' · ') || attempt.detail || 'nothing new'}
-    </span>
+  const moved = [added.documents && `${number(added.documents)} new`, lost.gone && `${number(lost.gone)} gone`, lost.blocked && `${number(lost.blocked)} blocked`, lost.errored && `${number(lost.errored)} errors`].filter(Boolean).join(' · ')
+  return <div className="grid grid-cols-[8px_128px_minmax(0,1fr)_auto] items-center gap-3 border-b py-2.5 text-sm">
+    <span className={`size-1.5 rounded-full ${outcomeDot[attempt.outcome]}`} />
+    <span>{when(attempt.started_at)}</span>
+    <span className="truncate text-muted-foreground" title={attempt.detail}>{attempt.outcome === 'interrupted' ? 'stopped' : attempt.outcome === 'ok' ? 'finished' : attempt.outcome} · {moved || attempt.detail || 'nothing new'}</span>
+    <span className="text-xs text-muted-foreground">{attempt.schedule ? `${attempt.schedule} schedule` : attempt.trigger}</span>
   </div>
 }
 
@@ -297,29 +435,32 @@ const STAGES = ['discover', 'collect', 'extract', 'index', 'embed']
 
 /**
  * This source's run as it happens, pinned to the bottom of its page: the stage it is in,
- * how far through, and the last lines of its log. The drawer has the whole log.
+ * how far through, and the last lines of its log. In a run over several sources that is
+ * this source's part of it until the stages the run does for all of them. The drawer has
+ * the whole log.
  */
-function RunStrip({ job }: { job: JobState }) {
+function RunStrip({ job, part }: { job: JobState; part?: JobPart }) {
   const open = useOpenJob()
-  const stage = STAGES.indexOf((job.step ?? '').split(' · ').at(-1) ?? '')
-  const lines = job.log.filter(line => line.type === 'item' || line.type === 'step').slice(-3)
+  const at = part && !job.step ? part : job
+  const stage = STAGES.indexOf((at.step ?? '').split(' · ').at(-1) ?? '')
+  const lines = job.log.filter(line => (line.type === 'item' || line.type === 'step') && (at === job || line.part === part?.name)).slice(-3)
   return <section className="sticky bottom-4 z-10 grid gap-3 rounded-lg border bg-background p-4 shadow-lg">
     <div className="flex items-center gap-3">
       <span className="text-flame"><Pulse /></span>
-      <b className="text-sm font-semibold">{jobTitle(job)}</b>
-      {job.total != null && <span className="font-mono text-xs text-muted-foreground">{number(job.done ?? 0)} / {number(job.total)}</span>}
+      <b className="text-sm font-semibold">{jobTitle({ kind: job.kind, step: at.step })}</b>
+      {at.total != null && <span className="font-mono text-xs text-muted-foreground">{number(at.done ?? 0)} / {number(at.total)}</span>}
       <span className="flex flex-1 justify-end gap-1.5 text-xs">
         {STAGES.map((name, i) => <span key={name} className={`rounded-md px-2 py-0.5 ${i === stage ? 'bg-flame-soft text-flame-ink' : i < stage ? 'text-foreground' : 'text-muted-foreground'}`}>{name}</span>)}
       </span>
     </div>
-    <Bar job={job} thin />
+    <Bar job={at} thin />
     <div className="rounded-md bg-terminal py-2 font-mono text-xs leading-[22px]">
       {lines.map(line => <LogLine key={line.seq} line={line} />)}
       {!lines.length && <div className="px-5 text-[#B9AE98]">Waiting for the first page…</div>}
     </div>
     <div className="flex justify-end gap-2">
-      <Button size="sm" variant="outline" onClick={() => open(job.id)}>Open full log</Button>
-      {job.stoppable && <StopButton id={job.id} />}
+      <IconButton size="icon-sm" label="Open the full log" variant="outline" onClick={() => open(job.id)}><ScrollText /></IconButton>
+      {job.stoppable && <StopButton id={job.id} icon />}
     </div>
   </section>
 }
@@ -355,4 +496,3 @@ function Facts({ rows }: { rows: Array<[string, ReactNode]> }) {
 function Fact({ label, value }: { label: string; value: ReactNode }) {
   return <><dt>{label}</dt><dd>{value}</dd></>
 }
-

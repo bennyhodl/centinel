@@ -88,7 +88,9 @@ whole. Entries past 10,000 in one feed are counted and dropped.
 ## Politeness
 
 Per host, and deliberately slow. `rps = 1.0` by default. Acquisition runs per source for
-this reason, and because a 403 on one site must not stop the next.
+this reason, and because a 403 on one site must not stop the next. A run walks different
+hosts at the same time and the sources of one host in turn, so going faster overall never
+means asking any one host faster.
 
 `robots.txt` is honoured, and a robots denial is recorded as `Blocked` — refused, not
 absent. A descriptive `User-Agent` measurably reduces WAF 403s.

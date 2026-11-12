@@ -35,6 +35,8 @@ centinel source add agartha-council --channel https://www.youtube.com/@CityofAga
 centinel source list
 centinel source disable agartha     # a bare `centinel run` skips it; naming it still runs it
 centinel source enable agartha
+centinel source remove agartha      # hidden and never run again, named or not; what it collected stays
+centinel source restore agartha
 ```
 
 `source add` defines the source and stops; `--run` collects it straight away. Before adding
@@ -72,8 +74,15 @@ The **Sources** page does the same, for an administrator signed in to the worksp
   `investigations/` in the store, and **Copy report for an agent** puts all of it on the
   clipboard as Markdown, for an agent to improve the scraping from. If something recognised
   it, adding it is one click.
-- Each source's page shows what its log holds, the addresses that are not live, its runs,
-  and its crumbs, each with an **Investigate** button. **Run** takes the store's one run lane, the
+- The list shows one mark per source: a turning ring while a run works on it, a check when
+  everything it collected is read, indexed and embedded, an amber dot when something waits
+  on you, a red dot when it is stuck. **Needs you** narrows the list to the dots. Tick
+  sources to run them together, finish processing what they hold, pause them or remove
+  them. A removed source is hidden under **Removed** at the foot of the list and is never
+  run; everything it collected stays in the archive, and **Restore** brings it back.
+- Each source's page opens on where it stands at each stage: collected, read, indexed,
+  embedded, with a button on the one stage that has work left. Below that are its runs, and,
+  folded away, how it is collected, the addresses that are not live and its crumbs. **Run** takes the store's one run lane, the
   same one a schedule takes: while a run holds it, a second is refused rather than queued.
   The run is a job under its journal id — the page opens the live drawer on it as it
   starts, and **Stop** ends it at its next page, journaled `interrupted`. A run started
