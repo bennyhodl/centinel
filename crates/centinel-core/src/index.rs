@@ -329,12 +329,13 @@ impl Index {
 
     /// Opens a write batch: one transaction covering however many rows the caller adds.
     ///
-    /// **The unit of batching is the caller's unit of resumption.** A commit here is a WAL
-    /// checkpoint and an FTS5 index flush, and FTS5 is built to accumulate rows and flush
-    /// in bulk — so committing once per row does not merely pay the commit cost 450,000
-    /// times, it defeats the design of the thing being written to. A document's worth of
-    /// rows in one transaction is safe because [`Self::has_placement`] subtracts placements
-    /// *per address*: a batch lost to a crash is a document the next run simply redoes.
+    /// **A batch holds whole documents.** A commit here is a WAL checkpoint and an FTS5
+    /// index flush, and FTS5 is built to accumulate rows and flush in bulk — so committing
+    /// once per row does not merely pay the commit cost 450,000 times, it defeats the
+    /// design of the thing being written to, and once per document still pays it once per
+    /// page. Several documents' rows in one transaction is safe because
+    /// [`Self::has_placement`] subtracts placements *per address*: a batch lost to a crash
+    /// is documents the next run simply redoes.
     pub fn batch(&mut self) -> anyhow::Result<Batch<'_>> {
         Ok(Batch {
             tx: self.conn.transaction()?,
@@ -350,6 +351,17 @@ impl Index {
         let body_is_new = batch.insert(chunk, placement)?;
         batch.commit()?;
         Ok(body_is_new)
+    }
+
+    /// How many documents of each source are in the index, by source id. A document is
+    /// an address, whichever of its texts is placed.
+    pub fn documents_by_source(&self) -> anyhow::Result<BTreeMap<String, usize>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source, COUNT(*) FROM (SELECT DISTINCT source, resource FROM placement)
+             GROUP BY source",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as usize)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// The chunk geometry this index's hashes were built with, if it has been recorded.
@@ -402,15 +414,7 @@ impl Index {
         resource: &str,
         derived_sha: &str,
     ) -> anyhow::Result<bool> {
-        // `prepare_cached`, because this runs once per (derivation × address) on the
-        // indexing path — the same reason `Batch::insert` is cached. `query_row` compiles
-        // its SQL afresh every call, and this is the hottest statement `index` issues.
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM placement
-                           WHERE source = ?1 AND resource = ?2 AND derived_sha = ?3)",
-        )?;
-        let n: i64 = stmt.query_row(params![source, resource, derived_sha], |r| r.get(0))?;
-        Ok(n != 0)
+        has_placement(&self.conn, source, resource, derived_sha)
     }
 
     /// Per source, how many documents hold any of these phrases word for word — every one,
@@ -811,6 +815,25 @@ impl Index {
     }
 }
 
+/// [`Index::has_placement`], on whichever handle is asking: the index, or a batch that has
+/// rows of its own not yet committed.
+fn has_placement(
+    conn: &Connection,
+    source: &str,
+    resource: &str,
+    derived_sha: &str,
+) -> anyhow::Result<bool> {
+    // `prepare_cached`, because this runs once per (derivation × address) on the
+    // indexing path — the same reason `Batch::insert` is cached. `query_row` compiles
+    // its SQL afresh every call, and this is the hottest statement `index` issues.
+    let mut stmt = conn.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM placement
+                       WHERE source = ?1 AND resource = ?2 AND derived_sha = ?3)",
+    )?;
+    let n: i64 = stmt.query_row(params![source, resource, derived_sha], |r| r.get(0))?;
+    Ok(n != 0)
+}
+
 /// Rows on their way into the index, under one transaction. Dropped without
 /// [`Self::commit`], it rolls back — which is `rusqlite`'s default and the one we want.
 pub struct Batch<'a> {
@@ -818,6 +841,18 @@ pub struct Batch<'a> {
 }
 
 impl Batch<'_> {
+    /// [`Index::has_placement`], counting the rows this batch has added and not yet
+    /// committed. A batch spanning several documents asks here, so the second document to
+    /// place a text at an address sees the first.
+    pub fn has_placement(
+        &self,
+        source: &str,
+        resource: &str,
+        derived_sha: &str,
+    ) -> anyhow::Result<bool> {
+        has_placement(&self.tx, source, resource, derived_sha)
+    }
+
     /// Adds a chunk and one placement. Answers whether the chunk *body* was new.
     ///
     /// The body is written once; a repeat of the same text from another page adds only a

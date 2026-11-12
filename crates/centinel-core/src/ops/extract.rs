@@ -5,17 +5,22 @@
 //! improves the whole corpus can be re-derived offline.
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use anyhow::Context;
 
 use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::content::{ContentKind, SNIFF_BYTES};
-use crate::domain::Underivable;
+use crate::domain::{Observation, Resource, Underivable};
 use crate::extract::{self, Extracted};
 use crate::op::{ItemOutcome, Verdict};
 use crate::prelude::*;
-use crate::store::LogRecord;
+use crate::store::{LogRecord, Store};
+use crate::verdict::{Read, ReadQuality};
+use futures::StreamExt;
 
 #[derive(Clone, Debug, clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ExtractArgs {
@@ -217,8 +222,51 @@ pub async fn extract(
         report.observations += latest.len();
 
         let total = latest.len() as u64;
-        for (i, (resource, obs)) in latest.iter().enumerate() {
-            // The item boundary: one blob's derivation is appended before the next is read.
+
+        // Read ahead, write in order. Reading a document is the expensive half and needs
+        // nothing from the one before it, so `workers()` of them are read at once, each on
+        // a thread of its own. What a read found is written down one document at a time,
+        // in work-list order, exactly as a single reader would have: the log, the report,
+        // `--limit` and a cancel all see the same sequence they always did.
+        let extracted_so_far = AtomicUsize::new(report.extracted);
+        let work: Vec<(&Resource, &Observation)> = latest.iter().collect();
+        let mut turns = futures::stream::iter(0..work.len())
+            .map(|i| {
+                let (resource, obs) = work[i];
+                // Settled without a read, or everything a read needs, owned: the read
+                // runs on another thread and outlives this borrow of the work list.
+                let turn = if !args.refresh && derived.contains(&obs.blob_sha) {
+                    Ok(Turn::AlreadyDerived)
+                } else if !args.refresh && given_up.contains(&obs.blob_sha) {
+                    Ok(Turn::AlreadyUnextractable)
+                } else {
+                    Err((resource.clone(), obs.clone(), args.kind.clone()))
+                };
+                let extracted_so_far = &extracted_so_far;
+                async move {
+                    let (resource, obs, want) = match turn {
+                        Ok(turn) => return anyhow::Ok((i, turn)),
+                        Err(read) => read,
+                    };
+                    // Every item, not every twenty-fifth: this is the line that names a
+                    // document as its read starts and where it sits in the work list.
+                    progress.step_on(
+                        format!("{} extracted", extracted_so_far.load(Ordering::Relaxed)),
+                        i as u64,
+                        total,
+                        &resource.natural_key,
+                    );
+                    let reading = read_ahead(ctx.store.clone(), resource, obs, want).await?;
+                    Ok((i, reading.map_or(Turn::OtherKind, Turn::Read)))
+                }
+            })
+            .buffered(workers());
+
+        while let Some(turn) = turns.next().await {
+            let (i, turn) = turn?;
+            let (resource, obs) = work[i];
+            // The item boundary: one blob's derivation is appended before the next is
+            // written down.
             cancel.check()?;
             if let Some(limit) = args.limit
                 && report.attempted >= limit
@@ -236,76 +284,31 @@ pub async fn extract(
                     .count();
                 break;
             }
-            if !args.refresh && derived.contains(&obs.blob_sha) {
-                report.already_derived += 1;
-                continue;
-            }
-            if !args.refresh && given_up.contains(&obs.blob_sha) {
-                report.already_unextractable += 1;
-                continue;
-            }
-
-            // Every item, not every twenty-fifth: this is the line that names the document
-            // about to be read and where it sits in the work list.
-            progress.step_on(
-                format!("{} extracted", report.extracted),
-                i as u64,
-                total,
-                &resource.natural_key,
-            );
-            let started = std::time::Instant::now();
-
-            // The head decides the kind, and the kind decides whether the rest is worth
-            // reading. `get_blob` reads the whole file and verifies it, which is the
-            // right thing to do before extracting and the wrong thing to do before
-            // finding out there is nothing to extract.
-            let head = ctx.store.blob_head(&obs.blob_sha, SNIFF_BYTES).await?;
-            let kind = ContentKind::classify(&obs.meta, &head);
-            if let Some(want) = &args.kind
-                && want != kind.as_str()
-            {
-                continue;
-            }
+            let reading = match turn {
+                Turn::AlreadyDerived => {
+                    report.already_derived += 1;
+                    continue;
+                }
+                Turn::AlreadyUnextractable => {
+                    report.already_unextractable += 1;
+                    continue;
+                }
+                Turn::OtherKind => continue,
+                Turn::Read(reading) => reading,
+            };
             report.attempted += 1;
-
-            let bytes = ctx.store.get_blob(&obs.blob_sha).await?;
-            *report.by_kind.entry(kind.to_string()).or_default() += 1;
-
-            // **A Derivation always has bytes**, and `derive` is where that invariant is
-            // enforced — an extractor that parsed the document and came back with nothing
-            // has produced a verdict, not a derivation. It lives in the library rather than
-            // here so that `check` runs the same extractor this does; see
-            // [`crate::extract::derive`].
-            //
-            // The Source's own title, where it has one, is passed in: a YouTube
-            // recording's title is never spoken aloud, so it reaches the text only from
-            // here — see `extract_captions`.
-            let derived = extract::derive(
+            let Reading {
                 kind,
-                &bytes,
-                &ctx.store.blob_path_of(&obs.blob_sha),
-                Some(&resource.natural_key),
-                obs.meta.get("title").map(String::as_str),
-            )
-            .await;
-            if derived.recovered_by_fallback {
+                bytes,
+                derivation,
+                read,
+                millis,
+            } = *reading;
+            *report.by_kind.entry(kind.to_string()).or_default() += 1;
+            if derivation.recovered_by_fallback {
                 report.recovered_by_fallback += 1;
             }
-            let outcome = derived.outcome;
-
-            // What we think of the read, taken here rather than only in `check`.
-            //
-            // The measure already existed and was already right — on the Cleveland landmark
-            // pages `check` says *"73% of the text is link text. This is a menu, not a
-            // page"* — and `run` printed `html 135203 378ch 4ms` for the same document and
-            // moved on. 385 of that site's 1,098 addresses are that template. A verdict only
-            // the diagnostic command shows is a verdict for people who already suspect
-            // something, which is not who needs it.
-            let read = crate::verdict::ReadQuality::on(
-                &bytes,
-                outcome.text().unwrap_or_default(),
-                crate::verdict::Read::of(kind),
-            );
+            let outcome = derivation.outcome;
 
             let item = |verdict, produced, detail| ItemOutcome {
                 address: resource.natural_key.clone(),
@@ -314,9 +317,9 @@ pub async fn extract(
                 tag: kind.to_string(),
                 verdict,
                 noun: "documents".into(),
-                bytes: bytes.len() as u64,
+                bytes,
                 produced,
-                millis: started.elapsed().as_millis() as u64,
+                millis,
                 detail,
                 nested: false,
             };
@@ -429,6 +432,7 @@ pub async fn extract(
                 .await?;
 
             report.extracted += 1;
+            extracted_so_far.store(report.extracted, Ordering::Relaxed);
             report.chars_of_text += text.chars().count();
             *report.by_tool.entry(tool.to_string()).or_default() += 1;
 
@@ -457,6 +461,98 @@ pub async fn extract(
 
     progress.say(format!("{} documents extracted", report.extracted));
     Ok(report)
+}
+
+/// Where a document in the work list stands when its turn to be written down comes.
+enum Turn {
+    AlreadyDerived,
+    AlreadyUnextractable,
+    /// `--kind` asked for another kind.
+    OtherKind,
+    Read(Box<Reading>),
+}
+
+/// What the readers made of one document, held until its turn.
+struct Reading {
+    kind: ContentKind,
+    /// The size of the source blob.
+    bytes: u64,
+    derivation: extract::Derived,
+    /// What we think of the read, taken here rather than only in `check`.
+    ///
+    /// The measure already existed and was already right — on the Cleveland landmark
+    /// pages `check` says *"73% of the text is link text. This is a menu, not a page"* —
+    /// and `run` printed `html 135203 378ch 4ms` for the same document and moved on. 385
+    /// of that site's 1,098 addresses are that template. A verdict only the diagnostic
+    /// command shows is a verdict for people who already suspect something, which is not
+    /// who needs it.
+    read: ReadQuality,
+    millis: u64,
+}
+
+/// How many documents are read at once: one per core. Extraction is parsing, and parsing
+/// is the processor's work.
+fn workers() -> usize {
+    std::thread::available_parallelism().map_or(1, usize::from)
+}
+
+/// Reads one blob and runs the readers over it, on a thread of the blocking pool: the
+/// work is CPU-bound, and an async worker held for a 400-page PDF is a worker nothing
+/// else can use. `None` when `want` names a kind and this document is another.
+async fn read_ahead(
+    store: Store,
+    resource: Resource,
+    obs: Observation,
+    want: Option<String>,
+) -> anyhow::Result<Option<Box<Reading>>> {
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        runtime.block_on(async move {
+            let started = std::time::Instant::now();
+            // The head decides the kind, and the kind decides whether the rest is worth
+            // reading. `get_blob` reads the whole file and verifies it, which is the
+            // right thing to do before extracting and the wrong thing to do before
+            // finding out there is nothing to extract.
+            let head = store.blob_head(&obs.blob_sha, SNIFF_BYTES).await?;
+            let kind = ContentKind::classify(&obs.meta, &head);
+            if want.as_deref().is_some_and(|want| want != kind.as_str()) {
+                return Ok(None);
+            }
+            let bytes = store.get_blob(&obs.blob_sha).await?;
+
+            // **A Derivation always has bytes**, and `derive` is where that invariant is
+            // enforced — an extractor that parsed the document and came back with nothing
+            // has produced a verdict, not a derivation. It lives in the library rather than
+            // here so that `check` runs the same extractor this does; see
+            // [`crate::extract::derive`].
+            //
+            // The Source's own title, where it has one, is passed in: a YouTube
+            // recording's title is never spoken aloud, so it reaches the text only from
+            // here — see `extract_captions`.
+            let derivation = extract::derive(
+                kind,
+                &bytes,
+                &store.blob_path_of(&obs.blob_sha),
+                Some(&resource.natural_key),
+                obs.meta.get("title").map(String::as_str),
+            )
+            .await;
+            let read = ReadQuality::on(
+                &bytes,
+                derivation.outcome.text().unwrap_or_default(),
+                Read::of(kind),
+            );
+            Ok(Some(Box::new(Reading {
+                kind,
+                bytes: bytes.len() as u64,
+                derivation,
+                read,
+                millis: started.elapsed().as_millis() as u64,
+            })))
+        })
+    })
+    .await
+    .context("a document's read stopped before it finished")?
 }
 
 // -----------------------------------------------------------------------------------------

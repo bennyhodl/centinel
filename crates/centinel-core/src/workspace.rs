@@ -1383,6 +1383,7 @@ impl<'a> Workspace<'a> {
             [],
             |r| r.get(0),
         )?;
+        match_search(&conn, &query)?;
         let (total, total_chars, page) = select_identities(&conn, &query)?;
         let facets = facets(&conn, &query)?;
         let mut documents = Vec::with_capacity(page.len());
@@ -2102,6 +2103,7 @@ impl<'a> Workspace<'a> {
             min_score: selection.min_score,
             max_score: selection.max_score,
         };
+        match_search(&conn, &query)?;
         let (total, _, documents) = select_identities(&conn, &query)?;
         let documents = documents
             .into_iter()
@@ -2945,6 +2947,19 @@ pub const INDEX_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// Keeps `workspace_document` — one row per address at its latest derivation — current
 /// with `placement`, rebuilding it when a placement changed since the last read.
 fn prepare_projection(conn: &Connection) -> anyhow::Result<()> {
+    // The common case first: the projection exists and nothing was placed since it was
+    // built. That is one read. Everything below writes, and a write waits on whatever
+    // holds the index's write lock, which during `index` is most of the time.
+    let dirty = conn
+        .query_row(
+            "SELECT value FROM workspace_meta WHERE key='documents_dirty'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok();
+    if dirty.as_deref() == Some("0") {
+        return Ok(());
+    }
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS workspace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -3007,21 +3022,45 @@ enum Filter {
     Classifier,
 }
 
+/// Finds the documents holding the query's words, once, into `temp.matched`.
+///
+/// A corpus page asks its filter six times over: the count, the page, and a facet for each
+/// part of the filter. Matching the words is the expensive part of that filter, a walk of
+/// the full-text index and of every matching chunk's placements, and it has the same
+/// answer all six times. So it is asked once here, and [`filter_from`] reads the answer.
+/// The table lives and dies with the connection. A query with no words makes none.
+fn match_search(conn: &Connection, q: &DocumentQuery) -> anyhow::Result<()> {
+    if q.search.trim().is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "CREATE TEMP TABLE matched (
+           source TEXT NOT NULL, resource TEXT NOT NULL, derived_sha TEXT NOT NULL,
+           PRIMARY KEY (source,resource,derived_sha)
+         ) WITHOUT ROWID;",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO temp.matched
+         SELECT p.source,p.resource,p.derived_sha
+         FROM chunk_fts JOIN chunk c ON c.id=chunk_fts.rowid
+         JOIN placement p ON p.chunk_hash=c.chunk_hash
+         WHERE chunk_fts MATCH ?",
+        [to_fts_query(&q.search)],
+    )?;
+    Ok(())
+}
+
 /// The corpus filter as a `FROM … WHERE` over documents `d` and their exclusions `x`,
-/// with one part left out when a facet is counting it.
+/// with one part left out when a facet is counting it. A query with words reads them from
+/// `temp.matched`, so [`match_search`] runs first on the same connection.
 fn filter_from(q: &DocumentQuery, except: Option<Filter>) -> (String, Vec<rusqlite::types::Value>) {
     let mut where_parts = vec!["1=1".to_string()];
     let mut values: Vec<rusqlite::types::Value> = Vec::new();
     if !q.search.trim().is_empty() {
         where_parts.push(
-            "(d.source,d.resource,d.derived_sha) IN (
-             SELECT p.source,p.resource,p.derived_sha
-             FROM chunk_fts JOIN chunk c ON c.id=chunk_fts.rowid
-             JOIN placement p ON p.chunk_hash=c.chunk_hash
-             WHERE chunk_fts MATCH ?)"
+            "(d.source,d.resource,d.derived_sha) IN (SELECT source,resource,derived_sha FROM temp.matched)"
                 .into(),
         );
-        values.push(to_fts_query(&q.search).into());
     }
     if !q.address.trim().is_empty() {
         where_parts.push("(d.resource LIKE ? OR COALESCE(d.title,'') LIKE ?)".into());
