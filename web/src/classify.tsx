@@ -15,7 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { compact, money, number, plural, seconds, tail } from './format'
 import { LiveRun, useRunDetail } from './live'
 import { useOpenJob } from './jobs'
-import { decisionLabels, decisionOf, estimateRun, isChoice, missingOther, outcomesOf, questionProblem, questionSnapshot, reachOf, tagsOf } from './policy'
+import { classifierOptions, decisionLabels, decisionOf, estimateRun, isChoice, missingOther, outcomesOf, questionProblem, questionSnapshot, reachOf, tagsOf } from './policy'
 import { ResultsSection } from './results'
 import { priceOf } from './spend-logic'
 import { ErrorBox, Empty, PageHeader, Segmented, Spinner } from './ui'
@@ -31,13 +31,6 @@ const withKeys = (questions: Question[], previous: LocalQuestion[] = []) => ques
   return { ...question, localKey: before?.localKey || newKey(), skip: before?.skip }
 })
 const stripKey = ({ localKey: _localKey, skip: _skip, ...question }: LocalQuestion): Question => question
-
-/** Classifier filter choices: every question, and every option of every choice. */
-export function classifierOptions(questions: Question[]): Array<[string, string]> {
-  return questions.flatMap(question => isChoice(question)
-    ? [[question.id, `${question.id} · junk probability`] as [string, string], ...(question.options || []).map(option => [`${question.id}:${option.id}`, `${question.id} · ${option.id}`] as [string, string])]
-    : [[question.id, question.id] as [string, string]])
-}
 
 const blankNoul = (count: number): Question => ({ id: `question_${count + 1}`, kind: 'noul', instructions: '', version: 0, threshold: 0.9, review: 0.5, action: 'tag' })
 const blankChoice = (count: number): Question => ({

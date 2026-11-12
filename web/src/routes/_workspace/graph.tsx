@@ -1,4 +1,4 @@
-import { createFileRoute, type SearchSchemaInput } from '@tanstack/react-router'
+import { createFileRoute, stripSearchParams, type SearchSchemaInput } from '@tanstack/react-router'
 import { GraphPage, GraphSkeleton } from '../../graph'
 import { queries } from '../../queries'
 
@@ -10,6 +10,7 @@ export const Route = createFileRoute('/_workspace/graph')({
     min: Number(search.min) > 0 ? Number(search.min) : defaults.min,
     refused: search.refused === true || search.refused === 'true',
   }),
+  search: { middlewares: [stripSearchParams(defaults)] },
   loaderDeps: ({ search }) => search,
   loader: ({ context: { queryClient }, deps }) => queryClient.ensureQueryData(queries.graph({ min_pages: deps.min, hide_refused: deps.refused })),
   pendingComponent: GraphSkeleton,

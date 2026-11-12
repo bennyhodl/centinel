@@ -4,6 +4,9 @@ import { isChoice } from './policy'
 /** What a person answers with: `true`/`false` for a yes-or-no question, an option id for a choice. */
 export type Answers = Record<string, boolean | string>
 
+/** How many cards Review takes at once. The route's loader warms the same page. */
+export const REVIEW_QUEUE = 20
+
 /** How near its threshold a score sits while it is still the model's guess, not its call. */
 const MARGIN = 0.15
 

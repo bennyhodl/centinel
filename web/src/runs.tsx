@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import { ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react'
 import { api, type ResultOutcome, type Run, type RunDetailQuery, type RunSummary } from './api'
-import { queries } from './queries'
+import { queries, startView } from './queries'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -13,8 +13,6 @@ import { ResultsSection } from './results'
 import { DocumentLink, Empty, ErrorBox, PageHeader, Spinner } from './ui'
 
 const route = getRouteApi('/_workspace/_admin/runs')
-
-export const startView = (outcome: string): RunDetailQuery => ({ page: 1, page_size: 100, outcome: outcome as ResultOutcome, sort: 'decision', direction: '' })
 
 export function Runs() {
   const search = route.useSearch()

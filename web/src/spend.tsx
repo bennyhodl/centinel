@@ -8,7 +8,7 @@ import { queries } from './queries'
 import { SpendChart } from './spend-chart'
 import {
   formatCount, formatPercent, formatTokens, formatUsd, isUnpriced, merge, modelColors, modelLabel, perMillion, priceOf,
-  PROVIDERS, sortModels, STAGES, windowFor, WINDOWS, type Figures, type Merged, type Metric, type ModelTotals, type Window, type WindowDays,
+  PROVIDERS, sortModels, STAGES, windowFor, type Figures, type Merged, type Metric, type ModelTotals, type SpendSearch, type Window,
 } from './spend-logic'
 import { ErrorBox, PageHeader, Segmented } from './ui'
 import { Button } from '@/components/ui/button'
@@ -22,13 +22,6 @@ const route = getRouteApi('/_workspace/_admin/spend')
  * What every model call cost: Jev, OpenRouter, and the local models priced as the cloud
  * model with the same weights. T3 Code's usage page, with one series per model.
  */
-
-export type SpendSearch = { metric: Metric; days: WindowDays }
-
-export const spendSearch = (search: Record<string, unknown>): SpendSearch => ({
-  metric: search.metric === 'tokens' ? 'tokens' : 'cost',
-  days: WINDOWS.find(days => days === Number(search.days)) ?? 30,
-})
 
 const windowLabels: Array<[string, string]> = [['1', 'Past 24h'], ['7', '7 days'], ['30', '30 days'], ['90', '90 days']]
 
@@ -264,7 +257,7 @@ function SpendHeader() {
   return <PageHeader title="Spend" detail="Every model call and what it cost. Local models are priced as the cloud.">
     <div className="flex flex-wrap items-center gap-2 lg:flex-nowrap">
       <Segmented small label="Metric" value={metric} onChange={value => set({ metric: value })} options={[['cost', 'Cost'], ['tokens', 'Tokens']]} />
-      <Segmented small label="Window" value={String(days)} onChange={value => set({ days: Number(value) as WindowDays })} options={windowLabels} />
+      <Segmented small label="Window" value={String(days)} onChange={value => set({ days: Number(value) as SpendSearch['days'] })} options={windowLabels} />
       <Button size="icon-sm" variant="ghost" aria-label="Refresh" onClick={() => void query.refetch()}><RefreshCw className={cn(query.isFetching && 'animate-spin motion-reduce:animate-none')} /></Button>
     </div>
   </PageHeader>

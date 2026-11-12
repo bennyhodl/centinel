@@ -1,6 +1,7 @@
 import { serve } from '@hono/node-server'
 import { Hono } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
+import { compress } from 'hono/compress'
 import handler from '../.start/server/server.js'
 
 const origin = process.env.CENTINEL_PUBLIC_URL
@@ -11,6 +12,9 @@ if (!origin || !process.env.CENTINEL_BACKEND || !process.env.CENTINEL_INTERNAL_S
 await handler.fetch(new Request(`${origin}/health`))
 const app = new Hono()
 app.use('*', bodyLimit({ maxSize: 2 * 1024 * 1024 }))
+// JSON and the shell go out compressed. A script or stylesheet already is, from the build,
+// and an event stream never is.
+app.use('*', compress())
 app.all('*', context => {
   const request = context.req.raw
   const url = new URL(request.url)

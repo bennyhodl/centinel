@@ -21,8 +21,6 @@ export const Route = createFileRoute('/_workspace/document/$sha')({
   component: Reader,
 })
 
-/** The Jev model a run from this page asks, the same the Classify page starts with. */
-
 /** The kinds the reader can show as collected. Everything else is read as text and downloaded. */
 const originals: Record<string, string[]> = { pdf: ['Original'], csv: ['Table'], html: ['Page', 'Source'] }
 

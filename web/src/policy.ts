@@ -150,6 +150,13 @@ export function policyShort(question: Question): string {
   return (parts.join(' · ') || 'Score only') + band
 }
 
+/** Classifier filter choices: every question, and every option of every choice. */
+export function classifierOptions(questions: Question[]): Array<[string, string]> {
+  return questions.flatMap(question => isChoice(question)
+    ? [[question.id, `${question.id} · junk probability`] as [string, string], ...(question.options || []).map(option => [`${question.id}:${option.id}`, `${question.id} · ${option.id}`] as [string, string])]
+    : [[question.id, question.id] as [string, string]])
+}
+
 /** Every order the results table can take, as [server key, label]. */
 export function sortKeys(questions: Question[]): Array<[string, string]> {
   const keys: Array<[string, string]> = [['decision', 'Decision'], ['resource', 'Document name']]

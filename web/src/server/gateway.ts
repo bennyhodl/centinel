@@ -24,14 +24,34 @@ export async function createGateway(config: { root: string; origin: string; back
       body: ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer(),
       redirect: 'manual',
     })
+    // The body is sent on as read, so how the backend framed and encoded it no longer holds.
     const output = new Headers(response.headers)
-    output.delete('content-encoding')
-    output.delete('content-length')
+    for (const name of ['content-encoding', 'content-length', 'transfer-encoding']) output.delete(name)
     // Nothing forwarded is stored unless the backend says it may be: an icon is kept for a
     // week, and a signed-in user's list of documents is not.
     if (!output.has('cache-control')) output.set('cache-control', 'no-store')
     return new Response(response.body, { status: response.status, headers: output })
   }
+  /**
+   * A script, stylesheet, font or image of the page. The build leaves a brotli copy of
+   * each script and stylesheet beside it; a browser that takes brotli is handed that copy
+   * as it lies, so nothing is compressed while it waits.
+   */
+  const compressed: Record<string, string> = { js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8' }
+  async function asset(request: Request, path: string) {
+    const type = compressed[path.slice(path.lastIndexOf('.') + 1)]
+    if (type && /\bbr\b/.test(request.headers.get('accept-encoding') ?? '')) {
+      const packed = await forward(new Request(`${request.url.split('?')[0]}.br`, { headers: request.headers, signal: request.signal }))
+      if (packed.ok) {
+        packed.headers.set('content-type', type)
+        packed.headers.set('content-encoding', 'br')
+        return packed
+      }
+      await packed.body?.cancel()
+    }
+    return forward(request)
+  }
+
   const mcpHandler = requireMcpAuth(auth, async (request, claims) => {
     const user = claims.sub ? member(claims.sub) : undefined
     if (!user || user.access !== 'approved') return denied()
@@ -84,7 +104,7 @@ export async function createGateway(config: { root: string; origin: string; back
       db.prepare('UPDATE user SET access = ?, updatedAt = ? WHERE id = ?').run(body.access!, Date.now(), body.id)
       return json(member(body.id))
     }
-    if (path.startsWith('/web/assets/')) return forward(request)
+    if (path.startsWith('/web/assets/')) return asset(request, path)
     if (path === '/ops' || path.startsWith('/ops/') || path.startsWith('/workspace/')) {
       const user = await session(request)
       if (!user) return json({ error: 'Sign in required' }, 401)
@@ -92,7 +112,7 @@ export async function createGateway(config: { root: string; origin: string; back
       if (!['GET', 'HEAD'].includes(request.method) && origin !== config.origin) return json({ error: 'Same-origin request required' }, 403)
       return forward(request, user)
     }
-    if (path === '/') return Response.redirect(`${config.origin}/web`, 302)
+    if (path === '/') return Response.redirect(`${config.origin}/web/`, 302)
     return undefined
   }
   return { handle, close: () => db.close() }

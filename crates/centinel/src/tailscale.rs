@@ -89,7 +89,7 @@ pub async fn publish(local: SocketAddr, pinned: Option<u16>) -> Result<Published
         _ => format!("https://{host}:{port}"),
     };
     tracing::info!(
-        web = %format!("{origin}/web"),
+        web = %format!("{origin}/web/"),
         mcp = %format!("{origin}/mcp"),
         "published on the tailnet"
     );

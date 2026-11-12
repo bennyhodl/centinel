@@ -1,6 +1,7 @@
 //! The web workspace bundle: every file `npm run build` leaves in `web-dist/`, the
-//! route it is served at, and its content type. `build.rs` embeds these files and
-//! `centinel web --rebuild` reads them back from disk, so both agree on one table.
+//! route it is served at, its content type, and the version its page is stamped with.
+//! `build.rs` embeds these files and `centinel web --rebuild` reads them back from disk,
+//! so both agree on one table and one way to read the stamp.
 
 use std::path::{Path, PathBuf};
 
@@ -29,6 +30,16 @@ pub fn files(dist: &Path) -> std::io::Result<Vec<(String, &'static str, PathBuf)
     Ok(files)
 }
 
+/// The `centinel-version` meta tag in a page, as the Start root route writes it.
+pub fn stamped_version(html: &str) -> Option<String> {
+    let start = html.find("name=\"centinel-version\"")?;
+    let rest = &html[start..];
+    let content = rest.find("content=\"")? + "content=\"".len();
+    let rest = &rest[content..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
 fn visit(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
@@ -48,7 +59,9 @@ fn mime(path: &Path) -> &'static str {
         Some("css") => "text/css; charset=utf-8",
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
         Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
         _ => "application/octet-stream",
     }
 }

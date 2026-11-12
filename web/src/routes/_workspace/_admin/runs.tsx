@@ -1,9 +1,10 @@
-import { createFileRoute } from '@tanstack/react-router'
-import { queries } from '../../../queries'
-import { Runs, RunsSkeleton, startView } from '../../../runs'
+import { createFileRoute, stripSearchParams } from '@tanstack/react-router'
+import { queries, startView } from '../../../queries'
+import { Runs, RunsSkeleton } from '../../../runs'
 
 export const Route = createFileRoute('/_workspace/_admin/runs')({
   validateSearch: (search: Record<string, unknown>) => ({ run: String(search.run || ''), page: Math.max(1, Number(search.page || 1)), outcome: String(search.outcome || '') }),
+  search: { middlewares: [stripSearchParams({ run: '', page: 1, outcome: '' })] },
   loaderDeps: ({ search }) => search,
   // One run's detail when a run is open, the ledger page otherwise.
   loader: ({ context: { queryClient }, deps }) => deps.run
