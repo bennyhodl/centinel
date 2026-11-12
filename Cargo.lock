@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "centinel"
-version = "0.30.1"
+version = "0.30.2"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -866,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "centinel-core"
-version = "0.30.1"
+version = "0.30.2"
 dependencies = [
  "anydoc",
  "anyhow",
@@ -910,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "centinel-macros"
-version = "0.30.1"
+version = "0.30.2"
 dependencies = [
  "proc-macro2",
  "quote",
