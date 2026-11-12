@@ -342,8 +342,12 @@ export type JobItem = {
 
 export type JobOutcome = 'ok' | 'failed' | 'cancelled'
 
-/** What happened to a job, as the server stamped it. `seq` only grows, across every job. */
-export type JobEvent = { seq: number; at: number; job: string } & (
+/**
+ * What happened to a job, as the server stamped it. `seq` only grows, across every job.
+ * `part` names the part of the job it came from when the job does several at once: a
+ * source in a run over several.
+ */
+export type JobEvent = { seq: number; at: number; job: string; part?: string } & (
   | { type: 'started'; kind: string; label: string; stoppable?: boolean }
   | { type: 'step'; step: string }
   | { type: 'progress'; message: string; done: number; total: number; current?: string }
@@ -351,6 +355,9 @@ export type JobEvent = { seq: number; at: number; job: string } & (
   | { type: 'note'; message: string }
   | { type: 'finished'; outcome: JobOutcome; error?: string }
 )
+
+/** One part of a job that does several at once, as it stands: a source in a run, with its own stage, count and item in hand. */
+export type JobPart = Pick<JobState, 'step' | 'message' | 'done' | 'total' | 'current' | 'ok' | 'failed'> & { name: string }
 
 /** A job as it stands: every event folded in, and the latest readable ones. */
 export type JobState = {
@@ -375,6 +382,8 @@ export type JobState = {
   failed: number
   outcome?: JobOutcome
   error?: string
+  /** The parts of a job that does several at once, in the order each first spoke. Absent for a job that is one piece of work. */
+  parts?: JobPart[]
   /** Oldest first. Counter ticks are not kept here. */
   log: JobEvent[]
 }
@@ -484,12 +493,23 @@ export type ListedSource = {
   kind: SourceKind
   target: string
   enabled: boolean
+  /** Removed by the operator: hidden, and never run again. What it collected stays. */
+  removed?: boolean
+  /** How far what it holds has been taken through the pipeline. */
+  stages: Stages
   resources: number
   liveness: Record<string, number>
   /** Whether the run holding the lane walks it: one started for it, or one over every enabled source. */
   collecting: boolean
   last_run?: LastRun
 }
+
+/**
+ * How far a source's documents have been taken, stage by stage, each counted in addresses:
+ * collected, read into text (or found unreadable), indexed for keyword search, embedded for
+ * search by meaning. `embedded` is absent when the store has no vector table at all.
+ */
+export type Stages = { collected: number; read: number; unreadable: number; indexed: number; embedded?: number }
 
 /** The newest run in the journal that covered a source. */
 export type LastRun = { started_at: string; outcome: RunAttempt['outcome']; trigger: RunAttempt['trigger']; schedule?: string; documents: number }
@@ -822,6 +842,10 @@ export const api = {
   addSource: (source: NewSource) => request<unknown>('/workspace/sources', { method: 'POST', body: JSON.stringify(source) }),
   updateSource: (id: string, settings: SourceSettings) => request<{ action: 'update'; source: string }>(`/workspace/sources/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(settings) }),
   setSourceEnabled: (id: string, enabled: boolean) => request<unknown>(`/workspace/sources/${encodeURIComponent(id)}/enabled`, { method: 'POST', body: JSON.stringify({ enabled }) }),
+  /** Removes a source, or brings it back. Removed, it is hidden and never run; what it collected stays. */
+  setSourceRemoved: (id: string, removed: boolean) => request<unknown>(`/workspace/sources/${encodeURIComponent(id)}/removed`, { method: 'POST', body: JSON.stringify({ removed }) }),
+  /** One run over these sources: different hosts at once. `skip` naming `discover` and `collect` fetches nothing and finishes what is stored. */
+  runSources: (sources: string[], body: { skip?: string[] } = {}) => request<{ run_id: string }>('/workspace/sources/run', { method: 'POST', body: JSON.stringify({ sources, ...body }) }),
   /** Starts a run in the store's one lane. `run_id` is the journal's handle and the job's id, so the page opens the drawer on it. */
   runSource: (id: string, body: { skip?: string[]; limit?: number; refresh?: boolean } = {}) => request<{ run_id: string }>(`/workspace/sources/${encodeURIComponent(id)}/run`, { method: 'POST', body: JSON.stringify(body) }),
   /** Starts an investigation of an address, as a job. The answer is the job's id, which is also the report's. */

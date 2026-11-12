@@ -9,7 +9,9 @@
 //! | `GET /workspace/sources/{id}/crumbs` | the off-host links its pages carry, from the ledger |
 //! | `POST /workspace/sources/{id}/crumbs/rescan` | write the ledger again from the blobs, as a job |
 //! | `POST /workspace/sources/{id}/enabled` | `{ "enabled": bool }` |
+//! | `POST /workspace/sources/{id}/removed` | `{ "removed": bool }`: hide it and never run it, or bring it back |
 //! | `POST /workspace/sources/{id}/run` | run it in the store's one lane; 409 when the lane is held |
+//! | `POST /workspace/sources/run` | run the named sources together, in one run in that lane |
 //! | `POST /workspace/sources/{id}/stages/{stage}` | process stored material in that lane; see [`super::stages`] |
 //!
 //! ## Who may call these
@@ -54,7 +56,9 @@ pub fn routes() -> axum::Router<Arc<Ctx>> {
         .route("/workspace/sources/{id}/crumbs", get(crumbs))
         .route("/workspace/sources/{id}/crumbs/rescan", post(rescan_crumbs))
         .route("/workspace/sources/{id}/enabled", post(enabled))
+        .route("/workspace/sources/{id}/removed", post(removed))
         .route("/workspace/sources/{id}/run", post(run))
+        .route("/workspace/sources/run", post(run_several))
 }
 
 async fn source_op(ctx: &Ctx, action: SourceAction) -> anyhow::Result<SourceReport> {
@@ -102,16 +106,15 @@ async fn detail(State(ctx): State<Arc<Ctx>>, Path(id): Path<String>) -> Response
         .sources
         .into_iter()
         .next();
-        // The runs that covered this source, newest first — including one stopped before it
-        // reported, which its arguments still name (`Attempt::covers`).
-        let mut runs: Vec<_> = Journal::new(&ctx.store)
+        // The runs that covered this source, newest first as the journal reads — including
+        // one stopped before it reported, which its arguments still name (`Attempt::covers`).
+        let runs: Vec<_> = Journal::new(&ctx.store)
             .read()
             .await?
             .into_iter()
             .filter(|a| a.covers(&id))
+            .take(RUNS_SHOWN)
             .collect();
-        runs.reverse();
-        runs.truncate(RUNS_SHOWN);
         anyhow::Ok(json!({
             "definition": definition,
             "settings_options": {
@@ -210,9 +213,33 @@ async fn enabled(
     }
 }
 
+#[derive(Deserialize)]
+struct Removed {
+    removed: bool,
+}
+
+async fn removed(
+    State(ctx): State<Arc<Ctx>>,
+    Path(id): Path<String>,
+    Json(body): Json<Removed>,
+) -> Response {
+    let action = match body.removed {
+        true => SourceAction::Remove(ops::IdArgs { id }),
+        false => SourceAction::Restore(ops::IdArgs { id }),
+    };
+    match source_op(&ctx, action).await {
+        Ok(report) => Json(report).into_response(),
+        Err(error) => workspace_error(error),
+    }
+}
+
 /// What the Run button sends. Absent fields run the whole pipeline.
 #[derive(Default, Deserialize)]
 struct RunBody {
+    /// The sources to run together, for [`run_several`]. One source's own route names it
+    /// in the path.
+    #[serde(default)]
+    sources: Vec<String>,
     #[serde(default)]
     skip: Vec<Stage>,
     #[serde(default)]
@@ -232,6 +259,27 @@ async fn run(
     let body = body.map(|Json(b)| b).unwrap_or_default();
     let args = RunArgs {
         sources: vec![id],
+        skip: body.skip,
+        limit: body.limit,
+        refresh: body.refresh,
+        ..Default::default()
+    };
+    launch_run(&ctx, args)
+}
+
+/// One run over the sources a selection names: different hosts walked at once, then what
+/// they hold read, indexed and embedded. With `skip` naming the two acquisition stages it
+/// is "finish processing": nothing is fetched, and whatever is outstanding is worked off.
+async fn run_several(State(ctx): State<Arc<Ctx>>, Json(body): Json<RunBody>) -> Response {
+    if body.sources.is_empty() {
+        return workspace_error(anyhow::anyhow!("name at least one source to run"));
+    }
+    // Refused here, before the lane is taken, with the same words a terminal would get.
+    if let Err(error) = Sources::new(&ctx.store).selected(&body.sources).await {
+        return workspace_error(error);
+    }
+    let args = RunArgs {
+        sources: body.sources,
         skip: body.skip,
         limit: body.limit,
         refresh: body.refresh,

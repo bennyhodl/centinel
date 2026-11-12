@@ -1,4 +1,4 @@
-import type { JobEvent, JobState } from './api'
+import type { JobEvent, JobPart, JobState } from './api'
 
 /** The same bounds the server keeps: lines per job, finished jobs. */
 const TAIL = 200
@@ -22,21 +22,35 @@ export function foldJob(jobs: JobState[], event: JobEvent): JobState[] {
   return event.type === 'finished' ? trimFinished(next) : next
 }
 
+/**
+ * An event from a part moves that part: its stage and its count are its own, and the
+ * job's are left to the stages the job runs as one. Its items still count toward the job.
+ */
 function apply(job: JobState, event: JobEvent): JobState {
   const log = event.type === 'progress' ? job.log : [...job.log, event].slice(-TAIL)
-  const base = { ...job, seq: event.seq, log }
+  const next: JobState = { ...job, seq: event.seq, log }
+  if (event.part) {
+    const name = event.part
+    const parts = next.parts?.some(part => part.name === name) ? next.parts : [...(next.parts ?? []), { name, ok: 0, failed: 0 }]
+    next.parts = parts.map(part => part.name === name ? moved(part, event) : part)
+    if (event.type !== 'item') return next
+  }
+  const job_ = moved(next, event)
+  return event.type === 'finished' ? { ...job_, finished_at: event.at, outcome: event.outcome, error: event.error, current: undefined } : job_
+}
+
+/** How far along a job or one of its parts is. Both move the same way. */
+function moved<T extends Omit<JobPart, 'name'>>(standing: T, event: JobEvent): T {
   switch (event.type) {
     case 'step':
       // A new stage counts a new work list.
-      return { ...base, step: event.step, message: undefined, done: undefined, total: undefined, current: undefined }
+      return { ...standing, step: event.step, message: undefined, done: undefined, total: undefined, current: undefined }
     case 'progress':
-      return { ...base, message: event.message, done: event.done, total: event.total, current: event.current }
+      return { ...standing, message: event.message, done: event.done, total: event.total, current: event.current }
     case 'item':
-      return succeeded(event.item.verdict) ? { ...base, ok: job.ok + 1 } : { ...base, failed: job.failed + 1 }
-    case 'finished':
-      return { ...base, finished_at: event.at, outcome: event.outcome, error: event.error, current: undefined }
+      return succeeded(event.item.verdict) ? { ...standing, ok: standing.ok + 1 } : { ...standing, failed: standing.failed + 1 }
     default:
-      return base
+      return standing
   }
 }
 
@@ -62,13 +76,31 @@ const verbs: Record<string, string> = {
   index: 'Indexing', classify: 'Classifying', embed: 'Embedding', run: 'Running', done: 'Finishing',
 }
 
+/** The stage a step names: `tampa.gov · collect` is `collect`, and so is a bare `collect`. */
+const stageOf = (step: string) => step.split(' · ').at(-1)!
+
+/** Whether a part's stages are over. `run` says so with a step of its own. */
+export const partOver = (part: JobPart) => part.step !== undefined && stageOf(part.step) === 'done'
+
+/** The parts of a job still under way. */
+export const activeParts = (job: Pick<JobState, 'parts'>) => (job.parts ?? []).filter(part => !partOver(part))
+
+/** A step's stage as a word: `Collecting` for `tampa.gov · collect`, `Embedding` for `embed`. */
+export const stageWord = (step: string) => verbs[stageOf(step)] || stageOf(step)
+
+/** What a part is doing, in a word: `Collecting`, `Discovering`, `Done`. */
+export const partStage = (part: JobPart) => !part.step ? 'Waiting' : partOver(part) ? 'Done' : stageWord(part.step)
+
 /**
  * What a job is doing, in words: `Collecting tampa.gov`, `Embedding`. The stage comes from
  * the step `run` names (`tampa.gov · collect`), or from the job's own kind when it is one
- * stage on its own.
+ * stage on its own. A run walking several sources at once has no one stage to name, so
+ * it says how many it is collecting.
  */
-export function jobTitle(job: Pick<JobState, 'kind' | 'step'>): string {
-  const [first, second] = (job.step || job.kind).split(' · ')
+export function jobTitle(job: Pick<JobState, 'kind' | 'step' | 'parts'>): string {
+  const active = activeParts(job)
+  if (!job.step && active.length > 1) return `Collecting ${active.length} sources`
+  const [first, second] = (job.step || active[0]?.step || job.kind).split(' · ')
   const [source, stage] = second === undefined ? ['', first] : [first, second]
   const verb = verbs[stage] || stage
   return source ? `${verb} ${source}` : verb

@@ -86,7 +86,7 @@
 //! `embed`'s work list. This module owns the Lance side of that because it owns the
 //! table; the `verify` op is the thin thing that asks.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -528,6 +528,49 @@ impl VectorTable {
 
     pub async fn is_empty(&self) -> anyhow::Result<bool> {
         Ok(self.len().await? == 0)
+    }
+
+    /// The table's version, which moves with every commit to it.
+    pub async fn version(&self) -> anyhow::Result<u64> {
+        Ok(self.table.version().await?)
+    }
+
+    /// How many documents of each source have a vector, by source id. A document is an
+    /// address. Two short columns, so the scan never touches the vectors beside them.
+    pub async fn documents_by_source(&self) -> anyhow::Result<BTreeMap<String, usize>> {
+        use std::hash::{Hash, Hasher};
+
+        let mut stream = self
+            .table
+            .query()
+            .select(Select::Columns(vec![
+                SOURCE_COLUMN.to_string(),
+                RESOURCE_COLUMN.to_string(),
+            ]))
+            .execute()
+            .await?;
+        // An address is remembered by its hash: a corpus has hundreds of thousands, and
+        // all that is wanted of each is whether it was seen before.
+        let mut seen: BTreeMap<String, HashSet<u64>> = BTreeMap::new();
+        while let Some(batch) = stream.try_next().await? {
+            let sources = strings(&batch, SOURCE_COLUMN)?;
+            let resources = strings(&batch, RESOURCE_COLUMN)?;
+            for i in 0..sources.len() {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                resources.value(i).hash(&mut hasher);
+                match seen.get_mut(sources.value(i)) {
+                    Some(addresses) => addresses.insert(hasher.finish()),
+                    None => seen
+                        .entry(sources.value(i).to_string())
+                        .or_default()
+                        .insert(hasher.finish()),
+                };
+            }
+        }
+        Ok(seen
+            .into_iter()
+            .map(|(source, addresses)| (source, addresses.len()))
+            .collect())
     }
 
     /// Every stored key, handed to `visit` one at a time and never held whole.

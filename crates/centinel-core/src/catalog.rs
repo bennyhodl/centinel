@@ -134,7 +134,9 @@ impl<'a> Sources<'a> {
     /// The sources a run walks: every enabled one, or exactly those named.
     ///
     /// Naming a disabled source runs it. `enabled = false` is a default, and an explicit
-    /// argument is an instruction.
+    /// argument is an instruction. Naming a removed one is refused: removing a source is
+    /// the operator saying never again, and a schedule written before that should say so
+    /// rather than quietly crawl it.
     pub async fn selected(&self, only: &[String]) -> anyhow::Result<Vec<SourceConfig>> {
         if only.is_empty() {
             return Ok(self
@@ -146,7 +148,12 @@ impl<'a> Sources<'a> {
         }
         let mut out = Vec::with_capacity(only.len());
         for id in only {
-            out.push(self.require(id).await?);
+            let source = self.require(id).await?;
+            anyhow::ensure!(
+                !source.is_removed(),
+                "source `{id}` was removed and is not run; `centinel source restore {id}` brings it back"
+            );
+            out.push(source);
         }
         Ok(out)
     }
@@ -166,6 +173,15 @@ impl<'a> Sources<'a> {
     pub async fn set_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<SourceConfig> {
         let mut source = self.require(id).await?;
         source.enabled = (!enabled).then_some(false);
+        self.write(&SourceId::new(source.id.clone())?, &source)?;
+        Ok(source)
+    }
+
+    /// Removes a source, or restores one. Removed, it is left out of every list and never
+    /// run; its definition, its log and everything it collected stay where they are.
+    pub async fn set_removed(&self, id: &str, removed: bool) -> anyhow::Result<SourceConfig> {
+        let mut source = self.require(id).await?;
+        source.removed = removed.then_some(true);
         self.write(&SourceId::new(source.id.clone())?, &source)?;
         Ok(source)
     }
