@@ -106,6 +106,21 @@ impl Gate {
     }
 }
 
+impl Need {
+    /// What a capability's server costs when it is not answering.
+    ///
+    /// The reranker is `Optional`: search without it still runs both arms and says
+    /// `no_rerank`, and no stage waits on it. Shutting the search gate for it told a
+    /// machine whose embedder and vectors were fine that it could not search — and on a
+    /// machine that only reaches OpenRouter, which serves no reranker, it never could.
+    fn of(capability: Capability) -> Self {
+        match capability {
+            Capability::Embed | Capability::Transcribe => Self::Required,
+            Capability::Rerank => Self::Optional,
+        }
+    }
+}
+
 impl std::fmt::Display for Gate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.pad(match self {
@@ -123,6 +138,8 @@ pub struct Service {
     /// Which pipeline stage stops without it. A crawl-only machine needs no transcription
     /// server, and reporting it unready for want of one would be crying wolf.
     pub gates: Gate,
+    /// Whether its absence shuts that stage (`required`) or only degrades it (`optional`).
+    pub need: Need,
     /// What it is needed for — so a missing one is actionable, not just red.
     pub purpose: String,
     pub base_url: String,
@@ -167,9 +184,13 @@ pub struct GateStatus {
     pub ready: bool,
     /// What is unavailable while this gate is shut.
     pub blocks: String,
-    /// Capabilities not answering.
+    /// Required capabilities not answering. Any one shuts the gate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<String>,
+    /// Optional capabilities not answering. The gate stays open and the stage runs
+    /// without them: search with no reranker answers in a worse order and says so.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degraded: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -208,7 +229,8 @@ pub struct DoctorReport {
     pub gates: Vec<GateStatus>,
     /// True when every *required* binary is present.
     pub binaries_ready: bool,
-    /// True when every server is answering.
+    /// True when every gate is open: each required server answering, and the vectors in
+    /// the configured space. An optional server that is down does not clear it.
     pub services_ready: bool,
     /// True when the config loads and both of the above hold. Reported separately as well,
     /// because a machine can crawl and extract with no server at all — it simply cannot
@@ -321,9 +343,10 @@ async fn service(endpoint: Endpoint) -> Service {
     Service {
         capability: endpoint.capability.name().to_string(),
         gates: Gate::of(endpoint.capability),
+        need: Need::of(endpoint.capability),
         purpose: match endpoint.capability {
             Capability::Embed => "the vector half of hybrid search",
-            Capability::Rerank => "reranks retrieved passages; always on",
+            Capability::Rerank => "reranks retrieved passages; search runs without it, worse",
             Capability::Transcribe => "turns meeting audio into a timestamped transcript",
         }
         .to_string(),
@@ -370,11 +393,15 @@ fn gate_statuses(services: &[Service], vectors: Option<&VectorsStatus>) -> Vec<G
     [Gate::Search, Gate::Transcription]
         .into_iter()
         .map(|gate| {
-            let mut missing: Vec<String> = services
-                .iter()
-                .filter(|s| s.gates == gate && !s.ready)
-                .map(|s| s.capability.clone())
-                .collect();
+            let down = |need: Need| -> Vec<String> {
+                services
+                    .iter()
+                    .filter(|s| s.gates == gate && s.need == need && !s.ready)
+                    .map(|s| s.capability.clone())
+                    .collect()
+            };
+            let mut missing = down(Need::Required);
+            let degraded = down(Need::Optional);
             if gate == Gate::Search && vectors.is_some_and(|v| !v.ready) {
                 missing.push("vectors".to_string());
             }
@@ -389,6 +416,7 @@ fn gate_statuses(services: &[Service], vectors: Option<&VectorsStatus>) -> Vec<G
                 }
                 .to_string(),
                 missing,
+                degraded,
             }
         })
         .collect()
@@ -585,11 +613,23 @@ impl Render for DoctorReport {
                 Align::Left,
                 Align::Left,
             ]);
+            // The same three states as a binary: a reranker that is down degrades search,
+            // it does not stop it, and painting it red said otherwise.
+            let mark = |s: &Service| match (s.ready, s.need) {
+                (true, _) => Mark::Ok,
+                (false, Need::Required) => Mark::Bad,
+                (false, _) => Mark::Warn,
+            };
             for s in &self.services {
+                let ink = match (s.ready, s.need) {
+                    (true, _) => Ink::Cyan,
+                    (false, Need::Required) => Ink::Red,
+                    (false, _) => Ink::Dim,
+                };
                 table.push(vec![
-                    Cell::mark(Mark::from_ok(s.ready)),
+                    Cell::mark(mark(s)),
                     Cell::plain(&s.capability),
-                    Cell::new(&s.model, if s.ready { Ink::Cyan } else { Ink::Red }),
+                    Cell::new(&s.model, ink),
                     Cell::dim(&s.base_url),
                     Cell::dim(s.gates.to_string()),
                 ]);
@@ -601,7 +641,7 @@ impl Render for DoctorReport {
             for s in self.services.iter().filter(|s| !s.ready) {
                 if let Some(problem) = &s.problem {
                     let note = format!("{}  {}", s.capability, p.paint(problem, Ink::Dim));
-                    p.marked(Mark::Bad, note)?;
+                    p.marked(mark(s), note)?;
                 }
             }
             Ok(())
@@ -626,15 +666,17 @@ impl Render for DoctorReport {
         p.section("gates")?;
         p.nest(|p| {
             for gate in &self.gates {
-                let mark = Mark::from_ok(gate.ready);
-                let head = if gate.ready {
+                let (mark, note) = if !gate.ready {
+                    (Mark::Bad, format!("blocks {}", gate.blocks))
+                } else if !gate.degraded.is_empty() {
+                    (Mark::Warn, format!("runs without {}", gate.degraded.join(", ")))
+                } else {
+                    (Mark::Ok, String::new())
+                };
+                let head = if note.is_empty() {
                     gate.gate.to_string()
                 } else {
-                    format!(
-                        "{:<16}{}",
-                        gate.gate,
-                        p.paint(&format!("blocks {}", gate.blocks), Ink::Dim)
-                    )
+                    format!("{:<16}{}", gate.gate, p.paint(&note, Ink::Dim))
                 };
                 p.marked(mark, head)?;
             }
@@ -796,15 +838,21 @@ mod tests {
         assert!(out.contains("no config file"), "{out}");
         assert!(out.contains("/home/x/.centinel/centinel.toml"), "{out}");
     }
-    /// An `[inference]` with embed and rerank at a port nothing listens on and
-    /// transcription at `transcribe`.
-    fn split(transcribe: &str) -> InferenceConfig {
+    /// A base URL at a port nothing listens on.
+    fn nothing_listening() -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
+        format!("http://127.0.0.1:{port}/v1")
+    }
+
+    /// An `[inference]` with embed and rerank at a port nothing listens on and
+    /// transcription at `transcribe`.
+    fn split(transcribe: &str) -> InferenceConfig {
         crate::config::Config::parse(&format!(
-            "[inference]\nbase_url = \"http://127.0.0.1:{port}/v1\"\n\
-             [inference.transcribe]\nmodel = \"whisper-1\"\nbase_url = \"{transcribe}\"\n"
+            "[inference]\nbase_url = \"{}\"\n\
+             [inference.transcribe]\nmodel = \"whisper-1\"\nbase_url = \"{transcribe}\"\n",
+            nothing_listening()
         ))
         .unwrap()
         .inference
@@ -821,7 +869,8 @@ mod tests {
 
         let search = gates.iter().find(|g| g.gate == Gate::Search).unwrap();
         assert!(!search.ready);
-        assert_eq!(search.missing, vec!["embed", "rerank"]);
+        assert_eq!(search.missing, vec!["embed"]);
+        assert_eq!(search.degraded, vec!["rerank"]);
         let transcription = gates
             .iter()
             .find(|g| g.gate == Gate::Transcription)
@@ -831,6 +880,61 @@ mod tests {
         let embed = services.iter().find(|s| s.capability == "embed").unwrap();
         let problem = embed.problem.as_deref().unwrap();
         assert!(problem.contains(&config.base_url), "{problem}");
+    }
+
+    /// A machine that only reaches OpenRouter: an embedder that answers, and no reranker
+    /// or transcription server anywhere. Search runs without the reranker, so its gate is
+    /// open with a warning, and `doctor` must not say embed or vector search is blocked.
+    #[tokio::test]
+    async fn a_missing_reranker_warns_and_leaves_search_open() {
+        let server = crate::inference::fake::serve().await;
+        let down = nothing_listening();
+        let config = crate::config::Config::parse(&format!(
+            "[inference]\nbase_url = \"{}\"\n\
+             [inference.embed]\nmodel = \"fake-embed\"\nquery_prefix = \"\"\n\
+             [inference.rerank]\nmodel = \"qwen3-reranker-0.6b\"\nbase_url = \"{down}\"\n\
+             [inference.transcribe]\nmodel = \"whisper-large-v3-turbo\"\nbase_url = \"{down}\"\n",
+            server.base_url
+        ))
+        .unwrap()
+        .inference;
+        let services = survey(&config).await;
+        let gates = gate_statuses(&services, None);
+
+        let search = gates.iter().find(|g| g.gate == Gate::Search).unwrap();
+        assert!(search.ready, "{search:?}");
+        assert!(search.missing.is_empty(), "{search:?}");
+        assert_eq!(search.degraded, vec!["rerank"]);
+        let transcription = gates
+            .iter()
+            .find(|g| g.gate == Gate::Transcription)
+            .unwrap();
+        assert!(!transcription.ready);
+        assert_eq!(transcription.missing, vec!["transcribe"]);
+
+        let report = DoctorReport {
+            store_root: "/tmp/store".into(),
+            config: Some("/tmp/centinel.toml".into()),
+            config_searched: vec![],
+            config_error: None,
+            sources: vec![],
+            binaries: vec![],
+            services,
+            vectors: None,
+            gates,
+            binaries_ready: true,
+            services_ready: false,
+            ready: false,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut p = Painter::new(&mut buf, false, 120);
+            report.render(&mut p).unwrap();
+        }
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("runs without rerank"), "{out}");
+        assert!(!out.contains("blocks `centinel embed`"), "{out}");
+        assert!(out.contains("blocks `centinel transcribe`"), "{out}");
     }
 
     /// A key the config names and the environment lacks is the problem reported — not a

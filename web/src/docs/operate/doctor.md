@@ -137,9 +137,22 @@ gates
   ✓ transcription
 ```
 
-A gate is a **stage**: *search* needs the embed and rerank servers, *transcription* the
-transcription server. Reporting them apart is what lets a crawl-only machine with no
-transcription server read as able to search.
+A gate is a **stage**: *search* needs the embed server, *transcription* the transcription
+server. Reporting them apart is what lets a crawl-only machine with no transcription server
+read as able to search.
+
+The rerank server is optional. Search runs without it, in a worse order, and says
+`no_rerank` on every result. So a reranker that is not answering is a warning, not a shut
+gate. That is the usual state on a machine that only reaches OpenRouter:
+
+```
+inference
+  ✓  embed       qwen/qwen3-embedding-8b  https://openrouter.ai/api/v1  search
+  !  rerank      qwen3-reranker-0.6b      http://127.0.0.1:8080/v1      search
+
+gates
+  ! search          runs without rerank
+```
 
 **A closed gate does not fail a run. It skips a stage.** An hour of crawling must never be
 thrown away over a server that was not started, so `run` checks each stage's server before

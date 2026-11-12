@@ -195,8 +195,8 @@ centinel doctor         # what this machine is missing, and which servers are an
 ```
 
 Run `doctor` first and after every step. It names the fix beside each gap it finds. Search
-works on keywords alone; the vector half and the reranker need an embedding and a rerank
-server, and the transcribe stage needs a transcription server. [Inference
+works on keywords alone; the vector half needs an embedding server, the reranker (optional,
+search runs without it) a rerank server, and the transcribe stage a transcription server. [Inference
 servers](../reference/inference.md) has the commands that start them.
 
 Then open the workspace, which is how most of Centinel is used:

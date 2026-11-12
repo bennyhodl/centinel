@@ -382,9 +382,11 @@ caller, which splits the batch to find the chunk.
 server's host and port and sends nothing, because a request would cost a model call.
 `run` uses it to skip a stage whose server is down; `doctor` uses it to report one
 `services` row per capability — `base_url`, `model`, `ready`, `problem` — beside the
-binary probes, and gates Search on embed and rerank and Transcription on transcribe. A
+binary probes, and gates Search on embed and Transcription on transcribe. A
 server not answering stops a stage exactly like a missing binary does, which is why they
-sit side by side. Readiness is split — `binaries_ready`, `services_ready`, and `ready` as
+sit side by side. The reranker is the exception, and `optional` like a binary that only
+degrades a stage: search runs without it and says `no_rerank`, so its absence is a
+warning on the Search gate (`degraded`), never a shut one. Readiness is split — `binaries_ready`, `services_ready`, and `ready` as
 their conjunction with a config that loads — because a machine can crawl and extract with
 no server at all; it simply cannot search. A config that fails to load is reported as
 `config_error` rather than failing the op — over HTTP and MCP, and on the CLI under
