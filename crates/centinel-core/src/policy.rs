@@ -22,6 +22,13 @@ use crate::discovery::robots::UnreachableRobots;
 pub const DEFAULT_USER_AGENT: &str =
     "Centinel/0.1 (civic transparency archiver; +https://github.com/bennyhodl/centinel)";
 
+/// The largest single response kept, unless an invocation says otherwise.
+///
+/// A ceiling on what one fetch may hold in memory as much as on what is worth keeping:
+/// the body is read into memory, so a server that answers with an 830 MB slideshow costs
+/// 830 MB, and a run walks several hosts at once on a machine that may have three.
+pub const DEFAULT_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
 /// How to treat one host.
 #[derive(Clone, Debug)]
 pub struct HostPolicy {
@@ -37,6 +44,10 @@ pub struct HostPolicy {
     /// What to do when `robots.txt` cannot be fetched at all.
     pub unreachable_robots: UnreachableRobots,
     pub timeout: Duration,
+    /// The largest body taken from one response. Larger is refused: before the body is
+    /// read when the server says its length, and the moment it passes the ceiling when
+    /// it does not.
+    pub max_bytes: u64,
 }
 
 impl Default for HostPolicy {
@@ -50,6 +61,7 @@ impl Default for HostPolicy {
             respect_crawl_delay: true,
             unreachable_robots: UnreachableRobots::Allow,
             timeout: Duration::from_secs(30),
+            max_bytes: DEFAULT_MAX_BYTES,
         }
     }
 }

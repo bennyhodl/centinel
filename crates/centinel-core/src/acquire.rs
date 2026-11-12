@@ -169,8 +169,6 @@ pub struct CollectOpts {
     pub refresh: bool,
     /// Only acquire addresses whose natural key contains one of these substrings.
     pub matches: Vec<String>,
-    /// Drop any single artifact larger than this.
-    pub max_bytes: u64,
     /// Failures to carry back in the report.
     pub max_failures: usize,
     /// Stops the walk after the address in flight. Defaults to a token that never fires.
@@ -188,7 +186,6 @@ impl Default for CollectOpts {
             limit: None,
             refresh: false,
             matches: Vec::new(),
-            max_bytes: 256 * 1024 * 1024,
             max_failures: 20,
             cancel: Cancel::none(),
         }
@@ -343,24 +340,10 @@ pub async fn collect(
                 let mut changed_here = false;
 
                 for artifact in artifacts {
+                    // Within the size ceiling already: the Source enforced it where the
+                    // bytes arrived (see `Overrides::max_bytes`), because here they are all
+                    // in memory and checking is too late.
                     let bytes = &artifact.fetched.bytes;
-                    if bytes.len() as u64 > opts.max_bytes {
-                        push_failure(
-                            &mut report,
-                            opts.max_failures,
-                            Failure {
-                                natural_key: artifact.resource.natural_key.clone(),
-                                state: Liveness::Error,
-                                detail: format!(
-                                    "artifact is {} MB, over the {} MB ceiling",
-                                    bytes.len() / (1024 * 1024),
-                                    opts.max_bytes / (1024 * 1024),
-                                ),
-                            },
-                        );
-                        continue;
-                    }
-
                     let kind = crate::content::ContentKind::classify(&artifact.fetched.meta, bytes);
                     *report.by_kind.entry(kind.to_string()).or_default() += 1;
                     *report
@@ -1232,36 +1215,6 @@ mod tests {
         assert_eq!(
             out.by_kind["pdf"], 1,
             "content kind is sniffed, not declared"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_oversized_artifact_is_dropped_with_a_reason() {
-        let (_d, store) = store().await;
-        let src = Scripted::new("x", &["https://x.gov/big"])
-            .yields("https://x.gov/big", &"x".repeat(4096));
-        discover(&store, &src, &DiscoverOpts::default(), &Progress::none())
-            .await
-            .unwrap();
-
-        let out = collect(
-            &store,
-            &src,
-            &CollectOpts {
-                max_bytes: 1024,
-                ..Default::default()
-            },
-            &Progress::none(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(out.stored, 0);
-        assert_eq!(out.failed, 1);
-        assert!(
-            out.failures[0].detail.contains("over the"),
-            "{:?}",
-            out.failures
         );
     }
 

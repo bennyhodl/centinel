@@ -543,10 +543,21 @@ impl YtDlp {
 
         first_file_named(work_dir, "audio").ok_or_else(|| YtFailure {
             state: Liveness::Error,
-            detail: "yt-dlp reported success but wrote no audio file".to_string(),
+            detail: no_file(&String::from_utf8_lossy(&out.stdout)),
             status: None,
         })
     }
+}
+
+/// Why yt-dlp exited cleanly and wrote nothing. Over `--max-filesize` it says so on stdout
+/// and exits 0, and that line is the reason; anything else is a run that should have
+/// written a file.
+fn no_file(stdout: &str) -> String {
+    stdout
+        .lines()
+        .find(|line| line.contains("larger than max-filesize"))
+        .map(|line| line.trim_start_matches("[download]").trim().to_string())
+        .unwrap_or_else(|| "yt-dlp reported success but wrote no audio file".to_string())
 }
 
 /// Pulls the fields we rely on out of a `--flat-playlist -J` document.
@@ -654,6 +665,22 @@ fn first_file_named(dir: &Path, stem: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file over `--max-filesize` is skipped with exit 0 and no file, which used to read
+    /// as yt-dlp misbehaving rather than as the ceiling.
+    #[test]
+    fn audio_over_the_ceiling_says_so() {
+        let stdout = "[youtube] Extracting URL: https://www.youtube.com/watch?v=x\n\
+                      [download] File is larger than max-filesize (912345678 bytes > 268435456 bytes). Aborting.\n";
+        assert_eq!(
+            no_file(stdout),
+            "File is larger than max-filesize (912345678 bytes > 268435456 bytes). Aborting."
+        );
+        assert_eq!(
+            no_file("[youtube] Extracting URL: x\n"),
+            "yt-dlp reported success but wrote no audio file"
+        );
+    }
 
     #[test]
     fn a_video_has_one_canonical_address() {

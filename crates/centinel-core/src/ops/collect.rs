@@ -195,6 +195,7 @@ pub async fn collect(
         lang: args.lang.clone(),
         audio: args.audio_policy(),
         yt_dlp_args: args.yt_dlp_args.clone(),
+        max_bytes: Some(args.max_mb.saturating_mul(1024 * 1024)),
         ..Default::default()
     };
 
@@ -218,7 +219,6 @@ pub async fn collect(
             limit: args.limit,
             refresh: args.refresh,
             matches,
-            max_bytes: args.max_mb.saturating_mul(1024 * 1024),
             max_failures: args.max_failures,
             cancel: cancel.clone(),
         },

@@ -44,6 +44,10 @@ pub struct Overrides {
     /// Stop enumerating after this many addresses. A URL ceiling for a crawled site, a
     /// `--playlist-end` for a channel — the same instruction in each Source's idiom.
     pub limit: Option<usize>,
+    /// The largest artifact kept, in bytes; [`crate::policy::DEFAULT_MAX_BYTES`] when
+    /// unset. Each Source enforces it where the bytes arrive, before they are all in
+    /// memory: a site's fetcher, a channel's `yt-dlp --max-filesize`.
+    pub max_bytes: Option<u64>,
 }
 
 /// Builds the Source a definition declares ([`crate::catalog`]).
@@ -60,6 +64,7 @@ pub fn from_config(
         Acquisition::Site(url) => {
             let policy = HostPolicy {
                 max_requests_per_second: over.rps.or(cfg.rps).unwrap_or(defaults.rps),
+                max_bytes: over.max_bytes.unwrap_or(crate::policy::DEFAULT_MAX_BYTES),
                 ..Default::default()
             };
             let mut limits = over.limits.clone().unwrap_or_default();
@@ -82,6 +87,8 @@ pub fn from_config(
         Acquisition::Channel(url) => {
             let mut args = cfg.yt_dlp_args.clone();
             args.extend(over.yt_dlp_args.iter().cloned());
+            let max_bytes = over.max_bytes.unwrap_or(crate::policy::DEFAULT_MAX_BYTES);
+            args.extend(["--max-filesize".to_string(), max_bytes.to_string()]);
 
             let lang = over
                 .lang

@@ -45,6 +45,7 @@ pub trait Fetch: Send + Sync + std::fmt::Debug {
 #[derive(Clone, Debug)]
 pub struct Fetcher {
     client: reqwest::Client,
+    max_bytes: u64,
 }
 
 impl Fetch for Fetcher {
@@ -63,6 +64,7 @@ impl Fetcher {
                 .user_agent(&policy.user_agent)
                 .timeout(policy.timeout)
                 .build()?,
+            max_bytes: policy.max_bytes,
         })
     }
 
@@ -125,16 +127,50 @@ impl Fetcher {
         // The post-redirect URL — where the bytes actually came from.
         meta.insert("final_url".into(), resp.url().to_string());
 
-        let bytes = resp.bytes().await.map_err(|e| FetchFailure {
+        let bytes = self.body(resp).await?;
+        Ok(Fetched { bytes, meta })
+    }
+
+    /// Reads a body into memory, refusing one over the ceiling before it is all there.
+    ///
+    /// When the server states the length, an oversized body is refused before a byte of
+    /// it is read. Otherwise it is read a piece at a time into one buffer and refused the
+    /// moment it passes the ceiling. Reading it whole first cost a body twice over, once
+    /// as the frames arrived and once as one contiguous copy, and checked the ceiling only
+    /// after: an 830 MB slideshow took a run on a 3 GB machine to 2.2 GB and the kernel
+    /// killed it.
+    async fn body(&self, mut resp: reqwest::Response) -> Result<Vec<u8>, FetchFailure> {
+        let ceiling = crate::render::bytes(self.max_bytes);
+        let status = resp.status().as_u16();
+        let refuse = |detail: String| FetchFailure {
+            state: Liveness::Error,
+            detail,
+            status: Some(status),
+        };
+
+        let declared = resp.content_length();
+        if let Some(len) = declared
+            && len > self.max_bytes
+        {
+            return Err(refuse(format!(
+                "{} declared, over the {ceiling} ceiling",
+                crate::render::bytes(len)
+            )));
+        }
+
+        let mut body = Vec::with_capacity(declared.unwrap_or(0) as usize);
+        while let Some(chunk) = resp.chunk().await.map_err(|e| FetchFailure {
             state: Liveness::Error,
             detail: format!("body read failed: {e}"),
             status: None,
-        })?;
-
-        Ok(Fetched {
-            bytes: bytes.to_vec(),
-            meta,
-        })
+        })? {
+            if (body.len() + chunk.len()) as u64 > self.max_bytes {
+                // Also a server whose declared length was short of the truth.
+                return Err(refuse(format!("over the {ceiling} ceiling")));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
 }
 
