@@ -676,6 +676,7 @@ pub(crate) mod tests {
                     state: crate::domain::Liveness::Gone,
                     detail: "HTTP 404 Not Found".into(),
                     status: Some(404),
+                    too_large: None,
                 })?;
                 Ok(Fetched {
                     bytes: body.as_bytes().to_vec(),

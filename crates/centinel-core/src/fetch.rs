@@ -78,6 +78,7 @@ impl Fetcher {
                 state: Liveness::Error,
                 detail: e.to_string(),
                 status: None,
+                too_large: None,
             }
         })?;
 
@@ -101,6 +102,7 @@ impl Fetcher {
                 state: classify(status.as_u16()),
                 detail: format!("HTTP {status}"),
                 status: Some(status.as_u16()),
+                too_large: None,
             });
         }
         // A success status is not the last word. Plenty of platforms answer 200 and hand
@@ -110,6 +112,7 @@ impl Fetcher {
                 state,
                 detail: format!("HTTP {status}, redirected to {}", resp.url()),
                 status: Some(status.as_u16()),
+                too_large: None,
             });
         }
 
@@ -142,20 +145,24 @@ impl Fetcher {
     async fn body(&self, mut resp: reqwest::Response) -> Result<Vec<u8>, FetchFailure> {
         let ceiling = crate::render::bytes(self.max_bytes);
         let status = resp.status().as_u16();
-        let refuse = |detail: String| FetchFailure {
+        let refuse = |detail: String, bytes: u64| FetchFailure {
             state: Liveness::Error,
             detail,
             status: Some(status),
+            too_large: Some(bytes),
         };
 
         let declared = resp.content_length();
         if let Some(len) = declared
             && len > self.max_bytes
         {
-            return Err(refuse(format!(
-                "{} declared, over the {ceiling} ceiling",
-                crate::render::bytes(len)
-            )));
+            return Err(refuse(
+                format!(
+                    "{} declared, over the {ceiling} ceiling",
+                    crate::render::bytes(len)
+                ),
+                len,
+            ));
         }
 
         let mut body = Vec::with_capacity(declared.unwrap_or(0) as usize);
@@ -163,10 +170,12 @@ impl Fetcher {
             state: Liveness::Error,
             detail: format!("body read failed: {e}"),
             status: None,
+            too_large: None,
         })? {
             if (body.len() + chunk.len()) as u64 > self.max_bytes {
                 // Also a server whose declared length was short of the truth.
-                return Err(refuse(format!("over the {ceiling} ceiling")));
+                let read = (body.len() + chunk.len()) as u64;
+                return Err(refuse(format!("over the {ceiling} ceiling"), read));
             }
             body.extend_from_slice(&chunk);
         }
@@ -294,6 +303,7 @@ mod tests {
             state: Liveness::Gone,
             detail: "x".into(),
             status,
+            too_large: None,
         };
         assert_eq!(status_of(&Err(refused(Some(404)))), Some(404));
         assert_eq!(status_of(&Err(refused(None))), None);

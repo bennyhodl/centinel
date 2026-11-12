@@ -249,6 +249,7 @@ impl Source for ChannelSource {
                     state: crate::domain::Liveness::Error,
                     detail: format!("`{}` is not a video address", resource.natural_key),
                     status: None,
+                    too_large: None,
                 });
             };
 
@@ -262,6 +263,7 @@ impl Source for ChannelSource {
                 state: crate::domain::Liveness::Error,
                 detail: format!("cannot create a working directory: {e}"),
                 status: None,
+                too_large: None,
             })?;
 
             let mut out = Vec::new();

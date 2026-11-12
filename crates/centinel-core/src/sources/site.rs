@@ -1028,11 +1028,13 @@ mod tests {
                         state: *state,
                         detail: format!("scripted {state}"),
                         status: None,
+                        too_large: None,
                     }),
                     None => Err(Refusal {
                         state: Liveness::Gone,
                         detail: "HTTP 404 Not Found".into(),
                         status: Some(404),
+                        too_large: None,
                     }),
                 }
             })

@@ -178,6 +178,9 @@ pub struct CollectReport {
     pub failures: Vec<CollectFailure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failures_truncated: Option<usize>,
+    /// Refused for size alone. Each is listed with the command that takes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub too_large: Vec<crate::acquire::TooLarge>,
 }
 
 /// Acquire every address the latest discovery run found, skipping what is already stored.
@@ -252,6 +255,7 @@ pub async fn collect(
             })
             .collect(),
         failures_truncated: out.failures_truncated,
+        too_large: out.too_large,
     })
 }
 
@@ -336,6 +340,19 @@ impl Render for CollectReport {
                 }
             }
 
+            if !self.too_large.is_empty() {
+                p.section("over the size ceiling")?;
+                for big in &self.too_large {
+                    let head = format!(
+                        "{:>9}  {}",
+                        render::bytes(big.bytes),
+                        render::truncate(&big.natural_key, p.width().saturating_sub(14))
+                    );
+                    p.marked(Mark::Warn, head)?;
+                    p.nest(|p| p.note(big.command(&self.source)))?;
+                }
+            }
+
             if self.remaining > 0 {
                 p.blank()?;
                 let text = format!(
@@ -395,10 +412,31 @@ mod tests {
             notes: Vec::new(),
             failures: Vec::new(),
             failures_truncated: None,
+            too_large: Vec::new(),
         }
     }
 
     /// The only figure here that is an instruction.
+    /// A file over the ceiling reads as a size and the command that takes it, not as an
+    /// error to puzzle over.
+    #[test]
+    fn a_file_over_the_ceiling_comes_with_the_command_that_takes_it() {
+        let mut r = report();
+        r.too_large = vec![crate::acquire::TooLarge {
+            natural_key: "https://x.gov/big.ppsx".into(),
+            bytes: 829_618_617,
+        }];
+        let out = render_to_string(&r);
+        assert!(out.contains("over the size ceiling"), "{out}");
+        assert!(out.contains("791 MiB  https://x.gov/big.ppsx"), "{out}");
+        assert!(
+            out.contains(
+                "centinel collect --source tampa --match 'https://x.gov/big.ppsx' --max-mb 793"
+            ),
+            "{out}"
+        );
+    }
+
     #[test]
     fn remaining_work_says_what_to_do_about_it() {
         let mut r = report();

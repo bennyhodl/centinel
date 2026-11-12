@@ -192,6 +192,29 @@ impl Default for CollectOpts {
     }
 }
 
+/// An address refused for being over the size ceiling: not broken, only bigger than this
+/// run would hold. Listed apart from failures so it can be fetched on purpose, with a
+/// higher `--max-mb`.
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct TooLarge {
+    pub natural_key: String,
+    /// What the server declared, or what had arrived when reading stopped.
+    pub bytes: u64,
+}
+
+impl TooLarge {
+    /// The command that collects this one address, with a ceiling just over its size.
+    pub fn command(&self, source: &str) -> String {
+        let mib = self.bytes.div_ceil(1024 * 1024) + 1;
+        format!(
+            "centinel collect --source {source} --match '{}' --max-mb {mib}",
+            self.natural_key
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Failure {
     pub natural_key: String,
@@ -241,6 +264,8 @@ pub struct Collected {
     pub parts: BTreeMap<String, usize>,
     pub failures: Vec<Failure>,
     pub failures_truncated: Option<usize>,
+    /// Refused for size alone, and counted in `failed` but not in `errored`.
+    pub too_large: Vec<TooLarge>,
     /// What the Source itself wanted said about the result.
     pub remarks: Vec<Note>,
 }
@@ -399,10 +424,17 @@ pub async fn collect(
                 let st = statuses
                     .entry(resource.clone())
                     .or_insert_with(|| ResourceStatus::new_live(resource.clone(), at));
-                st.apply(refusal.state, at, Some(refusal.detail.clone()));
+                st.refused(&refusal, at);
                 store.append(&id, &LogRecord::Status(st.clone())).await?;
 
                 report.failed += 1;
+                if let Some(bytes) = refusal.too_large {
+                    report.too_large.push(TooLarge {
+                        natural_key: resource.natural_key.clone(),
+                        bytes,
+                    });
+                    continue;
+                }
                 match refusal.state {
                     Liveness::Blocked => report.blocked += 1,
                     Liveness::Gone => report.gone += 1,
@@ -544,6 +576,21 @@ mod tests {
                     state,
                     detail: detail.to_string(),
                     status: None,
+                    too_large: None,
+                }),
+            );
+            self
+        }
+
+        /// Refused for being `bytes` long, as the fetcher refuses past the ceiling.
+        fn too_large(mut self, key: &str, bytes: u64) -> Self {
+            self.script.insert(
+                key.to_string(),
+                Err(Refusal {
+                    state: Liveness::Error,
+                    detail: "over the ceiling".to_string(),
+                    status: Some(200),
+                    too_large: Some(bytes),
                 }),
             );
             self
@@ -1216,6 +1263,53 @@ mod tests {
             out.by_kind["pdf"], 1,
             "content kind is sniffed, not declared"
         );
+    }
+
+    /// An address over the ceiling is not broken. It is listed with its size, apart from
+    /// the errors, and the size is on its status in the log, so it survives the run.
+    #[tokio::test]
+    async fn an_address_over_the_ceiling_is_listed_apart_and_recorded() {
+        let (_d, store) = store().await;
+        let big = "https://x.gov/TBAAACC_Chamber.ppsx";
+        let src = Scripted::new("x", &[big, "https://x.gov/ok.pdf"])
+            .too_large(big, 829_618_617)
+            .yields("https://x.gov/ok.pdf", "%PDF-1.7");
+        discover(&store, &src, &DiscoverOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+
+        let out = collect(&store, &src, &CollectOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+
+        assert_eq!(out.stored, 1);
+        assert_eq!(out.failed, 1, "it was not stored");
+        assert_eq!(out.errored, 0, "and it is not an error");
+        assert!(out.failures.is_empty(), "{:?}", out.failures);
+        assert_eq!(
+            out.too_large,
+            [TooLarge {
+                natural_key: big.to_string(),
+                bytes: 829_618_617
+            }]
+        );
+        assert_eq!(
+            out.too_large[0].command("x"),
+            format!("centinel collect --source x --match '{big}' --max-mb 793")
+        );
+
+        let mut recorded = None;
+        store
+            .scan(src.id(), |record| {
+                if let LogRecord::Status(s) = record
+                    && s.resource.natural_key == big
+                {
+                    recorded = s.too_large;
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(recorded, Some(829_618_617));
     }
 
     #[tokio::test]

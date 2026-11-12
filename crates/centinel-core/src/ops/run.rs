@@ -791,6 +791,15 @@ async fn run_acquisition(
                                 render::count(r.remaining as u64)
                             ));
                         }
+                        // Not broken, only bigger than a run holds: `collect` on the
+                        // source lists each with the command that takes it.
+                        if !r.too_large.is_empty() {
+                            summary.push_str(&format!(
+                                " \u{00b7} {} over the size ceiling (`centinel collect --source {}` lists them)",
+                                render::count(r.too_large.len() as u64),
+                                source.id()
+                            ));
+                        }
                         StageRun::ran(
                             stage,
                             Tally::of(
@@ -806,6 +815,7 @@ async fn run_acquisition(
                                     ("blocked", r.blocked as u64),
                                     ("gone", r.gone as u64),
                                     ("errored", r.errored as u64),
+                                    ("too_large", r.too_large.len() as u64),
                                     ("remaining", r.remaining as u64),
                                     ("bytes", r.bytes),
                                 ],

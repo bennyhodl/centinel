@@ -247,6 +247,11 @@ pub struct ResourceStatus {
     /// Last transport detail — HTTP status, error string. Diagnostic, not authoritative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Bytes, when the last refusal was the size ceiling. See [`Refusal::too_large`].
+    /// Optional rather than a `Liveness` of its own so that a log written with it still
+    /// reads in a binary from before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub too_large: Option<u64>,
 }
 
 impl ResourceStatus {
@@ -258,6 +263,7 @@ impl ResourceStatus {
             last_checked: at,
             consecutive_failures: 0,
             detail: None,
+            too_large: None,
         }
     }
 
@@ -274,6 +280,13 @@ impl ResourceStatus {
             self.consecutive_failures.saturating_add(1)
         };
         self.detail = detail;
+        self.too_large = None;
+    }
+
+    /// A refusal, with what it carries beyond its state.
+    pub fn refused(&mut self, refusal: &Refusal, at: Timestamp) {
+        self.apply(refusal.state, at, Some(refusal.detail.clone()));
+        self.too_large = refusal.too_large;
     }
 }
 
@@ -460,6 +473,10 @@ pub struct Refusal {
     /// never reached the server" are different facts. Carried as a number so nothing
     /// reads it back out of `detail`, which is prose for a person.
     pub status: Option<u16>,
+    /// Bytes, when the refusal was the size ceiling: the length the server declared, or
+    /// as much as had arrived when reading stopped. Kept as a number for the same reason
+    /// as `status`, so a report can list these and say how to fetch one on purpose.
+    pub too_large: Option<u64>,
 }
 
 impl fmt::Display for Refusal {
@@ -751,5 +768,27 @@ mod tests {
         s.apply(Liveness::Live, t2, None);
         assert_eq!(s.since, t2);
         assert_eq!(s.consecutive_failures, 0);
+    }
+
+    /// The size is a fact about the last refusal, so whatever happens next replaces it.
+    #[test]
+    fn a_size_refusal_is_recorded_and_cleared_by_what_follows() {
+        let r = Resource::new(SourceId::new("x").unwrap(), "https://x/big.ppsx");
+        let t0: Timestamp = "2026-01-01T00:00:00Z".parse().unwrap();
+        let t1: Timestamp = "2026-01-02T00:00:00Z".parse().unwrap();
+        let too_large = Refusal {
+            state: Liveness::Error,
+            detail: "791 MiB declared, over the 256 MiB ceiling".into(),
+            status: Some(200),
+            too_large: Some(829_618_617),
+        };
+
+        let mut s = ResourceStatus::new_live(r, t0);
+        s.refused(&too_large, t0);
+        assert_eq!(s.too_large, Some(829_618_617));
+        assert_eq!(s.state, Liveness::Error);
+
+        s.apply(Liveness::Live, t1, None);
+        assert_eq!(s.too_large, None, "fetched with a higher ceiling");
     }
 }

@@ -235,6 +235,7 @@ mod tests {
                 state: Liveness::Error,
                 detail: detail.into(),
                 status,
+                too_large: None,
             }),
         )
     }

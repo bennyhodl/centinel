@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use centinel_core::discovery::DiscoveryLimits;
-use centinel_core::domain::{Resource, Source, SourceId};
+use centinel_core::domain::{Refusal, Resource, Source, SourceId};
 use centinel_core::op::Progress;
 use centinel_core::policy::HostPolicy;
 use centinel_core::sources::site::SiteSource;
@@ -94,13 +94,12 @@ fn site() -> SiteSource {
     .unwrap()
 }
 
-async fn acquire(url: String) -> Result<Vec<u8>, String> {
+async fn acquire(url: String) -> Result<Vec<u8>, Refusal> {
     let site = site();
     let resource = Resource::new(site.id().clone(), url);
     site.acquire(&resource, &Progress::none())
         .await
         .map(|mut got| got.remove(0).fetched.bytes)
-        .map_err(|refusal| refusal.detail)
 }
 
 /// The 830 MB slideshow: refused on what the server says, before the body is read.
@@ -108,10 +107,14 @@ async fn acquire(url: String) -> Result<Vec<u8>, String> {
 async fn a_declared_length_over_the_ceiling_is_refused_unread() {
     let base = serve().await;
     let started = Instant::now();
-    let detail = acquire(format!("{base}/declared")).await.unwrap_err();
+    let refusal = acquire(format!("{base}/declared")).await.unwrap_err();
 
-    assert!(detail.contains("over the 1.0 KiB ceiling"), "{detail}");
-    assert!(detail.contains("declared"), "{detail}");
+    assert!(
+        refusal.detail.contains("over the 1.0 KiB ceiling"),
+        "{refusal}"
+    );
+    assert!(refusal.detail.contains("declared"), "{refusal}");
+    assert_eq!(refusal.too_large, Some(1_000_000), "the size it declared");
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "it waited on the body: {:?}",
@@ -122,8 +125,13 @@ async fn a_declared_length_over_the_ceiling_is_refused_unread() {
 #[tokio::test]
 async fn a_body_with_no_length_is_refused_once_it_passes_the_ceiling() {
     let base = serve().await;
-    let detail = acquire(format!("{base}/chunked")).await.unwrap_err();
-    assert!(detail.contains("over the 1.0 KiB ceiling"), "{detail}");
+    let refusal = acquire(format!("{base}/chunked")).await.unwrap_err();
+    assert!(
+        refusal.detail.contains("over the 1.0 KiB ceiling"),
+        "{refusal}"
+    );
+    let read = refusal.too_large.expect("the size is recorded");
+    assert!(read > CEILING, "as much as had arrived: {read}");
 }
 
 #[tokio::test]

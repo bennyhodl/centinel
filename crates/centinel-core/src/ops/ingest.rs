@@ -159,11 +159,12 @@ pub async fn ingest(
                     first_seen,
                 });
             }
-            Err(FetchFailure { state, detail, .. }) => {
+            Err(failure) => {
                 let entry = statuses
                     .entry(resource.clone())
                     .or_insert_with(|| ResourceStatus::new_live(resource.clone(), at));
-                entry.apply(state, at, Some(detail.clone()));
+                entry.refused(&failure, at);
+                let FetchFailure { state, detail, .. } = failure;
                 let consecutive_failures = entry.consecutive_failures;
 
                 // No Observation — liveness carries the failure instead (§4.4).

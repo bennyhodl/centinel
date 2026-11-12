@@ -114,6 +114,7 @@ impl From<ToolError> for crate::domain::Refusal {
             state: crate::domain::Liveness::Error,
             detail: e.to_string(),
             status: None,
+            too_large: None,
         }
     }
 }

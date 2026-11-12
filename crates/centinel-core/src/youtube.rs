@@ -311,6 +311,7 @@ pub fn classify(stderr: &str) -> YtFailure {
         state,
         detail: first_line,
         status: None,
+        too_large: None,
     }
 }
 
@@ -452,6 +453,7 @@ impl YtDlp {
             state: Liveness::Error,
             detail: format!("yt-dlp returned output that is not JSON: {e}"),
             status: None,
+            too_large: None,
         })
     }
 
@@ -541,23 +543,31 @@ impl YtDlp {
             return Err(classify(&String::from_utf8_lossy(&out.stderr)));
         }
 
-        first_file_named(work_dir, "audio").ok_or_else(|| YtFailure {
-            state: Liveness::Error,
-            detail: no_file(&String::from_utf8_lossy(&out.stdout)),
-            status: None,
-        })
+        first_file_named(work_dir, "audio")
+            .ok_or_else(|| no_file(&String::from_utf8_lossy(&out.stdout)))
     }
 }
 
 /// Why yt-dlp exited cleanly and wrote nothing. Over `--max-filesize` it says so on stdout
 /// and exits 0, and that line is the reason; anything else is a run that should have
 /// written a file.
-fn no_file(stdout: &str) -> String {
-    stdout
+fn no_file(stdout: &str) -> YtFailure {
+    let over = stdout
         .lines()
-        .find(|line| line.contains("larger than max-filesize"))
-        .map(|line| line.trim_start_matches("[download]").trim().to_string())
-        .unwrap_or_else(|| "yt-dlp reported success but wrote no audio file".to_string())
+        .find(|line| line.contains("larger than max-filesize"));
+    YtFailure {
+        state: Liveness::Error,
+        detail: match over {
+            Some(line) => line.trim_start_matches("[download]").trim().to_string(),
+            None => "yt-dlp reported success but wrote no audio file".to_string(),
+        },
+        status: None,
+        // `File is larger than max-filesize (912345678 bytes > 268435456 bytes)`.
+        too_large: over.and_then(|line| {
+            let (_, size) = line.split_once('(')?;
+            size.split_whitespace().next()?.parse().ok()
+        }),
+    }
 }
 
 /// Pulls the fields we rely on out of a `--flat-playlist -J` document.
@@ -672,14 +682,18 @@ mod tests {
     fn audio_over_the_ceiling_says_so() {
         let stdout = "[youtube] Extracting URL: https://www.youtube.com/watch?v=x\n\
                       [download] File is larger than max-filesize (912345678 bytes > 268435456 bytes). Aborting.\n";
+        let over = no_file(stdout);
         assert_eq!(
-            no_file(stdout),
+            over.detail,
             "File is larger than max-filesize (912345678 bytes > 268435456 bytes). Aborting."
         );
+        assert_eq!(over.too_large, Some(912_345_678));
+        let silent = no_file("[youtube] Extracting URL: x\n");
         assert_eq!(
-            no_file("[youtube] Extracting URL: x\n"),
+            silent.detail,
             "yt-dlp reported success but wrote no audio file"
         );
+        assert_eq!(silent.too_large, None);
     }
 
     #[test]
