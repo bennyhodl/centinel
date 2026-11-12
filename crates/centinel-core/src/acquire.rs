@@ -87,11 +87,7 @@ pub async fn discover(
     let id = source.id().clone();
     let enumeration = source.enumerate(progress).await?;
 
-    let previous: Option<Vec<Resource>> = store
-        .replay(&id)
-        .await?
-        .latest_discovery()
-        .map(|d| d.resources.clone());
+    let previous: Option<Vec<Resource>> = store.latest_discovery(&id).await?.map(|d| d.resources);
 
     let previous_run = previous.as_ref().map(Vec::len);
     let known: std::collections::HashSet<&str> = previous
@@ -268,37 +264,33 @@ pub async fn collect(
 ) -> anyhow::Result<Collected> {
     let id = source.id().clone();
 
-    // One pass over the log for the work list, the resume state and the change baseline.
-    let replay = store.replay(&id).await?;
-
-    let discovered = replay
-        .latest_discovery()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no discovery run for `{id}` — run `centinel discover --source {id}` first"
-            )
-        })?
-        .resources
-        .clone();
+    // One pass over the log for the work list, the resume state and the change baseline,
+    // and those are all it keeps: the newest snapshot, a fingerprint per address and a
+    // status per address. The log itself is not held while the walk runs. It carries
+    // every snapshot the source ever had, and a run walks several sources at once.
+    let mut discovered: Option<Vec<Resource>> = None;
+    let mut seen: HashMap<Resource, Fingerprint> = HashMap::new();
+    let mut statuses: BTreeMap<Resource, ResourceStatus> = BTreeMap::new();
+    store
+        .scan(&id, |record| match record {
+            LogRecord::DiscoveryRun(run) => discovered = Some(run.resources),
+            LogRecord::Observation(o) => {
+                seen.insert(o.resource, o.fingerprint);
+            }
+            LogRecord::Status(s) => {
+                statuses.insert(s.resource.clone(), s);
+            }
+            LogRecord::Derivation(_) | LogRecord::Underivable(_) => {}
+        })
+        .await?;
+    let discovered = discovered.ok_or_else(|| {
+        anyhow::anyhow!("no discovery run for `{id}` — run `centinel discover --source {id}` first")
+    })?;
 
     // Written to as each artifact is stored, from markup already in hand. See
     // [`crate::crumbs::Ledger`] — this is the whole reason `crumbs` is a file read rather
     // than a pass over every HTML blob in the corpus.
     let ledger = crate::crumbs::Ledger::new(store, id.clone());
-
-    let mut seen: HashMap<Resource, Fingerprint> = HashMap::new();
-    let mut statuses: BTreeMap<Resource, ResourceStatus> = BTreeMap::new();
-    for rec in replay.records() {
-        match rec {
-            LogRecord::Observation(o) => {
-                seen.insert(o.resource.clone(), o.fingerprint.clone());
-            }
-            LogRecord::Status(s) => {
-                statuses.insert(s.resource.clone(), s.clone());
-            }
-            _ => {}
-        }
-    }
 
     // ---- the work list -------------------------------------------------------------
     let mut report = Collected {

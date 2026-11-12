@@ -133,6 +133,10 @@ pub const INDEX_FILE: &str = "centinel.db";
 /// The suffix Lance gives every table directory.
 const LANCE_SUFFIX: &str = ".lance";
 
+/// How much of a log file [`Store::scan`] reads at a time. A DiscoveryRun is one line of
+/// a megabyte or more, and the default 8 KiB would fetch it in a hundred and fifty reads.
+const SCAN_BUFFER: usize = 256 * 1024;
+
 fn io_at(path: impl Into<PathBuf>) -> impl FnOnce(std::io::Error) -> StoreError {
     let path = path.into();
     move |source| StoreError::Io { path, source }
@@ -739,17 +743,27 @@ impl Store {
         Ok(())
     }
 
-    /// Reads every record for a Source, in month order.
+    /// Reads a Source's log one record at a time, in log order, and keeps none of them.
     ///
-    /// Returns an empty vec for an unknown Source rather than erroring — "no log yet"
-    /// is an ordinary state, not a fault.
-    pub async fn read_log(&self, source: &SourceId) -> Result<Vec<LogRecord>> {
+    /// **What a caller folds is what it holds.** A log repeats a Source's whole address
+    /// list in every DiscoveryRun, so it grows with every run the Source has ever had, and
+    /// a caller that parsed all of it to ask one question held sixty snapshots to read the
+    /// newest. `collect` did, for as long as it collected: a run walking eight Sources at
+    /// once held eight whole logs, 1.3 GB against 590 MB of history, and the server it ran
+    /// in was killed for it. Read a line at a time, a caller's memory is the answer it
+    /// keeps and one record in hand, whatever the history is.
+    ///
+    /// An unknown Source has no records rather than an error: "no log yet" is an ordinary
+    /// state, not a fault.
+    pub async fn scan(&self, source: &SourceId, mut each: impl FnMut(LogRecord)) -> Result<()> {
+        use tokio::io::AsyncBufReadExt;
+
         let dir = self.log_dir(source);
         let mut months: Vec<PathBuf> = Vec::new();
 
         let mut entries = match tokio::fs::read_dir(&dir).await {
             Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => {
                 return Err(StoreError::Io {
                     path: dir,
@@ -765,24 +779,31 @@ impl Store {
         }
         months.sort();
 
-        let mut out = Vec::new();
         for path in months {
-            let text = tokio::fs::read_to_string(&path)
-                .await
-                .map_err(io_at(&path))?;
-            for (i, line) in text.lines().enumerate() {
+            let file = tokio::fs::File::open(&path).await.map_err(io_at(&path))?;
+            let mut lines = tokio::io::BufReader::with_capacity(SCAN_BUFFER, file).lines();
+            let mut number = 0;
+            while let Some(line) = lines.next_line().await.map_err(io_at(&path))? {
+                number += 1;
                 if line.trim().is_empty() {
                     continue;
                 }
-                let rec =
-                    serde_json::from_str(line).map_err(|source| StoreError::MalformedLogLine {
+                each(serde_json::from_str(&line).map_err(|source| {
+                    StoreError::MalformedLogLine {
                         path: path.clone(),
-                        line: i + 1,
+                        line: number,
                         source,
-                    })?;
-                out.push(rec);
+                    }
+                })?);
             }
         }
+        Ok(())
+    }
+
+    /// Reads every record for a Source, in month order: [`Self::scan`], kept.
+    pub async fn read_log(&self, source: &SourceId) -> Result<Vec<LogRecord>> {
+        let mut out = Vec::new();
+        self.scan(source, |record| out.push(record)).await?;
         Ok(out)
     }
 
@@ -859,6 +880,19 @@ impl Store {
             source: source.clone(),
             records: self.read_log(source).await?,
         })
+    }
+
+    /// The newest snapshot of what a Source declares it has, holding one snapshot at a
+    /// time rather than the log. What `discover` compares its new snapshot against.
+    pub async fn latest_discovery(&self, source: &SourceId) -> Result<Option<DiscoveryRun>> {
+        let mut latest = None;
+        self.scan(source, |record| {
+            if let LogRecord::DiscoveryRun(run) = record {
+                latest = Some(run);
+            }
+        })
+        .await?;
+        Ok(latest)
     }
 
     /// Replays a Source's liveness. One pass — see [`Self::replay`] to ask more than one
@@ -1281,6 +1315,55 @@ mod tests {
         // Both are still addressable — the record is append-only.
         assert_eq!(replay.derived_from().len(), 2);
         assert!(replay.derived_from().contains_key(&first));
+    }
+
+    /// What `collect` and `discover` read instead of the whole log: each record in log
+    /// order across the month files, so the last snapshot met is the newest one.
+    #[tokio::test]
+    async fn a_scan_meets_every_record_in_log_order_and_the_newest_snapshot_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let id = SourceId::new("tampa").unwrap();
+        let snapshot = |at: &str, addresses: &[&str]| {
+            LogRecord::DiscoveryRun(DiscoveryRun {
+                source: id.clone(),
+                at: ts(at),
+                resources: addresses
+                    .iter()
+                    .map(|a| Resource::new(id.clone(), *a))
+                    .collect(),
+                method: "sitemap".into(),
+            })
+        };
+        let january = snapshot("2026-01-01T00:00:00Z", &["https://tampa.gov/a"]);
+        let february = snapshot(
+            "2026-02-01T00:00:00Z",
+            &["https://tampa.gov/a", "https://tampa.gov/b"],
+        );
+        store.append(&id, &january).await.unwrap();
+        store
+            .record_observation(
+                &Resource::new(id.clone(), "https://tampa.gov/a"),
+                b"one",
+                ts("2026-01-02T00:00:00Z"),
+                meta(),
+            )
+            .await
+            .unwrap();
+        store.append(&id, &february).await.unwrap();
+
+        let mut met = Vec::new();
+        store.scan(&id, |record| met.push(record)).await.unwrap();
+        assert_eq!(met.len(), 3);
+        assert_eq!((&met[0], &met[2]), (&january, &february));
+        assert!(matches!(met[1], LogRecord::Observation(_)));
+
+        let LogRecord::DiscoveryRun(newest) = february else {
+            unreachable!()
+        };
+        assert_eq!(store.latest_discovery(&id).await.unwrap(), Some(newest));
+        let nobody = SourceId::new("nobody").unwrap();
+        assert_eq!(store.latest_discovery(&nobody).await.unwrap(), None);
     }
 
     #[tokio::test]
