@@ -38,7 +38,7 @@
 set -eu
 
 # The workspace `rust-version`. LanceDB sets it; see the root Cargo.toml.
-MSRV="1.91"
+MSRV="1.94"
 
 PKG_MAIN="centinel"
 

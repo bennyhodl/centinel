@@ -10,9 +10,10 @@ members = [
 version = "0.30.1"
 edition = "2024"
 # Set by LanceDB, which is the only dependency that asks for more than edition 2024's
-# 1.85. Holding 1.85 would hold LanceDB at 0.23 — ten releases back — to keep a floor
-# no CI job tests against.
-rust-version = "1.91"
+# 1.85. lancedb 0.41 and lance 14 ask for 1.94; holding 1.91 would hold them at 0.40 and
+# 13, and lance 9.0.0 before that lacked two decode bounds checks for damaged string
+# columns, which is what `audit` and `repair` read. No CI job tests the floor.
+rust-version = "1.94"
 license = "MIT"
 repository = "https://github.com/bennyhodl/centinel"
 

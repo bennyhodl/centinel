@@ -1070,7 +1070,7 @@ impl VectorTable {
             .distance_type(DistanceType::Cosine)
             // The backend's 20-partition default lost too many candidates in the
             // synthetic recall benchmark. Search more partitions before reranking.
-            .nprobes(64)
+            .nprobes(64)?
             // Before distance, which is lancedb's default for a filter on a vector query;
             // said here because the arm's correctness under a narrow filter depends on it.
             .only_if(predicate)
