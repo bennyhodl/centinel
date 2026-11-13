@@ -38,6 +38,7 @@ lever.
 | 3 | CTTV captions (`apps.tampagov.net/cttv_cc_webapp`) | table cells fuse into one run-on line; 2,606 transcripts behind a `__doPostBack` pager | extract **and** enumerate | **every HTML page with a table**; every ASP.NET WebForms grid |
 | 4 | Hillsborough Clerk (`hillsclerk.com`) | ~6 GB of open bulk files nobody looked for; every `.csv` unextractable because IIS says `octet-stream` | collect | every server that defaults to `octet-stream`; every open directory listing |
 | 5 | Six ordinary city and county sites | five of six enumerate perfectly and still lose most of their content; one loses all 579 addresses to a relative `Sitemap:` line | **extract and report** — not enumerate | every CMS site, which is most of them |
+| 6 | A full run on the box: 37 Tampa Bay sources | one 830 MB file killed every run; CMS redirect pages are fetched off-host and counted as the city's failures; `<base href>` is ignored, so largo's links resolve to 404s; a footer PDF is fetched once per page (21.5 GB of repeats); a 10 s crawl delay over a WooCommerce shop holds the run ~13 h; extract peaks at ~670 MB per vector PDF and glibc keeps it; one 17,162-font PDF stalls extract with no deadline; index's chrome learner holds every CSV row and is killed | **collect** (memory, redirects), **enumerate** (links), **extract** and **index** (memory, time) | every run on a small machine; every CivicPlus/Granicus "external link" page; every site that declares `<base href>` |
 
 **Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
@@ -1434,6 +1435,581 @@ shape, it needs its own measure and that measure needs validating.
 
 ---
 
+## 6. A full run on the box — 37 Tampa Bay sources
+
+*Seen 2026-11-12, on `ssh centinel` (VM 113, the live store). `centinel -v run` over every
+enabled source, logged to `~/.centinel/run-logs/`, with RSS and CPU sampled every 2 s
+beside it. v0.30.2 for the first runs, v0.31.0 from 20:54Z.*
+
+This entry is written while the run goes. The running log at the end is appended as things
+come up; the faults above it are the ones that held up.
+
+### Fault 1 — one 830 MB file killed every run *(fixed in v0.30.3)*
+
+Every multi-source run on the box ended in the OOM killer: 03:39 (8 sources, 3.19 GB),
+17:48 (2.51 GB), 18:01 (2.57 GB), and the Nov 6 runs ended `interrupted`. CPU was idle
+(40 s in 11 min); systemd stops the whole tmux scope with the killed process, so the
+session vanished too.
+
+`heaptrack` on `run --source hillsborough`, acquisition only: flat at 52 MB through
+discover, then 63 MB → 367 → 876 → 1,823 MB in 13 s and killed at 2.25 GB. One call held
+830 MB (`reqwest` `Response::bytes()`) and 780 MB of HTTP/2 frames held the same body.
+The file: `assets.contentstack.io/…/TBAAACC_Chamber_092025_UPDATED.ppsx`, a slideshow,
+`content-length: 829618617`. The 256 MiB ceiling was checked after the body was in memory.
+
+Fixed by moving the ceiling into the fetcher (refuse a declared length before reading, and
+stop reading at the ceiling otherwise), and listing what it refuses with the command that
+takes it (v0.31.0). On the next run it was refused in 815 ms with 0 bytes read, and RSS
+stayed at 140–280 MB through collect.
+
+### Fault 2 — a CMS "external link" page is fetched off-host, and fails as the city's
+
+Every 403 in the first 1,350 lines of the run was a `dunedin.gov` or `myclearwater.com`
+page that redirects to a vendor: municode, OpenGov procurement, Paymentus, the property
+appraiser, GovDeals, myvscloud, floridajobs, fldoe, recover.pinellas.gov,
+floridahealth.gov, atozdatabases. The vendor refuses us; collect counts the city's address
+as failed. None returned 200 this time, but `fetch.rs` follows redirects with no host check
+and records only `final_url`, so one that did would be stored as the city's document.
+
+**Two sites, same shape** — both are CMS link pages whose only content is the redirect.
+
+**Way around:** stop at the first redirect that leaves the source's host, record the target
+as a crumb (one Source per exact host; an off-host link is recorded, not followed), and do
+not count it as a failure.
+
+### Fault 3 — `<base href>` is ignored, and links resolve to pages that do not exist
+
+`largo.com` pages declare `<base href="https://www.largo.com/" />` and link relatively:
+`connect/mayor_and_commission/mayor.php`. We resolve against the page's own address, so a
+link on `/connect/mayor_and_commission/index.php` becomes
+`/connect/mayor_and_commission/connect/mayor_and_commission/mayor.php`: 404. 272 of the
+run's first 362 4xx answers were this (172 in collect, 100 in discover), and any page
+reachable only by those links is never found. `largo.com` also has no `robots.txt` and no
+`sitemap.xml`, so the links are the whole enumeration.
+
+By 21:55Z largo's collect stood at **57 stored, 2,451 failed** of 4,434 addresses: about
+98% of what its discovery found are addresses this fault made up, compounding as each
+404 page's own links (it has none, but every real page links to forty others) resolve
+deeper. At one request a second that is over an hour of the run for 57 pages.
+
+Final: **124 stored, 4,309 failed of 4,434**, collect running from 20:58 to 22:15 — 77
+minutes of the run, 97% of it on addresses that do not exist.
+
+Four resolvers each take their own base and none reads `<base>`:
+`strategies/crawl/links.rs`, `strategies/crawl/listing.rs`, `enclosure.rs`, `crumbs.rs`.
+
+**Way around:** one place says what a page's links resolve against — `<base href>`
+resolved against the page, else the page — and all four use it.
+
+### Fault 5 — a filename in a script becomes a document address (tampa, 196 × 404)
+
+Every `tampa.gov/document/<slug>-<id>` page links its PDF correctly, and we fetch it:
+`/sites/default/files/document/2025/foreclosure-registry-faqs-v2.pdf`, 200. A second later
+we also ask for `/document/foreclosure-registry-faqs-v2.pdf`, which 404s. The page names
+the file six times; three are bare filenames — `aria-label="Download: …pdf"`, link text,
+and a download widget's `fileName: "foreclosure-registry-faqs-v2.pdf"`. The last is a quoted
+string in a `<script>` ending in `.pdf`, which is exactly what `enclosure::script_targets`
+takes as an address (it exists for PDFObject's `var pdfURL = "https://…pdf"`). Resolved
+against the page, it lands on `/document/…pdf`. 196 requests a run, one per document page.
+
+**Second sighting** of *enclosure detection matches JavaScript source* (entry 2: OnBase's URL
+template). Way around: a string in a script counts as an address only when it looks like
+one — absolute, or rooted (`/`, `./`, `../`). The `pdfURL` case is absolute.
+
+### Fault 6 — WordPress attachment pages are a large part of a site, and they are wrappers
+
+`madeirabeachfl.gov` discovers 4,884 addresses, and its discovery walks Yoast's
+`attachment-sitemap.xml` and `attachment-sitemap2.xml` beside the post, page, event and
+document sitemaps. An attachment page is the page WordPress makes for every uploaded file:
+`/festival-of-lights-boat-parade/fol21-poster-11x17-lr-2/` is
+`<body class="attachment … attachment-pdf">`, about 80 KB of theme around one file. At
+Yoast's 1,000 per sitemap that is up to 2,000 of the 4,884 addresses, each a request at
+1 per second and a page of chrome for extraction and the junk gate to deal with, while the
+file it wraps is one link away.
+
+**Second sighting** of *a plugin generates most of the site* (entry 5: `medinaco.org`'s
+venue stubs), and kin to *the page is a wrapper and the content is one address away*. Way
+around, not built: treat a sitemap named `attachment-sitemap*.xml` (or a page whose body
+class is `attachment`) as a list of files, and take the file it wraps instead of the page.
+WordPress with Yoast is a large share of small-city sites, so this is not one site's rule.
+
+### Fault 7 — a document every page links is fetched once per page (21.5 GB for nothing)
+
+`townofredingtonshores.com` puts five PDFs in its footer or sidebar: the FEMA substantial
+damage desk reference (9.8 MB), the floodplain management plan (6.0 MB), *Evacuate or
+Stay* (2.5 MB), the KDOW fact sheet and a roofing affidavit. Each was fetched **1,026
+times** in this run, once for every page that encloses it, and a sixth (the town
+information sheet) 593 times: about 19 GB downloaded for six files, and nearly all of
+redington-shores' 2 h 17 min in collect (20:55–23:13) at one request a second.
+
+`SiteSource::acquire` (`sources/site.rs:829`) fetches every enclosure of a page in line, and
+nothing remembers that this source already fetched that address a minute ago. The blob
+store dedupes the bytes; the request, the wait and the download are not deduped.
+
+Across the run so far: **7,174 repeat fetches, 21.5 GB** — redington-shores 5,793 (19.4 GB),
+st-petersburg 992 over 190 addresses (1.6 GB), south-pasadena 154, hillstaxfl 89 (at its
+10 s crawl delay, 15 minutes), belleair-shore 60, gulfport 54, and four more under 15.
+
+**Second sighting** of *a shared enclosure is re-fetched once per referring page* (entry 5:
+one `dunedin.gov` `.docx`, 42 times in 50 pages).
+
+**Way around:** an enclosure is an address, and should meet the same "already have it"
+check as every address discovery hands collect. The smallest version is a per-pass set of
+fetched enclosure addresses on the source; the deeper one is enclosures going back into the
+frontier as resources, so they are counted, deduped and resumable like everything else.
+Not checked: whether each repeat also appends its own status record to the log.
+
+### Fault 8 — a 10 s crawl delay across a WooCommerce shop holds the whole run (hillstaxfl)
+
+`hillstaxfl.gov`'s `robots.txt` says `Crawl-delay: 10`, and we honour it. Its discovery
+reads 23 Yoast sitemaps, ten of them `product-sitemap*.xml`: a WooCommerce shop of student
+artwork, one page per student (`/product/carlee-k/`, *"Carlee K. - Hillsborough County Tax
+Collector"*, 250 KB, *"The product images shown are samples"*). Discovery found 10,039
+addresses; collect had 5,459 left to fetch. At 00:04Z it was 867 in, ~10 s each, so the
+rest is about **13 hours**, and every other source finished collect at 23:13Z. Extract,
+index and embed wait on it.
+
+Also seen: off-host enclosures (`flhsmv.gov/pdf/proc/tl/*.pdf`, 75 of them) are paced at
+hillstaxfl's 10 s, because the pace is the source's, not the host's; and its `/form/` pages
+return 403 to us (10 so far). Respected.
+
+**Third sighting** of *a plugin generates most of the site* (entry 5's venue stubs, Fault 6's
+attachment pages). Way around, not built: a Yoast sitemap's name says what it lists —
+`product-`, `product_tag-`, `product_cat-`, `pa_*-`, `author-`, `attachment-` — and
+discovery can skip or defer the ones that list a plugin's objects rather than the site's
+writing. And a crawl-delay source should be visible up front: a run that knows it holds
+5,000 addresses at 10 s can say "≈14 h" before it starts, not after.
+
+### Fault 9 — extract climbs to 2.2 GB and is killed, three minutes in
+
+The run was stopped at 06:09Z (Ctrl-C, Fault 8) and restarted as
+`run --skip discover --skip collect`, PID 224862. Extract started 06:09:36; the OOM killer
+took it at 06:12:26 with 2.24 GB anon RSS, and systemd took the tmux server with it.
+
+Not one file this time. RSS, sampled every 2 s: 826 MB at 06:10:04 (28 s in), 1,181 →
+1,412 → 1,517 → 1,632 → 1,705 → 2,013 → 1,998 at 06:12:17, then killed. A ratchet: it
+rises with the work and never comes back down. It had just finished clearwater (1,684 of
+1,684, the last files 7.4 MB and 3.7 MB) and started dunedin (4 of 2,759). Nothing in the
+log near the kill is large. The per-source logs `replay` reads are small (tampa's is the
+largest at 42 MB), so the replay is not it.
+
+Extract reads `workers()` = `available_parallelism()` = 4 documents at once, each on a
+`spawn_blocking` thread holding the whole blob plus the parser's state.
+
+**Not the allocator.** `MALLOC_ARENA_MAX=2 centinel -v extract` (06:20Z) went from 226 MB
+to 1,849 MB in 15 s, the same climb. Under heaptrack, one PDF's peak heap is 519 MB against
+572 MB RSS: the memory is live, not stranded.
+
+**Four vector-art PDFs at once.** The work list starts with dunedin's off-host enclosures,
+and `pinellas.gov/wp-content/uploads/…` sorts together: the 2026 hurricane guide in
+English, Spanish and Vietnamese (17.8–19.3 MB, 20 pages each) and the Spanish damage
+prevention guide (15.8 MB). Each parsed alone through `centinel check`, peak RSS:
+
+| PDF | bytes | pages | peak RSS | × size |
+|---|---|---|---|---|
+| hurricane guide, EN | 19.3 MB | 20 | 561 MB | 29× |
+| hurricane guide, ES | 17.8 MB | 20 | 546 MB | 32× |
+| hurricane guide, VIE | 18.9 MB | 20 | 547 MB | 30× |
+| damage prevention, ES | 15.8 MB | 97 | 671 MB | 44× |
+| welcome guide, EN | 8.9 MB | 115 | 73 MB | 8× |
+| welcome guide, ES | 9.3 MB | 143 | 82 MB | 9× |
+| 400-water | 7.4 MB | 30 | 73 MB | 10× |
+| 811 guide | 6.9 MB | 81 | 64 MB | 9× |
+| a 1-page form | 0.2 MB | 1 | 49 MB | — |
+
+Four of the first kind in flight is ~2.3 GB, which is the kill. Size does not predict it:
+8–10× for most PDFs, 30–44× for these.
+
+**Where it goes (heaptrack, the EN guide):** 254 MB over 962k allocations in `lopdf`'s
+content-stream `operand` parser and 218 MB over 343k in the `Vec<Operation>` it grows,
+called from `pdf_inspector::extractor::xobjects::extract_form_xobject_text_inner` →
+`content_decode::decode_content_bounded`. A Form XObject holding vector artwork (the
+evacuation map) has ~960,000 drawing operators, and `Content::decode` materialises every
+one, each with heap-allocated operands, to find the text among them. pdf-inspector bounds
+this by **count** — `MAX_PAGE_OPERATIONS = 1_000_000`, a `pub(crate) const` — and this
+stream sits just under it, so the bound permits ~500 MB per stream. Not configurable from
+centinel.
+
+These four were derived in the 06:20Z test before it was stopped, so the next pass skips
+them; the shape will recur on any vector-heavy PDF.
+
+**Way around:**
+1. Extract admits documents against a memory budget, not a core count. Since size does not
+   predict cost, the simple form is weighted permits: a large document (say ≥ 5 MB) takes
+   every reader slot and parses alone, small ones run `workers()`-wide. Worst case is one
+   heavy document plus nothing, ~700 MB here, instead of four.
+2. Upstream, in pdf-inspector: text extraction from a form does not need path operators;
+   a scan that skips them (it already has an allocation-free tokenizer in
+   `count_content_operators`) would make the cost proportional to text, not artwork.
+3. Until either lands, `taskset -c 0,1 centinel …` halves the readers with no code change:
+   `available_parallelism` honours the CPU affinity mask.
+
+**Not a small-machine problem, a sizing problem.** Readers scale with cores; cost scales
+with the document. 4 cores × ~600 MB dies on this 3.3 GB VM, passes unnoticed on a 16 GB
+laptop, and on a 16-core box is ~10 GB of worst case. Collect has the same shape:
+`HOSTS_AT_ONCE` = 16 × the 256 MiB ceiling is 4 GB, on any machine. Per-stage worker knobs
+(`[extract] workers`, `[collect] hosts_at_once`) would push that arithmetic onto the
+operator and still OOM on a wrong guess.
+
+**Proposed (Ben, 2026-11-13: "flags/config for constrained machines", design not settled):**
+one memory budget, not a knob per stage.
+
+```toml
+[resources]
+memory = "1.5 GB"   # default: auto, a share of what the machine or cgroup has
+```
+
+with `--memory` to override it for one run. The budget lives in one place in core; every
+stage that holds memory reserves against it before a unit of work and waits when it is
+full, so a constrained machine runs slower instead of dying. Collect reserves a body's
+declared length, which it knows before reading; extract reserves an estimate per document,
+deliberately conservative because size is a poor predictor (a document over a few MB takes
+most of the budget and parses near alone). Embed and classify are network-bound and keep
+their `concurrency`. `doctor` prints the budget it detected and warns on a ballooned VM.
+Open: the auto default's share, and whether this box sets it by hand. The upstream
+pdf-inspector fix is still the true bound on a small PDF that is mostly artwork.
+
+Also seen: RSS does not come back down after the heavy documents finish (1.85 GB held
+while parsing 200 KB forms). Secondary: with a budget the peak is what matters.
+
+Also seen, and mine: `kill -INT` did not stop the test, because a job started with `&` from
+a non-interactive shell ignores SIGINT. A standalone `extract` is not wired to the graceful
+stop that `run` has; SIGTERM ended it, losing only the in-flight reads.
+
+### Fault 10 — one PDF with 17,162 font subsets stalls extract, and nothing bounds it
+
+Plant City's *2022 Annual Comprehensive Financial Report*
+(`plantcitygov.com/…/Annual Financial Reports/2022_city_of_plant_city_florida.pdf`,
+32 MB, 151 pages, PScript5 → Acrobat Distiller 17) stopped two extract passes cold: the
+heaptrack pass sat on it from 06:52:35 until killed at 06:59 at 100% CPU, and the jemalloc
+pass reached it as its first unread document and sat there too. `pdftotext` reads the same
+file in **2.7 s at 32 MB** (263 KB of text). `centinel check` on it alone: **8 min 52 s,
+669 MB peak**, one core flat out, exit 0 — it does finish, 200× slower than poppler.
+
+`pdffonts` lists **17,162 embedded fonts**: PScript5 writes a fresh subset of the same few
+CID TrueType faces (`…+CIDFont+F1`, `F2`, …) per use, each with its own ToUnicode map.
+heaptrack over 120 s: 3.8 M allocations from one path —
+`pdf_inspector::process_document` → `tounicode::FontCMaps::from_doc_pages_inner` →
+`collect_cmaps_from_fonts_inner` → `font_cmap_entry` → (lazy) `program_fallback_cmap` →
+`build_simple_cmap_from_truetype` → `build_gid_to_unicode` → `glyph_text` →
+`glyph_names::glyph_name_to_string`. It builds a fallback glyph→Unicode map from every
+font *program*, 17k times, before reading a page, though every font carries a ToUnicode
+map already. Separately, `lopdf` loading the document holds ~360 MB of objects.
+
+Two faults in one:
+- **pdf-inspector (upstream):** the program fallback is computed for fonts that have a
+  ToUnicode map, and not shared across subsets of one face. Either alone would cut this
+  from minutes to near nothing.
+- **centinel:** extract has no per-document deadline. One document stops the pipeline
+  for every source behind it, and since it never finishes it is never recorded as
+  underivable, so every later pass stops on it again. A reader that has had its time
+  should be abandoned, the document handed to `pdftotext` (the fallback that exists for
+  PDFs pdf-inspector makes nothing of), and the verdict recorded. An in-process reader on a
+  blocking thread cannot be abandoned, which argues for running the in-process readers in
+  a child process with a time and memory limit — the same isolation would have contained
+  Fault 9's peaks.
+
+### Fault 11 — index learns chrome from every line of a data source, and is killed on publicrec
+
+The 07:11Z run got through extract (6,929 documents, 36 sources, 0 errors, peak 999 MB
+under jemalloc), then indexed 21 sources at 119 MB. On publicrec (Hillsborough clerk bulk
+case-file CSVs) RSS went 814 → 1,619 MB in 13 s and the OOM killer took it at 07:43:29
+(anon-rss 1.83 GB). It was still in `reading publicrec` (done=250 of 319), the
+boilerplate-learning pass before anything is chunked.
+
+`boilerplate::Learner::add` keeps every distinct line of up to `LEARN_SAMPLE` (500)
+documents as an owned `String` in a `HashMap<String, usize>`. For a website that is the menu
+and the footer, a few thousand lines. A CSV has no chrome: every row is distinct (the first
+file has 691 lines, 690 unique), and publicrec's first 300 derived texts come to 804 MB,
+the largest 42 MB. The map holds all of it plus a `String` header and a hash slot per row,
+so its size is the source's text size times about two, before a single line is recognised
+as chrome.
+
+Two smaller costs come with the same pass:
+
+- It reads the sample on every run, already-placed documents included (on purpose, so a
+  resumed run strips what a fresh one would). For publicrec that is 800 MB of blob reads to
+  learn a set that comes out empty.
+- What a source's chrome is gets worked out again each time and is never recorded.
+
+**Ways around**, any one of which would have held this run:
+
+- **Count line hashes, not lines.** `HashMap<u64, usize>` keyed on a hash of the line is
+  ~16 bytes a line whatever the line's length. A second pass over the few lines that
+  reached `MIN_DOCUMENTS` recovers their text. This bounds memory by line count, not
+  bytes, which is still millions of entries for publicrec.
+- **Look where chrome is.** Navigation and footers sit at the top and bottom of a page.
+  Counting only the first and last N lines of each document bounds the learner per
+  document, whatever the content type.
+- **Don't learn chrome for data.** A CSV derivation has no chrome to strip. The extractor
+  knows the content type; the learner could skip derivations whose tool is the CSV path.
+  This is the cleanest fit, but it is a special case, and the first two fix it for every
+  shape.
+
+The 21 sources indexed before publicrec were committed (window transactions), so a restart
+resumes. publicrec is left out of the restart until this is fixed.
+
+### Fault 12 — embed grows ~0.85 MB per commit to the vector table, without end
+
+The 13:20Z restart reached embed at 13:25Z: 330,631 chunks owed, about 61 a second through
+OpenRouter. `Writer::write` appends each batch as its own Lance commit (64–95 rows, a version
+and a fragment each), which is what makes embed resumable. RSS rose in step with the
+commits (sampled every 30 s against `_versions`):
+
+| time | RSS | versions | available |
+|---|---|---|---|
+| 13:39:29 | 730 MB | 607 | 913 MB |
+| 13:42:29 | 868 MB | 779 | 762 MB |
+| 13:45:29 | 1,011 MB | 936 | 602 MB |
+| 13:48 (stopped) | 1,214 MB peak | 1,109 | ~470 MB |
+
+That is ~0.85 MB a commit at ~700 fragments (more as fragments grow, below), and it does not plateau. At that rate the 330k
+chunks are ~4,500 commits, ~3.8 GB, on a VM with 3.3 GB. Stopped with one Ctrl-C at 13:48Z
+(69,632 embedded, all committed) rather than let the OOM killer choose; the item boundary
+held and the journal reads `interrupted`.
+
+Not yet located. Nothing in `embed.rs` keeps rows after `append` returns: `owed` and `rows`
+are dropped per batch. A batch of vectors is about 1 MB (4,096 dims × 4 bytes × ~70 rows),
+so the growth is the size of one batch per commit. Candidates, unconfirmed: Lance's session
+caches (the defaults are 1 GiB metadata, 6 GiB index, both larger than this VM), filled by
+`checkout_latest` before every append, or the writer keeping something per version. A
+heaptrack or jemalloc profile of a short `embed --limit` would say which.
+
+Two more costs come from writing one commit per batch:
+
+- 1,109 versions and ~1,100 fragments of ~70 rows each sit in a 31 GB table until
+  `maintain` compacts them, which happens only when an embed *finishes*. An interrupted or
+  killed embed leaves them, and `serve` searches across all of them meanwhile.
+- `serve` held 551 MB RSS at 13:39Z, beside the run, on the same 3.3 GB.
+
+**Ways around:**
+
+- **Find the growth.** If it is the Lance session cache, open the table with a session sized
+  to the machine. That is the same memory budget as Fault 9.
+- **Commit less often.** Buffer rows to a few MB or a few seconds before each `append`. That
+  is one-tenth the versions and fragments for the same resumability, at the cost of losing
+  at most one buffer on a kill.
+- **Stopgap now:** `centinel embed --limit N` in pieces, each a fresh process that ends in
+  `maintain`.
+
+**Measured on the stopgap (13:50Z, `embed --limit 40000`):** a fresh process is not a fresh
+start. RSS went 231 → 752 MB in 30 s at `checking stored vectors`, before any commit, with
+1,110 fragments in the table (the 13:20Z run made the same jump at the same step). Then
+~0.9 MB a commit again, to 1,303 MB at 40,000 chunks (1,731 versions, 405 MB available).
+`maintaining the vector table` started at 14:02:10, RSS reached 2.04 GB within three seconds,
+and the OOM killer took it at 14:02:13. The 40,000 chunks are committed. The compaction
+never committed: it left a 0-byte `data/.tmpyRgYfx`, and the table now has 1,734 fragments.
+So the stopgap does not work on this box. Each piece adds ~600 fragments that only `maintain`
+removes, and `maintain` does not fit in what the piece leaves. `serve` holds ~580 MB beside it.
+
+**It is per commit, and each commit costs more as the table fragments.** *(An earlier
+reading here, that every vector stays resident, did not survive the next three pieces.)*
+Memory per commit rises with the number of fragments already in the table:
+
+| when | fragments | MB per commit |
+|---|---|---|
+| 13:30Z run | ~700 | ~0.85 |
+| piece 1 (14:04Z) | ~1,900 | ~1.8 |
+| piece 4 (14:51Z) | ~3,000 | ~5 |
+
+That is ~1.5 KB per fragment per commit, so memory grows with commits × fragments,
+quadratically over a run. The likely holder is a copy of the whole fragment list, which is
+the manifest, kept for every version written. Lance's session metadata cache would do this,
+filled by the `checkout_latest` before each `append` (default 1 GiB, larger than what is
+left on this VM). centinel's own side is bounded: `run` feeds through two channels of
+`PIPELINE_SLACK`, `embed_with_recovery` returns its window, and `Writer::write` moves the
+rows into `append` and drops them. The jump at `checking stored vectors` (~550–750 MB) is
+separate, and does not grow with the fragment count.
+
+This makes *commit less often* the main fix, not a side one. Fewer commits mean fewer
+cached versions and fewer fragments for each one to carry. A session with a metadata cache
+sized to the machine bounds what is left. A heap profile would confirm the holder.
+
+### Fault 4 — the VM's memory is ballooned *(infrastructure)*
+
+`virtio_balloon` is loaded on VM 113. During the v0.31.0 run `MemTotal` fell from at least
+5.5 GB to 3.4 GB, 100 MB inside five seconds, while the run itself held 140–280 MB. The
+3.3 GB the earlier OOMs happened against is likely the balloon's low point. Index and embed
+work against a 31 GB vector table and want more than collect. **Way around:** a fixed
+memory size for the VM in Proxmox (minimum equal to maximum).
+
+### Smaller, recorded not ranked
+
+- **Files over the ceiling worth having.** Besides the slideshow, Hillsborough's
+  *Post-Hurricane Regional Flooding Assessment — Findings and Recommendations* is 464 MiB.
+  A real report; the too-large list is the way to it.
+- **Hillsborough's asset CDN answers 422** for images and some assets
+  (`images.contentstack.io`, `assets.contentstack.io`): 5 in the probe, 23 by stage 60.
+- **`belleairbluffs.org` refuses the crawler at its home page** (403, no redirect). Respected.
+- **Ctrl-C on `run … | tee` loses the end of the log.** The interrupt reaches `tee` too, so
+  the "stopping at the next item boundary" line and the run summary never reach the file;
+  the log ends mid-progress at 06:09:11. `tee -i` ignores the interrupt.
+- **`chunks.lance.pre-lance14` is 31 GB on disk** beside the live 31 GB table, the copy kept
+  for the Lance 14 upgrade. Ben's to delete once the new table has been read back.
+
+### Running log
+
+- 20:54Z — v0.31.0 run starts, PID 37007. RSS 200 MB.
+- 21:05Z — stage 60/77 (south-pasadena · collect). RSS 183 MB, peak 278 MB. 3,351 × 200,
+  362 × 4xx, 1 × 5xx, 0 errors, 2 refused for size. VM total 3,423 MB, 2,005 MB available.
+- 21:09Z — RSS peaks at 712 MB (from ~200), CPU over 100% for several samples, while
+  st-pete-beach, pinellas-park, plant-city and south-pasadena collect documents at once.
+  Back to ~200 MB after. The ceiling bounds one body at 256 MiB, but not the sum across
+  hosts walked together (`HOSTS_AT_ONCE` = 16): on this VM, 16 large documents in flight is
+  still more than it has. Recorded, not yet seen to fail.
+- 21:15Z — stage 68/77 (tarpon-springs · collect). RSS 199 MB, peak 718 MB. 7,886 × 200,
+  1,034 × 4xx, 2 × 5xx, 0 errors. VM total 3,327 MB, 1,995 MB available. largo's
+  `<base href>` 404s (Fault 3) are now 852 of the 1,034: 752 in collect, 100 in discover.
+  hillsborough 49 × 404, tampa 20 × 404 — not yet looked at.
+- 21:25Z — stage 71/77 (tbrpc · collect). RSS 316 MB, peak 798 MB (21:19:53). 11,180 × 200,
+  1,802 × 4xx, 0 errors. largo 1,433 × 404 (Fault 3). tampa 196 × 404 = Fault 5.
+  hillsborough 49 × 404 are past events (`/events/…/2024/01/10/…`) its sitemap still lists:
+  the site's, not ours.
+- 21:45Z — stage 74/77; tampa done, madeira-beach collecting 2,128 of 4,782 (Fault 6),
+  largo still collecting and at 1,927 × 404 in collect alone — at 1 request a second, half
+  an hour of the run spent on addresses Fault 3 invented. 14,089 × 200, 2,408 × 4xx,
+  0 errors. RSS 159 MB, peak 798 MB. VM total 3,327 MB, 1,895 MB available.
+- 21:55Z — stage 74/77. largo 57 stored, 2,451 failed, at 2,508/4,434 (Fault 3);
+  madeira-beach 2,724/4,782; safety-harbor 265/338. 16,382 × 200, 2,991 × 4xx, 0 errors.
+  RSS 195 MB, peak 814 MB.
+- 22:05Z — stage 74/77; tbrpc done, largo and madeira-beach still collecting. 18,603 × 200,
+  3,585 × 4xx (largo's still climbing), 3 × 5xx, 0 errors. RSS 187 MB, peak 814 MB.
+- 22:15Z — stage 74/77; st-pete-beach done; largo, madeira-beach and redington-shores still
+  collecting. 20,262 × 200, 4,187 × 4xx, 0 errors. RSS 195 MB, peak 814 MB.
+- 22:25Z — stage 74/77; oldsmar done. 21,666 × 200, 4,779 × 4xx, 0 errors. RSS 201 MB.
+- 22:35Z — largo done: 124 stored, 4,309 failed of 4,434. madeira-beach 4,781/4,782;
+  redington-shores 641/1,030 is the last source collecting. 22,548 × 200, 5,071 × 4xx,
+  0 errors. RSS 201 MB.
+- 22:45Z — redington-shores still the only source collecting. 23,101 × 200, no new 4xx since
+  largo finished, 0 errors. RSS 201 MB.
+- 22:55Z — redington-shores still collecting (WordPress uploads, mostly PDFs). 23,657 × 200,
+  0 errors. RSS 201 MB.
+- 23:13Z — redington-shores done: 1,029 stored, 1 failed. Most of its time was six PDFs
+  fetched once per page (Fault 7). Correction to the last three lines: it was never the only
+  source left — hillstaxfl had been collecting since 20:58 at 10 s a request, too slow to
+  show up in the line counts.
+- 00:04Z — hillstaxfl is the only source collecting, 867 of 5,459, ~13 h to go (Fault 8).
+  80,090 log lines, 61 WARN (hillstaxfl 403s on `/form/`), 0 errors. RSS 202 MB, CPU 9%.
+  VM total 3,328 MB, 1,844 MB available.
+- 00:22Z — hillstaxfl 975 of 5,459: 91 addresses in 16 min, 5.7 a minute, so ~13 h to the
+  end of collect. 0 errors, no new WARN. RSS 201 MB. The run's OpenRouter key
+  (`OPENROUTER_API_KEY`, set only in the run's own shell) answered a test embedding: 200,
+  4096 dims, $20 limit, $0.001 used.
+- 00:37Z — hillstaxfl 1,066 of 5,459, same 6 a minute. 0 errors, no new WARN. RSS 201 MB,
+  1,845 MB available.
+- 00:52Z — hillstaxfl 1,156 of 5,459. 0 errors, no new WARN. RSS 201 MB.
+- 01:07Z — hillstaxfl 1,246 of 5,459. 0 errors, no new WARN. RSS 201 MB.
+- 01:22Z — hillstaxfl 1,337 of 5,459. 0 errors, no new WARN. RSS 201 MB.
+- 01:37Z — hillstaxfl 1,428 of 5,459. 0 errors, no new WARN. RSS 201 MB.
+- 01:52Z — hillstaxfl 1,518 of 5,459. 0 errors, no new WARN. RSS 201 MB.
+- 02:15Z — hillstaxfl 1,655 of 5,459. 0 errors. RSS 202 MB. Run 5 h 20 min old.
+- 05:05Z — (watch was asleep 02:24–05:05) hillstaxfl 2,672 of 5,459, 11 failed. 6 a minute
+  held all night; ~7.7 h to the end of collect, about 12:50Z. RSS 202 MB. The one new WARN
+  is a 504 from hillstaxfl's own gateway at 04:42Z on a product page — the site's, once.
+- 05:20Z — hillstaxfl 2,764 of 5,459. 0 errors. RSS 201 MB.
+- 05:35Z — hillstaxfl 2,854 of 5,459. 0 errors. RSS 201 MB.
+- 05:50Z — hillstaxfl 2,944 of 5,459. 0 errors. RSS 201 MB.
+- 06:09Z — stopped by Ctrl-C to drop hillstaxfl (Fault 8). Final for hillstaxfl: 3,046
+  stored, 11 failed, of 5,459. Peak RSS over 9 h 15 min: 814 MB, no OOM. The log has no
+  summary (`tee` took the interrupt too).
+- 06:09Z — `run --skip discover --skip collect` starts, PID 224862, log
+  `run-20261113T0609Z.log`, sampler `usage-20261113T061004Z-pid224862.csv`.
+- 06:12Z — **OOM-killed in extract** at 2.24 GB, between clearwater and dunedin (Fault 9).
+- 06:20Z — `MALLOC_ARENA_MAX=2 centinel -v extract`, PID 228139: same climb to 1.85 GB in
+  15 s, so not the allocator. Stopped 06:25Z (SIGTERM) after 1,582 derivations, including
+  the four heavy PDFs.
+- 06:25–06:35Z — `centinel check` + heaptrack on single PDFs: 30–44× size for vector-art
+  PDFs, all of it in `lopdf` content parsing under pdf-inspector's form XObject text path.
+- 06:33Z — restarted: `taskset -c 0,1 centinel -v run --skip discover --skip collect`, PID
+  231081, in tmux session `run`, log `run-20261113T0633Z.log` (`tee -i`). The key comes from
+  `centinel.service`'s environment, where the user unit sets it.
+- 06:33Z — RSS 1,016 MB three seconds into extract: hillsborough's *FY 2025 OMB Cost
+  Allocation Plan*, a 54 MB PDF, 1.8 M chars, 31 s to parse, alongside a 1.8 MB scan. It
+  finished; RSS held at ~1.15 GB after (the freed heap kept, not returned), 630 MB
+  available. With two readers it fit; with four it would have been this plus three more.
+- 06:35Z — **OOM-killed again**, 2.12 GB anon, tmux with it. The *FY 2025 Full Cost
+  Allocation Plan* (57 MB, 06:34:25–06:34:59) took RSS to 1,866 MB with 0 MB available; RSS
+  stayed there after it finished and small documents pushed it over at 06:35:11. On this
+  ballooned VM the run has ~2.1 GB, and one 50+ MB PDF costs ~1 GB of it. Both cost
+  allocation plans were derived before the kill.
+- 06:35Z — restarted on one reader: `taskset -c 0`, PID 232437, log `run-20261113T0635Z.log`.
+- 06:36Z — the document in flight at the 06:35 kill was *THEDC Report 2026 Q4*, 52 MB,
+  30 pages of scans: 867 MB alone, 24 s. One reader carried it; RSS fell back to ~700 MB.
+  hillsborough's contentstack assets hold at least three 50+ MB PDFs at ~1 GB each.
+- 06:43Z — **OOM-killed on one reader**, 2.05 GB anon, in indian-rocks-beach. No large
+  document at the end: RSS climbed in steps (700 → 1,251 at 06:39:24 → 1,795 at 06:39:28
+  → 1,947 at 06:40:29) through ordinary 1–34 MB agenda packets, then held flat at 1,947 MB
+  for three minutes while parsing 200 KB agendas, with 3–16 MB available on the VM. RSS
+  that never comes back down is either live memory accumulating (a leak) or freed heap
+  glibc does not return; either way it starves the poppler children extract starts.
+- 06:44Z — the rest of extract under heaptrack on one core, to tell those apart:
+  `taskset -c 0 heaptrack centinel -v extract`, PID 235358, log
+  `extract-heap-20261113T0644Z.log`, profile `heap-extract-20261113T0644Z.zst`.
+- 06:45Z — the profile is lost: `heaptrack_interpret` itself was OOM-killed at 06:45:19
+  (1.7 GB), one minute in. heaptrack is too heavy for a long profile on this VM. Extract
+  kept going (same step pattern, 582 → 652 → 938 → 1,602 MB) until stopped with SIGTERM at
+  06:59 after 6,381 derivations; its RSS after 06:45 is not evidence, the preload library
+  was writing into a dead pipe.
+- 07:02Z — the allocator test instead: the same one-core extract with jemalloc preloaded
+  (`LD_PRELOAD=libjemalloc.so.2`, `MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,
+  muzzy_decay_ms:0`), PID 241079, log `extract-jemalloc-20261113T0702Z.log`. RSS that falls
+  back after a heavy document means glibc was keeping freed heap; RSS that still ratchets
+  means live memory is accumulating.
+- 07:05Z — inconclusive: its first unread document was Plant City's 2022 financial report,
+  and it sat on that at 100% CPU (Fault 10). Stopped.
+- 07:06–07:10Z — `centinel check` and heaptrack on that report alone: the font-subset
+  stall (Fault 10).
+- 07:11Z — restarted with plant-city left out: `run --skip discover --skip collect` naming
+  the other 36 enabled sources, one reader, jemalloc preloaded. PID 242969, tmux `run`,
+  log `run-20261113T0711Z.log`. Also the allocator test, on the documents after it.
+- 07:22Z — **jemalloc settles the ratchet: it was glibc keeping freed heap.** 11 min in,
+  0 errors, no OOM, 3,635 documents through extract, now on st-petersburg (404 of 1,993).
+  RSS rises to 400–850 MB on heavy documents and falls back to 100–270 MB after (peak
+  848 MB), where glibc held every peak until the VM ran out. Under glibc the one-reader
+  pass died at 2.05 GB on ordinary agenda packets; under jemalloc the same kind of work
+  idles at ~150 MB. Fix: a global allocator that returns memory (jemalloc or mimalloc),
+  one line in the binary — on its own it would have prevented the 06:43 kill; the budget
+  (Fault 9) and the deadline (Fault 10) are still needed for the single heavy documents.
+- 07:26Z — st-petersburg 575 of 1,993. 0 errors. RSS 163 MB, 1,563 MB available.
+- 07:39Z — **extract done.** 6,929 documents extracted across 36 sources, 0 errors, peak RSS
+  999 MB (07:29:59), one reader, jemalloc. Index starts.
+- 07:43Z — **OOM in index, on publicrec** (Fault 11). 21 sources indexed at ≤119 MB, total
+  1,501,559 chunks, then the chrome learner held publicrec's CSV rows and went 814 → 1,619 MB
+  in 13 s. Killed at 07:43:29. Embed never ran. Found at 13:17Z.
+- 13:20Z — restarted with publicrec left out as well (PID 257974, `run-20261113T1320Z.log`).
+  Extract had nothing left; index resumed cleanly: the 21 committed sources wrote 0 chunks,
+  then redington-shores onward is new work (st-petersburg 90,408 new chunks by 875 of
+  1,858). RSS 76 MB.
+- 13:25Z — embed starts: 330,631 chunks owed (includes chunks embedded nowhere yet from
+  earlier runs), ~61/sec. RSS climbs ~0.85 MB per commit (Fault 12).
+- 13:48Z — **stopped by hand** at 1,214 MB RSS, ~470 MB available, about eight minutes from
+  the OOM killer. 69,632 chunks embedded and committed; 1,109 versions, not compacted.
+  Index finished for 35 sources (all but plant-city and publicrec).
+- 13:50Z — `embed --limit 40000`, fresh process, PID 264982, tmux `embed`,
+  `embed-20261113T1350Z.log`. 70/sec. 40,000 embedded by 14:02:10.
+- 14:02Z — **OOM in `maintain`** (Fault 12, measured on the stopgap). 1.3 → 2.04 GB in 3 s,
+  killed at 14:02:13. Table intact at version 3092, 1,734 fragments, uncompacted. Embedded so
+  far this afternoon: 109,632 of 330,631. Stopped here for Ben: the next step needs
+  `serve` stopped for the compaction, or more memory for the VM.
+- 14:04Z — Ben: keep embedding. A loop on the box (`/tmp/centinel-embed-loop.sh`) runs
+  `embed --limit 25000` pieces and SIGTERMs each at `maintaining the vector table`. Piece 1:
+  25,000, peak 1,037 MB, stopped at maintain as meant.
+- 14:20Z — Ben's OpenRouter dashboard showed no activity. The run's key is the one the
+  service holds (same hash), label `sk-or-v1-f80...527`. `/api/v1/key` showed $0.128 today
+  and rising, about 165k chunks for 13 cents.
+- 14:30Z — piece 2: 25,000, peak 1,164 MB. Then `maintain` went past 2 GB inside the loop's
+  2 s poll, and the **global** OOM killer took it at 14:30:53. systemd stopped the tmux scope
+  with it, which killed the loop too. Fix: each piece now runs in
+  `systemd-run --user --scope -p MemoryMax=1400M -p MemorySwapMax=0`, so the cgroup kills
+  only the piece and the loop goes on. Interrupted compactions leave `data/.tmp*`
+  (five so far, 70 MB).
+- 14:35Z — loop restarted with the cap. 159,632 embedded since 13:25Z, ~171k to go.
+- 14:51, 15:06, 15:22, 15:39Z — four capped pieces, 25,000 each, every one stopped at
+  `maintain` as meant; no cgroup kill. 259,632 of 330,631 embedded, ~71k to go. The table
+  is at 4,080 versions and 4,081 fragments, uncompacted.
+
+---
+
 ## Recurring shapes
 
 A shape is promoted here when **two** sites show it.
@@ -1842,6 +2418,15 @@ would invent a corpus rather than observe one.
 
 ### Candidates, at one sighting each
 
+- **A CMS "external link" page redirects to a vendor, and the vendor's refusal is counted
+  as the city's.** Two sites already (6: `dunedin.gov`, `myclearwater.com`), so this one is
+  past a single sighting: stop at an off-host redirect and record it as a crumb.
+- **`<base href>` decides what relative links mean, and nothing reads it.** 272 404s from
+  one site, and the pages behind them never found. (6: `largo.com`)
+- **One file can be most of a run's memory.** An 830 MB slideshow took the run from 63 MB to
+  2.25 GB; a body must be refused before it is held, not after. (6: Hillsborough — fixed)
+- **A real report bigger than the ceiling.** 464 MiB of flooding assessment; the ceiling is
+  a memory guard, so what it refuses needs a way to be taken on purpose. (6: Hillsborough)
 - **A relative `Sitemap:` line is never resolved, and the site is total loss.** Legal, common,
   and it takes 579 addresses to zero while blaming another host. (5: `buffalony.gov`)
 - **A capped walk over a single sitemap reports itself complete.** The cap warning needs a
@@ -1857,10 +2442,13 @@ would invent a corpus rather than observe one.
   sightings of the same missing write, one defect)
 - **A shared enclosure is re-fetched once per referring page.** One `.docx` fetched 42 times in
   a 50-page run. Content addressing absorbs the storage; the requests are still made.
-  (5: `dunedin.gov`)
+  (5: `dunedin.gov`; 6: `townofredingtonshores.com`, six footer PDFs fetched up to 1,026
+  times each, 21.5 GB of repeats across ten sources — **second sighting**)
 - **A plugin generates most of the site.** 7,841 of 9,939 addresses are auto-generated venue
   stubs, many near-duplicates. Changes what "collect the whole site" is worth.
-  (5: `medinaco.org`)
+  (5: `medinaco.org`; 6: `madeirabeachfl.gov`, Yoast attachment sitemaps, up to 2,000 of
+  4,884 addresses are wrappers around uploads — **second sighting**; 6: `hillstaxfl.gov`,
+  ten WooCommerce product sitemaps of student artwork at a 10 s crawl delay — **third**)
 - **`application/octet-stream` defeats classification.** A `.csv` served with the one header
   that asserts nothing reaches `other`, and no reader claims it. (4: Hillsborough — 2.2 GB)
 - **Both signals honest, both wrong about shape.** A `.txt` served `text/plain` whose first
@@ -1883,7 +2471,8 @@ would invent a corpus rather than observe one.
 - **Errors answer HTTP 200.** A dead address becomes a live Observation and its error text
   is indexed. (2: OnBase)
 - **Enclosure detection matches JavaScript source.** A URL template in a `<script>` becomes
-  a fetch. (2: OnBase)
+  a fetch. (2: OnBase; 6: `tampa.gov`, a download widget's bare `fileName`, 196 × 404 a run
+  — **second sighting**)
 - **Extracted text carries base64 `data:` URIs.** (2: OnBase — 43% of one document). Not
   really a site shape at all; it is a defect any site can trigger, which is why it ranks
   first for a fix.
