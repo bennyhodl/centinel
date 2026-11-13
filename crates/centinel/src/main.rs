@@ -8,6 +8,8 @@
 //! investigation ([`promote`]), the workspace's stage actions — never to build a surface.
 
 mod access;
+#[cfg(unix)]
+mod allocator;
 mod bundle;
 mod gateway;
 mod http;

@@ -42,3 +42,13 @@ tower = { version = "0.5", features = ["util"] }
 # latency work. Already in the tree under tokio, so this costs no new download.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# The global allocator. glibc's malloc kept the heap freed after each heavy document and
+# extract was OOM-killed at 2 GB; jemalloc hands it back (see `allocator`). Its build runs
+# jemalloc's `configure` and `make`, so a source build needs `make` beside the C compiler;
+# install.sh checks for both.
+tikv-jemallocator = "0.6"
+
+# `mallctl`, so a test can read back the settings jemalloc started with. The same crate
+# tikv-jemallocator builds on, so nothing new to download or compile.
+[target.'cfg(unix)'.dev-dependencies]
+tikv-jemalloc-sys = "0.6"

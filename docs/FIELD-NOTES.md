@@ -1598,7 +1598,9 @@ Extract reads `workers()` = `available_parallelism()` = 4 documents at once, eac
 
 **Not the allocator.** `MALLOC_ARENA_MAX=2 centinel -v extract` (06:20Z) went from 226 MB
 to 1,849 MB in 15 s, the same climb. Under heaptrack, one PDF's peak heap is 519 MB against
-572 MB RSS: the memory is live, not stranded.
+572 MB RSS: the memory is live, not stranded. *(Later: this ruled out the arena count, not
+retention. At 07:22Z jemalloc showed glibc keeping freed heap was the cause of the ratchet;
+the peak of one heavy document is live, as measured here.)*
 
 **Four vector-art PDFs at once.** The work list starts with dunedin's off-host enclosures,
 and `pinellas.gov/wp-content/uploads/…` sorts together: the 2026 hurricane guide in
@@ -1670,7 +1672,9 @@ Open: the auto default's share, and whether this box sets it by hand. The upstre
 pdf-inspector fix is still the true bound on a small PDF that is mostly artwork.
 
 Also seen: RSS does not come back down after the heavy documents finish (1.85 GB held
-while parsing 200 KB forms). Secondary: with a budget the peak is what matters.
+while parsing 200 KB forms). Secondary: with a budget the peak is what matters. *(Later
+that morning this turned out to be glibc keeping freed heap, not the parse — see 07:22Z in
+the log. Fixed: the binary's allocator is now jemalloc, with the settings that test ran.)*
 
 Also seen, and mine: `kill -INT` did not stop the test, because a job started with `&` from
 a non-interactive shell ignores SIGINT. A standalone `extract` is not wired to the graceful

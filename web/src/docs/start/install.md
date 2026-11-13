@@ -9,8 +9,8 @@ One command installs and updates. It downloads a release binary when the latest 
 carries one this host can run, and builds from source when it does not — which is most
 hosts, and every host until binary releases are switched on.
 
-A download needs no Rust and no toolchain. A build needs Rust 1.94+, a C compiler and
-`protoc`; the script checks for each before it starts, and names the command for whatever is
+A download needs no Rust and no toolchain. A build needs Rust 1.94+, a C compiler,
+`make` and `protoc`; the script checks for each before it starts, and names the command for whatever is
 missing rather than installing a toolchain behind your back.
 
 Centinel runs no model itself. Embedding, reranking and transcription are requests to
