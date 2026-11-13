@@ -88,8 +88,10 @@ No checkpoint file. The work list is:
 index chunk hashes  −  stored chunk hashes
 ```
 
-Kill it at chunk 40,000 and re-run; it starts at 40,001. Lance commits a version per
-append, so what landed before the kill is there.
+Kill it at chunk 40,000 and re-run; it starts where the last commit left off. The writer
+commits every 32 MiB of vectors (about 2,000 rows at 4,096 dimensions) or every 30 seconds,
+whichever comes first, so a kill loses at most that much. Ctrl-C, `--limit` and the end of
+the work commit what it holds before the run stops.
 
 `--dry-run` creates no table. A plan must leave nothing behind.
 

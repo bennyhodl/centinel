@@ -53,6 +53,27 @@
 //! manifests and 16 GiB of them. [`VectorTable::maintain`] is what consolidates them, and
 //! it is also what builds the scalar indexes the filters are served from.
 //!
+//! ## What a write costs in memory
+//!
+//! Three things in Lance grow with the table's history rather than with the work in hand,
+//! and each is bounded here rather than by the caller:
+//!
+//! - **Every commit's manifest is cached.** Lance puts the manifest of each version it
+//!   commits into the session's metadata cache, and a manifest lists every fragment. At
+//!   ~1.5 KB a fragment that is quadratic over a run of small appends — 0.85 MB a commit at
+//!   700 fragments, 5 MB at 3,000 — up to a 1 GiB default larger than the machine it was
+//!   measured on. The connection opens with a metadata cache of
+//!   [`METADATA_CACHE_BYTES`].
+//! - **Fragments accumulate between maintenances.** A commit is one fragment. `embed`
+//!   batches its appends ([`VectorTable::commit_due`]), and after each commit
+//!   [`VectorTable::compact_appended`] compacts the new fragments once there are
+//!   [`COMPACT_AFTER_FRAGMENTS`] of them, so an interrupted or piecewise run never leaves
+//!   thousands behind.
+//! - **Compaction reads far ahead by default.** Lance's scan behind a compaction buffers
+//!   up to 2 GiB of I/O and 8,192 rows a batch — 128 MiB at 4,096 dimensions — in as many
+//!   parallel tasks as the machine has cores, which fits `maintain` going from 1.3 to 2 GB
+//!   in three seconds on the field VM. [`compaction`] sets all three.
+//!
 //! ## The guard
 //!
 //! A query vector and the vectors it searches must come from the same space (SPEC §6.2).
@@ -89,12 +110,17 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::TryStreamExt;
+use lance::Dataset;
 use lance::dataset::fragment::FileFragment;
+use lance::dataset::index::DatasetIndexRemapperOptions;
+use lance::dataset::optimize::{CompactionOptions, commit_compaction, plan_compaction};
 use lance::dataset::transaction::{Operation, Transaction};
 use lance::dataset::write::CommitBuilder;
+use lance::index::DatasetIndexExt;
+use lance::session::{CacheSpec, Session};
 use lancedb::arrow::arrow_array::builder::{ListBuilder, StringBuilder};
 use lancedb::arrow::arrow_array::{
     Array, BooleanArray, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator,
@@ -164,6 +190,65 @@ const KEY_SEPARATOR: char = '\u{1f}';
 /// enough that the manifests one run leaves behind are gone by the next. The table is
 /// derived, so old versions buy no rollback worth their size.
 const VERSION_RETENTION: Duration = Duration::from_secs(10 * 60);
+
+/// The most vector bytes one append carries, which is how much a writer holds before it
+/// commits.
+///
+/// A commit is a version and a fragment, so this is what decides how many of each a run
+/// makes: at 4,096 dimensions it is about 2,000 rows, twenty-odd requests of 64–97 chunks,
+/// where a commit per request made 4,500 versions of a 330,000-chunk run. It is also what
+/// a kill can lose, and what the writer holds — about three times this at the moment of
+/// the commit, while the rows, the Arrow batch and Lance's encoder each have a copy. Text
+/// columns are not counted: beside 16 KB of vector a row's half-kilobyte of key and
+/// address is noise. A memory budget would size this.
+const COMMIT_BYTES: usize = 32 << 20;
+
+/// The longest rows wait for their commit, so a server that answers slowly still has its
+/// answers committed, and a kill loses at most this much of its time.
+const COMMIT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The metadata cache of the Lance session every connection opens, in bytes.
+///
+/// Lance caches each committed version's manifest here, and the transaction and file
+/// metadata beside it; its default is 1 GiB, which is more than the field VM had left
+/// while embedding. A manifest is ~1.5 KB a fragment, so with fragments kept to tens this
+/// holds every version a run makes and the file metadata of a scan many times over. A
+/// miss costs a read of a small file from local disk. The index cache, where opened
+/// indexes and their partitions live, keeps Lance's default; a memory budget would size
+/// both.
+const METADATA_CACHE_BYTES: usize = 64 << 20;
+
+/// The rows a compaction aims for in one fragment, and below which a fragment is small
+/// enough to be compacted again.
+///
+/// Lance's default is a million, which at 4,096 dimensions is a 16 GiB file — so every
+/// fragment under that is a candidate, and each `maintain` rewrote the tail of the table
+/// with whatever had been appended. Lance writes a compaction's output in fragments of
+/// between one and two times this — 1 to 2 GiB at 4,096 dimensions — and the last of a
+/// table's can be shorter: a 1.3-million-row table is ten to twenty fragments, and of
+/// those a compaction rewrites at most the short last one, and only while no index covers
+/// it.
+const FRAGMENT_ROWS: usize = 65_536;
+
+/// Unindexed fragments under [`FRAGMENT_ROWS`] that appends leave before
+/// [`VectorTable::compact_appended`] compacts them.
+///
+/// With commits of [`COMMIT_BYTES`], that is a gigabyte of new rows rewritten while the
+/// writer waits, about once every quarter-hour at OpenRouter's pace; a query reads at
+/// most this many small fragments beside the compacted ones.
+const COMPACT_AFTER_FRAGMENTS: usize = 32;
+
+/// The share of a fragment's rows deleted past which a compaction rewrites it to write
+/// them out. Lance's own default, named because [`settled_fragments`] must agree with it.
+const REWRITE_DELETED_SHARE: f32 = 0.1;
+
+/// Rows per batch a compaction reads, which at 4,096 dimensions is 16 MiB a batch where
+/// Lance's default of 8,192 is 128 MiB.
+const COMPACT_BATCH_ROWS: usize = 1024;
+
+/// The I/O a compaction's scan may queue ahead of the rewrite, where Lance's default is
+/// 2 GiB. Several batches' worth, so the read keeps ahead of the encoder.
+const COMPACT_IO_BUFFER_BYTES: u64 = 64 << 20;
 
 /// Below this many rows an ANN index is not worth its partition loss; exact search is
 /// fast enough and loses nothing.
@@ -409,11 +494,21 @@ impl VectorLock {
     }
 }
 
+/// Every connection to the table, with a Lance session whose metadata cache is
+/// [`METADATA_CACHE_BYTES`].
 async fn connect(dir: &Path) -> anyhow::Result<lancedb::Connection> {
     let dir = dir
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("{} is not valid UTF-8", dir.display()))?;
-    Ok(lancedb::connect(dir).execute().await?)
+    let session = Session::with_cache_backends(
+        CacheSpec::Default,
+        CacheSpec::Size(METADATA_CACHE_BYTES),
+        Default::default(),
+    );
+    Ok(lancedb::connect(dir)
+        .session(Arc::new(session))
+        .execute()
+        .await?)
 }
 
 async fn has_table(db: &lancedb::Connection, name: &str) -> anyhow::Result<bool> {
@@ -599,11 +694,24 @@ impl VectorTable {
         Ok(count)
     }
 
+    /// Whether `rows` that have waited since `since` are due an [`append`](Self::append):
+    /// when their vectors reach [`COMMIT_BYTES`], or the first of them has waited
+    /// [`COMMIT_INTERVAL`].
+    ///
+    /// A writer holds rows until this says so, which is what keeps a run's commits — and
+    /// so its versions and fragments — to one per few thousand rows rather than one per
+    /// request. What it holds is what a kill loses, and the next run's subtraction puts
+    /// those rows back on the work list.
+    pub fn commit_due(&self, rows: usize, since: Instant) -> bool {
+        rows * self.dims * size_of::<f32>() >= COMMIT_BYTES || since.elapsed() >= COMMIT_INTERVAL
+    }
+
     /// Appends rows in one durable commit.
     ///
     /// Lance commits a version per call, so an interrupted run keeps every batch that
     /// landed before the kill and the work list is recomputed from what is there. That is
-    /// what makes `embed` resumable without a checkpoint file.
+    /// what makes `embed` resumable without a checkpoint file. A commit is a fragment;
+    /// a writer that commits many calls [`Self::compact_appended`] after each.
     pub async fn append(&self, _lock: &VectorLock, rows: &[Row]) -> anyhow::Result<()> {
         if rows.is_empty() {
             return Ok(());
@@ -660,6 +768,138 @@ impl VectorTable {
             "appended to the vector table"
         );
         Ok(())
+    }
+
+    /// Compacts what appends have left, once there are [`COMPACT_AFTER_FRAGMENTS`]
+    /// unindexed fragments under [`FRAGMENT_ROWS`] — one [pass](Self::compact) — and
+    /// drops the versions that superseded. Nothing when there are fewer.
+    ///
+    /// For a writer to call between its commits, so a long run keeps its fragments to tens
+    /// rather than thousands whether or not it reaches [`Self::maintain`]. It never
+    /// rewrites a fragment an index covers, deleted rows or not: rewriting one rewrites
+    /// every index over it, and an IVF_FLAT index holds every vector in the table — work
+    /// for `maintain`, not for the middle of a run. A backlog bigger than one pass is
+    /// folded a pass per call.
+    pub async fn compact_appended(&self, lock: &VectorLock) -> anyhow::Result<()> {
+        self.table.checkout_latest().await?;
+        let dataset = self.dataset().await?;
+        let indexed = indexed_fragments(&dataset).await?;
+        let loose = dataset
+            .fragments()
+            .iter()
+            .filter(|f| u32::try_from(f.id).is_ok_and(|id| !indexed.contains(&id)))
+            .filter(|f| f.physical_rows.is_none_or(|rows| rows < FRAGMENT_ROWS))
+            .count();
+        if loose < COMPACT_AFTER_FRAGMENTS {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let (removed, added) = self.compact(lock, indexed.into_iter().collect()).await?;
+        let (versions, _) = self.prune(lock, VERSION_RETENTION).await?;
+        tracing::debug!(
+            fragments_removed = removed,
+            fragments_added = added,
+            versions_removed = versions,
+            ms = started.elapsed().as_millis() as u64,
+            "appended fragments compacted"
+        );
+        Ok(())
+    }
+
+    /// One compaction pass, one commit: plans the table's compaction leaving `excluded`
+    /// alone, and carries out one task of the plan — or, when every task touches an
+    /// indexed fragment, all of them. The fragments removed and added; none removed means
+    /// there was nothing left to do.
+    ///
+    /// Lance's own compaction commits a whole plan at once, so a killed one keeps nothing
+    /// and its size grows with the backlog. A task is Lance's unit of work: fragments
+    /// binned towards [`FRAGMENT_ROWS`], under a few times that unless one fragment
+    /// rewritten for its deletions is larger, so a commit here is a gigabyte or a few of
+    /// rows however large the backlog — with no budget to set, and so none a task could
+    /// overrun and empty the plan. A task of unindexed fragments costs
+    /// its rows and nothing more, so those go one a commit. A task that touches an indexed
+    /// fragment also rewrites every index over it, at the size of the index rather than the
+    /// task, so those share one commit and that cost is paid once. The reads are bounded by
+    /// [`compaction`] either way.
+    ///
+    /// The plan is made and committed under the lock, against the version this handle
+    /// sees, so nothing else commits in between; Lance refuses tasks from a plan once
+    /// another of its tasks has committed, which is why each pass plans afresh.
+    async fn compact(
+        &self,
+        _lock: &VectorLock,
+        excluded: Vec<u32>,
+    ) -> anyhow::Result<(usize, usize)> {
+        let handle = self.table.dataset().ok_or_else(not_a_local_table)?;
+        let mut dataset = (*handle.get().await?).clone();
+        let indexed = indexed_fragments(&dataset).await?;
+        let plan = plan_compaction(&dataset, &compaction(excluded)).await?;
+        let (reindexing, plain): (Vec<_>, Vec<_>) = plan.compaction_tasks().partition(|task| {
+            task.task
+                .fragments
+                .iter()
+                .any(|f| u32::try_from(f.id).is_ok_and(|id| indexed.contains(&id)))
+        });
+        let tasks = match plain.into_iter().next() {
+            Some(task) => vec![task],
+            None => reindexing,
+        };
+        if tasks.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let mut rewritten = Vec::with_capacity(tasks.len());
+        for task in &tasks {
+            rewritten.push(task.execute(&dataset).await?);
+        }
+        let metrics = commit_compaction(
+            &mut dataset,
+            rewritten,
+            Arc::new(DatasetIndexRemapperOptions::default()),
+            plan.options(),
+        )
+        .await?;
+        // lancedb's handle learns of a commit it did not make only by being told.
+        handle.update(dataset);
+        Ok((metrics.fragments_removed, metrics.fragments_added))
+    }
+
+    /// Drops every version older than `retention` with the files only it held, and every
+    /// file no version holds — the `data/.tmp*` a killed write leaves. The versions and
+    /// bytes removed.
+    ///
+    /// Lance leaves an unreferenced file for seven days in case a write in another process
+    /// is about to commit it. Every write centinel makes to this table holds the
+    /// [`VectorLock`] this is called under, so no such write exists, and Lance is told so.
+    /// That holds only for writers that take the lock: a script writing `chunks.lance`
+    /// through pylance or lancedb directly would have the files it has not yet committed
+    /// deleted under it. Stop `serve` and `embed` before running one.
+    async fn prune(&self, _lock: &VectorLock, retention: Duration) -> anyhow::Result<(u64, u64)> {
+        // Lance measures the retention in chrono's `Duration`, which it re-exports; the
+        // conversion fails only for a span longer than chrono can count, which ten
+        // minutes is not.
+        let stats = self
+            .table
+            .optimize(OptimizeAction::Prune {
+                older_than: Some(lancedb::table::Duration::from_std(retention)?),
+                delete_unverified: Some(true),
+                error_if_tagged_old_versions: None,
+            })
+            .await?;
+        Ok(stats
+            .prune
+            .map(|p| (p.old_versions, p.bytes_removed))
+            .unwrap_or_default())
+    }
+
+    /// The Lance dataset at the version this handle sees.
+    async fn dataset(&self) -> anyhow::Result<Arc<Dataset>> {
+        Ok(self
+            .table
+            .dataset()
+            .ok_or_else(not_a_local_table)?
+            .get()
+            .await?)
     }
 
     /// Deletes the rows with these keys.
@@ -751,10 +991,12 @@ impl VectorTable {
     /// the indexes the filters are served from.
     ///
     /// Compaction rewrites the per-append fragments into few and writes deleted rows out
-    /// for good; the scalar indexes — the key the merges join on, the hash `embed` copies
-    /// by, and the source, tags and exclusion a search filters on — are created when
-    /// missing and brought up to date when present; then every version older than
-    /// `VERSION_RETENTION` (ten minutes) is dropped with its files. Creating an ANN index
+    /// for good, in bounded memory ([`compaction`]) and leaving alone the indexed fragments
+    /// it has no reason to touch ([`settled_fragments`]); the scalar indexes — the key the
+    /// merges join on, the hash `embed` copies by, and the source, tags and exclusion a
+    /// search filters on — are created when missing and brought up to date when present;
+    /// then every version older than `VERSION_RETENTION` (ten minutes) is dropped with its
+    /// files, and so is whatever an interrupted write left behind. Creating an ANN index
     /// stays opt-in through `build_index` — small corpora keep exact search, and IVF_FLAT
     /// keeps full-precision vectors, so only partition selection is approximate. An index
     /// that exists is brought up to date either way.
@@ -770,18 +1012,23 @@ impl VectorTable {
     /// [`Self::maintain`] with the retention spelled out, so a test can watch versions go.
     async fn maintain_keeping(
         &self,
-        _lock: &VectorLock,
+        lock: &VectorLock,
         build_index: bool,
         retention: Duration,
     ) -> anyhow::Result<Maintenance> {
         self.table.checkout_latest().await?;
-        let compacted = self
-            .table
-            .optimize(OptimizeAction::Compact {
-                options: Default::default(),
-                remap_options: None,
-            })
-            .await?;
+        // Pass after pass until one finds nothing to do, each its own commit, so a kill
+        // part-way keeps the passes that landed.
+        let (mut fragments_removed, mut fragments_added) = (0, 0);
+        loop {
+            let settled = settled_fragments(&self.dataset().await?).await?;
+            let (removed, added) = self.compact(lock, settled.into_iter().collect()).await?;
+            if removed == 0 {
+                break;
+            }
+            fragments_removed += removed;
+            fragments_added += added;
+        }
 
         let rows = self.len().await?;
         let existing: HashSet<String> = self
@@ -830,26 +1077,7 @@ impl VectorTable {
 
         // Last, so the versions the compaction and the indexes just superseded are among
         // what goes.
-        // Lance measures the retention in chrono's `Duration`, which it re-exports; the
-        // conversion fails only for a span longer than chrono can count, which ten
-        // minutes is not.
-        let pruned = self
-            .table
-            .optimize(OptimizeAction::Prune {
-                older_than: Some(lancedb::table::Duration::from_std(retention)?),
-                delete_unverified: None,
-                error_if_tagged_old_versions: None,
-            })
-            .await?;
-
-        let (fragments_removed, fragments_added) = compacted
-            .compaction
-            .map(|c| (c.fragments_removed, c.fragments_added))
-            .unwrap_or_default();
-        let (versions_removed, bytes_removed) = pruned
-            .prune
-            .map(|p| (p.old_versions, p.bytes_removed))
-            .unwrap_or_default();
+        let (versions_removed, bytes_removed) = self.prune(lock, retention).await?;
         tracing::debug!(
             rows,
             indexed = indexed || (build_index && rows >= ANN_MIN_ROWS),
@@ -876,12 +1104,7 @@ impl VectorTable {
     pub async fn audit(&self, progress: &Progress, cancel: &Cancel) -> anyhow::Result<VectorAudit> {
         // Through the table rather than by reopening the path, so the audit reads the
         // version this handle sees — the one `repair` will then commit against.
-        let dataset = self
-            .table
-            .dataset()
-            .ok_or_else(not_a_local_table)?
-            .get()
-            .await?;
+        let dataset = self.dataset().await?;
         let fragments = dataset.get_fragments();
         let total = fragments.len() as u64;
 
@@ -1190,7 +1413,79 @@ fn metadata_columns<'a>(
     (tags.finish(), excluded)
 }
 
-/// The width of the vector column, or why there is no such thing.
+/// How every compaction of this table runs: towards fragments of [`FRAGMENT_ROWS`], one
+/// task at a time, reading [`COMPACT_BATCH_ROWS`] a batch with [`COMPACT_IO_BUFFER_BYTES`]
+/// queued — so what it holds is tens of megabytes whatever the table's size, where Lance's
+/// defaults hold up to 2 GiB of read-ahead and a 128 MiB batch in a task per core.
+/// `excluded` fragments are left as they are.
+fn compaction(excluded: Vec<u32>) -> CompactionOptions {
+    CompactionOptions {
+        target_rows_per_fragment: FRAGMENT_ROWS,
+        num_threads: Some(1),
+        batch_size: Some(COMPACT_BATCH_ROWS),
+        io_buffer_size: Some(COMPACT_IO_BUFFER_BYTES),
+        materialize_deletions_threshold: REWRITE_DELETED_SHARE,
+        excluded_fragment_ids: excluded,
+        ..Default::default()
+    }
+}
+
+/// The fragments some index covers. An index that does not record what it covers is taken
+/// to cover every fragment, as Lance's own remapping takes it.
+///
+/// Rewriting one of these moves its rows, so every index over it is rewritten with it,
+/// and an IVF_FLAT index holds every vector in the table.
+async fn indexed_fragments(dataset: &Dataset) -> anyhow::Result<HashSet<u32>> {
+    let indices = dataset.load_indices().await?;
+    Ok(dataset
+        .fragments()
+        .iter()
+        .filter_map(|f| u32::try_from(f.id).ok())
+        .filter(|&id| {
+            indices.iter().any(|index| {
+                index
+                    .fragment_bitmap
+                    .as_ref()
+                    .is_none_or(|b| b.contains(id))
+            })
+        })
+        .collect())
+}
+
+/// The fragments [`VectorTable::maintain`] does not rewrite: [indexed](indexed_fragments)
+/// ones with no more than [`REWRITE_DELETED_SHARE`] of their rows deleted.
+///
+/// For an indexed fragment past that share, rewriting it and its indexes buys the space
+/// back; for any other it buys one fewer fragment, which is not worth tens of gigabytes of
+/// I/O. Lance would otherwise rewrite every fragment under [`FRAGMENT_ROWS`], indexed or
+/// not. That includes the field table's oldest fragments, written at Lance's million-row
+/// target: one past the share is rewritten whole, 16 GiB at 4,096 dimensions, once — it
+/// comes out with no deletions and settled — in bounded memory, and in the commit that
+/// pays for the index rewrite anyway. A fragment whose deletions are not counted is left
+/// to Lance.
+async fn settled_fragments(dataset: &Dataset) -> anyhow::Result<HashSet<u32>> {
+    let indexed = indexed_fragments(dataset).await?;
+    Ok(dataset
+        .fragments()
+        .iter()
+        .filter_map(|f| {
+            let id = u32::try_from(f.id).ok()?;
+            let deleted = match &f.deletion_file {
+                None => Some(0),
+                Some(file) => file.num_deleted_rows,
+            };
+            let worth_writing_out = match (deleted, f.physical_rows) {
+                (Some(0), _) => false,
+                (Some(deleted), Some(rows)) if rows > 0 => {
+                    deleted as f32 / rows as f32 > REWRITE_DELETED_SHARE
+                }
+                _ => true,
+            };
+            (indexed.contains(&id) && !worth_writing_out).then_some(id)
+        })
+        .collect())
+}
+
 /// The scalar index a column is served from: a bitmap for the few values a filter narrows
 /// by, a label list for the tags a filter asks of a list, a B-tree for the keys a merge or
 /// a copy looks up one at a time.
@@ -1202,6 +1497,7 @@ fn scalar_index(column: &str) -> LanceIndex {
     }
 }
 
+/// The width of the vector column, or why there is no such thing.
 fn vector_width(schema: &Schema) -> anyhow::Result<usize> {
     match schema
         .field_with_name(VECTOR_COLUMN)
@@ -1668,6 +1964,164 @@ pub(crate) mod tests {
                 .chunk_hash,
             hash(4)
         );
+    }
+
+    /// The fragment ids at the version `t` sees, in manifest order.
+    async fn fragment_ids(t: &VectorTable) -> Vec<u64> {
+        t.dataset()
+            .await
+            .unwrap()
+            .fragments()
+            .iter()
+            .map(|f| f.id)
+            .collect()
+    }
+
+    /// A run that never reaches `maintain` — killed, or embedding in pieces — must not
+    /// leave a fragment per commit behind; on the field VM it left four thousand, and
+    /// `maintain` could not fold them in the memory there was. What a run compacts along
+    /// the way must not touch a fragment an index covers, even one with deleted rows,
+    /// since rewriting it rewrites every index over it; `maintain` writes the deletions
+    /// out, and leaves alone the indexed fragment that has none.
+    ///
+    /// The two indexed fragments share one index, small and side by side, so Lance would
+    /// fold them together if nothing held it back.
+    #[tokio::test]
+    async fn compaction_leaves_indexed_fragments_to_maintain_and_maintain_leaves_settled_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = table(dir.path()).await;
+        let pinned = [1.0, 0.0, 0.0, 0.0];
+        t.append(
+            &lock(dir.path()).await,
+            &[
+                row(0, 0, unit(pinned)),
+                row(1, 0, unit([0.0, 1.0, 0.0, 0.0])),
+            ],
+        )
+        .await
+        .unwrap();
+        t.append(
+            &lock(dir.path()).await,
+            &[row(2, 0, unit([0.0, 0.0, 1.0, 0.0]))],
+        )
+        .await
+        .unwrap();
+        let fragments = fragment_ids(&t).await;
+        let [deleting, clean] = fragments[..] else {
+            panic!("two appends, two fragments: {fragments:?}");
+        };
+        t.table
+            .create_index(&[KEY_COLUMN], scalar_index(KEY_COLUMN))
+            .execute()
+            .await
+            .unwrap();
+        // Half of the first fragment's rows: past the share `maintain` writes out.
+        t.remove(&lock(dir.path()).await, &[key_of(&hash(1), &doc(0))])
+            .await
+            .unwrap();
+
+        // The two indexed fragments are the only candidates: one past the deleted share,
+        // one small beside it under the same index. A run's pass, with its exclusion, must
+        // find nothing to do; without it Lance would rewrite both and the key index.
+        let in_run = indexed_fragments(&t.dataset().await.unwrap())
+            .await
+            .unwrap();
+        let done = t
+            .compact(&lock(dir.path()).await, in_run.into_iter().collect())
+            .await
+            .unwrap();
+        assert_eq!(
+            done,
+            (0, 0),
+            "a run's compaction rewrote an indexed fragment"
+        );
+        assert_eq!(fragment_ids(&t).await, fragments);
+
+        let appends = COMPACT_AFTER_FRAGMENTS as u8;
+        for i in 3..3 + appends {
+            let lock = lock(dir.path()).await;
+            t.append(&lock, &[row(i, i, unit([i as f32, 1.0, 1.0, 0.0]))])
+                .await
+                .unwrap();
+            t.compact_appended(&lock).await.unwrap();
+        }
+        let ids = fragment_ids(&t).await;
+        assert!(
+            ids.len() < COMPACT_AFTER_FRAGMENTS,
+            "{} fragments after {appends} appends",
+            ids.len()
+        );
+        assert!(
+            ids.contains(&deleting) && ids.contains(&clean),
+            "a run's compaction rewrote an indexed fragment: {ids:?}"
+        );
+
+        // A few more behind them that no run compacted: `maintain` folds these beside the
+        // fragment it keeps and the one it rewrites, a commit for the plain rewrite and
+        // one for the rewrite that remaps the index.
+        let after = 3 + appends;
+        for i in after..after + 3 {
+            t.append(
+                &lock(dir.path()).await,
+                &[row(i, i, unit([i as f32, 1.0, 1.0, 0.0]))],
+            )
+            .await
+            .unwrap();
+        }
+
+        t.maintain(&lock(dir.path()).await, false).await.unwrap();
+        let ids = fragment_ids(&t).await;
+        assert!(
+            !ids.contains(&deleting),
+            "maintain left the deleted rows in place: {ids:?}"
+        );
+        assert!(
+            ids.contains(&clean),
+            "maintain rewrote an indexed fragment with nothing to write out: {ids:?}"
+        );
+        assert_eq!(
+            ids.len(),
+            3,
+            "the kept fragment, the rewritten one, and every append folded into one: {ids:?}"
+        );
+
+        let reopened = table(dir.path()).await;
+        assert_eq!(all_keys(&reopened).await.len(), 2 + appends as usize + 3);
+        assert_eq!(
+            reopened
+                .nearest(&unit(pinned), 1, &Filter::default())
+                .await
+                .unwrap()[0]
+                .chunk_hash,
+            hash(0),
+            "the surviving row of the rewritten fragment still answers"
+        );
+    }
+
+    /// A write killed mid-file leaves its staging file in `data/` — `.tmp` and six
+    /// characters, from Lance's local writer, zero bytes in the field — and no manifest
+    /// names it. Maintenance clears it rather than leaving it for Lance's seven days.
+    #[tokio::test]
+    async fn maintenance_clears_what_a_killed_write_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = table(dir.path()).await;
+        t.append(
+            &lock(dir.path()).await,
+            &[row(1, 0, unit([1.0, 0.0, 0.0, 0.0]))],
+        )
+        .await
+        .unwrap();
+        let debris = dir
+            .path()
+            .join("chunks.lance")
+            .join("data")
+            .join(".tmpyRgYfx");
+        std::fs::write(&debris, b"").unwrap();
+
+        t.maintain(&lock(dir.path()).await, false).await.unwrap();
+
+        assert!(!debris.exists(), "the staging file outlived maintenance");
+        assert_eq!(all_keys(&t).await.len(), 1);
     }
 
     #[tokio::test]

@@ -11,6 +11,13 @@
 //! and renders the answer. A dropped fragment's chunks are not lost — their hashes fall
 //! back onto `embed`'s work list — but the disk that lost the writes is not fixed by any
 //! of this, and the report says so.
+//!
+//! An audit without `--repair` reads without the table's lock, and `embed` compacts and
+//! prunes as it goes, dropping versions older than ten minutes with their files. An audit
+//! that runs longer than that beside an `embed` can find a file gone that a prune removed
+//! and report its fragment unreadable when it is not. `repair` cannot act on that: it
+//! commits against the version the audit read, and Lance refuses the commit once a
+//! compaction has rewritten those fragments. Audit again, or with `embed` stopped.
 
 use std::path::PathBuf;
 
