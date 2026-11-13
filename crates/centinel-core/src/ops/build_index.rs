@@ -240,17 +240,29 @@ pub async fn index(
         // What repeats across this source is chrome, and it is learned before anything is
         // chunked — from every derivation, including ones already placed. A resumed run
         // must strip exactly what a fresh one would, or half a corpus carries the menu.
+        //
+        // The learner may ask for the sample twice: once to count lines by hash, and again
+        // to confirm by their text the few that repeated (see `boilerplate`).
         let sample = derivations.len().min(boilerplate::LEARN_SAMPLE);
         let mut learner = boilerplate::Learner::new();
-        for (i, d) in derivations.iter().take(sample).enumerate() {
-            cancel.check()?;
-            if i % 25 == 0 {
-                progress.step(format!("reading {source}"), i as u64, sample as u64);
+        let chrome = loop {
+            for (i, d) in derivations.iter().take(sample).enumerate() {
+                cancel.check()?;
+                if i % 25 == 0 {
+                    progress.step(
+                        format!("{} {source}", learner.reading()),
+                        i as u64,
+                        sample as u64,
+                    );
+                }
+                let bytes = ctx.store.get_blob(&d.to_sha).await?;
+                learner.add(&String::from_utf8_lossy(&bytes));
             }
-            let bytes = ctx.store.get_blob(&d.to_sha).await?;
-            learner.add(&String::from_utf8_lossy(&bytes));
-        }
-        let chrome = learner.finish();
+            match learner.finish() {
+                boilerplate::Learned::Chrome(chrome) => break chrome,
+                boilerplate::Learned::ReadAgain(again) => learner = again,
+            }
+        };
         report.boilerplate_lines += chrome.len();
 
         let total = derivations.len() as u64;

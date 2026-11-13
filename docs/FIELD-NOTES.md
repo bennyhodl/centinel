@@ -1753,6 +1753,14 @@ Two smaller costs come with the same pass:
 The 21 sources indexed before publicrec were committed (window transactions), so a restart
 resumes. publicrec is left out of the restart until this is fixed.
 
+*(Later: fixed. The learner counts a `u64` hash per line, and only the first and last 1,000
+countable lines of each document (`boilerplate::EDGE_LINES`): at most a million hashes a
+source, whatever the content. Lines whose hash reaches `MIN_DOCUMENTS` are counted again by
+their text on a second reading of the sample, and only that count makes chrome, so a hash
+collision cannot strip a line. A source where nothing repeats stops after the first
+reading. Pages under 2,000 countable lines are still counted whole. Still open: `holds_records`
+knows `,`, tab and `;` only, so a pipe-delimited file's repeated rows can still be learned.)*
+
 ### Fault 12 — embed grows ~0.85 MB per commit to the vector table, without end
 
 The 13:20Z restart reached embed at 13:25Z: 330,631 chunks owed, about 61 a second through
