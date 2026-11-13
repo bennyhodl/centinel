@@ -497,8 +497,10 @@ fn workers() -> usize {
 }
 
 /// Reads one blob and runs the readers over it, on a thread of the blocking pool: the
-/// work is CPU-bound, and an async worker held for a 400-page PDF is a worker nothing
-/// else can use. `None` when `want` names a kind and this document is another.
+/// readers that stay in process are CPU-bound, and an async worker held for a large page is
+/// a worker nothing else can use. A PDF is read in a child, which waits here no longer than
+/// [`extract::READ_DEADLINE`] per reader. `None` when `want` names a kind and this document
+/// is another.
 async fn read_ahead(
     store: Store,
     resource: Resource,
@@ -535,8 +537,12 @@ async fn read_ahead(
                 &store.blob_path_of(&obs.blob_sha),
                 Some(&resource.natural_key),
                 obs.meta.get("title").map(String::as_str),
+                extract::READ_DEADLINE,
             )
-            .await;
+            .await
+            // A reader that could not be started says nothing about this document, so the
+            // pass stops here with nothing written, and the next one asks again.
+            .with_context(|| format!("reading {}", resource.natural_key))?;
             let read = ReadQuality::on(
                 &bytes,
                 derivation.outcome.text().unwrap_or_default(),

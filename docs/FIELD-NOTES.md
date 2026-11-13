@@ -1712,6 +1712,13 @@ Two faults in one:
   blocking thread cannot be abandoned, which argues for running the in-process readers in
   a child process with a time and memory limit — the same isolation would have contained
   Fault 9's peaks.
+  *(Later: fixed in centinel. `pdf-inspector`, `anydoc` and `calamine` now run in a child
+  of the binary (`extract/contained.rs`) under `extract::READ_DEADLINE`, two minutes per
+  reader. Past it the child is killed, which frees its core and memory, and `pdftotext`
+  takes the document; the verdict reads "pdf-inspector: stopped after 120s, past its
+  deadline". A child that cannot be started stops the pass and records nothing. On Linux
+  the child raises its own `oom_score_adj`, and `serve`'s unit sets `OOMPolicy=continue`, so
+  a Fault 9 peak costs one read and not the run. The upstream pdf-inspector fault stands.)*
 
 ### Fault 11 — index learns chrome from every line of a data source, and is killed on publicrec
 

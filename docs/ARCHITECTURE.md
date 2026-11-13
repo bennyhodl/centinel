@@ -316,7 +316,7 @@ not count as changed.
 
 ## Requirements
 
-Rust 1.94+, a C compiler, `make` and `protoc` to build. Corpus processing shells out to standalone binaries. The authenticated web gateway separately runs Node.js. Every call goes through `tool`, the module that owns child processes: each child is killed when its caller is dropped, carries a deadline sized for what it is doing, and never inherits our stdin. `open`'s launcher is the stated exception — it may be somebody's editor, so it takes the terminal and waits.
+Rust 1.94+, a C compiler, `make` and `protoc` to build. Corpus processing shells out to standalone binaries. The authenticated web gateway separately runs Node.js. Every call goes through `tool`, the module that owns child processes: each child is killed when its caller is dropped, carries a deadline sized for what it is doing, and never inherits our stdin. The parsers that read binary formats — `pdf-inspector`, `anydoc`, `calamine` — run the same way, in a child of the `centinel` binary itself (`--contained-read`, handled before the command line is parsed), so a document that stalls its reader is stopped at the deadline and handed to the next reader instead of holding extract. `open`'s launcher is the stated exception — it may be somebody's editor, so it takes the terminal and waits.
 
 | Binary | Needed for | Required |
 |---|---|---|

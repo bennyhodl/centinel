@@ -491,12 +491,18 @@ async fn extracted_text(kind: ContentKind, seed: &Seed) -> String {
     {
         return String::new();
     }
-    crate::extract::derive(kind, &seed.page.bytes, file.path(), None, None)
-        .await
-        .outcome
-        .text()
-        .map(str::to_string)
-        .unwrap_or_default()
+    crate::extract::derive(
+        kind,
+        &seed.page.bytes,
+        file.path(),
+        None,
+        None,
+        crate::extract::READ_DEADLINE,
+    )
+    .await
+    .ok()
+    .and_then(|d| d.outcome.text().map(str::to_string))
+    .unwrap_or_default()
 }
 
 /// Every off-host link on the seed, grouped by host.

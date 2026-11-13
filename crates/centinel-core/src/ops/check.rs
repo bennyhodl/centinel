@@ -348,8 +348,10 @@ pub async fn check(
             &as_served,
             Some(&item.address),
             item.meta.get("title").map(String::as_str),
+            extract::READ_DEADLINE,
         )
-        .await;
+        .await
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", item.address))?;
         doc.recovered_by_fallback = derived.recovered_by_fallback;
 
         let (extraction, pages_needing_ocr) = match derived.outcome {

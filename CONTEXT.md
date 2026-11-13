@@ -328,6 +328,15 @@ once, the predicate can be wrong once; written per pair, it is wrong per pair. A
 reader for a new kind is now an element in a list rather than a fourth mechanism, and
 `recovered_by_fallback` counts every kind's fallback rather than only PDF's.
 
+**Contained reader** — an in-process parser (`pdf-inspector`, `anydoc`, `calamine`) that
+`derive` runs in a child of the centinel binary, so a **deadline** can stop it. *Why it
+matters:* a reader on a thread cannot be stopped, only stopped waiting for. One PDF held
+`pdf-inspector` for nine minutes on its 17,162 font subsets, every pass met it again, and
+every source behind it waited (FIELD-NOTES, Fault 10). A child past its deadline is killed,
+which gives back the core and the memory. The reader then counts as having produced nothing:
+the next reader in the list takes the document, and the verdict names the stop. It takes no
+new mechanism, which is the reader-list contract above doing its job.
+
 **Chunk geometry** — the target and overlap sizes chunking uses. Load-bearing far outside
 chunking, because a `chunk_hash` hashes the chunk's *text* and the geometry decides the
 text. Changing it produces a wholly different set of hashes, so the old chunks stay in the
@@ -533,13 +542,14 @@ seven made none of them.
 
 **Deadline** — the bound on a call's *total* time. Every child process has one, sized for
 what it is doing: seconds for a version probe, half an hour for ffmpeg to decode a
-meeting. A transcription request has one too, sized by its audio — ten minutes plus three
-times the recording — because a server answers nothing until it has transcribed the whole
-thing, and a deadline that fits a three-hour meeting would guard nothing for a
-thirty-second clip. Before transcription moved to a server it ran in a child process
-whose honest duration was hours, so it was guarded by a **stall timeout** instead — a
-bound on silence, reset by each line of the worker's stderr, its **heartbeat**. Nothing
-streams now, and both went with the worker.
+meeting. A reader of one document gets two minutes, `extract::READ_DEADLINE`, whether
+it is `pdftotext` or a contained reader. A transcription request has one too, sized by its
+audio — ten minutes plus three times the recording — because a server answers nothing
+until it has transcribed the whole thing, and a deadline that fits a three-hour meeting
+would guard nothing for a thirty-second clip. Before transcription moved to a server it
+ran in a child process whose honest duration was hours, so it was guarded by a **stall
+timeout** instead — a bound on silence, reset by each line of the worker's stderr, its
+**heartbeat**. Nothing streams now, and both went with the worker.
 
 **Refusal vs transport fault** — `yt-dlp` reporting "video unavailable" is evidence about
 the video. A missing binary, or a hang that had to be killed, is evidence about this

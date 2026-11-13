@@ -21,13 +21,19 @@
 //! to an embedding model, which is precisely the failure semantic search cannot survive.
 
 use std::io::Cursor;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::content::ContentKind;
 
+mod contained;
 mod html;
 
+/// The child's side of a contained reader: `None` unless this process was started as one.
+/// Every program that calls [`derive`] calls this first in `main` and exits with the code it
+/// returns.
+pub use contained::serve as serve_contained_read;
 use html::{html_marked, html_readability, html_whole_page};
 
 /// Versions of the extraction tools, recorded on every [`crate::domain::Derivation`].
@@ -305,12 +311,28 @@ impl Reader {
         }
     }
 
-    /// Whether running this one means starting a child process.
+    /// Whether running this one means starting another program.
     ///
     /// [`extract`] is synchronous and answers for the in-process pipeline alone; only
     /// [`derive`] can reach the rest.
     fn spawns(self) -> bool {
         matches!(self, Self::Poppler)
+    }
+
+    /// Whether [`derive`] runs this reader in a child of this program, where
+    /// [`READ_DEADLINE`] can stop it.
+    ///
+    /// The readers that parse a binary format, because what a read costs them is the
+    /// document's to decide, and documents have decided badly: one PDF's 17,162 font subsets
+    /// held `pdf-inspector` for 8 min 52 s (docs/FIELD-NOTES.md, Fault 10), and one vector map
+    /// took it to 670 MB (Fault 9). A reader on a thread of this process cannot be stopped,
+    /// so a deadline there would only stop the waiting. A child can be killed, and killing it
+    /// gives the core and the memory back. See [`contained`].
+    ///
+    /// The text readers stay in process. None has been seen to stall, a web page reads in a
+    /// few milliseconds, and a child per page would cost more than the read.
+    fn contained(self) -> bool {
+        matches!(self, Self::PdfInspector | Self::AnyDoc | Self::Spreadsheet)
     }
 
     fn read_in_process(self, blob: &Blob<'_>) -> Extracted {
@@ -328,16 +350,24 @@ impl Reader {
         }
     }
 
-    async fn read(self, blob: &Blob<'_>) -> Extracted {
-        match self {
-            Self::Poppler => match pdf_text_via_poppler(blob.path).await {
+    /// `Err` only when a contained reader's child could not be started, which says nothing
+    /// about the document. `pdftotext` not starting is still "nothing": poppler is optional,
+    /// and a machine without it reads every PDF it can with the primary.
+    async fn read(
+        self,
+        blob: &Blob<'_>,
+        deadline: Duration,
+    ) -> Result<Extracted, crate::tool::ToolError> {
+        Ok(match self {
+            Self::Poppler => match pdf_text_via_poppler(blob.path, deadline).await {
                 Some(extraction) => Extracted::Text(extraction),
                 None => Extracted::Unextractable {
                     reason: "poppler found no text either".into(),
                 },
             },
+            reader if reader.contained() => contained::read(reader, blob, deadline).await?,
             reader => reader.read_in_process(blob),
-        }
+        })
     }
 }
 
@@ -441,13 +471,26 @@ pub fn extract(
 /// meant it was reachable only by a corpus-wide `extract`. Anything else deriving one
 /// document — `check` — would have re-implemented it, and a QA tool that runs a different
 /// extractor from the pipeline it is checking answers a question nobody asked.
+///
+/// `deadline` bounds each reader that runs in a child, [`READ_DEADLINE`] for every caller
+/// that reads a corpus. A reader past it is stopped and counts as having produced nothing,
+/// so the next one takes the document and the verdict says why.
+///
+/// `Err` when a reader's child could not be started at all: a fact about this machine, not
+/// the document, so the caller records nothing and a later pass asks again.
+///
+/// **The program calling this must call [`serve_contained_read`] first in its `main`**,
+/// because the contained readers run in a child of it. Under libtest they cannot, and fail
+/// over: a test in this crate that sends a PDF, a Word file or a workbook through `derive`
+/// or `ops::extract` sees the fallback's text or nothing, never `pdf-inspector`'s.
 pub async fn derive(
     kind: ContentKind,
     bytes: &[u8],
     path: &std::path::Path,
     url: Option<&str>,
     title: Option<&str>,
-) -> Derived {
+    deadline: Duration,
+) -> Result<Derived, crate::tool::ToolError> {
     let blob = Blob {
         bytes,
         path,
@@ -458,7 +501,7 @@ pub async fn derive(
     let mut carried: Vec<(Reader, String)> = Vec::new();
 
     for (i, reader) in readers_for(kind).iter().copied().enumerate() {
-        let mut outcome = reader.read(&blob).await;
+        let mut outcome = reader.read(&blob, deadline).await?;
         // Before the check, not after: a page whose only "text" was a spelled-out image
         // has produced nothing, and the next reader deserves its turn.
         outcome.normalize_text();
@@ -467,20 +510,20 @@ pub async fn derive(
             // old code wrote by hand — "readability found only 90 chars" — and on PDF it
             // is the page count that used to be lost on the way to the fallback.
             outcome.note_all(&notes_of(&carried));
-            return Derived {
+            return Ok(Derived {
                 outcome,
                 recovered_by_fallback: i > 0,
-            };
+            });
         }
         carried.push((reader, no_text_reason(&outcome)));
     }
 
-    Derived {
+    Ok(Derived {
         outcome: Extracted::Unextractable {
             reason: give_up_reason(kind, &carried),
         },
         recovered_by_fallback: false,
-    }
+    })
 }
 
 /// What the readers that came up short had to say, each named.
@@ -739,9 +782,21 @@ fn extract_pdf(bytes: &[u8]) -> Extracted {
 /// The name `pdftotext` records itself under. Poppler's version is asked for at runtime.
 pub const PDFTOTEXT: &str = "pdftotext";
 
-/// How long one PDF gets. A deadline, not a stall timeout: this call has a known shape,
-/// and the largest document in a real `.gov` corpus is under a hundred megabytes.
-const PDFTOTEXT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+/// How long one reader that runs in a child gets with one document: `pdftotext`, and each
+/// reader [`Reader::contained`] names. Past it the child is killed, and the next reader in
+/// the kind's list takes the document as if this one had produced nothing.
+///
+/// Two minutes, because the measured cases sit far apart. Plant City's 2022 ACFR — 32 MB,
+/// 151 pages — took `pdftotext` 2.7 s and `pdf-inspector` 8 min 52 s, on 17,162 embedded
+/// font subsets (docs/FIELD-NOTES.md, Fault 10). A reader still going at two minutes is in
+/// that second shape, not about to finish. Cutting one off early costs flat text from the
+/// fallback where markdown was coming, still searchable, and `extract --refresh` asks
+/// again; waiting costs every source behind it.
+///
+/// Fixed, not scaled by size: Fault 9 measured that a PDF's size does not predict its
+/// cost, and this stall came from the fonts, not from the 32 MB. Per reader, not per
+/// document, so the fallback always gets a whole turn and a PDF is bounded at twice this.
+pub const READ_DEADLINE: Duration = Duration::from_secs(120);
 
 /// A second reader for a PDF the first one made nothing of.
 ///
@@ -759,7 +814,10 @@ const PDFTOTEXT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1
 /// its content address, and handing a child process a path it can read is cheaper and
 /// simpler than a temporary file. `None` when poppler is absent, when it fails, or when it
 /// agrees there is nothing to read — all three leave the caller's verdict unchanged.
-pub async fn pdf_text_via_poppler(path: &std::path::Path) -> Option<Extraction> {
+pub async fn pdf_text_via_poppler(
+    path: &std::path::Path,
+    deadline: Duration,
+) -> Option<Extraction> {
     let out = crate::tool::Tool::new(PDFTOTEXT)
         // `-q` so poppler's warnings about malformed xref tables stay out of the text;
         // `-enc UTF-8` because the default is locale-dependent and this is an archive.
@@ -770,7 +828,7 @@ pub async fn pdf_text_via_poppler(path: &std::path::Path) -> Option<Extraction> 
             path.as_os_str(),
             std::ffi::OsStr::new("-"),
         ])
-        .timeout(PDFTOTEXT_DEADLINE)
+        .timeout(deadline)
         .success()
         .await;
 
@@ -1550,7 +1608,9 @@ mod tests {
         let bytes = b"%PDF-1.7\nnot really a pdf";
         std::fs::write(&path, bytes).unwrap();
 
-        let derived = derive(ContentKind::Pdf, bytes, &path, None, None).await;
+        let derived = derive(ContentKind::Pdf, bytes, &path, None, None, READ_DEADLINE)
+            .await
+            .unwrap();
 
         let Extracted::Unextractable { reason } = derived.outcome else {
             panic!("a corrupt pdf cannot yield text");
