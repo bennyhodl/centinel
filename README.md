@@ -69,7 +69,7 @@ Light the candle.
 curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/bennyhodl/centinel/master/install.sh | sh
 ```
 
-The same command installs and updates. It downloads a release binary when the latest release carries one this host can run, and builds from source when it does not. A download needs no Rust and no toolchain; a build checks for Rust, a C compiler and `protoc`, and names the command for whatever is missing rather than installing a toolchain behind your back.
+The same command installs and updates. It downloads a release binary when the latest release carries one this host can run, and builds from source when it does not. A download needs no Rust and no toolchain; a build checks for Rust, a C compiler, `make` and `protoc`, and names the command for whatever is missing rather than installing a toolchain behind your back.
 
 A release carries one asset per platform — `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu` (AVX2), `x86_64-unknown-linux-gnu-v2` (x86_64 without AVX2) and `aarch64-unknown-linux-gnu` — and none carries a GPU backend, because Centinel runs no model itself. Embedding, reranking and transcription are requests to servers you run; see [Models run on servers](#models-run-on-servers) below.
 

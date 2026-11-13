@@ -245,7 +245,7 @@ pkg_for() {
 # somebody's word deserves to know which dependency asked for them.
 why_for() {
     case "$1" in
-        cc)       echo "a C compiler, for SQLite, zstd and lz4" ;;
+        cc)       echo "a C compiler and make, for SQLite, zstd, lz4 and jemalloc" ;;
         protoc)   echo "six lance crates run prost-build, and none of them vendor it" ;;
         node)     echo "builds and runs the authenticated TanStack Start web server" ;;
     esac
@@ -470,7 +470,9 @@ have_protoc() {
 
 missing_build_tools() {
     _m=""
-    have cc || have gcc || have clang || _m="$_m cc"
+    # `make` rides with the compiler: jemalloc's build runs it, and every package `pkg_for`
+    # names for `cc` brings make too, as do the Xcode command line tools.
+    if ! { have cc || have gcc || have clang; } || ! have make; then _m="$_m cc"; fi
     have_protoc || _m="$_m protoc"
     { have node && have npm; } || _m="$_m node"
     printf '%s' "$_m"

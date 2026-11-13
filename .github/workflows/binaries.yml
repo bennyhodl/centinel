@@ -157,6 +157,9 @@ jobs:
       - name: build centinel
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
+          # jemalloc fixes its page size at build time and fails to start on a kernel with
+          # larger pages; 64K covers the 16K and 64K arm64 kernels and still runs on 4K.
+          AARCH64_UNKNOWN_LINUX_GNU_JEMALLOC_SYS_WITH_LG_PAGE: 16
         run: cargo build --release --locked -p centinel
 
       - name: package and upload
