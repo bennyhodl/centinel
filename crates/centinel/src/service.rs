@@ -624,6 +624,9 @@ fn render_unit(spec: &Spec) -> String {
          Restart=on-failure\n\
          RestartSec=10\n\
          TimeoutStopSec={EXIT_TIMEOUT_SECS}\n\
+         # A reader's child offers itself to the OOM killer first, so the document costs its\n\
+         # own read. The default, OOMPolicy=stop, would stop the server for it.\n\
+         OOMPolicy=continue\n\
          StandardOutput=append:{log}\n\
          StandardError=append:{log}\n\
          \n\

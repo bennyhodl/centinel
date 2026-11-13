@@ -89,3 +89,9 @@ zip = "8"
 # Already in the tree under tokio, so this costs no new download.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Its own `main`, because a reader runs in a child of the program that asks for it, and the
+# libtest harness cannot be that child. See the file.
+[[test]]
+name = "deadline"
+harness = false

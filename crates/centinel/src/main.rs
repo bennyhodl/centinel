@@ -321,8 +321,18 @@ fn command_overview() -> String {
     out
 }
 
+fn main() -> Result<()> {
+    // A reader started by extract in a child of this program, so its deadline can stop it.
+    // Before the command line, the runtime and the store: the child does the read and
+    // nothing else. See `centinel_core::extract`'s `contained` module.
+    if let Some(code) = centinel_core::extract::serve_contained_read() {
+        std::process::exit(code);
+    }
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     let matches = build_cli().get_matches();
 
     let (name, sub) = matches
