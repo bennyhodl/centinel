@@ -479,7 +479,9 @@ a re-import rather than a re-embed — was already true without it.
 
 **Resumability is a consequence, not a feature.** No checkpoint file — the work list is
 `index chunk hashes − stored chunk hashes`. Kill it at chunk 40,000 and re-run; it starts
-at 40,001. Lance commits a version per append, so what landed before the kill is there. Same shape as `collect`, for the same reason. It is also why a monthly recrawl
+where the last commit left off. The writer commits every 32 MiB of vectors or 30 seconds,
+so a kill loses at most that much, and a stop — Ctrl-C, `--limit`, the end of the work —
+commits what it holds. Same shape as `collect`, for the same reason. It is also why a monthly recrawl
 is cheap: identical text has an identical `chunk_hash`, so only genuinely new chunks reach
 the model (§6.1). The subtraction runs the other way too: before it embeds, a run deletes
 the rows whose hash the index no longer has, then compacts the table and drops its
@@ -497,8 +499,8 @@ the op asks, and `embed` only points at it when its scan fails.
 
 **The pipeline is three parts.** A reader thread keeps windows of chunk text coming off
 SQLite, `concurrency` requests of `batch` chunks each are in flight to hide the round trip
-(`[inference.embed]`, `--batch N` for one run), and a writer task appends what comes back
-— so the server waits on neither SQLite nor Lance, and the async runtime is never
+(`[inference.embed]`, `--batch N` for one run), and a writer task appends what comes back,
+a commit per 32 MiB of vectors or 30 seconds — so the server waits on neither SQLite nor Lance, and the async runtime is never
 blocked, which matters more than usual here because an HTTP caller's connection has to
 survive a multi-hour run. A batch that fails is **bisected**, so one chunk the server
 will not take costs a dozen requests rather than 64 and is reported as skipped; a `Fatal`

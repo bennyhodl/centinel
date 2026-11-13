@@ -232,8 +232,9 @@ No checkpoint file. The work list is
 index chunk hashes  −  stored chunk hashes
 ```
 
-Kill it at chunk 40,000 and re-run; it starts at 40,001. Lance commits a version per
-append, so what landed before the kill is there.
+Kill it at chunk 40,000 and re-run; it starts where the last commit left off. The writer
+commits every 32 MiB of vectors or 30 seconds, whichever comes first, so a kill loses at
+most that much; a stop — Ctrl-C, `--limit`, the end of the work — commits what it holds.
 
 The subtraction runs the other way too. Before a run embeds anything it deletes the rows
 whose hash the index no longer has — what a rebuilt index or a `--rebuild --source`
@@ -242,7 +243,9 @@ one meaning: a row whose hash is in the index. The report says how many were `st
 how many it `pruned`. An empty index prunes nothing; it is an index that has not been
 built, not a verdict on the vectors. After the run the table is compacted and versions
 older than ten minutes are dropped, which is what keeps a query from reading one fragment
-per batch ever appended (one store reached 20,000 fragments and 16 GiB of manifests).
+per batch ever appended (one store reached 20,000 fragments and 16 GiB of manifests). A run
+that never gets there compacts its own appends every 32 fragments, so a killed or piecewise
+run does not leave thousands behind either.
 
 `--dry-run` creates no table and prunes nothing. A plan must leave nothing behind.
 

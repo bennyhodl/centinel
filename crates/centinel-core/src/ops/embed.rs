@@ -16,11 +16,13 @@
 //!   chunk hashes in the index  −  chunk hashes already in the table
 //! ```
 //!
-//! so killing a run at chunk 40,000 and re-running starts at 40,001. That falls out of
-//! the table being content-addressed and every append a commit, exactly as `collect`'s
-//! resumability falls out of the log. It is also why a **monthly recrawl is cheap**: a
-//! re-crawled site is ~95% identical, identical text has an identical `chunk_hash`, and
-//! only genuinely new chunks reach the model (SPEC §6.1).
+//! so killing a run at chunk 40,000 and re-running starts at the last commit before it —
+//! at most one commit's worth earlier ([`VectorTable::commit_due`]), and a stop rather than
+//! a kill commits what was held. That falls out of the table being content-addressed and
+//! every append a commit, exactly as `collect`'s resumability falls out of the log. It is
+//! also why a **monthly recrawl is cheap**: a re-crawled site is ~95% identical, identical
+//! text has an identical `chunk_hash`, and only genuinely new chunks reach the model
+//! (SPEC §6.1).
 //!
 //! ## One row per placement, and most rows are copies
 //!
@@ -49,7 +51,8 @@
 //! stage owns the table in both directions, so there is one definition of a stored row: a
 //! placement the index has. After the run the table is compacted and its superseded
 //! versions dropped ([`VectorTable::maintain`]), which is what keeps a query from reading
-//! one fragment per batch ever appended.
+//! one fragment per batch ever appended; a run that never gets there has had its appends
+//! compacted along the way ([`VectorTable::compact_appended`]).
 //!
 //! The one thing this will not do is empty the table on an empty index: zero placements is
 //! an index before `centinel index` has run. The cost that remains is an index rebuilt
@@ -64,9 +67,10 @@
 //!
 //! A reader thread keeps windows of chunk text coming off SQLite, `concurrency` requests
 //! are in flight at once to hide the round trip, and a writer task appends what has come
-//! back — so the server waits on neither SQLite nor Lance. How wide a request is and how
-//! many are in flight are `[inference.embed] batch` and `concurrency`; how the server
-//! packs the work onto its GPU is the server's tuning, not this binary's.
+//! back, a commit per thousands of rows or half a minute — so the server waits on neither
+//! SQLite nor Lance. How wide a request is and how many are in flight are
+//! `[inference.embed] batch` and `concurrency`; how the server packs the work onto its GPU
+//! is the server's tuning, not this binary's.
 //!
 //! ## Moving a table to another server
 //!
@@ -500,16 +504,25 @@ pub(crate) async fn embed_with(
             0,
             copyable.len() as u64,
         );
-        for (i, window) in copyable.chunks(COPY_WINDOW).enumerate() {
-            cancel.check()?;
-            let vectors = table.vectors_of(window).await?;
-            writer.write(vectors.into_iter().collect()).await?;
-            progress.step(
-                "copying vectors held under other documents",
-                ((i + 1) * COPY_WINDOW).min(copyable.len()) as u64,
-                copyable.len() as u64,
-            );
+        let copied = async {
+            for (i, window) in copyable.chunks(COPY_WINDOW).enumerate() {
+                cancel.check()?;
+                let vectors = table.vectors_of(window).await?;
+                writer.write(vectors.into_iter().collect()).await?;
+                progress.step(
+                    "copying vectors held under other documents",
+                    ((i + 1) * COPY_WINDOW).min(copyable.len()) as u64,
+                    copyable.len() as u64,
+                );
+            }
+            anyhow::Ok(())
         }
+        .await;
+        // Committed however the copies ended, and before the prune below: a held copy
+        // whose source row is pruned before it lands would cost a request to replace.
+        let flushed = writer.flush().await;
+        copied?;
+        flushed?;
     }
     let filled = writer.rows;
 
@@ -775,19 +788,30 @@ fn adopt_refusal(from: &Space, to: &Space, measured: Option<(usize, f32, f32)>) 
 }
 
 /// The one writer of rows for a run: it knows which documents still owe a row for each
-/// chunk, and for every vector it is handed it writes those rows with what the workspace
-/// says about each document right now — read under the table's lock, so a change the
-/// workspace makes after the read is a revision the next sync carries.
+/// chunk, holds the vectors it is handed until the table says a commit is due
+/// ([`VectorTable::commit_due`]), and then writes their rows with what the workspace says
+/// about each document right now — read under the table's lock at the commit, so a change
+/// the workspace makes after the read is a revision the next sync carries. After each
+/// commit it lets the table compact what the commits have left
+/// ([`VectorTable::compact_appended`]).
+///
+/// What it holds when the run stops is committed by [`Self::flush`]; what it holds when the
+/// process is killed is lost, and back on the next run's work list.
 struct Writer {
     table: VectorTable,
     store: Store,
     documents: Arc<Vec<DocumentId>>,
-    /// The documents owed a row for each chunk, by hash. A chunk written leaves the map.
+    /// The documents owed a row for each chunk, by hash. A chunk handed in leaves the map.
     pending: HashMap<[u8; 32], Vec<u32>>,
     classifications: Classifications,
-    /// Chunks written, whichever way their vector arrived.
+    /// Vectors handed in and not yet committed, each with the documents owed its row.
+    held: Vec<(String, Vec<u32>, Vec<f32>)>,
+    /// The rows `held` will make, and when the first of them arrived.
+    held_rows: usize,
+    held_since: Option<Instant>,
+    /// Chunks committed, whichever way their vector arrived.
     chunks: usize,
-    /// Rows written.
+    /// Rows committed.
     rows: usize,
 }
 
@@ -804,6 +828,9 @@ impl Writer {
             store,
             documents,
             pending,
+            held: Vec::new(),
+            held_rows: 0,
+            held_since: None,
             chunks: 0,
             rows: 0,
         })
@@ -819,43 +846,69 @@ impl Writer {
         self.pending.values().map(Vec::len).sum()
     }
 
-    /// Writes the rows these vectors are owed, one durable commit. A chunk nobody owes a
-    /// row for any more is skipped: a copy and the model may both offer it.
+    /// Takes the vectors for the rows they are owed, and commits what it holds once a
+    /// commit is due. A chunk nobody owes a row for any more is skipped: a copy and the
+    /// model may both offer it.
     async fn write(&mut self, entries: Vec<(String, Vec<f32>)>) -> anyhow::Result<()> {
-        let mut owed: Vec<(String, u32, Vec<f32>)> = Vec::new();
         for (hash, vector) in entries {
             let Some(documents) = self.pending.remove(&hash_bytes(&hash)?) else {
                 continue;
             };
-            self.chunks += 1;
-            for document in documents {
-                owed.push((hash.clone(), document, vector.clone()));
-            }
+            self.held_rows += documents.len();
+            self.held.push((hash, documents, vector));
         }
-        if owed.is_empty() {
+        if self.held.is_empty() {
             return Ok(());
         }
+        let since = *self.held_since.get_or_insert_with(Instant::now);
+        if self.table.commit_due(self.held_rows, since) {
+            self.flush().await?;
+            let lock = VectorLock::take(&self.store).await?;
+            self.table.compact_appended(&lock).await?;
+        }
+        Ok(())
+    }
+
+    /// Commits every row held, in one append, and nothing more. Nothing when nothing is
+    /// held.
+    ///
+    /// The end of a run flushes and does not compact: `maintain` follows a run that
+    /// finished, and a run that was stopped wants out, not a gigabyte rewrite.
+    async fn flush(&mut self) -> anyhow::Result<()> {
+        if self.held.is_empty() {
+            return Ok(());
+        }
+        let held = std::mem::take(&mut self.held);
+        let mut rows = Vec::with_capacity(self.held_rows);
+        self.held_rows = 0;
+        self.held_since = None;
+
         let lock = VectorLock::take(&self.store).await?;
         let mut states: HashMap<u32, DocState> = HashMap::new();
-        let mut rows = Vec::with_capacity(owed.len());
-        for (chunk_hash, document, vector) in owed {
-            let id = &self.documents[document as usize];
-            let state = match states.get(&document) {
-                Some(state) => state.clone(),
-                None => {
-                    let state = self.classifications.state_of(id)?;
-                    states.insert(document, state.clone());
-                    state
-                }
-            };
-            rows.push(Row {
-                chunk_hash,
-                document: id.clone(),
-                state,
-                vector,
-            });
+        for (chunk_hash, documents, vector) in &held {
+            for &document in documents {
+                let id = &self.documents[document as usize];
+                let state = match states.get(&document) {
+                    Some(state) => state.clone(),
+                    None => {
+                        let state = self.classifications.state_of(id)?;
+                        states.insert(document, state.clone());
+                        state
+                    }
+                };
+                rows.push(Row {
+                    chunk_hash: chunk_hash.clone(),
+                    document: id.clone(),
+                    state,
+                    vector: vector.clone(),
+                });
+            }
         }
+        // Before the append, which makes copies of its own.
+        let chunks = held.len();
+        drop(held);
         self.table.append(&lock, &rows).await?;
+        self.chunks += chunks;
         self.rows += rows.len();
         Ok(())
     }
@@ -916,8 +969,8 @@ struct Pipeline {
 }
 
 /// Windows either side of the requests may run ahead: the reader keeps this many read,
-/// the writer this many not yet committed. One would do; two absorbs jitter. More buys
-/// nothing and widens the gap between the progress count and the table.
+/// the writer this many not yet taken in. One would do; two absorbs jitter. More buys
+/// nothing. How much the writer holds before it commits is the table's to say.
 const PIPELINE_SLACK: usize = 2;
 
 /// The pipeline: read → request → write.
@@ -928,8 +981,9 @@ const PIPELINE_SLACK: usize = 2;
 ///
 /// The durable count is the writer's. Lance commits a version per append, a row's
 /// identity is its chunk and document, and the next run subtracts what is stored — so
-/// stopping mid-corpus costs nothing but what was in flight. The progress count runs at
-/// most a few windows ahead of the table; the report's figures are what actually landed.
+/// stopping mid-corpus costs nothing but what was in flight, and a kill what the writer
+/// held besides. The progress count runs up to one commit ahead of the table; the report's
+/// figures are what actually landed.
 async fn run(
     embedder: Embedder,
     index: Index,
@@ -968,11 +1022,14 @@ async fn run(
 
     let (write_tx, mut write_rx) =
         tokio::sync::mpsc::channel::<Vec<(String, Vec<f32>)>>(PIPELINE_SLACK);
+    // The channel closes however the run ends — the work done, `--limit` reached, a cancel
+    // or a failed request — and what the writer still holds is committed then.
     let writer = tokio::spawn(async move {
         let mut writer = writer;
         while let Some(entries) = write_rx.recv().await {
             writer.write(entries).await?;
         }
+        writer.flush().await?;
         anyhow::Ok(writer)
     });
 
@@ -2009,6 +2066,72 @@ mod tests {
         assert!(
             ctx.store.spend_dir().exists(),
             "the server's answers are in the ledger"
+        );
+    }
+
+    /// A run commits what comes back a buffer at a time, not a request at a time. A
+    /// version and a fragment per request is what grew the field VM's memory with every
+    /// commit and left thousands of fragments for `maintain` to fold. Counted as table
+    /// versions, which `maintain` adds a handful of its own to; one per request would be
+    /// forty and more.
+    #[tokio::test]
+    async fn a_run_commits_far_fewer_times_than_it_sends_requests() {
+        let server = crate::inference::fake::serve().await;
+        let (_d, ctx) = indexed_store(40).await;
+
+        let report = embed_on(
+            &ctx,
+            &server,
+            EmbedArgs {
+                batch: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.embedded, 40);
+        assert_eq!(report.remaining, 0);
+
+        let table = VectorTable::open_existing(&ctx.store.vectors_db())
+            .await
+            .unwrap();
+        assert_eq!(table.len().await.unwrap(), 40);
+        let versions = table.version().await.unwrap();
+        assert!(versions < 40, "{versions} versions for 40 requests");
+    }
+
+    /// A run that ends early commits what the writer was handed before it ends. Nothing
+    /// in a test reaches a commit's size or age, so every row here lands only because the
+    /// writer flushes when the run winds down — as it does on Ctrl-C and `--limit`.
+    #[tokio::test]
+    async fn a_run_that_fails_mid_way_keeps_what_came_back() {
+        // The width probe and ten requests are answered; every one after is an outage.
+        let server = crate::inference::fake::serve_failing_after(11, 503).await;
+        let (_d, ctx) = indexed_store(40).await;
+
+        let err = embed_on(
+            &ctx,
+            &server,
+            EmbedArgs {
+                batch: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(is_fatal(&err), "{err:#}");
+
+        let stored = VectorTable::open_existing(&ctx.store.vectors_db())
+            .await
+            .unwrap()
+            .len()
+            .await
+            .unwrap();
+        // At least the first request's: the fifth is not sent until the first's answer
+        // has gone to the writer.
+        assert!(
+            (1..=10).contains(&stored),
+            "{stored} rows stored of the ten requests answered"
         );
     }
 

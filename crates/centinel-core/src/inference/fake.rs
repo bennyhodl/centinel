@@ -65,10 +65,16 @@ pub(crate) async fn serve_salted(salt: u64) -> FakeServer {
 /// A server that answers every request with `status` — an outage, for the tests of what a
 /// stage does when one never ends.
 pub(crate) async fn serve_failing(status: u16) -> FakeServer {
-    serve_with(0, Some(status)).await
+    serve_failing_after(0, status).await
 }
 
-async fn serve_with(salt: u64, failing: Option<u16>) -> FakeServer {
+/// A server that answers `answered` requests to each path and then every one after with
+/// `status` — an outage that starts mid-run.
+pub(crate) async fn serve_failing_after(answered: usize, status: u16) -> FakeServer {
+    serve_with(0, Some((answered, status))).await
+}
+
+async fn serve_with(salt: u64, failing: Option<(usize, u16)>) -> FakeServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let hits: Arc<Mutex<HashMap<String, usize>>> = Arc::default();
@@ -84,7 +90,15 @@ async fn serve_with(salt: u64, failing: Option<u16>) -> FakeServer {
                     return;
                 };
                 let path = path.trim_start_matches("/v1/").to_string();
-                *seen.lock().unwrap().entry(path.clone()).or_default() += 1;
+                let nth = {
+                    let mut seen = seen.lock().unwrap();
+                    let count = seen.entry(path.clone()).or_default();
+                    *count += 1;
+                    *count
+                };
+                let failing = failing
+                    .filter(|&(answered, _)| nth > answered)
+                    .map(|(_, status)| status);
                 let (status, answer) = match (failing, path.as_str()) {
                     (Some(status), _) => (status, json!({"error": "unavailable"}).to_string()),
                     (None, "embeddings") => (200, embeddings(&body, salt)),
