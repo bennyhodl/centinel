@@ -204,9 +204,12 @@ pub struct Published {
 ///   is invented, and a private calendar answers 404 to the address, which is reported as
 ///   what it is.
 ///
-/// Resolution and the same-host question are the caller's. This only reads markup.
-pub fn published(html: &str, base: &Url) -> Vec<Published> {
+/// `page` is the address the page was served from; its links resolve against that, or
+/// against the `<base href>` it declares. The same-host question is the caller's. This only
+/// reads markup.
+pub fn published(html: &str, page: &Url) -> Vec<Published> {
     let scan = crate::html::Scan::new(html);
+    let base = scan.base(page);
     let mut out: Vec<Published> = Vec::new();
     let mut push = |url: Url, format: Format, how: &'static str| {
         if !out.iter().any(|p| p.url == url) {
@@ -225,7 +228,7 @@ pub fn published(html: &str, base: &Url) -> Vec<Published> {
             Some(t) if t == "text/calendar" => Format::Calendar,
             _ => continue,
         };
-        if let Some(url) = tag.attr("href").and_then(|h| join(base, h)) {
+        if let Some(url) = tag.attr("href").and_then(|h| join(&base, h)) {
             push(url, format, "link rel=alternate");
         }
     }
@@ -244,7 +247,7 @@ pub fn published(html: &str, base: &Url) -> Vec<Published> {
             true => format!("https:{}", &href[7..]),
             false => href.to_string(),
         };
-        if let Some(url) = join(base, &href)
+        if let Some(url) = join(&base, &href)
             && (webcal || url.path().to_ascii_lowercase().ends_with(".ics"))
         {
             push(url, Format::Calendar, ".ics link");
@@ -252,7 +255,7 @@ pub fn published(html: &str, base: &Url) -> Vec<Published> {
     }
 
     for tag in scan.tags(&["iframe"]) {
-        let Some(url) = tag.attr("src").and_then(|s| join(base, s)) else {
+        let Some(url) = tag.attr("src").and_then(|s| join(&base, s)) else {
             continue;
         };
         for ics in google_calendar_ics(&url) {
@@ -262,8 +265,8 @@ pub fn published(html: &str, base: &Url) -> Vec<Published> {
     out
 }
 
-fn join(base: &Url, href: &str) -> Option<Url> {
-    let mut url = base.join(&crate::html::unescape(href)).ok()?;
+fn join(base: &crate::html::Base, href: &str) -> Option<Url> {
+    let mut url = base.join(href)?;
     url.set_fragment(None);
     matches!(url.scheme(), "http" | "https").then_some(url)
 }

@@ -97,15 +97,15 @@ impl Strategy for Links {
                 }
                 pass.read_surface();
 
-                // Relative links resolve against where the page was served, which a
-                // redirect may have moved.
-                let base = fetched
+                // Where the page was served, which a redirect may have moved. Its links
+                // resolve against that, or against the `<base href>` it declares.
+                let served = fetched
                     .meta
                     .get("final_url")
                     .and_then(|u| Url::parse(u).ok())
                     .unwrap_or_else(|| start.clone());
                 let html = String::from_utf8_lossy(&fetched.bytes);
-                for target in pages_in(&html, &base) {
+                for target in pages_in(&html, &served) {
                     if !scope.contains(&target) {
                         if target.origin() == start.origin() {
                             outside += 1;
@@ -148,15 +148,12 @@ impl Strategy for Links {
 
 /// Every `<a href>` on a page that could be a page: http(s), fragment dropped, and not an
 /// address whose name says it is a document.
-fn pages_in(html: &str, base: &Url) -> Vec<Url> {
+fn pages_in(html: &str, page: &Url) -> Vec<Url> {
     let mut out = Vec::new();
-    for tag in crate::html::Scan::new(html).tags(&["a"]) {
-        let Some(href) = tag.attr("href") else {
-            continue;
-        };
-        // `&amp;` in an attribute is an escaped `&`, and joining it unescaped yields a
-        // different address.
-        let Ok(mut target) = base.join(&crate::html::unescape(href)) else {
+    let scan = crate::html::Scan::new(html);
+    let base = scan.base(page);
+    for tag in scan.tags(&["a"]) {
+        let Some(mut target) = tag.attr("href").and_then(|href| base.join(href)) else {
             continue;
         };
         if !matches!(target.scheme(), "http" | "https") {
@@ -176,7 +173,7 @@ fn pages_in(html: &str, base: &Url) -> Vec<Url> {
         out.push(target);
     }
     out.extend(
-        crate::feed::published(html, base)
+        crate::feed::published(html, page)
             .into_iter()
             .map(|feed| feed.url),
     );

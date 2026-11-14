@@ -1150,14 +1150,14 @@ mod tests {
     use super::*;
     use crate::html::Scan;
 
-    fn said(base: &str, html: &str) -> Vec<Mention> {
-        let base = url::Url::parse(base).unwrap();
-        Scan::new(html)
-            .links()
+    fn said(page: &str, html: &str) -> Vec<Mention> {
+        let scan = Scan::new(html);
+        let base = scan.base(&url::Url::parse(page).unwrap());
+        scan.links()
             .iter()
             .flat_map(|link| {
                 let href = link.tag.attr("href").unwrap();
-                mentions(&base.join(&crate::html::unescape(href)).unwrap(), link)
+                mentions(&base.join(href).unwrap(), link)
             })
             .collect()
     }

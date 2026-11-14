@@ -479,16 +479,18 @@ impl Candidate {
     }
 }
 
-/// The icon a page would most like to be drawn with, its link resolved against `base`.
-fn best(html: &str, base: &Url) -> Option<Url> {
-    candidates(html, base)
+/// The icon a page would most like to be drawn with, given the address it was served from.
+fn best(html: &str, page: &Url) -> Option<Url> {
+    candidates(html, page)
         .into_iter()
         .min_by_key(Candidate::rank)
         .map(|candidate| candidate.url)
 }
 
-fn candidates(html: &str, base: &Url) -> Vec<Candidate> {
+fn candidates(html: &str, page: &Url) -> Vec<Candidate> {
     let scan = Scan::new(html);
+    // A `<link href>` resolves against the page's `<base href>` as an `<a href>` does.
+    let base = scan.base(page);
     let mut out = Vec::new();
     for tag in scan.tags(&["link"]) {
         let rel = tag.attr("rel").unwrap_or_default().to_ascii_lowercase();
@@ -506,7 +508,7 @@ fn candidates(html: &str, base: &Url) -> Vec<Candidate> {
         }
         let Some(url) = tag
             .attr("href")
-            .and_then(|href| base.join(crate::html::unescape(href).trim()).ok())
+            .and_then(|href| base.join(href))
             .filter(|url| matches!(url.scheme(), "http" | "https"))
         else {
             continue;

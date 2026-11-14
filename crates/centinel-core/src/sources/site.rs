@@ -393,7 +393,7 @@ impl SiteSource {
     /// the same rule [`crawl::links`] follows, so a feed is collected exactly when a link to
     /// it would have been.
     fn add_published_feeds(&self, seed: &Seed, found: &mut crate::strategies::crawl::Enumerated) {
-        let Some(base) = seed.final_url() else {
+        let Some(served) = seed.final_url() else {
             return;
         };
         if crate::content::ContentKind::classify(&seed.page.meta, &seed.page.bytes)
@@ -401,10 +401,10 @@ impl SiteSource {
         {
             return;
         }
-        let scope = crawl::scope::Scope::of(&base);
+        let scope = crawl::scope::Scope::of(&served);
         let html = String::from_utf8_lossy(&seed.page.bytes);
         let mut added = 0u64;
-        for feed in crate::feed::published(&html, &base) {
+        for feed in crate::feed::published(&html, &served) {
             let address = feed.url.to_string();
             if !scope.contains(&feed.url) {
                 found.notes.push(Note::marked(
@@ -616,14 +616,14 @@ impl SiteSource {
     /// Gated on the content kind rather than on the extension in the URL: a `.gov` CMS
     /// serves plenty of HTML from paths that end in neither `.html` nor a slash, and a PDF
     /// must never be scanned as though it were markup.
-    fn enclosures(&self, fetched: &crate::domain::Fetched, base: &str) -> Vec<String> {
+    fn enclosures(&self, fetched: &crate::domain::Fetched, served: &str) -> Vec<String> {
         if crate::content::ContentKind::classify(&fetched.meta, &fetched.bytes)
             != crate::content::ContentKind::Html
         {
             return Vec::new();
         }
         let html = String::from_utf8_lossy(&fetched.bytes);
-        let found = enclosure::documents(&html, base, enclosure::MAX_PER_PAGE);
+        let found = enclosure::documents(&html, served, enclosure::MAX_PER_PAGE);
 
         self.enclosed.fetch_add(found.urls.len(), Ordering::Relaxed);
         self.dropped.fetch_add(found.dropped, Ordering::Relaxed);
@@ -841,15 +841,15 @@ impl Source for SiteSource {
             let fetched = page?;
 
             // Where the bytes actually came from, so a document relative to a redirected
-            // page resolves against the page it really is.
-            let base = fetched
+            // page resolves against the page it really is (or the `<base href>` it declares).
+            let served = fetched
                 .meta
                 .get("final_url")
                 .cloned()
                 .unwrap_or_else(|| resource.natural_key.clone());
             // The branch is on what the strategy *named*, never on which strategy it was.
             let enclosed = match self.scans_for_enclosures() {
-                true => self.enclosures(&fetched, &base),
+                true => self.enclosures(&fetched, &served),
                 false => Vec::new(),
             };
             // On what the bytes are, wherever the address came from: a feed a sitemap
@@ -1430,6 +1430,105 @@ mod tests {
                 && n.detail.contains("not followed")),
             "{:?}",
             out.notes
+        );
+    }
+
+    /// `largo.com`: every page declares `<base href="https://www.largo.com/" />` and links
+    /// relative to it. Read against the page instead, each link doubled the directory —
+    /// `/connect/mayor_and_commission/connect/mayor_and_commission/mayor.php` — and 4,309 of
+    /// the 4,434 addresses one run discovered were 404s it had invented.
+    ///
+    /// One page, through every reader of its links: the walk that discovers pages and the
+    /// feeds they publish, the enclosure scan when the page is collected, and the crumb scan
+    /// collect writes to the ledger (whose mentions carry the address a name links to).
+    #[tokio::test]
+    async fn links_resolve_against_the_base_a_page_declares() {
+        let section = "https://www.largo.com/connect/mayor_and_commission/index.php";
+        let page = |links: &str| {
+            format!(
+                r#"<html><head><base href="https://www.largo.com/" />
+                <link rel="alternate" type="application/rss+xml" href="feeds/news.xml"></head>
+                <body>{links}</body></html>"#
+            )
+        };
+        let s = site_at(
+            "https://www.largo.com/",
+            Scripted::default()
+                .refusing("https://www.largo.com/robots.txt", Liveness::Gone)
+                .serving_as(
+                    "https://www.largo.com/",
+                    "text/html",
+                    r#"<html><body><a href="connect/mayor_and_commission/index.php">Mayor and Commission</a></body></html>"#,
+                )
+                .serving_as(
+                    section,
+                    "text/html",
+                    &page(
+                        r#"<a href="connect/mayor_and_commission/mayor.php">Mayor Woody Brown</a>
+                        <a href="Document_Center/agenda.pdf">Agenda</a>"#,
+                    ),
+                )
+                .serving_as(
+                    "https://www.largo.com/connect/mayor_and_commission/mayor.php",
+                    "text/html",
+                    &page(r#"<a href="connect/mayor_and_commission/commission.php">Commission</a>"#),
+                )
+                .serving_as(
+                    "https://www.largo.com/Document_Center/agenda.pdf",
+                    "application/pdf",
+                    "%PDF-1.4\nthe agenda\n%%EOF",
+                ),
+            DiscoveryLimits::default(),
+        );
+
+        let out = s.enumerate(&Progress::none()).await.unwrap();
+        assert_eq!(s.method(), "links");
+        let mut keys: Vec<&str> = out
+            .resources
+            .iter()
+            .map(|r| r.natural_key.as_str())
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "https://www.largo.com/",
+                "https://www.largo.com/connect/mayor_and_commission/commission.php",
+                section,
+                "https://www.largo.com/connect/mayor_and_commission/mayor.php",
+                "https://www.largo.com/feeds/news.xml",
+            ],
+            "every link read against the declared base, none against the page"
+        );
+
+        let resource = Resource::new(s.id().clone(), section);
+        let got = s.acquire(&resource, &Progress::none()).await.unwrap();
+        let keys: Vec<&str> = got
+            .iter()
+            .map(|a| a.resource.natural_key.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            [section, "https://www.largo.com/Document_Center/agenda.pdf"],
+            "the page and the document it links, at the address the base gives it"
+        );
+
+        let row = crate::crumbs::scan_page(
+            &String::from_utf8_lossy(&got[0].fetched.bytes),
+            crate::crumbs::Carrier::at_address(section),
+        );
+        let named: Vec<&str> = row
+            .mentions
+            .iter()
+            .flatten()
+            .filter_map(|m| match m {
+                crate::rolodex::Mention::Page { url, .. } => Some(url.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            named,
+            ["https://www.largo.com/connect/mayor_and_commission/mayor.php"]
         );
     }
 
