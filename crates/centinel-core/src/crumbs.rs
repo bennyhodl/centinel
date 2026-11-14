@@ -233,13 +233,14 @@ pub fn scan_page(html: &str, page: Carrier) -> Recorded {
     let mut by_host: BTreeMap<String, (usize, String)> = BTreeMap::new();
     let mut mentions = Vec::new();
 
-    if let Ok(base) = url::Url::parse(&page.address) {
-        let here = base.host_str().unwrap_or_default().to_string();
-        for link in crate::html::Scan::new(html).links() {
-            let Some(href) = link.tag.attr("href") else {
-                continue;
-            };
-            let Ok(target) = base.join(&crate::html::unescape(href)) else {
+    if let Ok(address) = url::Url::parse(&page.address) {
+        let here = address.host_str().unwrap_or_default().to_string();
+        let scan = crate::html::Scan::new(html);
+        // Resolved against the page's `<base href>` when it declares one, so a relative link
+        // under a base on another host is a crumb, as it is to a reader who clicks it.
+        let base = scan.base(&address);
+        for link in scan.links() {
+            let Some(target) = link.tag.attr("href").and_then(|href| base.join(href)) else {
                 continue;
             };
             // Before the host test: a bio page on the site's own host and a `mailto:` both
@@ -825,6 +826,12 @@ mod tests {
         assert_eq!(crumbs.len(), 1);
         assert_eq!(crumbs[0].host, "publicrec.hillsclerk.com");
         assert_eq!(crumbs[0].example, "https://publicrec.hillsclerk.com/Civil/");
+
+        // A relative link under a `<base>` on another host leaves the host, as it does for
+        // a reader who clicks it.
+        let crumbs = read(r#"<base href="https://cdn.example.com/"><a href="agenda">x</a>"#);
+        assert_eq!(crumbs.len(), 1);
+        assert_eq!(crumbs[0].example, "https://cdn.example.com/agenda");
     }
 
     /// Links and pages are two questions. A template linking one host four times from one

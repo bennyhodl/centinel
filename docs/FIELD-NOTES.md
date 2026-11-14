@@ -1501,6 +1501,13 @@ Four resolvers each take their own base and none reads `<base>`:
 **Way around:** one place says what a page's links resolve against — `<base href>`
 resolved against the page, else the page — and all four use it.
 
+*(Later: fixed. `html::Scan::base` says what a page's links resolve against — the first
+`<base href>`, resolved against the page, else the page, as the HTML spec has it — and
+`html::Base::join` is the one way an `href` becomes an address. All four resolvers use it,
+and so do feed autodiscovery, icon discovery and the rolodex's mentions. An enclosure still
+has to be on the page's own host, not the base's. Readability already read `<base>` itself.
+Still open: only a quoted `href` is read, as everywhere in `Scan`.)*
+
 ### Fault 5 — a filename in a script becomes a document address (tampa, 196 × 404)
 
 Every `tampa.gov/document/<slug>-<id>` page links its PDF correctly, and we fetch it:

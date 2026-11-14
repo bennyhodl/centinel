@@ -136,6 +136,30 @@ impl<'a> Scan<'a> {
         out
     }
 
+    /// What this page's links resolve against, given the address it was served from.
+    ///
+    /// The HTML spec's rule: the first `<base>` that has an `href`, that `href` resolved
+    /// against the page, and the page itself when there is none. A first `<base href>` that
+    /// does not parse, or names a `data:` or `javascript:` URL, is ignored rather than
+    /// passed over for a later one — the spec freezes the first, and so does a browser.
+    ///
+    /// Only a quoted `href` is read, as everywhere in `Scan`, so an unquoted one is a
+    /// `<base>` with no `href` here and a later quoted one wins.
+    ///
+    /// `largo.com` is why this exists: every page declares a base of its own root and
+    /// links `connect/mayor_and_commission/mayor.php`. Read against the page, that doubled
+    /// the directory on every link, and 4,309 of the 4,434 addresses one run discovered
+    /// there were 404s it had invented.
+    pub fn base(&self, page: &url::Url) -> Base {
+        let declared = self
+            .tags(&["base"])
+            .into_iter()
+            .find_map(|tag| tag.attr("href"))
+            .and_then(|href| page.join(&unescape(href)).ok())
+            .filter(|url| !matches!(url.scheme(), "data" | "javascript"));
+        Base(declared.unwrap_or_else(|| page.clone()))
+    }
+
     /// The document's own name.
     ///
     /// `og:title` first, because a `<title>` is usually the page name plus the site name
@@ -160,6 +184,24 @@ impl<'a> Scan<'a> {
         let start = self.lower[open..].find('>').map(|i| open + i + 1)?;
         let end = self.lower[start..].find("</title").map(|i| i + start)?;
         Some(&self.html[start..end])
+    }
+}
+
+/// What a page's relative links resolve against, from [`Scan::base`].
+///
+/// A type rather than a bare `Url` so that every reader of an `href` turns it into an
+/// address the same way. Four of them used to join against whatever address they were
+/// handed, each with its own copy of the `&amp;` rule, and none read `<base>`.
+pub struct Base(url::Url);
+
+impl Base {
+    /// The address an `href` names, as a browser would follow it.
+    ///
+    /// `&amp;` in an attribute is an escaped `&`, and joining it unescaped yields a
+    /// different address. No scheme filter: `mailto:` is a mention to the rolodex and
+    /// `webcal:` a calendar to the feed reader, so what to keep is each caller's question.
+    pub fn join(&self, href: &str) -> Option<url::Url> {
+        self.0.join(&unescape(href)).ok()
     }
 }
 
@@ -472,6 +514,46 @@ mod tests {
         assert_eq!(scan.title().as_deref(), Some("Proclamation"));
         assert_eq!(scan.tags(&["a"])[0].attr("href"), Some("/a.pdf"));
         assert_eq!(literals(scan.scripts()[0]), vec!["/b.pdf"]);
+    }
+
+    /// The spec's rule for a page's base, one case per clause.
+    #[test]
+    fn links_resolve_against_the_first_base_href_and_else_the_page() {
+        let page = url::Url::parse("https://www.largo.com/connect/mayor/index.php").unwrap();
+        let resolved = |html: &str| {
+            Scan::new(html)
+                .base(&page)
+                .join("mayor.php?a=1&amp;b=2")
+                .unwrap()
+                .to_string()
+        };
+
+        // largo.com, verbatim.
+        assert_eq!(
+            resolved(r#"<head><base href="https://www.largo.com/" /></head>"#),
+            "https://www.largo.com/mayor.php?a=1&b=2"
+        );
+        // No `<base>`, or one with no `href`: the page.
+        assert_eq!(
+            resolved("<head></head>"),
+            "https://www.largo.com/connect/mayor/mayor.php?a=1&b=2"
+        );
+        // The first `<base>` with an `href` wins, and a relative one resolves against the page.
+        assert_eq!(
+            resolved(r#"<base target="_blank"><BASE HREF="../docs/"><base href="/other/">"#),
+            "https://www.largo.com/connect/docs/mayor.php?a=1&b=2"
+        );
+        // An unparseable first one is ignored, not passed over for the next.
+        for ignored in [
+            r#"<base href="https://[oops/"><base href="/other/">"#,
+            r#"<base href="javascript:void(0)">"#,
+        ] {
+            assert_eq!(
+                resolved(ignored),
+                "https://www.largo.com/connect/mayor/mayor.php?a=1&b=2",
+                "{ignored}"
+            );
+        }
     }
 
     #[test]

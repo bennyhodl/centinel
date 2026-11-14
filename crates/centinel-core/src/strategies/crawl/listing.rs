@@ -164,13 +164,10 @@ impl Strategy for Listing {
 /// `/251agendaonline/.pdf?documentType=`, an address naming no document.
 fn links_in(html: &str, page: &Url, root: &Url) -> Vec<Url> {
     let mut out = Vec::new();
-    for tag in crate::html::Scan::new(html).tags(&["a"]) {
-        let Some(href) = tag.attr("href") else {
-            continue;
-        };
-        // `&amp;` in an attribute is an escaped `&`, and joining it unescaped yields a
-        // different address.
-        let Ok(target) = page.join(&crate::html::unescape(href)) else {
+    let scan = crate::html::Scan::new(html);
+    let base = scan.base(page);
+    for tag in scan.tags(&["a"]) {
+        let Some(target) = tag.attr("href").and_then(|href| base.join(href)) else {
             continue;
         };
         // Same host, and inside the tree. This is what makes the parent link a non-event

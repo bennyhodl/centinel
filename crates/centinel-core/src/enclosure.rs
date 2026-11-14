@@ -61,9 +61,13 @@ pub struct Enclosures {
     pub dropped: usize,
 }
 
-/// Every document `html` embeds, resolved against `base`.
-pub fn documents(html: &str, base: &str, limit: usize) -> Enclosures {
-    let Ok(base) = url::Url::parse(base) else {
+/// Every document `html` embeds, given the address the page was served from.
+///
+/// Resolved as the page's own links are, against its `<base href>` when it declares one; a
+/// script's quoted URL too, since a viewer hands it to the browser, which resolves it the
+/// same way.
+pub fn documents(html: &str, page: &str, limit: usize) -> Enclosures {
+    let Ok(page) = url::Url::parse(page) else {
         return Enclosures::default();
     };
 
@@ -71,11 +75,12 @@ pub fn documents(html: &str, base: &str, limit: usize) -> Enclosures {
     let mut urls = Vec::new();
     let mut dropped = 0;
 
-    // One lowercased copy of the page, asked both questions. They used to make one each.
+    // One lowercased copy of the page, asked every question. They used to make one each.
     let scan = crate::html::Scan::new(html);
+    let base = scan.base(&page);
 
     for candidate in tag_targets(&scan).into_iter().chain(script_targets(&scan)) {
-        let Some(absolute) = resolve(&base, &candidate) else {
+        let Some(absolute) = resolve(&base, &page, &candidate) else {
             continue;
         };
         if !seen.insert(absolute.clone()) {
@@ -90,13 +95,16 @@ pub fn documents(html: &str, base: &str, limit: usize) -> Enclosures {
     Enclosures { urls, dropped }
 }
 
-/// Absolute, same-host, and something we could read. `None` for anything else.
-fn resolve(base: &url::Url, candidate: &str) -> Option<String> {
-    let joined = base.join(&crate::html::unescape(candidate)).ok()?;
+/// Absolute, on the page's own host, and something we could read. `None` for anything else.
+///
+/// The host is the page's, not the base's: a `<base href>` on another host moves where the
+/// links go, not which site this Source is.
+fn resolve(base: &crate::html::Base, page: &url::Url, candidate: &str) -> Option<String> {
+    let joined = base.join(candidate)?;
     if !matches!(joined.scheme(), "http" | "https") {
         return None;
     }
-    if joined.host_str() != base.host_str() {
+    if joined.host_str() != page.host_str() {
         return None;
     }
     if !is_document(joined.path()) {
@@ -304,6 +312,10 @@ mod tests {
             <a href="https://example.com/other.pdf">elsewhere</a>
             <a href="/ours.pdf">ours</a>"#;
         assert_eq!(found(html), vec!["https://www.tampa.gov/ours.pdf"]);
+
+        // A `<base>` on another host moves where the links go, not which site this is.
+        let based = r#"<base href="https://cdn.example.com/files/"><a href="theirs.pdf">x</a>"#;
+        assert!(found(based).is_empty());
     }
 
     #[test]
