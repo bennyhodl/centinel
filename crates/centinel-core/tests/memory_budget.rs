@@ -63,13 +63,9 @@ async fn a_full_budget_holds_back_reads_and_fetches_until_room_is_given_back() {
     let ctx = Ctx::new(store);
 
     // Extract.
+    let (progress, cancel) = (Progress::none(), Cancel::none());
     let holding = budget.reserve(u64::MAX).await;
-    let mut pass = Box::pin(extract(
-        &ctx,
-        ExtractArgs::default(),
-        &Progress::none(),
-        &Cancel::none(),
-    ));
+    let mut pass = Box::pin(extract(&ctx, ExtractArgs::default(), &progress, &cancel));
     assert!(
         still_waiting(&mut pass).await,
         "extract read a document while the budget had no room"
