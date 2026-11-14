@@ -588,7 +588,10 @@ mod tests {
         assert!(waits(budget.reserve(3 * quarter)).await, "3 + 3 is over 4");
         assert!(!waits(budget.reserve(quarter)).await, "3 + 1 fits");
         drop(first);
-        assert!(!waits(budget.reserve(3 * quarter)).await, "given back on drop");
+        assert!(
+            !waits(budget.reserve(3 * quarter)).await,
+            "given back on drop"
+        );
     }
 
     /// A document heavier than the whole budget is not refused and does not wait forever:
@@ -653,7 +656,11 @@ mod tests {
             (52_000_000, 867 * mb),
         ];
         for (size, peak) in measured {
-            assert!(read_cost(size) > peak, "{size} bytes: {} <= {peak}", read_cost(size));
+            assert!(
+                read_cost(size) > peak,
+                "{size} bytes: {} <= {peak}",
+                read_cost(size)
+            );
         }
 
         let large = Budget::auto(&Machine {
@@ -690,7 +697,10 @@ mod tests {
         assert_eq!((alone.bytes(), alone.origin()), (12 * gib, Origin::Machine));
 
         let scoped = Budget::auto(&machine(Some(16 * gib), Some(1400 * MIB)));
-        assert_eq!((scoped.bytes(), scoped.origin()), (1050 * MIB, Origin::Cgroup));
+        assert_eq!(
+            (scoped.bytes(), scoped.origin()),
+            (1050 * MIB, Origin::Cgroup)
+        );
 
         // v1 says "unlimited" as a number near i64::MAX, which must not win.
         let v1 = Budget::auto(&machine(Some(16 * gib), Some(9_223_372_036_854_771_712)));
@@ -722,7 +732,10 @@ mod tests {
     fn meminfo_is_read_in_bytes() {
         let meminfo = "MemTotal:        3423456 kB\nMemFree:  10 kB\nMemAvailable:    2005000 kB\n";
         assert_eq!(meminfo_field(meminfo, "MemTotal"), Some(3_423_456 * 1024));
-        assert_eq!(meminfo_field(meminfo, "MemAvailable"), Some(2_005_000 * 1024));
+        assert_eq!(
+            meminfo_field(meminfo, "MemAvailable"),
+            Some(2_005_000 * 1024)
+        );
         assert_eq!(meminfo_field(meminfo, "SwapTotal"), None);
     }
 
