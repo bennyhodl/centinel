@@ -341,6 +341,25 @@ which gives back the core and the memory. The reader then counts as having produ
 the next reader in the list takes the document, and the verdict names the stop. It takes no
 new mechanism, which is the reader-list contract above doing its job.
 
+**Memory budget** — how much one process may hold at once: `--memory`, else
+`[resources] memory`, else three quarters of the smaller of the machine's memory and its
+cgroup's limit. Read once at start, owned by `memory::Budget`, and shared by every op the
+process runs. *Why it matters:* readers scale with cores and their cost scales with the
+document, so a fixed count of them died on a 3.3 GB VM and idles on a 64 GB one (FIELD-NOTES,
+Fault 9). One figure replaces a knob per stage, which would hand the operator that
+arithmetic and still die on a wrong guess.
+
+**Reservation** — room taken from the budget before a unit of work and given back when it
+ends: extract's per document, at `memory::read_cost` of its size, and a fetched body's at its
+declared length, or the size ceiling while the server has not declared one. A full budget
+makes the next unit **wait**, so a small machine runs slower instead of being killed. A unit
+holds one reservation at a time, and one larger than all the room is cut to all of it,
+so it runs alone rather than never. An estimate, not a measurement: a document's size
+is a poor predictor of its parse, so up to 16 MiB the estimate takes the worst ratio seen
+(40×), and past it the slope the measurements fall to (8×). A contained reader still offers
+itself to the OOM killer for the document it is wrong about. Reservations share the
+**room**: the budget less the Lance caches it sizes, which are held beside the work.
+
 **Chunk geometry** — the target and overlap sizes chunking uses. Load-bearing far outside
 chunking, because a `chunk_hash` hashes the chunk's *text* and the geometry decides the
 text. Changing it produces a wholly different set of hashes, so the old chunks stay in the

@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use crate::domain::{Fetched, Liveness};
-use crate::policy::HostPolicy;
+use crate::policy::{DEFAULT_MAX_BYTES, HostPolicy};
 
 /// A fetch that failed.
 ///
@@ -69,7 +69,24 @@ impl Fetcher {
     }
 
     /// GETs a URL, classifying any non-success status into a [`Liveness`].
+    ///
+    /// Room in the [memory budget](crate::memory) is taken before the request is sent, the
+    /// ceiling's worth until the server says how long the body is (see [`Self::body`]). A
+    /// run walks sixteen hosts at once, and the ceiling bounds one body, not the sixteen:
+    /// on the field VM four hosts reading documents together took a run from 200 to 712 MB.
+    /// Waiting before the request costs only time. Waiting with a response open would spend
+    /// the request's timeout on the wait, and a page would be recorded as an error because
+    /// the machine was busy.
+    ///
+    /// The room taken is at most [`DEFAULT_MAX_BYTES`], even under a raised ceiling. Raising
+    /// it is for the few large documents worth having (`collect --max-mb 2048`), and
+    /// reserving the raised figure would make every 50 KB page in the same pass wait for
+    /// 2 GiB. The ceiling itself is still enforced on the body as it streams; a document
+    /// past the default is simply held without all of its room reserved.
     pub async fn get(&self, url: &str) -> Result<Fetched, FetchFailure> {
+        let mut held = crate::memory::budget()
+            .reserve(self.max_bytes.min(DEFAULT_MAX_BYTES))
+            .await;
         let started = std::time::Instant::now();
         let resp = self.client.get(url).send().await.map_err(|e| {
             let ms = started.elapsed().as_millis() as u64;
@@ -130,7 +147,7 @@ impl Fetcher {
         // The post-redirect URL — where the bytes actually came from.
         meta.insert("final_url".into(), resp.url().to_string());
 
-        let bytes = self.body(resp).await?;
+        let bytes = self.body(resp, &mut held).await?;
         Ok(Fetched { bytes, meta })
     }
 
@@ -142,7 +159,18 @@ impl Fetcher {
     /// as the frames arrived and once as one contiguous copy, and checked the ceiling only
     /// after: an 830 MB slideshow took a run on a 3 GB machine to 2.2 GB and the kernel
     /// killed it.
-    async fn body(&self, mut resp: reqwest::Response) -> Result<Vec<u8>, FetchFailure> {
+    ///
+    /// `held` is the room [`Self::get`] took at the ceiling. A declared length gives back
+    /// what it does not need, so a server that says how long its bodies are lets more of
+    /// them be read at once. One that does not, which is any compressed page, keeps the
+    /// ceiling until its body is read, since nothing short of reading it says how much it
+    /// holds. Growing the room as the body grows would mean waiting with room already held,
+    /// and two bodies doing that can wait on each other for good.
+    async fn body(
+        &self,
+        mut resp: reqwest::Response,
+        held: &mut crate::memory::Reservation<'_>,
+    ) -> Result<Vec<u8>, FetchFailure> {
         let ceiling = crate::render::bytes(self.max_bytes);
         let status = resp.status().as_u16();
         let refuse = |detail: String, bytes: u64| FetchFailure {
@@ -163,6 +191,9 @@ impl Fetcher {
                 ),
                 len,
             ));
+        }
+        if let Some(len) = declared {
+            held.shrink_to(len);
         }
 
         let mut body = Vec::with_capacity(declared.unwrap_or(0) as usize);

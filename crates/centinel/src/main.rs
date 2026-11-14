@@ -66,6 +66,19 @@ fn build_cli() -> Command {
                 .help("Store root [default: `root` in centinel.toml, else ~/.centinel]"),
         )
         .arg(
+            // Parsed here, so a size that is not one is clap's error before anything runs.
+            // Read once, before the store opens: see [`install_budget`].
+            Arg::new("memory")
+                .long("memory")
+                .global(true)
+                .value_name("SIZE")
+                .value_parser(centinel_core::memory::parse_size)
+                .help(
+                    "Memory this run may hold, e.g. 1.5GiB [default: [resources] memory in \
+                     centinel.toml, else three quarters of the machine or its cgroup]",
+                ),
+        )
+        .arg(
             Arg::new("verbose")
                 .long("verbose")
                 .short('v')
@@ -263,6 +276,10 @@ fn serve_argv(m: &clap::ArgMatches) -> Result<Vec<String>> {
     if let Some(port) = m.get_one::<u16>("tailscale-port") {
         argv.extend(["--tailscale-port".to_string(), port.to_string()]);
     }
+    // The service is the process the budget is for: a server's schedules run inside it.
+    if let Some(bytes) = m.get_one::<u64>("memory") {
+        argv.extend(["--memory".to_string(), bytes.to_string()]);
+    }
     if m.get_flag("verbose") {
         argv.push("-v".into());
     }
@@ -372,11 +389,13 @@ async fn run() -> Result<()> {
     }
 
     let root = resolve_root(&matches)?;
+    let (config, config_path) = config_in_effect(&matches)?;
+    install_budget(&matches, &config)?;
     let store = Store::open(&root)
         .await
         .with_context(|| format!("opening store at {}", root.display()))?;
     tracing::debug!(root = %root.display(), "store open");
-    import_sources(&store, &matches).await?;
+    import_sources(&store, &config, config_path).await?;
     let ctx = Arc::new(Ctx::new(store));
 
     let result = match name {
@@ -597,11 +616,31 @@ fn resolve_root(matches: &clap::ArgMatches) -> Result<PathBuf> {
     if let Some(typed) = matches.get_one::<String>("root") {
         return Ok(config::expand_tilde(typed));
     }
-    let config = match explicit_config(matches) {
-        Some(path) => Config::from_file(Path::new(path))?,
-        None => Config::load()?,
-    };
-    Ok(config.store_root())
+    Ok(config_in_effect(matches)?.0.store_root())
+}
+
+/// The config this invocation reads, and its path: the file `--config` names, else the
+/// nearest one found, else defaults and no path.
+fn config_in_effect(matches: &clap::ArgMatches) -> Result<(Config, Option<PathBuf>)> {
+    Ok(match explicit_config(matches) {
+        Some(path) => (
+            Config::from_file(Path::new(path))?,
+            Some(PathBuf::from(path)),
+        ),
+        None => (Config::load()?, Config::locate()),
+    })
+}
+
+/// Puts this process's memory budget in place: `--memory`, else `[resources] memory`, else
+/// a share of the machine. Before the store opens, so nothing has reserved against another.
+/// See [`centinel_core::memory`].
+fn install_budget(matches: &clap::ArgMatches, config: &Config) -> Result<()> {
+    let flag = matches.get_one::<u64>("memory").copied();
+    centinel_core::memory::install(centinel_core::memory::Budget::resolve(
+        flag,
+        &config.resources,
+    )?)?;
+    Ok(())
 }
 
 /// Carries a legacy config's `[[source]]` blocks into the store, and gives every log that
@@ -611,16 +650,9 @@ fn resolve_root(matches: &clap::ArgMatches) -> Result<PathBuf> {
 /// listing once the store is up to date. Blocks left in the config are said out loud on
 /// every run: the store owns the list now, and an edit to a block nothing reads would
 /// otherwise be silently ignored.
-async fn import_sources(store: &Store, matches: &clap::ArgMatches) -> Result<()> {
-    let (config, path) = match explicit_config(matches) {
-        Some(path) => (
-            Config::from_file(Path::new(path))?,
-            Some(PathBuf::from(path)),
-        ),
-        None => (Config::load()?, Config::locate()),
-    };
+async fn import_sources(store: &Store, config: &Config, path: Option<PathBuf>) -> Result<()> {
     let imported = centinel_core::catalog::Sources::new(store)
-        .import(&config)
+        .import(config)
         .await?;
     for id in &imported.from_config {
         tracing::info!(source = %id, "carried the config's [[source]] block into the store");
@@ -874,6 +906,8 @@ mod tests {
                 "--tailscale",
                 "--tailscale-port",
                 "8443",
+                "--memory",
+                "1.5GB",
             ])
             .unwrap();
         let (_, serve) = m.subcommand().unwrap();
@@ -897,6 +931,11 @@ mod tests {
         assert!(serve.get_flag("no-schedule"));
         assert!(serve.get_flag("tailscale"));
         assert_eq!(serve.get_one::<u16>("tailscale-port"), Some(&8443));
+        assert_eq!(
+            serve.get_one::<u64>("memory"),
+            Some(&1_500_000_000),
+            "the budget is the server's, where its schedules run"
+        );
         let config = Path::new(serve.get_one::<String>("config").unwrap());
         assert!(
             config.is_absolute() && config.ends_with("here.toml"),

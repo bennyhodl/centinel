@@ -464,6 +464,8 @@ export type SystemHealth = {
     services: Array<{ capability: string; gates: string; need: 'required' | 'optional'; purpose: string; base_url: string; model: string; ready: boolean; problem?: string }>
     gates: Array<{ gate: string; ready: boolean; blocks: string; missing?: string[]; degraded?: string[] }>
     vectors?: { path: string; ready: boolean; problem?: string }
+    /** Absent from servers older than the memory budget, which `web --server` can reach. */
+    memory?: { budget: number; room: number; origin: 'flag' | 'config' | 'machine' | 'cgroup' | 'assumed'; machine: { total?: number; available?: number; cgroup?: number; ballooned: boolean; given?: number }; warnings?: string[] }
   }
   corpus: { store_root: string; sources: Array<{ source: string; total: number; bytes: number }>; kinds: Record<string, number>; total: number; bytes: number; missing_blobs: number }
   running: LaneHolder | null

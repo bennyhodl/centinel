@@ -4,6 +4,7 @@ import { RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { queries } from './queries'
 import { bytes, clock, number, when } from './format'
+import type { SystemHealth } from './api'
 import { ErrorBox, PageHeader, SectionRule } from './ui'
 
 export function SystemHealthPage() {
@@ -29,7 +30,9 @@ export function SystemHealthPage() {
         <dl className="divide-y divide-border text-sm">
           <Detail label="Store"><code className="break-all text-xs">{doctor.store_root}</code></Detail>
           <Detail label="Configuration"><code className="break-all text-xs">{doctor.config ?? 'Defaults in use'}</code></Detail>
+          {doctor.memory && <Detail label="Memory budget">{memoryBytes(doctor.memory.budget)} <span className="text-xs text-muted-foreground">from {MEMORY_ORIGIN[doctor.memory.origin]} · {memoryBytes(doctor.memory.room)} after Lance's caches</span></Detail>}
         </dl>
+        {doctor.memory?.warnings?.map(warning => <Problem key={warning}>{warning}</Problem>)}
         {doctor.config_searched?.length ? <p className="mt-2 break-all text-xs text-muted-foreground">No config found. Searched {doctor.config_searched.join(', ')}.</p> : null}
         {doctor.config_error && <Problem>{doctor.config_error}</Problem>}
       </section>
@@ -92,6 +95,18 @@ export function SystemHealthPage() {
     </div>}
   </div>
 }
+
+/** Where the budget came from, as `centinel doctor` says it. */
+const MEMORY_ORIGIN: Record<NonNullable<SystemHealth['doctor']['memory']>['origin'], string> = {
+  flag: '--memory',
+  config: '[resources] memory',
+  machine: 'three quarters of the machine',
+  cgroup: "three quarters of the cgroup's limit",
+  assumed: "an assumption; this machine's memory could not be read",
+}
+
+/** A memory figure as `centinel doctor` prints it: the shared `bytes` stops at MB, and a budget is gigabytes. */
+const memoryBytes = (n: number) => n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GiB` : bytes(n)
 
 function Readiness({ ready, good = 'Ready', bad = 'Unavailable' }: { ready: boolean; good?: string; bad?: string }) {
   return <span className={`text-xs font-medium ${ready ? 'text-muted-foreground' : 'text-destructive'}`}>{ready ? good : bad}</span>

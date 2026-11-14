@@ -132,6 +132,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub classify: Option<ClassifyConfig>,
 
+    /// `[resources]` — what this machine lets a run hold. See [`crate::memory`].
+    #[serde(default)]
+    pub resources: ResourcesConfig,
+
     /// Legacy `[[source]]` blocks. Read only so [`crate::catalog::Sources::import`] can
     /// carry them into the store; nothing else reads them, because the store owns the
     /// list now.
@@ -162,6 +166,30 @@ pub struct ClassifyConfig {
     /// Documents in flight to Jev at once. Eight unless set; at most thirty-two.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency: Option<usize>,
+}
+
+/// The `[resources]` block: what this machine lets a run hold.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourcesConfig {
+    /// The memory budget, written as a person writes it: `"1.5 GiB"`, `"1536 MiB"`, `"2G"`.
+    /// Absent, three quarters of what the machine or its cgroup has. `--memory` overrides it
+    /// for one run. Kept as written, so a file read and written back says what it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+}
+
+impl ResourcesConfig {
+    /// `memory` in bytes, when it is set.
+    pub fn memory(&self) -> anyhow::Result<Option<u64>> {
+        self.memory
+            .as_deref()
+            .map(|text| {
+                crate::memory::parse_size(text)
+                    .map_err(|e| anyhow::anyhow!("[resources] memory: {e}"))
+            })
+            .transpose()
+    }
 }
 
 /// Which application opens which kind of document.
@@ -913,6 +941,7 @@ impl Config {
             "defaults.rps must be greater than zero"
         );
         self.inference.validate()?;
+        self.resources.memory()?;
         self.validate_schedules()?;
         Ok(())
     }
@@ -1039,6 +1068,13 @@ pub const EXAMPLE: &str = r#"# Centinel configuration — what is true of this m
 # Requests per second, per host. Deliberately slow.
 rps = 1.0
 lang = "en"
+
+# What a run may hold in memory. A stage that holds memory waits for room in it rather than
+# overrunning it, so a small machine runs slower instead of being killed. Absent, three
+# quarters of what the machine or its cgroup has; `centinel doctor` prints the figure, and
+# `--memory` overrides it for one run.
+#   [resources]
+#   memory = "1.5 GiB"
 
 # The servers that embed, rerank and transcribe. Centinel runs no model itself: each is
 # a request to the server named here, which holds the weights and its own tuning. Every
@@ -1292,6 +1328,18 @@ mod tests {
         assert_eq!(parse("").open.opener_for("pdf"), SYSTEM_DEFAULT);
         assert_eq!(Config::default().open.opener_for("pdf"), SYSTEM_DEFAULT);
         assert!(parse("").sources.is_empty());
+    }
+
+    /// A memory that is not a size is refused when the file is read, not when a run
+    /// reaches the first thing that reserves.
+    #[test]
+    fn the_memory_budget_is_read_when_the_file_is() {
+        let c = parse("[resources]\nmemory = \"1.5 GB\"");
+        assert_eq!(c.resources.memory().unwrap(), Some(1_500_000_000));
+        assert_eq!(parse("").resources.memory().unwrap(), None);
+
+        let err = Config::parse("[resources]\nmemory = \"plenty\"").unwrap_err();
+        assert!(err.to_string().contains("[resources] memory"), "{err}");
     }
 
     #[test]

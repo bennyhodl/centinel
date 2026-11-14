@@ -44,10 +44,11 @@
 //! **No memory limit is set on the child.** `RLIMIT_AS` is not enforced on macOS, and on
 //! Linux it counts address space reserved, not memory used: jemalloc's arenas and the
 //! stacks of lopdf's rayon threads, before a document is opened. Any number would bound
-//! the wrong quantity. What the child does do on Linux is offer itself to the OOM killer
-//! first ([`offer_to_the_oom_killer`]), so a document too heavy for the machine costs its
-//! own read and not the run. A real bound belongs to the machine-wide memory budget
-//! proposed under Fault 9, which can count what a child holds.
+//! the wrong quantity. What bounds the children is the [memory budget](crate::memory):
+//! `extract` takes room for a document's read before it starts one, sized by an estimate
+//! from the document's size, so a small machine reads the heavy ones nearly alone. What the
+//! child does do on Linux is offer itself to the OOM killer first
+//! ([`offer_to_the_oom_killer`]), for the document the estimate was wrong about.
 
 use std::ffi::OsStr;
 use std::io::Write;
@@ -201,6 +202,12 @@ fn refuse(why: &str) -> i32 {
 /// this the killer picks by size and can take the run instead, as it did in Fault 9, where
 /// it took the tmux server with it. Raising one's own score needs no privilege. Elsewhere
 /// there is no such knob, and on failure nothing changes but the order.
+///
+/// Kept beside the [memory budget](crate::memory), which does not make it redundant. The
+/// budget admits a read by an estimate from the document's size, and nothing about the
+/// bytes says which document holds 30× its size in vector artwork; the budget also cannot
+/// see memory outside this process, such as `serve` beside a run, or a balloon taking the
+/// VM's memory back. The score is what is left when either is wrong.
 ///
 /// The score makes a reader the first choice **even when something else ate the memory**,
 /// and that kill is then recorded against the document like any reader that ended without

@@ -1698,6 +1698,24 @@ Also seen, and mine: `kill -INT` did not stop the test, because a job started wi
 a non-interactive shell ignores SIGINT. A standalone `extract` is not wired to the graceful
 stop that `run` has; SIGTERM ended it, losing only the in-flight reads.
 
+*(Later: built. One memory budget, `memory::Budget`: `--memory`, else `[resources] memory`,
+else three quarters of the smaller of `MemTotal` (`hw.memsize`) and the tightest cgroup
+`memory.max`, read once at start. The Lance caches it sizes (64 MiB metadata and ~640 MB
+index here, Lance's 1 GiB / 6 GiB on a 32 GB machine) are set aside from it, and
+reservations share the rest. Extract reserves 64 MiB, plus 40× a document's first 16 MiB,
+the worst ratio measured, plus 8× the rest, where the measured ratio falls from 44× at
+15.8 MB to 17× at 52 MB. On this VM that is 1.7 GiB of room after the caches: two of the
+19 MB vector-art guides read at once (758 MB each), and a 52 MB scan (1.02 GB) reads with
+little beside it. A 32 GB machine still reads sixteen scans at once. The reservation is held
+by the read's blocking task, so a pass stopped by `--limit` or a cancel does not hand out
+room its readers' children still hold. Collect reserves the size ceiling per request, at
+most the default 256 MiB, and gives back all but a declared length, so sixteen hosts no
+longer sum to 4 GB. `doctor` prints the budget, its source and the room, and warns on
+`virtio_balloon`. The contained reader's `oom_score_adj` stays: the estimate is not a
+measurement, and the budget cannot see `serve` beside the run. This box should set
+`[resources] memory = "1.5 GiB"` while `serve` runs beside the pipeline and the balloon
+stays.)*
+
 ### Fault 10 — one PDF with 17,162 font subsets stalls extract, and nothing bounds it
 
 Plant City's *2022 Annual Comprehensive Financial Report*
@@ -1870,6 +1888,9 @@ sized to the machine bounds what is left. A heap profile would confirm the holde
 work against a 31 GB vector table and want more than collect. **Way around:** a fixed
 memory size for the VM in Proxmox (minimum equal to maximum).
 
+*(Later: `doctor` warns when `virtio_balloon` is loaded, with how far `MemTotal` is below
+the memory blocks the VM was given.)*
+
 ### Smaller, recorded not ranked
 
 - **Files over the ceiling worth having.** Besides the slideshow, Hillsborough's
@@ -1881,6 +1902,10 @@ memory size for the VM in Proxmox (minimum equal to maximum).
 - **Ctrl-C on `run … | tee` loses the end of the log.** The interrupt reaches `tee` too, so
   the "stopping at the next item boundary" line and the run summary never reach the file;
   the log ends mid-progress at 06:09:11. `tee -i` ignores the interrupt.
+- **A quota 429 ends embed in three seconds.** The provider says how long to wait ("Retry
+  the request after 1 sec") and embed's three attempts are spent before a token quota
+  refills. A 429 with a stated wait should be waited out, a few times, before the run
+  stops; it is the provider's pace, not a fault.
 - **`chunks.lance.pre-lance14` is 31 GB on disk** beside the live 31 GB table, the copy kept
   for the Lance 14 upgrade. Ben's to delete once the new table has been read back.
 
@@ -2044,6 +2069,15 @@ memory size for the VM in Proxmox (minimum equal to maximum).
 - 14:51, 15:06, 15:22, 15:39Z — four capped pieces, 25,000 each, every one stopped at
   `maintain` as meant; no cgroup kill. 259,632 of 330,631 embedded, ~71k to go. The table
   is at 4,080 versions and 4,081 fragments, uncompacted.
+- 16:00, 16:15Z — two more pieces of 25,000.
+- 16:31Z — the next piece **failed on a 429** after 20,608 of 20,999: the provider behind
+  OpenRouter (Nebius) answered "You exceeded your tokens quota for Qwen3-Embedding-8B. Retry
+  the request after 1 sec." Embed retried three times inside about three seconds and gave
+  up; the loop read it as the last piece. 330,240 of 330,631 embedded, 391 left. Committed
+  rows were kept, as designed.
+- 00:14Z — one more piece started for the 391. 00:16Z: the same 429, 0 embedded. Eight
+  hours on, the quota has not refilled, so it is a longer quota than the "1 sec" says, or
+  the provider's per-key allowance for the day. Stopped there: 391 chunks owed.
 
 ---
 

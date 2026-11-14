@@ -62,8 +62,8 @@
 //!   commits into the session's metadata cache, and a manifest lists every fragment. At
 //!   ~1.5 KB a fragment that is quadratic over a run of small appends — 0.85 MB a commit at
 //!   700 fragments, 5 MB at 3,000 — up to a 1 GiB default larger than the machine it was
-//!   measured on. The connection opens with a metadata cache of
-//!   [`METADATA_CACHE_BYTES`].
+//!   measured on. The connection opens with a metadata cache, and an index cache, sized
+//!   from the memory budget ([`connect`]).
 //! - **Fragments accumulate between maintenances.** A commit is one fragment. `embed`
 //!   batches its appends ([`VectorTable::commit_due`]), and after each commit
 //!   [`VectorTable::compact_appended`] compacts the new fragments once there are
@@ -200,23 +200,18 @@ const VERSION_RETENTION: Duration = Duration::from_secs(10 * 60);
 /// a kill can lose, and what the writer holds — about three times this at the moment of
 /// the commit, while the rows, the Arrow batch and Lance's encoder each have a copy. Text
 /// columns are not counted: beside 16 KB of vector a row's half-kilobyte of key and
-/// address is noise. A memory budget would size this.
+/// address is noise.
+///
+/// Fixed, not sized from the memory budget, because it is a decision about the table as
+/// much as about memory: it sets how many fragments a run makes and, with
+/// [`COMPACT_AFTER_FRAGMENTS`], how much each compaction rewrites. A larger machine would
+/// not see larger commits anyway. At OpenRouter's ~61 chunks a second a run writes about
+/// 1 MB of vectors a second, so [`COMMIT_INTERVAL`] commits before this fills.
 const COMMIT_BYTES: usize = 32 << 20;
 
 /// The longest rows wait for their commit, so a server that answers slowly still has its
 /// answers committed, and a kill loses at most this much of its time.
 const COMMIT_INTERVAL: Duration = Duration::from_secs(30);
-
-/// The metadata cache of the Lance session every connection opens, in bytes.
-///
-/// Lance caches each committed version's manifest here, and the transaction and file
-/// metadata beside it; its default is 1 GiB, which is more than the field VM had left
-/// while embedding. A manifest is ~1.5 KB a fragment, so with fragments kept to tens this
-/// holds every version a run makes and the file metadata of a scan many times over. A
-/// miss costs a read of a small file from local disk. The index cache, where opened
-/// indexes and their partitions live, keeps Lance's default; a memory budget would size
-/// both.
-const METADATA_CACHE_BYTES: usize = 64 << 20;
 
 /// The rows a compaction aims for in one fragment, and below which a fragment is small
 /// enough to be compacted again.
@@ -494,15 +489,25 @@ impl VectorLock {
     }
 }
 
-/// Every connection to the table, with a Lance session whose metadata cache is
-/// [`METADATA_CACHE_BYTES`].
+/// Every connection to the table, with a Lance session whose caches are sized from the
+/// memory budget.
+///
+/// Lance caches each committed version's manifest in the metadata cache, with the
+/// transaction and file metadata beside it, and the indexes a search opens and the
+/// partitions it reads in the index cache. Its defaults, 1 GiB and 6 GiB, are each more
+/// than the field VM had left while embedding (docs/FIELD-NOTES.md, Fault 12). A manifest
+/// is ~1.5 KB a fragment, so with fragments kept to tens the 64 MiB a small machine gets
+/// holds every version a run makes, and a miss costs a read of a small file from local
+/// disk. A large machine gets Lance's defaults back. The arithmetic is
+/// [`crate::memory::Budget::metadata_cache`] and [`crate::memory::Budget::index_cache`].
 async fn connect(dir: &Path) -> anyhow::Result<lancedb::Connection> {
     let dir = dir
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("{} is not valid UTF-8", dir.display()))?;
+    let budget = crate::memory::budget();
     let session = Session::with_cache_backends(
-        CacheSpec::Default,
-        CacheSpec::Size(METADATA_CACHE_BYTES),
+        CacheSpec::Size(budget.index_cache()),
+        CacheSpec::Size(budget.metadata_cache()),
         Default::default(),
     );
     Ok(lancedb::connect(dir)

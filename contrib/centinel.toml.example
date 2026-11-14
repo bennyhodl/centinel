@@ -14,6 +14,13 @@
 rps = 1.0
 lang = "en"
 
+# What a run may hold in memory. A stage that holds memory waits for room in it rather than
+# overrunning it, so a small machine runs slower instead of being killed. Absent, three
+# quarters of what the machine or its cgroup has; `centinel doctor` prints the figure, and
+# `--memory` overrides it for one run.
+#   [resources]
+#   memory = "1.5 GiB"
+
 # The servers that embed, rerank and transcribe. Centinel runs no model itself: each is a
 # request to the server named here. Every capability uses `base_url` unless its own table
 # names another. A server on this machine keeps everything here; one elsewhere receives
