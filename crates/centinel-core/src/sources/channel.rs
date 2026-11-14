@@ -241,6 +241,8 @@ impl Source for ChannelSource {
     fn acquire<'a>(
         &'a self,
         resource: &'a Resource,
+        // A video's parts are sub-addresses of the video, never another page's.
+        _frontier: &'a crate::acquire::Frontier,
         progress: &'a Progress,
     ) -> BoxFuture<'a, Result<Vec<Acquired>, Refusal>> {
         Box::pin(async move {

@@ -164,6 +164,10 @@ pub async fn discover(
 #[derive(Clone, Debug)]
 pub struct CollectOpts {
     /// Stop after this many addresses.
+    ///
+    /// Counted down the work list, so an address a page earlier in the pass already
+    /// stored as its document uses a slot without a fetch. A limited pass can fetch fewer
+    /// than this.
     pub limit: Option<usize>,
     /// Re-acquire addresses already in the store instead of skipping them.
     pub refresh: bool,
@@ -227,7 +231,8 @@ pub struct Failure {
 pub struct Collected {
     /// Addresses in the most recent DiscoveryRun.
     pub discovered: usize,
-    /// Skipped because the store already had them.
+    /// Skipped because the store already had them, or because this pass already stored
+    /// them as a document a page enclosed.
     pub already_had: usize,
     /// Excluded by `matches`.
     pub filtered_out: usize,
@@ -270,6 +275,102 @@ pub struct Collected {
     pub remarks: Vec<Note>,
 }
 
+/// What a collection pass already holds, and the one test an address meets before it is
+/// fetched.
+///
+/// Every address a pass fetches is checked here: the ones discovery listed, and the ones a
+/// page turned out to enclose. An address the store holds is not fetched again. The store
+/// holds what an earlier pass observed, unless this pass refreshes, and what this pass has
+/// stored so far.
+///
+/// That matters most for enclosures. `townofredingtonshores.com` links the same PDFs from
+/// every page's footer or sidebar, and each was fetched once per page that linked it: five
+/// of them 1,026 times each in one run, 19.4 GB for six files. Across that run, 7,174
+/// fetches repeated an address the source had already fetched. The blob store kept the
+/// bytes once, but the request, the wait for the host's pace and the download all happened
+/// every time.
+///
+/// An enclosure is still fetched inside its page's acquisition, not queued as an address
+/// of its own. A queue held in memory would be lost if a pass stopped after storing the
+/// page and before fetching the document: the page's marker is then in the log, so a
+/// resumed pass never reads the page again to find the document. Fetched inside, the page
+/// and its documents are stored together or not at all, as before.
+///
+/// Also the one owner of the fingerprint each address was last stored with, which is how
+/// a pass tells a changed address from an unchanged one.
+///
+/// One per pass, and one pass per source. Sources walk concurrently, but each has its own
+/// log, its own pass and its own `Frontier`, and an enclosure is always on its page's host.
+/// The `Mutex` is there because `Source::acquire` returns a `Send` future, not because two
+/// acquisitions share a frontier at once.
+#[derive(Default)]
+pub struct Frontier {
+    refresh: bool,
+    held: std::sync::Mutex<Held>,
+}
+
+#[derive(Default)]
+struct Held {
+    /// The newest fingerprint the log has for each address, kept current as the pass stores.
+    fingerprints: HashMap<Resource, Fingerprint>,
+    /// Stored by this pass.
+    stored: std::collections::HashSet<Resource>,
+    /// Taken by this pass as a page's document, whether or not it answered.
+    taken: std::collections::HashSet<Resource>,
+}
+
+impl Held {
+    fn holds(&self, resource: &Resource, refresh: bool) -> bool {
+        self.stored.contains(resource) || (!refresh && self.fingerprints.contains_key(resource))
+    }
+}
+
+impl Frontier {
+    /// A pass over a source whose log last stored each address with these fingerprints.
+    ///
+    /// A refreshing pass holds nothing from before. It still fetches each address only
+    /// once, because "fetch it again" means once per pass, not once per page that links it.
+    pub fn new(fingerprints: HashMap<Resource, Fingerprint>, refresh: bool) -> Self {
+        Self {
+            refresh,
+            held: std::sync::Mutex::new(Held {
+                fingerprints,
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, Held> {
+        self.held.lock().expect("a frontier is never poisoned")
+    }
+
+    /// Whether the store already holds this address, so the pass need not fetch it.
+    pub fn holds(&self, resource: &Resource) -> bool {
+        self.held().holds(resource, self.refresh)
+    }
+
+    /// Takes a document a page encloses. True the first time this pass asks for it, unless
+    /// the store already holds it. False after that.
+    ///
+    /// A refusal still counts as taken. A footer PDF that 404s is one failed request per
+    /// pass, not one per page that links it. If discovery also listed it, the pass fetches
+    /// it once more as its own address, and that refusal is recorded as its liveness.
+    pub fn take(&self, resource: &Resource) -> bool {
+        let mut held = self.held();
+        !held.holds(resource, self.refresh) && held.taken.insert(resource.clone())
+    }
+
+    /// Records that the pass stored this address with this fingerprint. True when it
+    /// differs from the last time the log stored it.
+    fn stored(&self, resource: &Resource, fingerprint: Fingerprint) -> bool {
+        let mut held = self.held();
+        held.stored.insert(resource.clone());
+        held.fingerprints
+            .insert(resource.clone(), fingerprint.clone())
+            != Some(fingerprint)
+    }
+}
+
 /// The `parts` key for an address that holds exactly one artifact.
 const WHOLE: &str = "document";
 
@@ -291,13 +392,13 @@ pub async fn collect(
     // status per address. The log itself is not held while the walk runs. It carries
     // every snapshot the source ever had, and a run walks several sources at once.
     let mut discovered: Option<Vec<Resource>> = None;
-    let mut seen: HashMap<Resource, Fingerprint> = HashMap::new();
+    let mut fingerprints: HashMap<Resource, Fingerprint> = HashMap::new();
     let mut statuses: BTreeMap<Resource, ResourceStatus> = BTreeMap::new();
     store
         .scan(&id, |record| match record {
             LogRecord::DiscoveryRun(run) => discovered = Some(run.resources),
             LogRecord::Observation(o) => {
-                seen.insert(o.resource, o.fingerprint);
+                fingerprints.insert(o.resource, o.fingerprint);
             }
             LogRecord::Status(s) => {
                 statuses.insert(s.resource.clone(), s);
@@ -319,6 +420,7 @@ pub async fn collect(
         discovered: discovered.len(),
         ..Default::default()
     };
+    let frontier = Frontier::new(fingerprints, opts.refresh);
     let mut todo: Vec<Resource> = Vec::new();
 
     for r in &discovered {
@@ -326,7 +428,7 @@ pub async fn collect(
             report.filtered_out += 1;
             continue;
         }
-        if !opts.refresh && seen.contains_key(&source.marker(r)) {
+        if frontier.holds(&source.marker(r)) {
             report.already_had += 1;
             continue;
         }
@@ -340,11 +442,25 @@ pub async fn collect(
 
     // ---- acquire -------------------------------------------------------------------
     let total = todo.len() as u64;
+    // Listed by discovery, and stored earlier in this pass because a page enclosed it.
+    let mut stored_by_a_page = 0usize;
     for (i, resource) in todo.iter().enumerate() {
         // The item boundary. Everything acquired so far is already appended to the log,
         // so stopping here loses nothing: the next run subtracts observed markers from
         // the latest DiscoveryRun and picks up exactly here.
         opts.cancel.check()?;
+
+        // A sitemap that lists a PDF, and a page earlier in the pass that enclosed it, name
+        // one address. Once a page has stored it, the address is held. One that refused as
+        // a page's document is fetched again here, once, so its refusal becomes liveness.
+        let marker = source.marker(resource);
+        if frontier.holds(&marker) {
+            report.already_had += 1;
+            stored_by_a_page += 1;
+            continue;
+        }
+        // Taken, so no page later in the pass fetches it as a document as well.
+        frontier.take(&marker);
 
         // Every resource, not every twenty-fifth: this is the line that names the page
         // about to be fetched and where it sits in the work list, and a counter that
@@ -359,7 +475,7 @@ pub async fn collect(
         let at = Timestamp::now();
         report.attempted += 1;
 
-        match source.acquire(resource, progress).await {
+        match source.acquire(resource, &frontier, progress).await {
             Ok(artifacts) => {
                 let mut stored_here = 0usize;
                 let mut changed_here = false;
@@ -389,10 +505,9 @@ pub async fn collect(
                     ledger.record(&artifact.resource, bytes, kind, &obs).await;
 
                     // Against the preloaded map, not a fresh log scan per address.
-                    if seen.get(&artifact.resource) != Some(&obs.fingerprint) {
+                    if frontier.stored(&artifact.resource, obs.fingerprint) {
                         changed_here = true;
                     }
-                    seen.insert(artifact.resource.clone(), obs.fingerprint);
                     stored_here += 1;
                 }
 
@@ -454,7 +569,7 @@ pub async fn collect(
         }
     }
 
-    report.remaining = total_todo.saturating_sub(report.stored);
+    report.remaining = total_todo.saturating_sub(report.stored + stored_by_a_page);
     report.remarks = source.remarks(&report.parts, report.attempted);
 
     progress.step(
@@ -634,6 +749,7 @@ mod tests {
         fn acquire<'a>(
             &'a self,
             resource: &'a Resource,
+            _frontier: &'a Frontier,
             _p: &'a Progress,
         ) -> BoxFuture<'a, Result<Vec<Acquired>, Refusal>> {
             Box::pin(async move {

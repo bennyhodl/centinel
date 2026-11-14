@@ -39,7 +39,11 @@ and carrying nothing — on `tampa.gov`, 915 of 1005 pages whose extracted text 
 and a print notice, with the proclamation itself at an address nothing had fetched. **One
 level, same host.** The page's own HTML is scanned and what comes back is not, because a
 second level makes acquisition a recursive crawler with no snapshot to bound it — and that
-is `enumerate`'s job, which is where a *complete* address set comes from.
+is `enumerate`'s job, which is where a *complete* address set comes from. **Once per
+pass.** An enclosure meets the same test as an address discovery listed, the pass's
+`Frontier`: fetched by the first page that links it, left alone by the rest, and held
+across passes like any observed address. The link from each page stays in that page's
+stored markup.
 
 **Feed entry** — one item of an RSS or Atom feed, or one event of an iCalendar file, stored
 as its own artifact at `<feed>#entry=<id>`, holding the bytes the feed served for it. The id

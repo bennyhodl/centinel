@@ -676,9 +676,14 @@ pub trait Source: Send + Sync {
     ///
     /// An empty `Vec` is a legitimate success meaning "nothing to store here"; a
     /// [`Refusal`] is the address declining to be read, which is what liveness records.
+    ///
+    /// Any other address the acquisition finds and would fetch, such as a document the
+    /// page encloses, is first taken from `frontier`. An address the pass already holds is
+    /// left alone, as it would be if discovery had listed it.
     fn acquire<'a>(
         &'a self,
         resource: &'a Resource,
+        frontier: &'a crate::acquire::Frontier,
         progress: &'a crate::op::Progress,
     ) -> BoxFuture<'a, Result<Vec<Acquired>, Refusal>>;
 

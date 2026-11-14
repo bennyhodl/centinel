@@ -6,6 +6,7 @@
 
 use std::time::{Duration, Instant};
 
+use centinel_core::acquire::Frontier;
 use centinel_core::discovery::DiscoveryLimits;
 use centinel_core::domain::{Refusal, Resource, Source, SourceId};
 use centinel_core::op::Progress;
@@ -97,7 +98,7 @@ fn site() -> SiteSource {
 async fn acquire(url: String) -> Result<Vec<u8>, Refusal> {
     let site = site();
     let resource = Resource::new(site.id().clone(), url);
-    site.acquire(&resource, &Progress::none())
+    site.acquire(&resource, &Frontier::default(), &Progress::none())
         .await
         .map(|mut got| got.remove(0).fetched.bytes)
 }

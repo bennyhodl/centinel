@@ -151,7 +151,8 @@ pub struct CollectReport {
     pub kind: SourceKind,
     /// Addresses in the most recent DiscoveryRun.
     pub discovered: usize,
-    /// Skipped because the store already had them.
+    /// Skipped because the store already had them, or because this pass already stored
+    /// them as a document a page enclosed.
     pub already_had: usize,
     /// Excluded by `--match`.
     pub filtered_out: usize,
