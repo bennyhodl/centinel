@@ -352,6 +352,64 @@ pub struct GateStatus {
     pub degraded: Vec<String>,
 }
 
+/// The memory budget this process runs under, where it came from, and what the machine
+/// says. See [`crate::memory`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryStatus {
+    /// Bytes.
+    pub budget: u64,
+    /// What reservations share, in bytes: the budget less the Lance caches it sizes.
+    pub room: u64,
+    pub origin: crate::memory::Origin,
+    pub machine: crate::memory::Machine,
+    /// Why the budget may not hold: a VM whose memory the host can take back, or a budget
+    /// set above what the machine has.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl MemoryStatus {
+    pub fn of(budget: &crate::memory::Budget, machine: crate::memory::Machine) -> Self {
+        let mut warnings = Vec::new();
+        // Fault 4: `MemTotal` fell from 5.5 GB to 3.4 GB under a run while the run itself
+        // held 280 MB. A budget read at start is a share of a machine that may not be
+        // there an hour later.
+        if machine.ballooned {
+            let given = match (machine.given, machine.total) {
+                (Some(given), Some(total)) if given > total => format!(
+                    "; it has {} of the {} it was given",
+                    render::bytes(total),
+                    render::bytes(given)
+                ),
+                _ => String::new(),
+            };
+            warnings.push(format!(
+                "virtio_balloon is loaded: the host can take this VM's memory back during a \
+                 run{given}. Give the VM a fixed size (minimum equal to maximum), or set \
+                 [resources] memory below its low point"
+            ));
+        }
+        let limit = match (machine.total, machine.cgroup) {
+            (Some(total), Some(cgroup)) => Some(total.min(cgroup)),
+            (total, cgroup) => total.or(cgroup),
+        };
+        if let Some(limit) = limit.filter(|limit| budget.bytes() > *limit) {
+            warnings.push(format!(
+                "the budget is more than the {} this machine has; a run can be killed before \
+                 it waits",
+                render::bytes(limit)
+            ));
+        }
+        Self {
+            budget: budget.bytes(),
+            room: budget.room(),
+            origin: budget.origin(),
+            machine,
+            warnings,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DoctorReport {
     pub store_root: PathBuf,
@@ -383,6 +441,8 @@ pub struct DoctorReport {
     /// The vector table, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vectors: Option<VectorsStatus>,
+    /// The memory budget, and what it was read from.
+    pub memory: MemoryStatus,
     /// Per-stage readiness. The field to look at when `ready` is false — it says which
     /// half of the pipeline still works.
     pub gates: Vec<GateStatus>,
@@ -449,6 +509,7 @@ pub async fn doctor(ctx: &Ctx, _args: DoctorArgs) -> anyhow::Result<DoctorReport
         binaries,
         services,
         vectors,
+        memory: MemoryStatus::of(crate::memory::budget(), crate::memory::Machine::read()),
         gates,
         binaries_ready,
         services_ready,
@@ -756,6 +817,22 @@ impl Render for DoctorReport {
             p.marked(Mark::Bad, p.paint(&render::one_line(error), Ink::Red))?;
         }
 
+        // With the lines about which store and which file, because it is the other thing
+        // this process was handed before it did anything.
+        let memory = &self.memory;
+        p.line(p.paint(
+            &format!(
+                "memory {} · {} · {} after Lance's caches",
+                render::bytes(memory.budget),
+                memory.origin,
+                render::bytes(memory.room)
+            ),
+            Ink::Dim,
+        ))?;
+        for warning in &memory.warnings {
+            p.marked(Mark::Warn, p.paint(warning, Ink::Yellow))?;
+        }
+
         p.section("binaries")?;
         p.nest(|p| {
             let mut table = Table::bare(&[Align::Left, Align::Left, Align::Left, Align::Left]);
@@ -892,6 +969,18 @@ fn short_version(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::{Budget, Machine, Origin};
+
+    /// A machine with nothing to warn about.
+    fn memory() -> MemoryStatus {
+        MemoryStatus::of(
+            &Budget::new(12 << 30, Origin::Machine),
+            Machine {
+                total: Some(16 << 30),
+                ..Machine::default()
+            },
+        )
+    }
 
     fn binary(name: &str, need: Need, found: bool, version: Option<&str>) -> Binary {
         Binary {
@@ -1024,6 +1113,7 @@ mod tests {
             binaries: vec![yt_dlp],
             services: vec![down("transcribe", Need::Required)],
             vectors: None,
+            memory: memory(),
             gates: gate_statuses(&[down("transcribe", Need::Required)], None),
             binaries_ready: false,
             services_ready: false,
@@ -1131,6 +1221,7 @@ mod tests {
             binaries: vec![bin],
             services: vec![],
             vectors: None,
+            memory: memory(),
             gates: vec![],
             binaries_ready: true,
             services_ready: true,
@@ -1164,6 +1255,7 @@ mod tests {
             binaries: vec![],
             services: vec![],
             vectors: None,
+            memory: memory(),
             gates: vec![],
             binaries_ready: true,
             services_ready: true,
@@ -1177,6 +1269,52 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("no config file"), "{out}");
         assert!(out.contains("/home/x/.centinel/centinel.toml"), "{out}");
+    }
+
+    /// Fault 4: the VM the OOMs happened on had a balloon, and `MemTotal` fell by 2 GB
+    /// under a run. A budget is a share of a machine read once, so `doctor` says when that
+    /// machine can shrink, and by how much it already has.
+    #[test]
+    fn a_ballooned_vm_is_warned_about_beside_the_budget() {
+        let ballooned = Machine {
+            total: Some(3_400_000_000),
+            ballooned: true,
+            given: Some(6 << 30),
+            ..Machine::default()
+        };
+        let status = MemoryStatus::of(&Budget::auto(&ballooned), ballooned);
+        assert_eq!(status.warnings.len(), 1, "{:?}", status.warnings);
+        assert!(status.warnings[0].contains("virtio_balloon"), "{:?}", status.warnings);
+        assert!(status.warnings[0].contains("6.0 GiB"), "{:?}", status.warnings);
+
+        assert!(memory().warnings.is_empty(), "a plain machine is not warned about");
+
+        let report = DoctorReport {
+            store_root: "/tmp/store".into(),
+            config: Some("/tmp/centinel.toml".into()),
+            config_searched: vec![],
+            config_error: None,
+            sources: vec![],
+            binaries: vec![],
+            services: vec![],
+            vectors: None,
+            memory: status,
+            gates: vec![],
+            binaries_ready: true,
+            services_ready: true,
+            ready: true,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut p = Painter::new(&mut buf, false, 200);
+            report.render(&mut p).unwrap();
+        }
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("memory 2.4 GiB · three quarters of the machine · 1.7 GiB after"),
+            "{out}"
+        );
+        assert!(out.contains("virtio_balloon"), "{out}");
     }
     /// A base URL at a port nothing listens on.
     fn nothing_listening() -> String {
@@ -1261,6 +1399,7 @@ mod tests {
             binaries: vec![],
             services,
             vectors: None,
+            memory: memory(),
             gates,
             binaries_ready: true,
             services_ready: false,

@@ -131,6 +131,13 @@ lang = "en"                                # caption and transcription language
 `rps` is deliberately slow. Politeness is per host, which is also why acquisition runs per
 source rather than corpus-wide.
 
+```toml
+[resources]
+memory = "1.5 GiB"                         # default: three quarters of the machine or cgroup
+```
+
+What a run may hold in memory. See [The run](run.md#memory).
+
 Which models embed, rerank and transcribe, and where they run, is `[inference]` — see
 [Inference servers](../reference/inference.md). Earlier releases kept `embed_model`,
 `embed_batch` and `transcribe_model` here; a config that still has them is refused with what

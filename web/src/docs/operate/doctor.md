@@ -9,6 +9,7 @@ $ centinel doctor
 
 ready  /data/agartha · 3 sources
 config /Users/you/.centinel/centinel.toml
+memory 12.0 GiB · three quarters of the machine · 8.8 GiB after Lance's caches
 
 binaries
   ✓  ffmpeg            7.1.1             decodes audio to 16 kHz WAV for the transcription…
@@ -59,6 +60,24 @@ something is already wrong and often the thing you type before everything else. 
 the corpus was the one line here that grew with the corpus — a walk of the whole blob pool,
 every time, to print a number nobody ran `doctor` to see. `centinel status` counts it, off
 the log, by source and content kind, and says what it occupies.
+
+## The third line is the memory budget
+
+```
+memory 12.0 GiB · three quarters of the machine · 8.8 GiB after Lance's caches
+```
+
+What a run on this machine may hold at once, and where the figure came from: `--memory`,
+`[resources] memory`, or three quarters of the machine or of its cgroup's limit, whichever
+is smaller. The last figure is what reads and fetches share once the vector table's caches,
+which are sized from the budget, are set aside. A run past it waits rather than overruns it;
+see [The run](run.md#memory).
+
+A warning under it means the figure may not hold. On a VM with `virtio_balloon` loaded the
+host can take memory back while a run holds it, and the warning says how far below the
+size it was given the VM already is. Give such a VM a fixed size, minimum equal to maximum,
+or set `[resources] memory` below its low point. A budget set above what the machine has is
+warned about too.
 
 ---
 

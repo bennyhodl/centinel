@@ -224,8 +224,9 @@ pub async fn extract(
         let total = latest.len() as u64;
 
         // Read ahead, write in order. Reading a document is the expensive half and needs
-        // nothing from the one before it, so `workers()` of them are read at once, each on
-        // a thread of its own. What a read found is written down one document at a time,
+        // nothing from the one before it, so up to `workers()` of them are read at once,
+        // each on a thread of its own, as many as the memory budget has room for. What a
+        // read found is written down one document at a time,
         // in work-list order, exactly as a single reader would have: the log, the report,
         // `--limit` and a cancel all see the same sequence they always did.
         let extracted_so_far = AtomicUsize::new(report.extracted);
@@ -490,8 +491,9 @@ struct Reading {
     millis: u64,
 }
 
-/// How many documents are read at once: one per core. Extraction is parsing, and parsing
-/// is the processor's work.
+/// How many documents are read at once, at most: one per core. Extraction is parsing, and
+/// parsing is the processor's work. How many of those fit in memory is the
+/// [budget](crate::memory)'s question, asked per document in [`read_ahead`].
 fn workers() -> usize {
     std::thread::available_parallelism().map_or(1, usize::from)
 }
@@ -501,25 +503,45 @@ fn workers() -> usize {
 /// a worker nothing else can use. A PDF is read in a child, which waits here no longer than
 /// [`extract::READ_DEADLINE`] per reader. `None` when `want` names a kind and this document
 /// is another.
+///
+/// Room for the read is taken from the [memory budget](crate::memory) before the blob is
+/// read, [`crate::memory::read_cost`] of its size, and held until the readers are done: the
+/// blob in this process and the parse in its reader's child are both this read's. The wait
+/// for it is outside the blocking pool, so a document waiting for room holds no thread, and
+/// outside `millis`, which is the read's own time.
+///
+/// The reservation moves into the blocking task rather than staying in this future. A pass
+/// that stops early (`--limit`, a cancel, another read's error) drops this future, but a
+/// blocking task cannot be stopped and its reader's child runs on for up to two deadlines;
+/// room given back at the drop would let the next pass's reads in beside it.
 async fn read_ahead(
     store: Store,
     resource: Resource,
     obs: Observation,
     want: Option<String>,
 ) -> anyhow::Result<Option<Box<Reading>>> {
+    // The head decides the kind, and the kind decides whether the rest is worth reading.
+    // `get_blob` reads the whole file and verifies it, which is the right thing to do
+    // before extracting and the wrong thing to do before finding out there is nothing to
+    // extract.
+    let head = store.blob_head(&obs.blob_sha, SNIFF_BYTES).await?;
+    let kind = ContentKind::classify(&obs.meta, &head);
+    if want.as_deref().is_some_and(|want| want != kind.as_str()) {
+        return Ok(None);
+    }
+    // A blob that is not there costs nothing here; `get_blob` says what is wrong with it.
+    let size = tokio::fs::metadata(store.blob_path_of(&obs.blob_sha))
+        .await
+        .map_or(0, |m| m.len());
+    let held = crate::memory::budget()
+        .reserve(crate::memory::read_cost(size))
+        .await;
+
     let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
+        let _held = held;
         runtime.block_on(async move {
             let started = std::time::Instant::now();
-            // The head decides the kind, and the kind decides whether the rest is worth
-            // reading. `get_blob` reads the whole file and verifies it, which is the
-            // right thing to do before extracting and the wrong thing to do before
-            // finding out there is nothing to extract.
-            let head = store.blob_head(&obs.blob_sha, SNIFF_BYTES).await?;
-            let kind = ContentKind::classify(&obs.meta, &head);
-            if want.as_deref().is_some_and(|want| want != kind.as_str()) {
-                return Ok(None);
-            }
             let bytes = store.get_blob(&obs.blob_sha).await?;
 
             // **A Derivation always has bytes**, and `derive` is where that invariant is

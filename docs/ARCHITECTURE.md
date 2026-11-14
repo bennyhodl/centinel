@@ -147,6 +147,10 @@ Acquisition is per source because politeness is per host and a 403 on one site m
 
 A stage whose server is not answering — one TCP connect to its `base_url`, before the stage starts — or whose named API key is not set is **skipped, not failed**: an hour of crawling must not be thrown away over a server that was never started, and the stage resumes on the next run once it is up. A server that goes away mid-stage, or refuses the key, ends that stage on the first such answer rather than skipping the corpus one chunk at a time. A source that fails is isolated: its remaining stages are skipped, every other source still runs, and the report says which broke.
 
+### One memory budget
+
+Width is set by the work, memory by the machine. Extract reads up to a document per core and collect walks sixteen hosts at once, and each **reserves** room in one process-wide budget (`memory::Budget`) before a unit of work: extract a document's estimated read cost (`memory::read_cost`: 64 MiB, plus 40× its first 16 MiB, the worst ratio measured, plus 8× the rest, where the worst ratio falls), collect a body's declared length or the size ceiling, up to the default 256 MiB. A full budget makes the next unit wait, so a small machine runs slower instead of being killed, and a reservation larger than all the room runs alone. The budget is `--memory`, else `[resources] memory`, else three quarters of the smaller of the machine's memory and its cgroup's limit, read once at start; `doctor` prints it and warns on a ballooned VM. The Lance session's caches are sized from it too, from 64 MiB on a small machine up to Lance's own defaults on a large one, and set aside from the room reservations share. `embed` and `classify` wait on servers and keep their `concurrency`. The estimate is not a bound, so a contained reader still offers itself to the OOM killer first.
+
 ### Incremental is inherited, not implemented
 
 Nothing in `run` diffs anything. Every stage already skips work it has done:

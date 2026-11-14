@@ -25,6 +25,28 @@ Sources on different hosts are walked at the same time, up to sixteen hosts at o
 site paced at ten seconds a page does not hold up the sources named after it. Sources
 that share a host take turns: that host is never asked faster than one source's `rps`.
 
+## Memory
+
+A run holds as much memory as its **budget** allows and waits for room past that, so a
+small machine runs slower instead of being killed. Extract reads a document once there is
+room for it, one per core at most, and collect fetches a body once there is room for its
+length. A document's size says little about what parsing it costs: a 19 MB PDF of vector
+artwork took 560 MB to read where an ordinary one takes ten times its size. So a document
+of more than a few megabytes is given a large share and, on a small machine, reads nearly
+alone.
+
+The budget is three quarters of the machine's memory, or of its cgroup's limit when that
+is smaller. On a machine shared with other work, name it:
+
+```toml
+[resources]
+memory = "1.5 GiB"
+```
+
+`--memory 1.5GiB` overrides it for one run, and `centinel doctor` prints the one in force.
+`embed` and `classify` wait on a server rather than on memory, and keep their
+`concurrency`.
+
 Derivation is **corpus-wide** because `transcribe` and `embed` each build a
 multi-gigabyte model. With twenty sources, naive per-source chaining spends more time
 loading weights than embedding. It also fixes an ordering hazard for free: `index` runs

@@ -88,6 +88,7 @@ rebuilds the page from the checkout and serves that instead of the one embedded 
 |---|---|
 | `--root DIR` | store root. Also `$CENTINEL_ROOT`. |
 | `--config FILE` | config file. Also `$CENTINEL_CONFIG`. |
+| `--memory SIZE` | memory this run may hold, e.g. `1.5GiB`; overrides `[resources] memory`. See [The run](../operate/run.md#memory). |
 | `--json` | force JSON output on a terminal |
 | `--pretty` | force rendered prose into a pipe |
 | `-y`, `--yes` | answer yes to any confirmation — today, `investigate` offering to add the source it found, and the `schedule set` write |

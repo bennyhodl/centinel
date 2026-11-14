@@ -52,6 +52,7 @@ pub mod inference;
 pub mod jobs;
 pub mod journal;
 pub mod materialize;
+pub mod memory;
 pub mod op;
 pub mod ops;
 pub mod policy;

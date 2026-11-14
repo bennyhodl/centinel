@@ -221,7 +221,12 @@ impl SiteSource {
 
     /// One GET through the fetcher, recorded when a log is attached.
     ///
-    /// The only place this Source fetches, so the log is complete by construction.
+    /// The only place this Source fetches, so the log is complete by construction. A
+    /// recorded time includes any wait for room in the memory budget, which the fetcher
+    /// takes before it sends the request. Leaving the wait out would mean the fetcher
+    /// reporting its own timing through [`Fetch`], for a log only `check`, `investigate` and
+    /// `probe` keep. Their fetches wait only while a run in the same process fills the
+    /// budget, and a slow row then is that run's, not the server's.
     async fn fetch(&self, step: Step, url: &str) -> Result<Fetched, Refusal> {
         match &self.log {
             Some(log) => log.timed(step, url, self.fetcher.get(url)).await,
