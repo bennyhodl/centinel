@@ -104,7 +104,7 @@ Two ideas carry most of the weight:
 
 **`Source` is a trait, not an entity with a `kind` field.** Implementations differ in `enumerate`, `acquire` and `change_signal`. Everything downstream is one shared model, so variation stays quarantined at the acquisition edge — the only place it genuinely exists.
 
-The half that does *not* vary lives in `acquire`: one loop that derives the work list from the log, turns refusals into `ResourceStatus`, and keeps the counters, for any Source. `sources::from_config` is the only code that picks an adapter. So `discover` and `collect` are single verbs that name what happens rather than how — there is no `centinel youtube`, and adding a third kind adds no verb.
+The half that does *not* vary lives in `acquire`: one loop that derives the work list from the log, turns refusals into `ResourceStatus`, and keeps the counters, for any Source. The loop also owns the pass's `Frontier`, the one test of whether an address is already held, and hands it to `Source::acquire` so that a document a page encloses meets the same test as an address discovery listed. `sources::from_config` is the only code that picks an adapter. So `discover` and `collect` are single verbs that name what happens rather than how — there is no `centinel youtube`, and adding a third kind adds no verb.
 
 `acquire` returns a **list** of artifacts rather than one blob, because a video is one address holding metadata, captions and audio, each with its own history. An earlier `fetch(&Resource) -> Fetched` had no possible implementation for that, which is why the kinds routed around the trait instead of through it.
 

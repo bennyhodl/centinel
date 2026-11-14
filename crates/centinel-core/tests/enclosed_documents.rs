@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use centinel_core::acquire::Frontier;
 use centinel_core::discovery::DiscoveryLimits;
 use centinel_core::domain::{Resource, Source, SourceId};
 use centinel_core::op::Progress;
@@ -145,7 +146,7 @@ async fn a_page_yields_its_document_as_a_second_artifact() {
     let resource = Resource::new(site.id().clone(), server.page_url());
 
     let got = site
-        .acquire(&resource, &Progress::none())
+        .acquire(&resource, &Frontier::default(), &Progress::none())
         .await
         .expect("the page was served");
 
@@ -178,7 +179,7 @@ async fn a_document_that_refuses_does_not_take_the_page_with_it() {
     let resource = Resource::new(site.id().clone(), server.page_url());
 
     let got = site
-        .acquire(&resource, &Progress::none())
+        .acquire(&resource, &Frontier::default(), &Progress::none())
         .await
         .expect("the page was served, whatever the document did");
 
@@ -208,7 +209,10 @@ async fn a_document_does_not_enclose_further_documents() {
     let site = source();
     let resource = Resource::new(site.id().clone(), server.pdf_url());
 
-    let got = site.acquire(&resource, &Progress::none()).await.unwrap();
+    let got = site
+        .acquire(&resource, &Frontier::default(), &Progress::none())
+        .await
+        .unwrap();
 
     assert_eq!(got.len(), 1, "one level only");
     assert_eq!(server.requests.load(Ordering::SeqCst), 1);

@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::acquire::Frontier;
 use crate::content::ContentKind;
 use crate::extract::{self, Extracted};
 use crate::policy::HostPolicy;
@@ -528,8 +529,9 @@ async fn acquire_url(
     let site = SiteSource::new(id.clone(), url, policy, Default::default())?.with_log(log.clone());
     let resource = Resource::new(id.clone(), url.to_string());
 
+    // A fresh frontier: one address, no store, and nothing held from before.
     let acquired = site
-        .acquire(&resource, progress)
+        .acquire(&resource, &Frontier::default(), progress)
         .await
         .map_err(|refusal| anyhow::anyhow!("{url}: {} — {}", refusal.state, refusal.detail))?;
 

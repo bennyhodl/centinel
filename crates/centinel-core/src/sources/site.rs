@@ -114,7 +114,10 @@ pub struct SiteSource {
     cancel: Cancel,
     /// Documents that refused, so a run can say so without failing over them.
     partial: Mutex<Vec<String>>,
+    /// Documents fetched from inside pages.
     enclosed: AtomicUsize,
+    /// Links to documents the pass already held, so not fetched again.
+    held: AtomicUsize,
     dropped: AtomicUsize,
     /// Feeds acquired, and the entries they gave. For [`Source::remarks`].
     feeds: FeedCounts,
@@ -182,6 +185,7 @@ impl SiteSource {
             pacers: Mutex::new(HashMap::new()),
             partial: Mutex::new(Vec::new()),
             enclosed: AtomicUsize::new(0),
+            held: AtomicUsize::new(0),
             dropped: AtomicUsize::new(0),
             feeds: FeedCounts::default(),
         })
@@ -625,7 +629,6 @@ impl SiteSource {
         let html = String::from_utf8_lossy(&fetched.bytes);
         let found = enclosure::documents(&html, served, enclosure::MAX_PER_PAGE);
 
-        self.enclosed.fetch_add(found.urls.len(), Ordering::Relaxed);
         self.dropped.fetch_add(found.dropped, Ordering::Relaxed);
         found.urls
     }
@@ -827,9 +830,14 @@ impl Source for SiteSource {
     /// along — one address holding metadata, captions and audio. The marker stays the page
     /// ([`Source::marker`]'s default), so a document that 404s does not make the run
     /// re-fetch the page forever; it is recorded as a remark and the page stands.
+    ///
+    /// A document is fetched only when `frontier` hands it over. One that every page's
+    /// footer links is fetched by the first page and left alone by the rest. The link to it
+    /// stays in each page's stored markup, which is where every enclosure is read from.
     fn acquire<'a>(
         &'a self,
         resource: &'a Resource,
+        frontier: &'a crate::acquire::Frontier,
         progress: &'a Progress,
     ) -> BoxFuture<'a, Result<Vec<Acquired>, Refusal>> {
         Box::pin(async move {
@@ -869,16 +877,27 @@ impl Source for SiteSource {
             out.extend(entries);
 
             for url in enclosed {
-                match self.fetch_reporting(&url, true, progress).await {
-                    Ok(document) => out.push(Acquired {
-                        resource: Resource::new(self.id.clone(), url),
-                        fetched: document,
+                let document = Resource::new(self.id.clone(), url);
+                if !frontier.take(&document) {
+                    self.held.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                self.enclosed.fetch_add(1, Ordering::Relaxed);
+                let answer = self
+                    .fetch_reporting(&document.natural_key, true, progress)
+                    .await;
+                match answer {
+                    Ok(fetched) => out.push(Acquired {
+                        resource: document,
+                        fetched,
                     }),
                     // A document that refuses is evidence about the document, not about
                     // the page that named it. One site's broken attachment must not cancel
                     // the page it hangs off, for the same reason one source's WAF block
                     // does not cancel the nineteen behind it.
-                    Err(refusal) => self.note_partial(format!("{url} — {}", refusal.detail)),
+                    Err(refusal) => {
+                        self.note_partial(format!("{} — {}", document.natural_key, refusal.detail))
+                    }
                 }
             }
 
@@ -897,6 +916,16 @@ impl Source for SiteSource {
                 format!(
                     "{} fetched from inside pages",
                     crate::render::count(enclosed as u64)
+                ),
+            ));
+        }
+        let held = self.held.load(Ordering::Relaxed);
+        if held > 0 {
+            notes.push(Note::new(
+                "documents",
+                format!(
+                    "{} more link(s) to documents already in hand were not fetched again",
+                    crate::render::count(held as u64)
                 ),
             ));
         }
@@ -961,6 +990,7 @@ impl Source for SiteSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acquire::Frontier;
 
     fn source() -> SiteSource {
         SiteSource::new(
@@ -983,6 +1013,9 @@ mod tests {
         pages: std::collections::BTreeMap<String, Result<Vec<u8>, Liveness>>,
         /// The `content-type` a page is served with, where a test says.
         types: std::collections::BTreeMap<String, String>,
+        /// Every address asked for, in order. Shared, so a test keeps it after the fetcher
+        /// is handed to the Source.
+        asked: Arc<Mutex<Vec<String>>>,
     }
 
     impl Scripted {
@@ -1013,6 +1046,7 @@ mod tests {
             url: &'a str,
         ) -> BoxFuture<'a, Result<crate::domain::Fetched, crate::fetch::FetchFailure>> {
             Box::pin(async move {
+                self.asked.lock().unwrap().push(url.to_string());
                 match self.pages.get(url) {
                     Some(Ok(bytes)) => {
                         let mut meta = BTreeMap::from([("final_url".to_string(), url.to_string())]);
@@ -1502,7 +1536,10 @@ mod tests {
         );
 
         let resource = Resource::new(s.id().clone(), section);
-        let got = s.acquire(&resource, &Progress::none()).await.unwrap();
+        let got = s
+            .acquire(&resource, &Frontier::default(), &Progress::none())
+            .await
+            .unwrap();
         let keys: Vec<&str> = got
             .iter()
             .map(|a| a.resource.natural_key.as_str())
@@ -1529,6 +1566,184 @@ mod tests {
         assert_eq!(
             named,
             ["https://www.largo.com/connect/mayor_and_commission/mayor.php"]
+        );
+    }
+
+    /// `townofredingtonshores.com` links the same PDFs from every page's footer, and each
+    /// was fetched once per page: 1,026 times in one run. Collected end to end against a
+    /// store, the document is fetched once per pass. Every page still links it in the
+    /// markup that was stored, and a later pass that finds it linked again leaves it alone,
+    /// as it leaves alone a page it already has.
+    #[tokio::test]
+    async fn a_document_every_page_links_is_fetched_once_per_pass() {
+        use crate::acquire::{CollectOpts, collect};
+        use crate::store::{LogRecord, Store};
+
+        let pdf = "https://townofredingtonshores.com/wp-content/uploads/fema-desk-reference.pdf";
+        let page = |n: usize| format!("https://townofredingtonshores.com/page-{n}/");
+        let mut pages = Scripted::default().serving_as(pdf, "application/pdf", "%PDF-1.4\n%%EOF");
+        for n in 1..=4 {
+            pages = pages.serving_as(
+                &page(n),
+                "text/html",
+                &format!(
+                    r#"<html><body><h1>Page {n}</h1><footer>
+                    <a href="/wp-content/uploads/fema-desk-reference.pdf">FEMA desk reference</a>
+                    </footer></body></html>"#
+                ),
+            );
+        }
+        let asked = Arc::clone(&pages.asked);
+        let s = site_at(
+            "https://townofredingtonshores.com/",
+            pages,
+            DiscoveryLimits::default(),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        // A discovery run naming these pages, as `discover` would have written it.
+        let discovered = |pages: std::ops::RangeInclusive<usize>| {
+            LogRecord::DiscoveryRun(crate::domain::DiscoveryRun {
+                source: s.id().clone(),
+                at: jiff::Timestamp::now(),
+                resources: pages
+                    .map(|n| Resource::new(s.id().clone(), page(n)))
+                    .collect(),
+                method: "sitemap".into(),
+            })
+        };
+        let times_asked = |url: &str| asked.lock().unwrap().iter().filter(|a| *a == url).count();
+
+        store.append(s.id(), &discovered(1..=3)).await.unwrap();
+        let first = collect(&store, &s, &CollectOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+        assert_eq!(first.stored, 3);
+        assert_eq!(times_asked(pdf), 1, "once per pass, not once per page");
+        assert!(
+            first.remarks.iter().any(|n| n
+                .detail
+                .contains("2 more link(s) to documents already in hand")),
+            "{:?}",
+            first.remarks
+        );
+
+        // One Observation of the document, and every page still links it in what was stored.
+        let replay = store.replay(s.id()).await.unwrap();
+        let observed = replay
+            .records()
+            .iter()
+            .filter(|r| matches!(r, LogRecord::Observation(o) if o.resource.natural_key == pdf))
+            .count();
+        assert_eq!(observed, 1, "a repeat no longer appends its own record");
+        for (resource, obs) in replay.latest_observations() {
+            if resource.natural_key == pdf {
+                continue;
+            }
+            let html = String::from_utf8(store.get_blob(&obs.blob_sha).await.unwrap()).unwrap();
+            let linked =
+                enclosure::documents(&html, &resource.natural_key, enclosure::MAX_PER_PAGE);
+            assert_eq!(linked.urls, [pdf], "{} lost its link", resource.natural_key);
+        }
+
+        // A later pass finds a new page linking the same document, and the store has it.
+        store.append(s.id(), &discovered(1..=4)).await.unwrap();
+        let later = collect(&store, &s, &CollectOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+        assert_eq!((later.already_had, later.stored), (3, 1));
+        assert_eq!(times_asked(&page(4)), 1);
+        assert_eq!(times_asked(pdf), 1, "held from the pass before");
+
+        // Refreshing fetches it again, once.
+        let refreshed = collect(
+            &store,
+            &s,
+            &CollectOpts {
+                refresh: true,
+                ..Default::default()
+            },
+            &Progress::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refreshed.stored, 4);
+        assert_eq!(
+            times_asked(pdf),
+            2,
+            "once more for the refresh, not once per page"
+        );
+    }
+
+    /// A document a page encloses that refuses, and that discovery also listed, is not
+    /// counted as had. It is fetched once more as its own address, and the refusal is
+    /// recorded as its liveness, as for any address that refuses.
+    #[tokio::test]
+    async fn a_listed_document_that_refused_inside_a_page_is_fetched_again_and_fails() {
+        use crate::acquire::{CollectOpts, collect};
+        use crate::store::{LogRecord, Store};
+
+        let page = "https://townofredingtonshores.com/flood/";
+        // Not served, so it answers 404.
+        let pdf = "https://townofredingtonshores.com/wp-content/uploads/floodplain-plan.pdf";
+        let pages = Scripted::default().serving_as(
+            page,
+            "text/html",
+            r#"<html><body><a href="/wp-content/uploads/floodplain-plan.pdf">Plan</a></body>"#,
+        );
+        let asked = Arc::clone(&pages.asked);
+        let s = site_at(
+            "https://townofredingtonshores.com/",
+            pages,
+            DiscoveryLimits::default(),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        // A sitemap that lists the page, then the document it links.
+        let listed = [page, pdf].map(|key| Resource::new(s.id().clone(), key));
+        store
+            .append(
+                s.id(),
+                &LogRecord::DiscoveryRun(crate::domain::DiscoveryRun {
+                    source: s.id().clone(),
+                    at: jiff::Timestamp::now(),
+                    resources: listed.to_vec(),
+                    method: "sitemap".into(),
+                }),
+            )
+            .await
+            .unwrap();
+
+        let out = collect(&store, &s, &CollectOpts::default(), &Progress::none())
+            .await
+            .unwrap();
+
+        assert_eq!((out.stored, out.failed, out.gone), (1, 1, 1));
+        assert_eq!(
+            out.already_had, 0,
+            "a refusal is not something the store has"
+        );
+        assert_eq!(out.failures[0].natural_key, pdf);
+        assert_eq!(
+            asked.lock().unwrap().iter().filter(|a| *a == pdf).count(),
+            2,
+            "once as the page's document, once as its own address"
+        );
+        let replay = store.replay(s.id()).await.unwrap();
+        let liveness: Vec<Liveness> = replay
+            .records()
+            .iter()
+            .filter_map(|r| match r {
+                LogRecord::Status(st) if st.resource.natural_key == pdf => Some(st.state),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            liveness,
+            [Liveness::Gone],
+            "the refusal is recorded as the document's liveness"
         );
     }
 
@@ -1565,7 +1780,7 @@ mod tests {
         );
 
         let refused = s
-            .acquire(&out.resources[0], &Progress::none())
+            .acquire(&out.resources[0], &Frontier::default(), &Progress::none())
             .await
             .unwrap_err();
         assert_eq!(refused.state, Liveness::Blocked, "blocked, not gone");
@@ -1627,7 +1842,7 @@ mod tests {
         assert_eq!(out.resources[0].natural_key, feed);
 
         let got = s
-            .acquire(&out.resources[0], &Progress::none())
+            .acquire(&out.resources[0], &Frontier::default(), &Progress::none())
             .await
             .unwrap();
         let keys: Vec<&str> = got
@@ -1704,7 +1919,7 @@ mod tests {
         let out = s.enumerate(&Progress::none()).await.unwrap();
         assert_eq!(s.method(), "feed");
         let got = s
-            .acquire(&out.resources[0], &Progress::none())
+            .acquire(&out.resources[0], &Frontier::default(), &Progress::none())
             .await
             .unwrap();
 

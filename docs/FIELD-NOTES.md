@@ -1566,6 +1566,17 @@ fetched enclosure addresses on the source; the deeper one is enclosures going ba
 frontier as resources, so they are counted, deduped and resumable like everything else.
 Not checked: whether each repeat also appends its own status record to the log.
 
+*(Later: fixed. An enclosure now meets the same "already have it" check as every address:
+`acquire::Frontier`, one per pass. The first page that links a document fetches it, every
+later page leaves it alone, a later pass holds it like any observed address, and `--refresh`
+fetches it once more. It is still fetched inside its page's acquisition rather than queued
+as an address, so the page and its documents are stored together and a resumed pass cannot
+lose one. A repeat did not append a Status record, but it did append its own Observation,
+crumbs-ledger row and request-log line; those stop with the fetch. Still open: a shared
+enclosure that refuses once (a 503) is not retried in that pass or a later one, since every
+page that links it is held and the refusal leaves no Status. The durable fix is a Status
+for a refused enclosure and a work list that picks up addresses that are not live.)*
+
 ### Fault 8 — a 10 s crawl delay across a WooCommerce shop holds the whole run (hillstaxfl)
 
 `hillstaxfl.gov`'s `robots.txt` says `Crawl-delay: 10`, and we honour it. Its discovery
