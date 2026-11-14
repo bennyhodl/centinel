@@ -1284,10 +1284,21 @@ mod tests {
         };
         let status = MemoryStatus::of(&Budget::auto(&ballooned), ballooned);
         assert_eq!(status.warnings.len(), 1, "{:?}", status.warnings);
-        assert!(status.warnings[0].contains("virtio_balloon"), "{:?}", status.warnings);
-        assert!(status.warnings[0].contains("6.0 GiB"), "{:?}", status.warnings);
+        assert!(
+            status.warnings[0].contains("virtio_balloon"),
+            "{:?}",
+            status.warnings
+        );
+        assert!(
+            status.warnings[0].contains("6.0 GiB"),
+            "{:?}",
+            status.warnings
+        );
 
-        assert!(memory().warnings.is_empty(), "a plain machine is not warned about");
+        assert!(
+            memory().warnings.is_empty(),
+            "a plain machine is not warned about"
+        );
 
         let report = DoctorReport {
             store_root: "/tmp/store".into(),

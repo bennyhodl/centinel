@@ -109,7 +109,9 @@ async fn serve_one_page() -> String {
                 let mut buf = [0u8; 4096];
                 let _ = socket.read(&mut buf).await;
                 let _ = socket
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
                     .await;
             });
         }

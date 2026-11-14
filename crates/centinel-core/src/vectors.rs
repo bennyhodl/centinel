@@ -1026,7 +1026,8 @@ impl VectorTable {
         // part-way keeps the passes that landed.
         let (mut fragments_removed, mut fragments_added) = (0, 0);
         loop {
-            let settled = settled_fragments(&self.dataset().await?).await?;
+            let dataset = self.dataset().await?;
+            let settled = settled_fragments(&dataset).await?;
             let (removed, added) = self.compact(lock, settled.into_iter().collect()).await?;
             if removed == 0 {
                 break;
