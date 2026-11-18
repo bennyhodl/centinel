@@ -18,7 +18,7 @@ use crate::domain::{Observation, Resource, Underivable};
 use crate::extract::{self, Extracted};
 use crate::op::{ItemOutcome, Verdict};
 use crate::prelude::*;
-use crate::store::{LogRecord, Store};
+use crate::store::{CorruptBlob, LogRecord, Store, StoreError};
 use crate::verdict::{Read, ReadQuality};
 use futures::StreamExt;
 
@@ -155,6 +155,11 @@ pub struct ExtractReport {
     pub by_kind: BTreeMap<String, usize>,
     /// Pages whose scans we could not read. Requires `pdftoppm` + `tesseract`.
     pub ocr_pages_pending: usize,
+    /// Blobs that failed their hash even after re-reads, skipped and listed in
+    /// `workspace/corrupt-blobs.jsonl` for repair. Nothing is recorded for them, so the
+    /// next run tries them again.
+    #[serde(default)]
+    pub corrupt_blobs: usize,
     pub unreadable: Vec<Unreadable>,
     pub sample: Vec<ExtractSample>,
 }
@@ -189,6 +194,7 @@ pub async fn extract(
         by_tool: BTreeMap::new(),
         by_kind: BTreeMap::new(),
         ocr_pages_pending: 0,
+        corrupt_blobs: 0,
         unreadable: Vec::new(),
         sample: Vec::new(),
     };
@@ -257,8 +263,7 @@ pub async fn extract(
                         total,
                         &resource.natural_key,
                     );
-                    let reading = read_ahead(ctx.store.clone(), resource, obs, want).await?;
-                    Ok((i, reading.map_or(Turn::OtherKind, Turn::Read)))
+                    Ok((i, read_ahead(ctx.store.clone(), resource, obs, want).await?))
                 }
             })
             .buffered(workers());
@@ -295,6 +300,23 @@ pub async fn extract(
                     continue;
                 }
                 Turn::OtherKind => continue,
+                // A blob that still fails its hash after `get_blob`'s re-reads is skipped and
+                // listed for repair. One bad file used to end the extract for its whole
+                // Source, and every run after it, until someone replaced the bytes by hand.
+                Turn::Corrupt { sha, actual } => {
+                    report.attempted += 1;
+                    tracing::warn!(%sha, %actual, address = %resource.natural_key, "skipping corrupt blob");
+                    ctx.store
+                        .note_corrupt_blob(
+                            &sha,
+                            source.as_str(),
+                            &resource.natural_key,
+                            CorruptBlob::Source,
+                        )
+                        .await;
+                    report.corrupt_blobs += 1;
+                    continue;
+                }
                 Turn::Read(reading) => reading,
             };
             report.attempted += 1;
@@ -470,6 +492,11 @@ enum Turn {
     AlreadyUnextractable,
     /// `--kind` asked for another kind.
     OtherKind,
+    /// The blob failed its hash even after `get_blob`'s re-reads.
+    Corrupt {
+        sha: BlobSha,
+        actual: BlobSha,
+    },
     Read(Box<Reading>),
 }
 
@@ -501,8 +528,8 @@ fn workers() -> usize {
 /// Reads one blob and runs the readers over it, on a thread of the blocking pool: the
 /// readers that stay in process are CPU-bound, and an async worker held for a large page is
 /// a worker nothing else can use. A PDF is read in a child, which waits here no longer than
-/// [`extract::READ_DEADLINE`] per reader. `None` when `want` names a kind and this document
-/// is another.
+/// [`extract::READ_DEADLINE`] per reader. [`Turn::OtherKind`] when `want` names a kind and
+/// this document is another, and [`Turn::Corrupt`] when the blob fails its hash.
 ///
 /// Room for the read is taken from the [memory budget](crate::memory) before the blob is
 /// read, [`crate::memory::read_cost`] of its size, and held until the readers are done: the
@@ -519,7 +546,7 @@ async fn read_ahead(
     resource: Resource,
     obs: Observation,
     want: Option<String>,
-) -> anyhow::Result<Option<Box<Reading>>> {
+) -> anyhow::Result<Turn> {
     // The head decides the kind, and the kind decides whether the rest is worth reading.
     // `get_blob` reads the whole file and verifies it, which is the right thing to do
     // before extracting and the wrong thing to do before finding out there is nothing to
@@ -527,7 +554,7 @@ async fn read_ahead(
     let head = store.blob_head(&obs.blob_sha, SNIFF_BYTES).await?;
     let kind = ContentKind::classify(&obs.meta, &head);
     if want.as_deref().is_some_and(|want| want != kind.as_str()) {
-        return Ok(None);
+        return Ok(Turn::OtherKind);
     }
     // A blob that is not there costs nothing here; `get_blob` says what is wrong with it.
     let size = tokio::fs::metadata(store.blob_path_of(&obs.blob_sha))
@@ -542,7 +569,19 @@ async fn read_ahead(
         let _held = held;
         runtime.block_on(async move {
             let started = std::time::Instant::now();
-            let bytes = store.get_blob(&obs.blob_sha).await?;
+            let bytes = match store.get_blob(&obs.blob_sha).await {
+                Err(StoreError::BlobCorrupt { sha, actual }) => {
+                    return Ok(Turn::Corrupt { sha, actual });
+                }
+                other => other?,
+            };
+            // The head was read without verifying it. Classify again from bytes that passed
+            // their hash, so a bad read of the head cannot choose the extractor and file a
+            // permanent verdict against a document that reads fine.
+            let kind = ContentKind::classify(&obs.meta, &bytes[..bytes.len().min(SNIFF_BYTES)]);
+            if want.as_deref().is_some_and(|want| want != kind.as_str()) {
+                return Ok(Turn::OtherKind);
+            }
 
             // **A Derivation always has bytes**, and `derive` is where that invariant is
             // enforced — an extractor that parsed the document and came back with nothing
@@ -570,7 +609,7 @@ async fn read_ahead(
                 derivation.outcome.text().unwrap_or_default(),
                 Read::of(kind),
             );
-            Ok(Some(Box::new(Reading {
+            Ok(Turn::Read(Box::new(Reading {
                 kind,
                 bytes: bytes.len() as u64,
                 derivation,
@@ -619,6 +658,17 @@ impl Render for ExtractReport {
                 let text = format!(
                     "stopped at the limit; {} left underived",
                     render::count(self.left_by_limit as u64)
+                );
+                p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
+            }
+
+            // Only where it fired. These documents were neither extracted nor given up on,
+            // and the next run tries them again.
+            if self.corrupt_blobs > 0 {
+                p.blank()?;
+                let text = format!(
+                    "{} failed their hash and were skipped; listed in workspace/corrupt-blobs.jsonl",
+                    render::plural(self.corrupt_blobs, "blob", "blobs")
                 );
                 p.marked(Mark::Warn, p.paint(&text, Ink::Dim))?;
             }
@@ -794,6 +844,38 @@ mod tests {
         assert_eq!(again.unextractable, 0);
         assert_eq!(again.already_unextractable, 1);
         assert!(again.unreadable.is_empty(), "not news twice");
+    }
+
+    /// The defect: one blob that failed its hash ended the extract for its whole Source,
+    /// so every document behind it waited on someone replacing the bytes by hand.
+    #[tokio::test]
+    async fn a_corrupt_blob_is_skipped_and_listed_and_the_rest_extract() {
+        const PAGE: &[u8] = b"<html><head><title>Agenda</title></head><body>\
+            <h1>Regular meeting</h1><p>The council will consider the budget.</p></body></html>";
+        let (_d, ctx) = store_with(AUDIO, "https://tampa.test/bad").await;
+        ctx.store
+            .record_observation(
+                &Resource::new(SourceId::new("tampa").unwrap(), "https://tampa.test/good"),
+                PAGE,
+                jiff::Timestamp::now(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let bad = BlobSha::from_bytes(AUDIO);
+        std::fs::write(ctx.store.blob_path_of(&bad), b"what the disk returned").unwrap();
+
+        let report = extract(&ctx, args(), &Progress::none(), &Cancel::none())
+            .await
+            .expect("a corrupt blob must not end the run");
+        assert_eq!(report.corrupt_blobs, 1);
+        assert_eq!(report.extracted, 1, "the good page still extracts");
+
+        let listed = std::fs::read_to_string(ctx.store.corrupt_blobs_path()).unwrap();
+        let line: serde_json::Value = serde_json::from_str(listed.trim()).unwrap();
+        assert_eq!(line["sha"], bad.as_str());
+        assert_eq!(line["address"], "https://tampa.test/bad");
+        assert_eq!(line["kind"], "source");
     }
 
     /// A one-page PDF carrying no text at all. Whether `pdf-inspector` calls this a parse
