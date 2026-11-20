@@ -313,10 +313,12 @@ measures without writing.
 **One table, not one per space.** SPEC §6.2 already makes changing the embedder a full
 re-embed rather than a config edit, so a second model is a rebuild.
 
-**ANN indexing is not built yet.** With no index, Lance scans flat — exact, and the right
-answer while the table is small. An `IVF_PQ` index starts to earn its cost somewhere above
-roughly 100,000 rows, which is a threshold to measure rather than a number to trust. A
-full corpus is 397,830 × 2,560 × 4 bytes = **3.79 GiB**.
+**ANN indexing is configured, under `[vectors]`.** With no index, Lance scans flat — exact,
+and the right answer while the table is small. A full corpus is 397,830 × 2,560 × 4 bytes =
+**3.79 GiB**; the field store reached 2.7 million rows of 4,096 dimensions, 44 GB, and a
+flat scan of it took 107 s a query. `embed` builds `IVF_PQ` by default once the table holds
+4,096 vectors, trained on as much of it as the memory budget holds, and a query re-scores
+its best against the full vectors. See `crates/centinel-core/src/vectors.rs`.
 
 Dependency: `lancedb = { version = "0.33.0", default-features = false }`. The default
 features are the S3, GCS, Azure and OSS object stores — every one a network path out of a
@@ -543,7 +545,6 @@ costs now is the server's time on the rerank, which has not been re-measured.
 
 ## 9. Not built yet
 
-- **ANN indexing.** Flat scan is exact and fine below ~100k rows.
 - **A source column on the vector table.** A `List<Utf8>` would push `--source` down into
   Lance, at the cost of updating a row whenever a new placement appears for an existing
   chunk.
