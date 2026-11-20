@@ -147,6 +147,7 @@ fn add_args(promote: &Promote) -> Value {
             "id": promote.id,
             "site": promote.site,
             "strategy": promote.strategy,
+            "ignore_robots": promote.ignore_robots,
         }
     })
 }
@@ -164,6 +165,7 @@ mod tests {
             id: "agartha".into(),
             site: "https://www.agartha.gov/".into(),
             strategy: Some("sitemap".into()),
+            ignore_robots: true,
         };
 
         let args: SourceArgs = serde_json::from_value(add_args(&promote))
@@ -173,6 +175,7 @@ mod tests {
                 assert_eq!(add.id, "agartha");
                 assert_eq!(add.site.as_deref(), Some("https://www.agartha.gov/"));
                 assert_eq!(add.strategy.as_deref(), Some("sitemap"));
+                assert!(add.ignore_robots, "what was probed is what is added");
                 assert!(!add.run, "adding must not collect");
                 assert!(!add.disabled);
             }
@@ -187,6 +190,7 @@ mod tests {
             id: "agartha".into(),
             site: "https://www.agartha.gov/".into(),
             strategy: None,
+            ignore_robots: false,
         }))
         .unwrap();
         match args.action {
@@ -217,6 +221,7 @@ mod tests {
                 id: "agartha".into(),
                 site: "https://www.agartha.gov/".into(),
                 strategy: None,
+                ignore_robots: false,
             }),
             warnings: Vec::new(),
             requests: Vec::new(),

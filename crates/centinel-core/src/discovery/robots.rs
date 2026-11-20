@@ -37,6 +37,9 @@ pub struct Robots {
     fallback: UnreachableRobots,
     /// True when rules were actually parsed, rather than assumed.
     pub declared: bool,
+    /// The operator ruled that this host's `Disallow` lines do not bind this source. See
+    /// [`Self::overruled`].
+    overruled: bool,
 }
 
 impl Robots {
@@ -51,6 +54,7 @@ impl Robots {
                 robot: Some(robot),
                 fallback: UnreachableRobots::Allow,
                 declared: true,
+                overruled: false,
             },
             // A malformed robots.txt is not permission to ignore the host's wishes, but
             // it is also not a reason to abandon the crawl. Treat it as undeclared.
@@ -67,11 +71,34 @@ impl Robots {
             robot: None,
             fallback,
             declared: false,
+            overruled: false,
         }
+    }
+
+    /// The same rules, with the operator's ruling that their `Disallow` lines do not bind.
+    ///
+    /// For a host that turns every crawler away while publishing public records: every
+    /// `*.granicus.com` serves `User-agent: *` / `Disallow: /` and admits Googlebot. The
+    /// rules are kept rather than dropped, so a run still says what they would have
+    /// excluded ([`Self::rules_allow`]), and `Crawl-delay` still slows the walk — the ruling
+    /// is about *whether* to fetch, never about how fast.
+    pub fn overruled(mut self) -> Self {
+        self.overruled = true;
+        self
+    }
+
+    /// Whether the operator overruled these rules.
+    pub fn is_overruled(&self) -> bool {
+        self.overruled
     }
 
     /// Whether we may fetch this URL.
     pub fn allowed(&self, url: &str) -> bool {
+        self.overruled || self.rules_allow(url)
+    }
+
+    /// What the host's rules say of this URL, whatever the operator ruled.
+    pub fn rules_allow(&self, url: &str) -> bool {
         match &self.robot {
             Some(r) => r.allowed(url),
             None => self.fallback == UnreachableRobots::Allow,
@@ -157,6 +184,26 @@ mod tests {
         assert!(r.allowed("https://www.phila.gov/anything"));
         assert!(!r.declared, "we must not claim rules we never read");
         assert!(r.sitemaps().is_empty());
+    }
+
+    /// `*.granicus.com`, recorded 2026-11-20. Overruled, every address may be fetched; the
+    /// rules still say what they would have excluded, and the delay still applies.
+    #[test]
+    fn an_overruled_host_is_fetched_and_its_rules_are_still_read() {
+        let txt = b"User-agent: Googlebot\nDisallow: /JSON.php\nUser-agent: *\nCrawl-delay: 2\nDisallow: /";
+        let url = "https://treasureislandfl.granicus.com/AgendaViewer.php?view_id=1&clip_id=1045";
+
+        let honoured = Robots::parse(UA, txt);
+        assert!(!honoured.allowed(url));
+
+        let overruled = Robots::parse(UA, txt).overruled();
+        assert!(overruled.allowed(url));
+        assert!(
+            !overruled.rules_allow(url),
+            "the rules are kept, not forgotten"
+        );
+        assert!(overruled.is_overruled());
+        assert_eq!(overruled.crawl_delay(), Some(Duration::from_secs(2)));
     }
 
     #[test]

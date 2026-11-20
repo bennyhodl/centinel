@@ -550,6 +550,17 @@ pub struct SourceConfig {
     /// green run is the failure this key exists to make loud.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<String>,
+
+    /// The operator's ruling that this website's `robots.txt` does not bind it. Website
+    /// sources only; absent means the rules are honoured, which is every source before
+    /// this key existed.
+    ///
+    /// For a vendor that hosts public records and turns every crawler away: each
+    /// `*.granicus.com` and `*.legistar1.com` host serves `User-agent: *` / `Disallow: /`
+    /// and admits Googlebot. `Crawl-delay` and the source's own rate still apply, and every
+    /// run notes that the rules were set aside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignore_robots: Option<bool>,
 }
 
 /// One cadence, and the `run` it fires.

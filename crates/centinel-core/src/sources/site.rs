@@ -105,6 +105,9 @@ pub struct SiteSource {
     /// both. Held in a `Mutex` rather than threaded through the caller because pacing is
     /// this Source's business, not its caller's.
     pacers: Mutex<HashMap<String, Arc<Pacer>>>,
+    /// `robots.txt` for each host a strategy asked about beyond the seed's, by origin.
+    /// See [`Walk::robots`].
+    robots: Mutex<HashMap<String, Arc<Robots>>>,
     /// Whether the op that owns this Source has been asked to stop.
     ///
     /// Read by [`SiteCrawl::may_fetch`], so a walk stops between requests rather than
@@ -183,6 +186,7 @@ impl SiteSource {
             crawl_delay: OnceLock::new(),
             cancel: Cancel::none(),
             pacers: Mutex::new(HashMap::new()),
+            robots: Mutex::new(HashMap::new()),
             partial: Mutex::new(Vec::new()),
             enclosed: AtomicUsize::new(0),
             held: AtomicUsize::new(0),
@@ -294,6 +298,7 @@ impl SiteSource {
                 Robots::unreachable(self.policy.unreachable_robots)
             }
         };
+        let robots = self.as_ruled(robots);
 
         // From here on, honour what the host asked for. The pacers built for the two
         // requests above are dropped rather than reused, because a cached limiter with no
@@ -322,6 +327,49 @@ impl SiteSource {
         };
 
         Ok((Seed { page, robots }, warnings))
+    }
+
+    /// A host's rules as this source applies them: overruled where its definition says
+    /// `ignore_robots`, as read everywhere else.
+    fn as_ruled(&self, robots: Robots) -> Robots {
+        match self.policy.ignore_robots {
+            true => robots.overruled(),
+            false => robots,
+        }
+    }
+
+    /// The rules of the host serving `url`, read once per origin. See [`Walk::robots`].
+    ///
+    /// The lock is never held across the fetch: two walks asking about one new host at
+    /// once may both read it, and the first answer stored is the one kept.
+    async fn robots_for(&self, url: &str, spent: &AtomicUsize) -> Arc<Robots> {
+        let origin = url::Url::parse(url)
+            .map(|u| u.origin().ascii_serialization())
+            .unwrap_or_default();
+        let known = self
+            .robots
+            .lock()
+            .expect("robots map is never poisoned")
+            .get(&origin)
+            .cloned();
+        if let Some(known) = known {
+            return known;
+        }
+        spent.fetch_add(1, Ordering::Relaxed);
+        let at = format!("{origin}/robots.txt");
+        self.pacer_for(&at).wait().await;
+        let rules = match self.fetch(Step::Robots, &at).await {
+            Ok(f) => Robots::parse(&self.policy.user_agent, &f.bytes),
+            Err(_) => Robots::unreachable(self.policy.unreachable_robots),
+        };
+        let rules = Arc::new(self.as_ruled(rules));
+        Arc::clone(
+            self.robots
+                .lock()
+                .expect("robots map is never poisoned")
+                .entry(origin)
+                .or_insert(rules),
+        )
     }
 
     /// Runs one strategy against a seed already in hand, and records what spoke.
@@ -369,6 +417,7 @@ impl SiteSource {
         let _ = self.spoke.set(spoke);
 
         self.add_published_feeds(seed, &mut found);
+        robots_exclusion(seed, &mut found);
         Ok(found)
     }
 
@@ -654,6 +703,53 @@ impl SiteSource {
     }
 }
 
+/// What `robots.txt` kept out, said where a person reads it.
+///
+/// Every `*.granicus.com` host serves `User-agent: *` / `Disallow: /`. Treasure Island's
+/// `ViewPublisher.php` links 858 agendas and minutes, and `investigate` on it reported
+/// `addresses: 0, complete: true`, with `disallowed: 1041` in a figure nobody reads. That
+/// is how a host that turns crawlers away came to look like a defect in link resolution.
+/// Zero because the host said no and zero because the site is empty must not read the same.
+///
+/// The sentence names the way past it, because the hosts that do this are the vendors that
+/// publish council agendas for most of a region, and an operator who has read the evidence
+/// can rule that the agendas are public. Where the operator already ruled, the run says the
+/// rules were set aside rather than staying silent about it.
+fn robots_exclusion(seed: &Seed, found: &mut crate::strategies::crawl::Enumerated) {
+    let Some(served) = seed.final_url() else {
+        return;
+    };
+    let host = served.host_str().unwrap_or("this host");
+    if seed.robots.is_overruled() {
+        if !seed.robots.rules_allow(served.as_str()) {
+            found.notes.push(Note::marked(
+                "robots",
+                format!(
+                    "{host}'s robots.txt disallows {served}; collected anyway, because this \
+                     source's definition sets `ignore_robots`"
+                ),
+                NoteMark::Warn,
+            ));
+        }
+        return;
+    }
+    const RULING: &str = "if the host publishes public records and turns every crawler away, \
+                          `source add --ignore-robots` rules that its robots.txt does not bind";
+    let disallowed = found.figures.get("disallowed").copied().unwrap_or(0);
+    if !seed.robots.allowed(served.as_str()) {
+        found.warnings.push(format!(
+            "{host}'s robots.txt disallows {served} for this crawler, so it and the {} \
+             address(es) the walk found under the same rules were not collected; {RULING}",
+            crate::render::count(disallowed.saturating_sub(1))
+        ));
+    } else if found.addresses.is_empty() && disallowed > 0 {
+        found.warnings.push(format!(
+            "{host}'s robots.txt excluded all {} address(es) this walk found; {RULING}",
+            crate::render::count(disallowed)
+        ));
+    }
+}
+
 /// The host, as a strategy is allowed to see it.
 ///
 /// Holds the budget rather than delegating it, so "how many requests has this enumeration
@@ -708,6 +804,10 @@ impl Walk for SiteCrawl<'_> {
 
     fn progress(&self) -> &Progress {
         self.progress
+    }
+
+    fn robots<'b>(&'b self, url: &'b str) -> BoxFuture<'b, Arc<Robots>> {
+        Box::pin(self.site.robots_for(url, self.spent))
     }
 }
 
@@ -783,7 +883,17 @@ impl Source for SiteSource {
                 ));
                 figures.insert("discovery_failed".to_string(), 1);
             } else if found.addresses.is_empty() {
-                notes.push(Note::new("discovery", "read, and it lists no addresses"));
+                notes.push(match figures.get("disallowed").copied().unwrap_or(0) {
+                    0 => Note::new("discovery", "read, and it lists no addresses"),
+                    n => Note::marked(
+                        "discovery",
+                        format!(
+                            "read, and robots.txt excluded all {} address(es) it lists",
+                            crate::render::count(n)
+                        ),
+                        NoteMark::Warn,
+                    ),
+                });
             }
             if let Some(total) = found.declared_total {
                 // The number that tells "collected the site" from "collected 4% of it".
@@ -1943,6 +2053,191 @@ mod tests {
         assert!(
             text.contains("**Where:** St. Petersburg Main Library"),
             "{text}"
+        );
+    }
+
+    // ── robots.txt that says no ───────────────────────────────────────────────────
+    //
+    // `*.granicus.com`, recorded 2026-11-20. Treasure Island's ViewPublisher page links its
+    // agendas scheme-relative, and every Granicus host serves this robots.txt.
+
+    const GRANICUS_ROBOTS: &str =
+        "User-agent: Googlebot\nDisallow: /JSON.php\nCrawl-delay: 10\nUser-agent: *\nDisallow: /";
+
+    const GRANICUS_PUBLISHER: &str = r#"<html><body><table><tr>
+        <td class="listItem" headers="Date Board-of-Commissioners">November&nbsp;17,&nbsp;2026</td>
+        <td class="listItem"><a href="//treasureislandfl.granicus.com/AgendaViewer.php?view_id=1&clip_id=1045" target="_blank">Agenda</a></td>
+        <td class="listItem"><a href="//treasureislandfl.granicus.com/MinutesViewer.php?view_id=1&clip_id=1009&doc_id=4bd7" target="_blank">Minutes</a></td>
+        </tr></table></body></html>"#;
+
+    const GRANICUS_FEED: &str = r#"<?xml version="1.0" ?>
+<rss version="2.0" xmlns:dc="https://purl.org/dc/elements/1.1/" xmlns:gran="https://www.granicus.com/schema/rss-supplements" >
+<channel>
+  <title>Treasure Island, FL: Treasure Island FL Content (Agenda Feed)</title>
+  <link>https://treasureislandfl.granicus.com/ViewPublisher.php?view_id=1</link>
+<item>
+  <guid isPermaLink="false">dd4b32f0-7e3f-47c3-afb3-aec8b5b0e144</guid>
+  <title>Board of Commissioners - Nov 17, 2026</title>
+  <pubDate>Tue, 17 Nov 2026 02:00:00 -0800</pubDate>
+  <gran:pubDateParts yr='2026' mo='11' day='17' hr='14' min='00' sec='0' tz='8' />
+  <link>https://treasureislandfl.granicus.com/AgendaViewer.php?view_id=1&amp;clip_id=1045</link>
+  <description><![CDATA[<p>Access it here:<br /><a href="https://treasureislandfl.granicus.com/AgendaViewer.php?view_id=1&amp;clip_id=1045">https://treasureislandfl.granicus.com/AgendaViewer.php?view_id=1&amp;clip_id=1045</a></p>]]></description>
+</item>
+</channel></rss>"#;
+
+    fn granicus(robots: Option<&str>) -> Scripted {
+        let robots_txt = "https://treasureislandfl.granicus.com/robots.txt";
+        let pages = match robots {
+            Some(txt) => Scripted::default().serving(robots_txt, txt),
+            None => Scripted::default().refusing(robots_txt, Liveness::Gone),
+        };
+        pages
+            .serving_as(
+                "https://treasureislandfl.granicus.com/ViewPublisher.php?view_id=1",
+                "text/html; charset=utf-8",
+                GRANICUS_PUBLISHER,
+            )
+            .serving_as(
+                "https://treasureislandfl.granicus.com/ViewPublisherRSS.php?view_id=1&mode=agendas",
+                "text/xml;charset=utf-8",
+                GRANICUS_FEED,
+            )
+    }
+
+    /// The links are not the fault. With no rules in the way, `//host/…` resolves to the
+    /// page's own scheme like any other link and is kept.
+    #[tokio::test]
+    async fn scheme_relative_links_resolve_against_the_page() {
+        let s = site_at(
+            "https://treasureislandfl.granicus.com/ViewPublisher.php?view_id=1",
+            granicus(None),
+            DiscoveryLimits::default(),
+        )
+        .with_strategy(Some(crate::strategies::crawl::by_name("links").unwrap()));
+
+        let out = s.enumerate(&Progress::none()).await.unwrap();
+
+        let keys: Vec<&str> = out
+            .resources
+            .iter()
+            .map(|r| r.natural_key.as_str())
+            .collect();
+        assert!(
+            keys.contains(
+                &"https://treasureislandfl.granicus.com/AgendaViewer.php?view_id=1&clip_id=1045"
+            ),
+            "{keys:?}"
+        );
+        assert!(
+            keys.contains(&"https://treasureislandfl.granicus.com/MinutesViewer.php?view_id=1&clip_id=1009&doc_id=4bd7"),
+            "{keys:?}"
+        );
+    }
+
+    /// robots.txt is the fault, and a run that collects nothing because of it says so —
+    /// rather than `addresses: 0, complete: true` with the reason in a figure.
+    #[tokio::test]
+    async fn a_page_robots_txt_turns_away_says_so() {
+        let s = site_at(
+            "https://treasureislandfl.granicus.com/ViewPublisher.php?view_id=1",
+            granicus(Some(GRANICUS_ROBOTS)),
+            DiscoveryLimits::default(),
+        )
+        .with_strategy(Some(crate::strategies::crawl::by_name("links").unwrap()));
+
+        let out = s.enumerate(&Progress::none()).await.unwrap();
+
+        assert!(out.resources.is_empty());
+        assert_eq!(
+            out.figures.get("disallowed"),
+            Some(&3),
+            "the seed and both links"
+        );
+        assert!(
+            out.warnings.iter().any(|w| w.contains(
+                "treasureislandfl.granicus.com's robots.txt disallows https://treasureislandfl.granicus.com/ViewPublisher.php?view_id=1"
+            )),
+            "{:?}",
+            out.warnings
+        );
+        assert!(
+            out.notes.iter().any(|n| n.label == "discovery"
+                && n.mark == Some(NoteMark::Warn)
+                && n.detail.contains("robots.txt excluded all 3")),
+            "{:?}",
+            out.notes
+        );
+    }
+
+    /// An operator who read the evidence ruled that this host's robots.txt does not bind
+    /// the source. The addresses are collected, and the run says the rules were set aside.
+    #[tokio::test]
+    async fn an_operator_ruling_collects_what_robots_txt_turns_away() {
+        let s = SiteSource::new(
+            SourceId::new("treasure-island").unwrap(),
+            "https://treasureislandfl.granicus.com/ViewPublisher.php?view_id=1",
+            HostPolicy {
+                max_requests_per_second: 1000.0,
+                ignore_robots: true,
+                ..Default::default()
+            },
+            DiscoveryLimits::default(),
+        )
+        .unwrap()
+        .with_fetcher(granicus(Some(GRANICUS_ROBOTS)).arc())
+        .with_strategy(Some(crate::strategies::crawl::by_name("links").unwrap()));
+
+        let out = s.enumerate(&Progress::none()).await.unwrap();
+
+        let keys: Vec<&str> = out
+            .resources
+            .iter()
+            .map(|r| r.natural_key.as_str())
+            .collect();
+        assert!(
+            keys.contains(
+                &"https://treasureislandfl.granicus.com/AgendaViewer.php?view_id=1&clip_id=1045"
+            ),
+            "{keys:?}"
+        );
+        assert_eq!(out.figures.get("disallowed"), Some(&0));
+        assert!(
+            !out.warnings.iter().any(|w| w.contains("robots.txt")),
+            "{:?}",
+            out.warnings
+        );
+        assert!(
+            out.notes.iter().any(|n| n.label == "robots"
+                && n.mark == Some(NoteMark::Warn)
+                && n.detail.contains("ignore_robots")),
+            "{:?}",
+            out.notes
+        );
+    }
+
+    /// The feed is read and recognised; its one address is the feed, and robots.txt
+    /// disallows it.
+    #[tokio::test]
+    async fn a_feed_robots_txt_turns_away_says_so() {
+        let feed =
+            "https://treasureislandfl.granicus.com/ViewPublisherRSS.php?view_id=1&mode=agendas";
+        let s = site_at(
+            feed,
+            granicus(Some(GRANICUS_ROBOTS)),
+            DiscoveryLimits::default(),
+        )
+        .with_strategy(Some(crate::strategies::crawl::by_name("feed").unwrap()));
+
+        let out = s.enumerate(&Progress::none()).await.unwrap();
+
+        assert!(out.resources.is_empty());
+        assert_eq!(out.figures.get("disallowed"), Some(&1));
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("robots.txt disallows") && w.contains(feed)),
+            "{:?}",
+            out.warnings
         );
     }
 

@@ -127,6 +127,11 @@ fact. `valhalla.gov` once printed a clean checkmark beside 500 addresses against
 
 `--no-probe` skips the walk entirely: recognition only, two requests.
 
+When a host's `robots.txt` disallows the address, the probe says so by name instead of
+reporting an empty site. `--ignore-robots` walks it as a source with `ignore_robots = true`
+would, so you see what a ruling collects before you make it; the line it prints to add the
+source carries `--ignore-robots` too. See [Sources](sources.md).
+
 ### `measured` is the navigation-menu detector
 
 ```
@@ -169,8 +174,8 @@ those off the whole corpus — with a ruling you can record once per host. See
 | crumbs and no strategy | the system you want is on another host — investigate that one |
 | nothing, said plainly | there is no lever here yet; record it in field notes |
 
-`--user-agent` and `--timeout-secs` are available here and on `check`. A descriptive
-User-Agent measurably reduces WAF 403s.
+`--user-agent`, `--timeout-secs` and `--ignore-robots` are available here and on `check`. A
+descriptive User-Agent measurably reduces WAF 403s.
 
 ---
 

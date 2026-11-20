@@ -65,6 +65,7 @@ pub fn from_config(
             let policy = HostPolicy {
                 max_requests_per_second: over.rps.or(cfg.rps).unwrap_or(defaults.rps),
                 max_bytes: over.max_bytes.unwrap_or(crate::policy::DEFAULT_MAX_BYTES),
+                ignore_robots: cfg.ignore_robots.unwrap_or(false),
                 ..Default::default()
             };
             let mut limits = over.limits.clone().unwrap_or_default();
