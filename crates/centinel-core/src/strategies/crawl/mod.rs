@@ -73,6 +73,7 @@
 
 pub mod feed;
 pub mod granicus;
+pub mod legistar;
 pub mod links;
 pub mod listing;
 pub mod onbase;

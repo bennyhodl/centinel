@@ -2215,6 +2215,73 @@ mod tests {
         );
     }
 
+    /// Legistar names its documents on `*.legistar1.com`, not on the seed's host, and that
+    /// host's robots.txt disallows everything. Its rules are read from it, not borrowed from
+    /// the seed's, and the operator's ruling reaches them through the source.
+    #[tokio::test]
+    async fn a_ruling_reaches_the_rules_of_hosts_the_seed_is_not_on() {
+        let calendar = "https://hillsboroughcounty.legistar.com/Calendar.aspx";
+        let events = "https://webapi.legistar.com/v1/hillsboroughcounty/events?%24orderby=EventDate+desc%2CEventId+desc&%24top=1000";
+        let items = "https://webapi.legistar.com/v1/hillsboroughcounty/events/1398/eventitems?AgendaNote=1&MinutesNote=1&Attachments=1";
+        let agenda = "https://hillsboroughcounty.legistar1.com/hillsboroughcounty/meetings/2026/11/1398_A_Zoning_Hearing_Master_26-11-16_Agenda.pdf";
+        let source = |ignore_robots: bool| {
+            let pages = Scripted::default()
+                .refusing(
+                    "https://hillsboroughcounty.legistar.com/robots.txt",
+                    Liveness::Gone,
+                )
+                .serving_as(calendar, "text/html", "<html><span>Legistar</span></html>")
+                .serving_as(
+                    events,
+                    "application/json; charset=utf-8",
+                    &format!(r#"[{{"EventId":1398,"EventAgendaFile":"{agenda}","EventMinutesFile":null}}]"#),
+                )
+                .serving_as(items, "application/json; charset=utf-8", "[]")
+                .serving(
+                    "https://hillsboroughcounty.legistar1.com/robots.txt",
+                    "User-agent: * \nDisallow: / \n",
+                );
+            SiteSource::new(
+                SourceId::new("hillsborough-legistar").unwrap(),
+                calendar,
+                HostPolicy {
+                    max_requests_per_second: 1000.0,
+                    ignore_robots,
+                    ..Default::default()
+                },
+                DiscoveryLimits::default(),
+            )
+            .unwrap()
+            .with_fetcher(pages.arc())
+        };
+        let keys = |out: &Enumeration| -> Vec<String> {
+            out.resources
+                .iter()
+                .map(|r| r.natural_key.clone())
+                .collect()
+        };
+
+        let honoured = source(false);
+        let out = honoured.enumerate(&Progress::none()).await.unwrap();
+        assert_eq!(honoured.method(), "legistar");
+        assert_eq!(
+            keys(&out),
+            [items],
+            "the API answers; the document host said no"
+        );
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.starts_with("hillsboroughcounty.legistar1.com's robots.txt")),
+            "{:?}",
+            out.warnings
+        );
+
+        let ruled = source(true);
+        let out = ruled.enumerate(&Progress::none()).await.unwrap();
+        assert_eq!(keys(&out), [agenda, items]);
+    }
+
     /// The feed is read and recognised; its one address is the feed, and robots.txt
     /// disallows it.
     #[tokio::test]
