@@ -58,8 +58,23 @@ export async function createGateway(config: { root: string; origin: string; back
   const mcpHandler = requireMcpAuth(auth, async (request, claims) => {
     const user = claims.sub ? member(claims.sub) : undefined
     if (!user || user.access !== 'approved') return denied()
-    return forward(request, user)
+    // The token is good from here on. A backend that does not answer is a 502, so that
+    // whatever is thrown out of `mcpHandler` is a token that could not be checked.
+    return forward(request, user).catch(() => mcpError(502, 'The Centinel backend did not answer.'))
   }, { resource: `${config.origin}/mcp`, requiredScopes: ['mcp:tools'] })
+  /** A bad token is the client's 401, answered by `requireMcpAuth`. A token this server could
+   * not check is its own fault: a 503 with the reason, and never a 401 that sends the client
+   * through sign-in again. */
+  async function mcp(request: Request) {
+    try {
+      return await mcpHandler(request)
+    } catch (error) {
+      console.error('Could not check an MCP access token:', error)
+      return mcpError(503, 'This server could not check the access token. The cause is in its log.', { 'retry-after': '30' })
+    }
+  }
+  const mcpError = (status: number, message: string, headers: Record<string, string> = {}) =>
+    Response.json({ jsonrpc: '2.0', error: { code: -32000, message }, id: null }, { status, headers: { 'cache-control': 'no-store', ...headers } })
 
   async function handle(request: Request): Promise<Response | undefined> {
     const url = new URL(request.url)
@@ -68,7 +83,7 @@ export async function createGateway(config: { root: string; origin: string; back
     const origin = request.headers.get('origin')
     if (origin && origin !== config.origin) return json({ error: 'Foreign origin' }, 403)
     if (path === '/health') return json({ product: 'centinel', status: 'ok', public_url: config.origin, api_version: 1, version: process.env.CENTINEL_VERSION, store_id: process.env.CENTINEL_STORE_ID, build_id: process.env.CENTINEL_BUILD_ID })
-    if (path === '/mcp') return mcpHandler(request)
+    if (path === '/mcp') return mcp(request)
     if (path.startsWith('/.well-known/')) return auth.handler(request)
     if (path.startsWith('/api/auth/')) {
       if (path === '/api/auth/oauth2/consent' || path === '/api/auth/oauth2/continue') {
