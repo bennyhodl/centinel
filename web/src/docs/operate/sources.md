@@ -27,6 +27,22 @@ calendar address works as a seed too: `https://dsa-pinellas.medium.com/feed`, or
 Calendar's public `…/basic.ics`. Each article or event it carries is stored as its own
 entry; see [Acquisition](../internals/acquire.md#feeds).
 
+Some vendors that host public meetings turn every crawler away in `robots.txt`: Granicus,
+and the hosts Legistar keeps its agendas on. A run reports that by name. Where you have
+read the evidence and judge the documents public, rule that the host's robots.txt does not
+bind this source:
+
+```toml
+# ~/.centinel/log/treasure-island/source.toml
+id            = "treasure-island"
+site          = "https://treasureislandfl.granicus.com/ViewPublisher.php?view_id=1"
+strategy      = "granicus"
+ignore_robots = true
+```
+
+`source add --ignore-robots` writes the key. `Crawl-delay` and the request rate still
+apply, and every run notes that the rules were set aside.
+
 ## Adding one
 
 ```bash

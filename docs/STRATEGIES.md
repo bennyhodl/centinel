@@ -693,11 +693,16 @@ item 6; `none` is ten lines and still blocked, because *"no collection strategy"
 question nothing asks yet — dropped into a `discover` run it enumerates zero and reads as a
 failure. It wants `investigate` first.
 
-**There is no `onbase.rs`, and §15 is not an instruction to write one.** OnBase sits at one
-sighting, and §5 is explicit that one sighting is a note rather than a strategy. §15 spends
-that example on the *shape* — how recognition, evidence, canonicalisation and a declared
-ceiling fit together — precisely because writing it as a file would break the rule the file
-above it states. A second city on OnBase changes that; nothing else does.
+**`onbase.rs` exists now, because the second city turned up.** This paragraph used to say
+there was none: OnBase sat at one sighting, and §5 is explicit that one sighting is a note.
+On 2026-11-20 it stood at three — Tampa on `hylandcloud.com`, and Manatee and Osceola
+Counties on their own servers — so `onbase-agenda` recognises the application by its own
+markup rather than by Hyland's host. Two things §15 assumed changed in the meantime: the
+search is a GET (`Meetings/Search?dropid=11&dropsv=…&dropev=…`), so the "held" half that
+needed a POST and a token is not needed; and a capped answer now says
+`"WarningCode":"SEARCHLIMITHIT"`, so the walk halves a date range until no answer is
+capped. `granicus` and `legistar` were added beside it, each at four or more sightings in
+Tampa Bay alone.
 
 `sequence` (§10.5) has no row at all, deliberately. Two sightings promoted it to a shape
 and not to a build.
