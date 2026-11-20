@@ -136,6 +136,10 @@ pub struct Config {
     #[serde(default)]
     pub resources: ResourcesConfig,
 
+    /// `[vectors]` — how the vector table is indexed and searched. See [`crate::vectors`].
+    #[serde(default)]
+    pub vectors: VectorsConfig,
+
     /// Legacy `[[source]]` blocks. Read only so [`crate::catalog::Sources::import`] can
     /// carry them into the store; nothing else reads them, because the store owns the
     /// list now.
@@ -189,6 +193,111 @@ impl ResourcesConfig {
                     .map_err(|e| anyhow::anyhow!("[resources] memory: {e}"))
             })
             .transpose()
+    }
+}
+
+/// The `[vectors]` block: how the vector table is indexed, and how a search reads it.
+///
+/// A search compares the query with stored vectors. Without an index it compares it with
+/// every one, which is exact and reads the whole table: 44 GB at 2.7 million chunks of
+/// 4,096 dimensions. An IVF index sorts the vectors into `partitions` by meaning, and a
+/// query reads only the `probes` nearest of them. IVF_PQ also keeps a compressed copy of
+/// each vector, `sub_vectors` bytes, small enough to stay in memory, and re-scores the
+/// best `refine` × its answers against the full vectors on disk, so the order it returns
+/// is exact. See [`crate::vectors`] for what each costs.
+///
+/// `probes` and `refine` take effect on the next search. `index`, `partitions` and
+/// `sub_vectors` shape a build: `embed` builds the index when the table has none, and
+/// `embed --reindex` rebuilds it with what this says.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VectorsConfig {
+    /// The index `embed` builds, and whether a search uses one.
+    #[serde(default)]
+    pub index: VectorIndexKind,
+
+    /// The partitions an IVF index sorts the vectors into. Absent, the square root of the
+    /// rows when the index is built.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partitions: Option<u32>,
+
+    /// IVF_PQ: the bytes each vector is compressed to. Must divide the vector's width.
+    /// Absent, a sixteenth of it, or an eighth when sixteen does not divide it. More is a
+    /// sharper copy and a larger index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_vectors: Option<u32>,
+
+    /// The partitions one query reads. More finds more of the true nearest at the cost of
+    /// reading more.
+    #[serde(default = "default_probes")]
+    pub probes: usize,
+
+    /// IVF_PQ: how many times its answers a query re-scores against the full vectors, to
+    /// put the compressed copy's guesses in exact order. `0` returns the compressed order.
+    #[serde(default = "default_refine")]
+    pub refine: u32,
+}
+
+/// Which index the vector table has, written as `index = "…"` under `[vectors]`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VectorIndexKind {
+    /// Partitions, and a compressed copy of each vector re-scored against the full one.
+    /// Fast at any size, in memory a machine can spare.
+    #[default]
+    #[serde(rename = "ivf_pq")]
+    IvfPq,
+    /// Partitions over the full vectors: no compressed copy, so a query reads every vector
+    /// in the partitions it probes.
+    #[serde(rename = "ivf_flat")]
+    IvfFlat,
+    /// No index: a search compares with every vector. Exact, and fine for a small table.
+    #[serde(rename = "none")]
+    None,
+}
+
+impl std::fmt::Display for VectorIndexKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::IvfPq => "IVF_PQ",
+            Self::IvfFlat => "IVF_FLAT",
+            Self::None => "no index",
+        })
+    }
+}
+
+fn default_probes() -> usize {
+    64
+}
+fn default_refine() -> u32 {
+    2
+}
+
+impl Default for VectorsConfig {
+    fn default() -> Self {
+        Self {
+            index: VectorIndexKind::default(),
+            partitions: None,
+            sub_vectors: None,
+            probes: default_probes(),
+            refine: default_refine(),
+        }
+    }
+}
+
+impl VectorsConfig {
+    /// Every count is in range — checked when the file is read. Whether `sub_vectors`
+    /// divides the vector's width is known only to the table, and checked when it builds.
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.probes > 0, "[vectors] probes must be at least 1");
+        anyhow::ensure!(
+            self.partitions != Some(0),
+            "[vectors] partitions must be at least 1"
+        );
+        anyhow::ensure!(
+            self.sub_vectors != Some(0),
+            "[vectors] sub_vectors must be at least 1"
+        );
+        Ok(())
     }
 }
 
@@ -953,6 +1062,7 @@ impl Config {
         );
         self.inference.validate()?;
         self.resources.memory()?;
+        self.vectors.validate()?;
         self.validate_schedules()?;
         Ok(())
     }
@@ -1110,6 +1220,24 @@ model = "qwen3-reranker-0.6b"
 
 [inference.transcribe]
 model = "whisper-large-v3-turbo"
+
+# How search finds the nearest passages among the embedded ones. Without an index a query
+# compares with every stored vector, which is exact and reads the whole table. With one,
+# vectors are sorted into partitions by meaning and a query reads only the nearest few.
+#   index = "ivf_pq"    partitions, and a compressed copy of each vector small enough to
+#                       stay in memory; the best are re-checked against the full vectors
+#   index = "ivf_flat"  partitions over the full vectors; reads far more per query
+#   index = "none"      compare with every vector
+# `embed` builds the index once the table holds 4,096 vectors, and `centinel embed --limit 0
+# --reindex` rebuilds it after `index`, `partitions` or `sub_vectors` change. Building it
+# trains on as much of the table as [resources] memory holds. `probes` and `refine` apply
+# to the next search.
+#   [vectors]
+#   index = "ivf_pq"
+#   probes = 64        # partitions a query reads: more is better recall, and slower
+#   refine = 2         # ivf_pq: answers re-checked against the full vectors, times kept
+#   partitions = 1024  # absent: the square root of the vectors
+#   sub_vectors = 256  # ivf_pq: bytes per compressed vector; absent: a sixteenth of the width
 
 # The Jev model `centinel classify` scores documents with when no --model is given.
 # Classifying is never part of `centinel run`: document text leaves this machine for
@@ -1351,6 +1479,45 @@ mod tests {
 
         let err = Config::parse("[resources]\nmemory = \"plenty\"").unwrap_err();
         assert!(err.to_string().contains("[resources] memory"), "{err}");
+    }
+
+    /// Absent, a table is indexed with IVF_PQ and searched with the default effort; each
+    /// setting can be turned up, down or off, and one that cannot work is refused when the
+    /// file is read.
+    #[test]
+    fn vectors_default_to_ivf_pq_and_every_setting_is_tunable() {
+        assert_eq!(parse("").vectors, VectorsConfig::default());
+        assert_eq!(parse("").vectors.index, VectorIndexKind::IvfPq);
+
+        let tuned = parse(
+            "[vectors]\nindex = \"ivf_flat\"\npartitions = 512\nsub_vectors = 128\nprobes = 16\nrefine = 0",
+        )
+        .vectors;
+        assert_eq!(
+            tuned,
+            VectorsConfig {
+                index: VectorIndexKind::IvfFlat,
+                partitions: Some(512),
+                sub_vectors: Some(128),
+                probes: 16,
+                refine: 0,
+            }
+        );
+        assert_eq!(
+            parse("[vectors]\nindex = \"none\"").vectors.index,
+            VectorIndexKind::None
+        );
+
+        for (text, says) in [
+            ("[vectors]\nprobes = 0", "probes"),
+            ("[vectors]\npartitions = 0", "partitions"),
+            ("[vectors]\nsub_vectors = 0", "sub_vectors"),
+        ] {
+            let err = Config::parse(text).unwrap_err();
+            assert!(err.to_string().contains(says), "{text}: {err}");
+        }
+        assert!(Config::parse("[vectors]\nindex = \"hnsw\"").is_err());
+        assert!(Config::parse("[vectors]\nnprobes = 8").is_err());
     }
 
     #[test]
