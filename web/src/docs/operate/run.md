@@ -44,6 +44,8 @@ memory = "1.5 GiB"
 ```
 
 `--memory 1.5GiB` overrides it for one run, and `centinel doctor` prints the one in force.
+[Tuning for a machine](tuning.md) works out this and every other setting that depends on
+the machine.
 `embed` and `classify` wait on a server rather than on memory, and keep their
 `concurrency`.
 
