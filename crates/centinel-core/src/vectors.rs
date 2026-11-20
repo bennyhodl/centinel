@@ -1761,13 +1761,13 @@ fn sub_vectors(configured: Option<u32>, dims: usize) -> anyhow::Result<usize> {
     match configured.map(|n| n as usize) {
         Some(n) => {
             anyhow::ensure!(
-                n > 0 && dims % n == 0,
+                n > 0 && dims.is_multiple_of(n),
                 "[vectors] sub_vectors = {n} does not divide the vectors' {dims} dimensions"
             );
             Ok(n)
         }
-        None if dims % 16 == 0 => Ok(dims / 16),
-        None if dims % 8 == 0 => Ok(dims / 8),
+        None if dims.is_multiple_of(16) => Ok(dims / 16),
+        None if dims.is_multiple_of(8) => Ok(dims / 8),
         None => Ok(1),
     }
 }
