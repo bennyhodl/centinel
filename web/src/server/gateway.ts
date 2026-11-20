@@ -52,6 +52,9 @@ export async function createGateway(config: { root: string; origin: string; back
     return forward(request)
   }
 
+  // A token is checked against this server's own signing keys, read in-process: given no
+  // `jwksUrl`, nothing is fetched from the public origin, which this machine may not be able
+  // to resolve (a tailnet host with MagicDNS off).
   const mcpHandler = requireMcpAuth(auth, async (request, claims) => {
     const user = claims.sub ? member(claims.sub) : undefined
     if (!user || user.access !== 'approved') return denied()

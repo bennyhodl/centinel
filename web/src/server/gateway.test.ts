@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { get } from 'node:http'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { createIdentity } from './auth'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto'
 import { serve } from '@hono/node-server'
 import { brotliCompressSync } from 'node:zlib'
 import { createGateway } from './gateway'
@@ -19,6 +19,7 @@ let origin: string
 let server: ReturnType<typeof serve>
 let backend: ReturnType<typeof serve>
 let forwarded = 0
+let keysFetched = 0
 beforeAll(async () => {
   backend = serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
     expect(request.headers.get('x-centinel-secret')).toBe('private-test-credential')
@@ -32,7 +33,12 @@ beforeAll(async () => {
     if (pathname.startsWith('/web/assets/')) return new Response(null, { status: 404 })
     return Response.json({ result: 'corpus result' })
   } })
-  server = serve({ hostname: '127.0.0.1', port: 0, fetch: async request => await gateway.handle(request) ?? new Response('page') })
+  server = serve({ hostname: '127.0.0.1', port: 0, fetch: async request => {
+    // As on a tailnet host with MagicDNS off, the public origin does not lead back to this
+    // server's keys from the server itself. A token must verify without them.
+    if (new URL(request.url).pathname === '/api/auth/jwks') return keysFetched++, new Response(null, { status: 502 })
+    return await gateway.handle(request) ?? new Response('page')
+  } })
   await Promise.all([server, backend].map(s => new Promise<void>(resolve => s.listening ? resolve() : s.once('listening', resolve))))
   origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`
   gateway = await createGateway({ root, origin, backend: `http://127.0.0.1:${(backend.address() as { port: number }).port}`, secret: 'private-test-credential', relays: [] })
@@ -114,16 +120,27 @@ test('signup approval, OAuth MCP access, and revocation share current account pe
   const tokenResponse = await fetch(metadata.token_endpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', code: callback.searchParams.get('code')!, client_id: client.client_id, redirect_uri: 'http://127.0.0.1:19451/callback', code_verifier: verifier, resource: `${origin}/mcp` }) })
   expect(tokenResponse.status).toBe(200)
   const token = await tokenResponse.json()
-  expect((await request('/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' }, undefined, { authorization: `Bearer ${token.access_token}` })).status).toBe(200)
+  // The token is checked with this server's own keys, never fetched over the public origin.
+  for (const method of ['initialize', 'tools/list']) {
+    const call = await request('/mcp', { jsonrpc: '2.0', id: 1, method }, undefined, { authorization: `Bearer ${token.access_token}` })
+    expect(call.status, await call.clone().text()).toBe(200)
+  }
+  expect(keysFetched).toBe(0)
+  // The same header and claims, signed by a key that is not this server's, is the client's 401.
+  const [header, claims] = token.access_token.split('.')
+  const forged = `${header}.${claims}.${sign(null, Buffer.from(`${header}.${claims}`), generateKeyPairSync('ed25519').privateKey).toString('base64url')}`
+  const rejected = await request('/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' }, undefined, { authorization: `Bearer ${forged}` })
+  expect(rejected.status).toBe(401)
+  expect(rejected.headers.get('www-authenticate')).toContain('error="invalid_token"')
   // An agent's token is not a browser session. It never reaches /workspace, where an
   // administrator can start collection — only the browser carries that authority.
   expect((await request('/workspace/sources', undefined, undefined, { authorization: `Bearer ${token.access_token}` })).status).toBe(401)
   expect((await request('/workspace/investigations', { url: 'https://example.gov/' }, undefined, { authorization: `Bearer ${token.access_token}` })).status).toBe(401)
-  expect(forwarded).toBe(4)
+  expect(forwarded).toBe(5)
   expect((await request('/api/admin/users', { id: first.account.id, access: 'revoked' }, admin.cookie)).status).toBe(200)
   expect((await request('/workspace/documents', undefined, first.cookie)).status).toBe(403)
   expect((await request('/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/list' }, undefined, { authorization: `Bearer ${token.access_token}` })).status).toBe(403)
-  expect(forwarded).toBe(4)
+  expect(forwarded).toBe(5)
   const { users } = await (await request('/api/admin/users', undefined, admin.cookie)).json()
   expect(users.find((u: { id: string }) => u.id === first.account.id).access).toBe('revoked')
   const reopened = await createIdentity(root, origin)
