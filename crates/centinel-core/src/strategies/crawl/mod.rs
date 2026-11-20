@@ -72,6 +72,7 @@
 //! [`HostPolicy`]: crate::policy::HostPolicy
 
 pub mod feed;
+pub mod granicus;
 pub mod links;
 pub mod listing;
 pub mod scope;
