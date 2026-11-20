@@ -202,11 +202,13 @@ So `embed` writes vectors where `search` reads them.
 
 A full corpus is 397,830 × 2,560 × 4 bytes.
 
-## Not built yet
+## The vector index
 
-**ANN indexing.** With no index, Lance scans flat — exact, and the right answer while the
-table is small. An `IVF_PQ` index starts to earn its cost somewhere above roughly 100,000
-rows, which is a threshold to measure rather than a number to trust.
+With no index, Lance scans flat: exact, and the right answer while the table is small,
+but it reads every vector. `[vectors]` names the index `embed` builds once the table holds
+4,096 vectors: `IVF_PQ` by default, `IVF_FLAT`, or `none`. See [Search](search.md#large-corpora).
+
+## Not built yet
 
 **MRL truncation.** Qwen3-Embedding is Matryoshka, so a narrower index is a prefix slice
 of a stored vector rather than a re-embed. A reversible decision, deferred until something

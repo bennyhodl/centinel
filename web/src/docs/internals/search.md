@@ -185,42 +185,81 @@ Next: [Ops](ops.md).
 
 ## Large corpora
 
-After embedding, Centinel compacts small Lance files on tables with at least 4,096
-vectors. Exact search remains the default. `embed --ann-index` also creates a cosine
-IVF_FLAT index; later embedding runs maintain an existing index automatically.
-Search probes nearby partitions instead of scanning every vector. Vectors remain full
-precision, but partition selection makes retrieval approximate; evaluate recall on
-representative questions when comparing versions. Use `centinel search --exact "question"`
-to bypass the ANN index for a recall comparison. Small tables use exact search.
-Newly appended vectors remain searchable before maintenance completes.
+Without an index, the vector arm compares the query with every stored vector. That is
+exact, and on a small table it is fast. On a large one it reads the whole table each time:
+the field store held 2.7 million passages of 4,096 numbers each, 44 GB, and one query took
+107 s on a 3.3 GB VM because none of it stayed in memory.
 
-Existing stores can compact files without sending anything to a model or re-embedding:
+An index replaces that scan. `[vectors]` in `centinel.toml` says which, and how hard a
+query looks:
 
-```sh
-centinel embed --limit 0
+```toml
+[vectors]
+index = "ivf_pq"   # "ivf_pq" (default), "ivf_flat", or "none"
+probes = 64        # partitions a query reads
+refine = 2         # ivf_pq: answers re-checked against the full vectors, times kept
+# partitions = 1024  # absent: the square root of the vectors
+# sub_vectors = 256  # ivf_pq: bytes per compressed vector; absent: a sixteenth of the width
 ```
 
-To also build an approximate index, use `centinel embed --limit 0 --ann-index`.
-Indexing is opt-in because speed and recall depend on the corpus.
+- **`ivf_pq`** sorts the vectors into `partitions` by meaning, and keeps a compressed copy
+  of each, `sub_vectors` bytes: 256 bytes at 4,096 dimensions, so the index is about 0.7 GB
+  where the vectors are 44 and it stays in memory. A query reads the compressed copies in
+  the `probes` nearest partitions, then re-checks the best `refine` × its answers against
+  the full vectors on disk, so the order it returns is exact.
+- **`ivf_flat`** is the partitions alone, over the full vectors. A query reads every vector
+  in the partitions it probes, about `probes / partitions` of the table.
+- **`none`** is the scan. It also turns an index that is there off, without dropping it.
+
+`embed` builds the configured index when the table holds 4,096 vectors and has none, and
+every later `embed` adds the vectors appended since without training it again. Until then
+they are scanned beside it, so a new passage is searchable at once. The server's own
+background sync keeps an index up to date and never starts a build.
+
+| To | Change |
+|---|---|
+| find more of the true nearest | raise `probes`, or `refine` |
+| answer faster | lower `probes`, or `refine` |
+| a sharper compressed copy, a larger index | raise `sub_vectors` |
+| turn the index off | `index = "none"` |
+
+`probes` and `refine` apply to the next search. `index`, `partitions` and `sub_vectors`
+apply when the index is rebuilt, which also drops it for `none`:
+
+```sh
+centinel embed --limit 0 --reindex
+```
+
+Rebuild too once the table has grown several times over since the index was trained. A
+build reads every vector and trains on as many as the memory budget holds, `[resources]
+memory`: it reserves the whole budget and runs alone, so a larger budget trains on more of
+the table, up to Lance's own sample. It needs disk for the index beside the vectors, about
+0.7 GB for `ivf_pq` and as much again as the vectors for `ivf_flat`.
+
+Partition selection makes retrieval approximate. Compare against the exact answer on
+questions you know before trusting a setting:
+
+```sh
+centinel search --exact "question"
+```
 
 `--limit 0` still checks the configured server against the space the table records, so
 `[inference.embed]` must name the server that wrote it — or adopt it first. Maintenance
-runs after ingestion, never on the query path, and retains historical Lance versions.
-It needs additional disk space for compacted files and the full precision index.
-`--dry-run` performs no maintenance.
+runs after ingestion, never on the query path. `--dry-run` builds nothing.
 
-
-A reproducible synthetic benchmark reports warm exact/indexed latency and recall@10:
+A reproducible synthetic benchmark reports warm exact/indexed latency, recall@10, and the
+build time, for `ivf_pq` or `ivf_flat`:
 
 ```sh
-cargo run --release --locked -p centinel-core --example vector_bench -- 100000 2560
+cargo run --release --locked -p centinel-core --example vector_bench -- 100000 2560 ivf_pq
 ```
 
 It uses a temporary store, removes it on completion, and excludes index construction
 from query timing. Its synthetic vectors test the storage path, not embedding or
 reranking quality; use real corpus questions for an end-to-end evaluation.
 
-Local debug-build measurements (20 queries, uniformly random 64-dimensional vectors)
-show why ANN is opt-in: at 10,000 rows, exact/indexed latency was 9.52/13.92 ms with
-96.5% recall@10; at 100,000 rows it was 35.47/37.71 ms with 78.5% recall@10. These
-measurements do not establish a speedup, and do not represent Qwen embeddings on Spark.
+Earlier `ivf_flat` measurements in a debug build (20 queries, uniformly random 64-dimensional
+vectors) found no speedup at small sizes: at 10,000 rows, exact/indexed latency was
+9.52/13.92 ms with 96.5% recall@10; at 100,000 rows, 35.47/37.71 ms with 78.5% recall@10.
+Random vectors have no clusters for partitions to find, so recall there is a floor, and a
+table that fits in memory scans quickly. The index pays where the table does not fit.
