@@ -192,6 +192,10 @@ pub struct Promote {
     /// it, and there is no evidence in a guess.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<String>,
+    /// The probe walked with `--ignore-robots`, so the source it offers does too: what is
+    /// added is what was shown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_robots: bool,
 }
 
 impl Promote {
@@ -202,7 +206,14 @@ impl Promote {
             Some(name) => format!(" --strategy={name}"),
             None => String::new(),
         };
-        format!("centinel source add {} --site {}{pin}", self.id, self.site)
+        let ruling = match self.ignore_robots {
+            true => " --ignore-robots",
+            false => "",
+        };
+        format!(
+            "centinel source add {} --site {}{pin}{ruling}",
+            self.id, self.site
+        )
     }
 }
 
@@ -377,6 +388,7 @@ pub async fn investigate(
             id: suggest_id(&url),
             site: url.to_string(),
             strategy: recognition.is_some().then(|| chosen.name.to_string()),
+            ignore_robots: args.net.ignore_robots,
         });
 
     Ok(InvestigateReport {
@@ -927,11 +939,23 @@ mod tests {
             id: "publicrec".into(),
             site: "https://publicrec.hillsclerk.com/Civil/".into(),
             strategy: Some("listing".into()),
+            ignore_robots: false,
         };
         assert_eq!(
             promote.command(),
             "centinel source add publicrec --site https://publicrec.hillsclerk.com/Civil/ \
              --strategy=listing"
+        );
+
+        let ruled = Promote {
+            ignore_robots: true,
+            ..promote.clone()
+        };
+        assert!(
+            ruled
+                .command()
+                .ends_with("--strategy=listing --ignore-robots"),
+            "what was probed past robots.txt is added the same way: {ruled:?}"
         );
 
         let guessed = Promote {
@@ -1241,6 +1265,7 @@ mod tests {
             id: "agartha".into(),
             site: "https://www.agartha.gov/".into(),
             strategy: Some("sitemap".into()),
+            ignore_robots: false,
         });
 
         let out = render_to_string(&r);

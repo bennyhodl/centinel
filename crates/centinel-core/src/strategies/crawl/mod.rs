@@ -158,6 +158,16 @@ pub trait Walk: Send + Sync {
     /// second a large site is minutes of nothing, and a caller cannot otherwise tell
     /// politeness from a hang.
     fn progress(&self) -> &Progress;
+
+    /// The `robots.txt` rules of the host serving `url`, as this source applies them.
+    ///
+    /// For an address on another host than the seed: [`Seed::robots`] is the seed host's,
+    /// and asking it about a path on a different host answers a question nobody asked.
+    /// Legistar's Web API names its documents on `*.legistar1.com`, whose robots.txt says
+    /// `Disallow: /` while the seed's says nothing. Read once per host and counted against
+    /// the budget like any other request; the host keeps the rules, so an operator's
+    /// ruling (`ignore_robots`) reaches them without the strategy knowing it was made.
+    fn robots<'a>(&'a self, url: &'a str) -> BoxFuture<'a, std::sync::Arc<Robots>>;
 }
 
 /// One enumeration pass, as a strategy reports it.
@@ -380,6 +390,14 @@ impl<'a, T: std::fmt::Display> Pass<'a, T> {
     }
 
     pub fn warn(&mut self, message: String) {
+        self.out.warnings.push(message);
+    }
+
+    /// The **source** stopped short, where none of this walk's own ceilings did: a search
+    /// that answers at most a hundred results however narrow the question. The count is a
+    /// floor either way, so it is marked the same as a walk that ran out of budget.
+    pub fn short(&mut self, message: String) {
+        self.out.truncated = true;
         self.out.warnings.push(message);
     }
 
@@ -631,6 +649,8 @@ pub(crate) mod tests {
     /// bodies a real fixture would use are blobs the store already holds.
     pub struct Fake {
         pages: BTreeMap<String, String>,
+        /// `robots.txt` by host, for [`Walk::robots`]. A host not here declares nothing.
+        robots_txt: BTreeMap<String, String>,
         seen: AtomicUsize,
         budget: usize,
         max_addresses: usize,
@@ -641,11 +661,18 @@ pub(crate) mod tests {
         pub fn new<const N: usize>(pages: [(&str, String); N]) -> Self {
             Self {
                 pages: pages.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+                robots_txt: BTreeMap::new(),
                 seen: AtomicUsize::new(0),
                 budget: 100,
                 max_addresses: 10_000,
                 progress: Progress::none(),
             }
+        }
+
+        /// The `robots.txt` one host serves.
+        pub fn with_robots(mut self, host: &str, txt: &str) -> Self {
+            self.robots_txt.insert(host.to_string(), txt.to_string());
+            self
         }
 
         pub fn with_budget(mut self, n: usize) -> Self {
@@ -699,6 +726,19 @@ pub(crate) mod tests {
 
         fn progress(&self) -> &Progress {
             &self.progress
+        }
+
+        fn robots<'a>(&'a self, url: &'a str) -> BoxFuture<'a, std::sync::Arc<Robots>> {
+            Box::pin(async move {
+                let host = url::Url::parse(url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_string))
+                    .unwrap_or_default();
+                std::sync::Arc::new(match self.robots_txt.get(&host) {
+                    Some(txt) => Robots::parse("centinel", txt.as_bytes()),
+                    None => Robots::unreachable(Default::default()),
+                })
+            })
         }
     }
 

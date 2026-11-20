@@ -31,7 +31,7 @@ use crate::sources::SiteSource;
 pub(super) const REQUESTS: usize = 25;
 pub(super) const ADDRESSES: usize = 500;
 
-/// The two flags any op that fetches on an operator's behalf has to offer.
+/// The flags any op that fetches on an operator's behalf has to offer.
 ///
 /// Flattened into both `CheckArgs` and `InvestigateArgs` rather than spelled out in each.
 /// They were byte-identical clap blocks with byte-identical `serde` default functions, and
@@ -47,6 +47,12 @@ pub struct NetArgs {
     #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+
+    /// Walk as a source with `ignore_robots = true` would: the host's `Disallow` lines do
+    /// not bind. To see what `source add --ignore-robots` would collect before ruling.
+    #[arg(long)]
+    #[serde(default)]
+    pub ignore_robots: bool,
 }
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -64,6 +70,7 @@ impl Default for NetArgs {
         Self {
             user_agent: default_ua(),
             timeout_secs: default_timeout(),
+            ignore_robots: false,
         }
     }
 }
@@ -73,6 +80,7 @@ impl NetArgs {
         HostPolicy {
             user_agent: self.user_agent.clone(),
             timeout: std::time::Duration::from_secs(self.timeout_secs),
+            ignore_robots: self.ignore_robots,
             ..Default::default()
         }
     }

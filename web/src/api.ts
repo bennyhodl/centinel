@@ -533,6 +533,7 @@ export type SourceDefinition = {
   audio_if_no_captions?: boolean
   lang?: string
   strategy?: string
+  ignore_robots?: boolean
 }
 
 /** Replaces editable settings. Null removes an override; other definition fields stay intact. */
@@ -616,7 +617,7 @@ export type InvestigateReport = {
   probe?: { addresses: number; complete: boolean; strategy: string; by_fallback: boolean; requests_allowed: number; sample?: string[]; declared_total?: number }
   lead?: { read: ReadQuality; anchors: number; script_bytes: number; sitemap_declared: boolean; findings?: string[] }
   crumbs?: Crumb[]
-  promote?: { id: string; site: string; strategy?: string }
+  promote?: { id: string; site: string; strategy?: string; ignore_robots?: boolean }
   warnings?: string[]
   requests?: RequestRecord[]
   elapsed_secs: number

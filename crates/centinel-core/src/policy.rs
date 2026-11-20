@@ -43,6 +43,10 @@ pub struct HostPolicy {
     pub respect_crawl_delay: bool,
     /// What to do when `robots.txt` cannot be fetched at all.
     pub unreachable_robots: UnreachableRobots,
+    /// The operator ruled that `Disallow` lines do not bind this source. Off unless a
+    /// source's definition says `ignore_robots = true`; see
+    /// [`crate::discovery::Robots::overruled`] for what it does and does not change.
+    pub ignore_robots: bool,
     pub timeout: Duration,
     /// The largest body taken from one response. Larger is refused: before the body is
     /// read when the server says its length, and the moment it passes the ceiling when
@@ -60,6 +64,7 @@ impl Default for HostPolicy {
             max_requests_per_second: 1.0,
             respect_crawl_delay: true,
             unreachable_robots: UnreachableRobots::Allow,
+            ignore_robots: false,
             timeout: Duration::from_secs(30),
             max_bytes: DEFAULT_MAX_BYTES,
         }

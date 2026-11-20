@@ -90,6 +90,17 @@ pub struct AddArgs {
     #[serde(default)]
     pub strategy: Option<String>,
 
+    /// Collect this website although its `robots.txt` disallows it. Writes
+    /// `ignore_robots = true` into the definition.
+    ///
+    /// For a vendor that hosts public records and turns every crawler away — Granicus and
+    /// Legistar's document hosts serve `Disallow: /` to everything but search engines.
+    /// `centinel investigate --ignore-robots` shows what it would collect first.
+    /// `Crawl-delay` and the request rate still apply.
+    #[arg(long, conflicts_with = "channel")]
+    #[serde(default)]
+    pub ignore_robots: bool,
+
     /// Define it but leave it out of a bare `centinel run`.
     #[arg(long)]
     #[serde(default)]
@@ -280,6 +291,9 @@ async fn add(
         // is right for a command that has fetched nothing and seen no evidence. `--strategy`
         // is how an operator who *has* seen it — from `centinel investigate` — says so.
         strategy: args.strategy.clone(),
+        // Absent rather than `false` when not asked for, so a definition only ever carries
+        // the key where an operator ruled.
+        ignore_robots: args.ignore_robots.then_some(true),
     };
 
     let acquisition = source.acquisition()?;
@@ -732,6 +746,42 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(defined.strategy.as_deref(), Some("listing"));
+    }
+
+    /// The operator's ruling on robots.txt is written down only where it was made, so a
+    /// definition never carries `ignore_robots = false` as though someone had decided it.
+    #[tokio::test]
+    async fn a_robots_ruling_is_written_only_when_the_operator_makes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = empty_store(dir.path()).await;
+        add(
+            &ctx,
+            AddArgs {
+                id: "treasure-island".into(),
+                site: Some(
+                    "https://treasureislandfl.granicus.com/ViewPublisher.php?view_id=1".into(),
+                ),
+                ignore_robots: true,
+                ..Default::default()
+            },
+            &Progress::none(),
+            &Cancel::none(),
+        )
+        .await
+        .unwrap();
+        add_site(&ctx, "tampa", Some("https://www.tampa.gov"), None)
+            .await
+            .unwrap();
+
+        let catalog = Sources::new(&ctx.store);
+        let ruled = catalog.get("treasure-island").await.unwrap().unwrap();
+        assert_eq!(ruled.ignore_robots, Some(true));
+        let plain = catalog.get("tampa").await.unwrap().unwrap();
+        assert_eq!(plain.ignore_robots, None);
+        let written =
+            std::fs::read_to_string(ctx.store.definition_path(&SourceId::new("tampa").unwrap()))
+                .unwrap();
+        assert!(!written.contains("ignore_robots"), "{written}");
     }
 
     /// Checked before anything is written. A name nothing answers to would otherwise sit

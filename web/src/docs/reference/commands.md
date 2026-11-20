@@ -121,8 +121,10 @@ snapshot of a source's address set would look exactly like a source that shrank.
 configured server once it has measured that the server reproduces them — see [Inference
 servers](inference.md).
 
-`--user-agent` and `--timeout-secs` are available on the ops that fetch on your behalf
-(`check`, `investigate`). A descriptive User-Agent measurably reduces WAF 403s.
+`--user-agent`, `--timeout-secs` and `--ignore-robots` are available on the ops that fetch
+on your behalf (`check`, `investigate`). A descriptive User-Agent measurably reduces WAF
+403s. `source add --ignore-robots` records the operator's ruling that a host's robots.txt
+does not bind that source; see [Sources](../operate/sources.md).
 
 ## Handles
 
