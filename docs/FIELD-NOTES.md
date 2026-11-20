@@ -39,6 +39,7 @@ lever.
 | 4 | Hillsborough Clerk (`hillsclerk.com`) | ~6 GB of open bulk files nobody looked for; every `.csv` unextractable because IIS says `octet-stream` | collect | every server that defaults to `octet-stream`; every open directory listing |
 | 5 | Six ordinary city and county sites | five of six enumerate perfectly and still lose most of their content; one loses all 579 addresses to a relative `Sitemap:` line | **extract and report** — not enumerate | every CMS site, which is most of them |
 | 6 | A full run on the box: 37 Tampa Bay sources | one 830 MB file killed every run; CMS redirect pages are fetched off-host and counted as the city's failures; `<base href>` is ignored, so largo's links resolve to 404s; a footer PDF is fetched once per page (21.5 GB of repeats); a 10 s crawl delay over a WooCommerce shop holds the run ~13 h; extract peaks at ~670 MB per vector PDF and glibc keeps it; one 17,162-font PDF stalls extract with no deadline; index's chrome learner holds every CSV row and is killed | **collect** (memory, redirects), **enumerate** (links), **extract** and **index** (memory, time) | every run on a small machine; every CivicPlus/Granicus "external link" page; every site that declares `<base href>` |
+| 7 | Council agendas: OnBase, Legistar, Granicus | robots.txt turned the walk away and the report read "empty"; a strategy's off-host addresses were checked against the seed's rules | **enumerate** and **report** | every vendor that admits only search engines; every strategy whose documents live on another host |
 
 **Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
@@ -2078,6 +2079,114 @@ the memory blocks the VM was given.)*
 - 00:14Z — one more piece started for the 391. 00:16Z: the same 429, 0 embedded. Eight
   hours on, the quota has not refilled, so it is a longer quota than the "1 sec" says, or
   the provider's per-key allowance for the day. Stopped there: 391 chunks owed.
+
+---
+
+## 7. Council agendas and minutes — the vendor platforms Tampa Bay publishes on
+
+*Seen 2026-11-20, with `investigate`/`check` v0.32.0 on the box and plain HTTP requests.*
+
+An investigation into Tampa's Water Street Phase 2 found no city council material in the
+corpus. Nearly every city here keeps its agendas and minutes on a vendor platform, and none
+was collected. Of 4,422 off-host hosts the corpus links to, the agenda platforms are:
+
+| Platform | Clients seen | Collected by |
+|---|---|---|
+| Hyland OnBase Agenda Online | Tampa; Manatee and Osceola Counties on their own servers | `onbase-agenda` |
+| Legistar | Hillsborough County, Pinellas County, Clearwater, Belleair | `legistar` |
+| Granicus | Treasure Island (agendas); Hillsborough, Clearwater, St. Pete, Safety Harbor, Gulfport (video) | `granicus` |
+| CivicWeb | Oldsmar, Madeira Beach, Largo | not built |
+| CivicClerk | Tarpon Springs, Seminole, St. Pete Beach | not built |
+
+### Fault 1 — robots.txt turned the walk away, and the report said "empty"
+
+`investigate https://treasureislandfl.granicus.com/ViewPublisher.php?view_id=1` read 231,397
+characters and reported `addresses: 0, complete: true`; the agenda RSS feed beside it, the
+same. It read as two bugs — scheme-relative links (`//host/AgendaViewer.php?…`) dropped, and
+a feed parser that found nothing. Neither: the probe's figures said `disallowed: 1041` and
+`disallowed: 1`. Every Granicus host serves
+
+```text
+User-agent: Googlebot
+Disallow: /JSON.php
+…
+User-agent: *
+Disallow: /
+```
+
+and so do the hosts Legistar keeps its documents on (`hillsboroughcounty.legistar1.com`,
+`pinellas.legistar1.com`, `legistar2.granicus.com`). The Legistar Web API, `{client}.legistar.com`
+and OnBase serve no robots.txt at all.
+
+**The lever:** a walk that collects nothing because robots.txt said no has to say that, by
+host, in the warnings — a figure nobody prints is the same silence. Built. And the operator
+can rule, per source, that a host's rules do not bind it (`ignore_robots`), seeing what that
+would collect first with `investigate --ignore-robots`. Built.
+
+### Fault 2 — a strategy's addresses on another host were checked against the seed's rules
+
+`Pass::keep` checks an address against `Seed::robots`, the seed host's rules. A sitemap's
+cross-host entries and Legistar's `*.legistar1.com` documents were checked against a path
+on the wrong host. `Walk::robots` now reads the rules of the host an address is on, once
+per host, and Legistar uses it. The sitemap walk still uses the seed's — changing it would
+change what every existing source collects, and that wants its own decision.
+
+### OnBase, three months on
+
+Entry 2's findings, rechecked:
+
+- **The search is a GET now**, the same one the page's own form builds:
+  `Meetings/Search?dropid=11&dropsv=MM/DD/YYYY&dropev=MM/DD/YYYY`. No token, no cookie.
+- **The cap now says so.** All of 2024: 100 meetings, `"WarningOccurred":true,
+  "WarningCode":"SEARCHLIMITHIT"`. Its halves: 77 and 57, no warning. All of 2015: 100 and
+  the warning. So the walk halves a capped date range until no answer is capped.
+- **`doctype` / `documentType` is the product's `PublishDocType`:** 1 agenda, 2 minutes,
+  3 summary, 5 agenda packet, 6 minutes packet. (A note handed over with this work said 2
+  was the agenda; meeting 2936's `doctype=2` is its proposed minutes.)
+- **An unpublished document answers 200 `application/pdf` with 3,505 bytes of HTML**
+  (meeting 3007, agenda). Only the meeting's `Is…Available` flags are safe to build an
+  address from. An unknown meeting id answers 302 to the error page, which the fetcher
+  already refuses.
+- `DownloadFileBytes/x.pdf?documentType=2&meetingId=2936` and `…/2936.pdf?…` return the same
+  248,827 bytes: the name is still decorative, so it is written as the meeting id.
+- Summaries exist now: 12 of 61 Tampa meetings in the last 90 days, 11 of 24 at Manatee.
+
+### Legistar
+
+- `GET https://webapi.legistar.com/v1/{client}/events` answered without a token for all
+  four clients. OData `$filter`, `$orderby`, `$top` (1,000 at most) and `$skip` work, and
+  form-encoded names (`%24filter`, `+` for space) are accepted.
+- Hillsborough: 9 meetings in the 90 days to 2026-11-20, one of them with 51 items and
+  80 matter attachments.
+- `nyc` answers `403 Token is required` with an empty body; `chicago` answers 500
+  "LegistarConnectionString setting is not set up" — a client name the API does not know.
+- The agendas the API names are on robots-disallowed hosts. The same PDFs are served by
+  `{client}.legistar.com/View.ashx?M=A&ID=…&GUID=…`, which no robots.txt covers, but those
+  ids are InSite's, not the API's (`View.ashx?M=A&ID=1398&GUID=<EventGuid>` redirects to
+  `Confirmation.aspx?M1=Gone`), and are only on each meeting's `MeetingDetail.aspx`.
+
+### Granicus
+
+- Treasure Island's `ViewPublisher.php` links 827 `AgendaViewer.php` and 31
+  `MinutesViewer.php` addresses; `AgendaViewer.php?view_id=1&clip_id=1042` redirects to a PDF
+  on `granicus_production_attachments.s3.amazonaws.com`. `links` would fetch every one of
+  those PDFs during discovery to learn its address, so `granicus` reads them off the page.
+- Hillsborough's `AgendaViewer.php` answers 200 "This agenda is not currently published":
+  its agendas are in Legistar.
+
+### Left on the table
+
+- CivicWeb and CivicClerk, six cities between them.
+- OnBase's executed documents at `/251publicaccess/`.
+- Legistar's `View.ashx` route, which would collect the documents without a ruling at one
+  extra request per meeting.
+- The meeting's name as the document's title (entry 2, lever 6): the search and the API
+  both carry it, and a Resource still has nowhere to put it.
+
+### Running log
+
+- 2026-11-20 — strategies written; the live runs against throwaway stores are recorded in
+  the pull request.
 
 ---
 

@@ -102,14 +102,38 @@ This is content-kind detection one level up: magic bytes are a list of *(signatu
 kind)* where each element answers for itself, and a strategy registry is magic bytes for
 websites. Registration is link-time, so there is nowhere to forget to add one.
 
-Four strategies are registered today:
+Seven strategies are registered today:
 
 | Strategy | Keys on | Addresses |
 |---|---|---|
+| `onbase-agenda` | Hyland OnBase Agenda Online (product) | the agenda, minutes and summary PDF of every meeting the application's search lists |
+| `legistar` | Legistar, on `{client}.legistar.com` or its Web API (product) | per meeting, the agenda and minutes PDFs, the meeting's items from the API, and every attachment those items name |
+| `granicus` | a Granicus `ViewPublisher.php` page or agenda feed (product) | the `AgendaViewer.php` and `MinutesViewer.php` documents it lists |
 | `sitemap` | a `Sitemap:` line in `robots.txt` (standard) | every `<loc>` the sitemaps list |
 | `listing` | an IIS or Apache/nginx directory index (server default) | the files under the seed's directory |
 | `feed` | an RSS, Atom or iCalendar seed (standard) | the feed itself; its entries are split at [acquisition](acquire.md#feeds) |
 | `links` | nothing — it never recognises | the seed, and the readable pages it links to inside its scope |
+
+The three products publish council agendas and minutes for most of Tampa Bay, and each
+reads its meetings from structured data rather than links. The seed bounds a walk, as a
+path bounds `links`: an OnBase search address with a date range
+(`…/Meetings/Search?dropid=11&dropsv=08/22/2026&dropev=11/20/2026`) or a Legistar API
+events address with an OData `$filter` covers that range, and the application's front door
+covers everything. OnBase's search answers at most a hundred meetings and says so, so a
+capped date range is halved until every answer is whole.
+
+### When `robots.txt` says no
+
+Granicus, and the hosts Legistar keeps its documents on (`*.legistar1.com`,
+`legistar2.granicus.com`), serve `User-agent: *` / `Disallow: /` and admit search
+engines. The rules are honoured, and a run that collected nothing because of them says so
+by name instead of reporting an empty site. A strategy whose addresses are on another host
+than the seed asks that host's rules, not the seed's.
+
+An operator who has read the evidence can rule that a host's robots.txt does not bind a
+source: `ignore_robots = true` in its definition, written by `source add --ignore-robots`.
+`investigate --ignore-robots` shows what that would collect first. `Crawl-delay` and the
+source's request rate still apply, and every run notes that the rules were set aside.
 
 ## When nothing can be read
 
