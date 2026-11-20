@@ -47,6 +47,24 @@ model = "qwen3-reranker-0.6b"
 model = "whisper-large-v3-turbo"
 #   base_url = "http://127.0.0.1:8178/v1"
 
+# How search finds the nearest passages among the embedded ones. Without an index a query
+# compares with every stored vector, which is exact and reads the whole table. With one,
+# vectors are sorted into partitions by meaning and a query reads only the nearest few.
+#   index = "ivf_pq"    partitions, and a compressed copy of each vector small enough to
+#                       stay in memory; the best are re-checked against the full vectors
+#   index = "ivf_flat"  partitions over the full vectors; reads far more per query
+#   index = "none"      compare with every vector
+# `embed` builds the index once the table holds 4,096 vectors, and `centinel embed --limit 0
+# --reindex` rebuilds it after `index`, `partitions` or `sub_vectors` change. Building it
+# trains on as much of the table as [resources] memory holds. `probes` and `refine` apply
+# to the next search.
+#   [vectors]
+#   index = "ivf_pq"
+#   probes = 64        # partitions a query reads: more is better recall, and slower
+#   refine = 2         # ivf_pq: answers re-checked against the full vectors, times kept
+#   partitions = 1024  # absent: the square root of the vectors
+#   sub_vectors = 256  # ivf_pq: bytes per compressed vector; absent: a sixteenth of the width
+
 # The Jev model `centinel classify` scores documents with when no --model is given.
 # Classifying is never part of `centinel run`: document text leaves this machine for
 # api.typesafe.ai only when a person starts it, and $TYPESAFE_API_KEY must be set.
