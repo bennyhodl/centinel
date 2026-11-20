@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::config::InferenceConfig;
+use crate::config::{InferenceConfig, VectorsConfig};
 use crate::index::{Filter, Hit, Index, Placement};
 use crate::inference::Capability;
 use crate::prelude::*;
@@ -204,15 +204,17 @@ pub struct SearchReport {
 /// Search the corpus for a passage.
 #[op(group = "corpus")]
 pub async fn search(ctx: &Ctx, args: SearchArgs) -> anyhow::Result<SearchReport> {
-    let inference = crate::config::Config::load()?.inference;
-    search_with(ctx, args, &inference).await
+    let config = crate::config::Config::load()?;
+    search_with(ctx, args, &config.inference, &config.vectors).await
 }
 
-/// [`search`], against the servers `inference` names.
+/// [`search`], against the servers `inference` names, reading the vector index as
+/// `vectors` says.
 pub(crate) async fn search_with(
     ctx: &Ctx,
     args: SearchArgs,
     inference: &InferenceConfig,
+    vectors: &VectorsConfig,
 ) -> anyhow::Result<SearchReport> {
     // A tag nobody defined is a typo, and a typo that returned nothing would read as a
     // corpus with nothing in it. Checked against the saved questions as they are, before
@@ -242,7 +244,7 @@ pub(crate) async fn search_with(
         tags: &args.tags,
         not_tags: &args.not_tags,
     };
-    let (vector, no_vectors) = match vector_arm(ctx, inference, &args, &filter).await {
+    let (vector, no_vectors) = match vector_arm(ctx, inference, vectors, &args, &filter).await {
         Ok(hits) => (hits, None),
         Err(reason) => (Vec::new(), Some(reason)),
     };
@@ -468,12 +470,14 @@ fn apply_scores(hits: &mut [Hit], scores: &[f32]) -> Result<(), String> {
 async fn vector_arm(
     ctx: &Ctx,
     inference: &InferenceConfig,
+    vectors: &VectorsConfig,
     args: &SearchArgs,
     filter: &Filter<'_>,
 ) -> Result<Vec<Nearest>, String> {
     let table = VectorTable::open_existing(&ctx.store.vectors_db())
         .await
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|e| format!("{e:#}"))?
+        .configured(vectors);
     if table.is_empty().await.map_err(|e| format!("{e:#}"))? {
         return Err("the vector table is empty — run `centinel embed`".into());
     }
@@ -1167,15 +1171,21 @@ mod tests {
             &ctx,
             Default::default(),
             &server.config(),
+            &crate::config::VectorsConfig::default(),
             &Progress::none(),
             &Cancel::none(),
         )
         .await
         .unwrap();
 
-        let report = search_with(&ctx, ask("bees hive swarm"), &server.config())
-            .await
-            .unwrap();
+        let report = search_with(
+            &ctx,
+            ask("bees hive swarm"),
+            &server.config(),
+            &Default::default(),
+        )
+        .await
+        .unwrap();
         assert!(report.no_vectors.is_none(), "{:?}", report.no_vectors);
         assert!(report.no_rerank.is_none(), "{:?}", report.no_rerank);
         assert_eq!(report.method, "bm25+vector→rrf→rerank");
@@ -1197,6 +1207,7 @@ mod tests {
             &ctx,
             Default::default(),
             &wrote.config(),
+            &crate::config::VectorsConfig::default(),
             &Progress::none(),
             &Cancel::none(),
         )
@@ -1204,7 +1215,7 @@ mod tests {
         .unwrap();
 
         let other = crate::inference::fake::serve().await;
-        let report = search_with(&ctx, ask("bees"), &other.config())
+        let report = search_with(&ctx, ask("bees"), &other.config(), &Default::default())
             .await
             .unwrap();
         let reason = report.no_vectors.expect("the vector arm stayed out");
@@ -1230,6 +1241,7 @@ mod tests {
             &ctx,
             Default::default(),
             &inference,
+            &crate::config::VectorsConfig::default(),
             &Progress::none(),
             &Cancel::none(),
         )
@@ -1238,9 +1250,14 @@ mod tests {
 
         // No shared content word with the water passage — "drinking" and "sampling"
         // appear nowhere in it. BM25 alone cannot reach it.
-        let report = search_with(&ctx, ask("drinking water sampling results"), &inference)
-            .await
-            .unwrap();
+        let report = search_with(
+            &ctx,
+            ask("drinking water sampling results"),
+            &inference,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
         assert!(report.no_vectors.is_none(), "{:?}", report.no_vectors);
         assert!(report.method.contains("vector"), "{}", report.method);
         assert!(
@@ -1280,6 +1297,7 @@ mod tests {
                 ..ask("budget")
             },
             &InferenceConfig::default(),
+            &VectorsConfig::default(),
         )
         .await
         .unwrap_err()

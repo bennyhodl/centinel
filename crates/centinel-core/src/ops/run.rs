@@ -1108,6 +1108,7 @@ async fn run_derivation(
                         EmbedArgs::default(),
                         // The config already open here, rather than the file read again.
                         &config.inference,
+                        &config.vectors,
                         progress,
                         cancel,
                     )

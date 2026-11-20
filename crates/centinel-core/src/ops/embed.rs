@@ -90,12 +90,12 @@ use anyhow::Context as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::config::InferenceConfig;
+use crate::config::{InferenceConfig, VectorsConfig};
 use crate::embed::Embedder;
 use crate::index::Index;
 use crate::inference::{Capability, is_fatal};
 use crate::prelude::*;
-use crate::vectors::{Row, Space, VectorLock, VectorTable, parse_key};
+use crate::vectors::{Indexing, Row, Space, VectorLock, VectorTable, parse_key};
 use crate::workspace::classifications::Classifications;
 use crate::workspace::{DocState, DocumentId};
 
@@ -153,11 +153,14 @@ pub struct EmbedArgs {
     #[serde(default)]
     pub dry_run: bool,
 
-    /// Build an approximate vector index after embedding. Compare speed and recall
-    /// with `search --exact` on representative queries before adopting it.
+    /// Rebuild the vector index with what `[vectors]` says, replacing the one there or
+    /// dropping it for `index = "none"`. Without it, `embed` builds the configured index
+    /// only when the table has none. For a changed `index`, `partitions` or `sub_vectors`,
+    /// or a table that has grown several times over since its index was trained. Reads
+    /// every vector.
     #[arg(long)]
     #[serde(default)]
-    pub ann_index: bool,
+    pub reindex: bool,
 
     /// Take the stored vectors over to the configured server: embed a sample of stored
     /// chunks there, and record the server as the table's own if every one matches what is
@@ -222,6 +225,9 @@ pub struct EmbedReport {
     /// Superseded table versions whose files this run removed.
     #[serde(default)]
     pub versions_removed: u64,
+    /// The vector index this run built, `IVF_PQ` or `IVF_FLAT`, when it built one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_built: Option<String>,
     pub elapsed_secs: f64,
     /// Sustained rate of the model, for planning the rest of a corpus.
     pub chunks_per_sec: f64,
@@ -255,16 +261,25 @@ pub async fn embed(
     progress: &Progress,
     cancel: &Cancel,
 ) -> anyhow::Result<EmbedReport> {
-    let inference = crate::config::Config::load()?.inference;
-    embed_with(ctx, args, &inference, progress, cancel).await
+    let config = crate::config::Config::load()?;
+    embed_with(
+        ctx,
+        args,
+        &config.inference,
+        &config.vectors,
+        progress,
+        cancel,
+    )
+    .await
 }
 
-/// [`embed`], against the server `inference` names — `run` passes the config it has open
-/// rather than have the file read twice.
+/// [`embed`], against the server `inference` names and indexed as `vectors` says — `run`
+/// passes the config it has open rather than have the file read twice.
 pub(crate) async fn embed_with(
     ctx: &Ctx,
     args: EmbedArgs,
     inference: &InferenceConfig,
+    vectors: &VectorsConfig,
     progress: &Progress,
     cancel: &Cancel,
 ) -> anyhow::Result<EmbedReport> {
@@ -272,8 +287,8 @@ pub(crate) async fn embed_with(
     if let Some(source) = &args.source {
         SourceId::new(source.clone())?;
         anyhow::ensure!(
-            !args.adopt && !args.ann_index,
-            "--adopt and --ann-index require the whole vector table"
+            !args.adopt && !args.reindex,
+            "--adopt and --reindex require the whole vector table"
         );
     }
     anyhow::ensure!(args.batch != Some(0), "--batch must be at least 1");
@@ -450,6 +465,7 @@ pub(crate) async fn embed_with(
         stale: stale.len(),
         pruned: 0,
         versions_removed: 0,
+        index_built: None,
         elapsed_secs: 0.0,
         chunks_per_sec: 0.0,
         batch: None,
@@ -471,6 +487,11 @@ pub(crate) async fn embed_with(
             let dims = embedder()?.probe_dims().await?;
             VectorTable::open(&ctx.store.vectors_db(), &wanted, dims).await?
         }
+    };
+    let table = table.configured(vectors);
+    let indexing = match args.reindex {
+        true => Indexing::Rebuild,
+        false => Indexing::Build,
     };
     let dims = table.dims();
     let base = EmbedReport {
@@ -559,6 +580,7 @@ pub(crate) async fn embed_with(
             remaining: writer.remaining_rows(),
             pruned,
             versions_removed: done.versions_removed,
+            index_built: done.index_built.map(|kind| kind.to_string()),
             elapsed_secs: elapsed,
             chunks_per_sec: embedded as f64 / elapsed.max(f64::EPSILON),
             batch,
@@ -569,7 +591,7 @@ pub(crate) async fn embed_with(
     if todo.is_empty() {
         cancel.check()?;
         progress.say("maintaining the vector table");
-        let done = maintain(&ctx.store, &table, args.ann_index).await?;
+        let done = maintain(&ctx.store, &table, indexing).await?;
         crate::workspace::sync_vectors(&ctx.store).await?;
         return Ok(finish(&writer, 0, Vec::new(), None, done));
     }
@@ -597,7 +619,7 @@ pub(crate) async fn embed_with(
 
     cancel.check()?;
     progress.say("maintaining the vector table");
-    let done = maintain(&ctx.store, &table, args.ann_index).await?;
+    let done = maintain(&ctx.store, &table, indexing).await?;
     crate::workspace::sync_vectors(&ctx.store).await?;
     Ok(finish(
         &writer,
@@ -919,11 +941,11 @@ impl Writer {
 async fn maintain(
     store: &Store,
     table: &VectorTable,
-    build_index: bool,
+    indexing: Indexing,
 ) -> anyhow::Result<crate::vectors::Maintenance> {
     let lock = VectorLock::take(store).await?;
     table
-        .maintain(&lock, build_index)
+        .maintain(&lock, indexing)
         .await
         .with_context(|| verify_hint("maintaining the vector table"))
 }
@@ -1207,6 +1229,9 @@ impl Render for EmbedReport {
                 rate.push_str(&format!(" \u{00b7} {batch} per request"));
             }
             p.line(p.paint(&rate, Ink::Dim))?;
+            if let Some(kind) = &self.index_built {
+                p.marked(Mark::Ok, format!("built the {kind} vector index"))?;
+            }
 
             // Only when there is something to estimate, and only when a rate exists to
             // estimate from — dividing by a zero rate would print `inf`.
@@ -1366,7 +1391,15 @@ mod tests {
         progress: &Progress,
         cancel: &Cancel,
     ) -> anyhow::Result<EmbedReport> {
-        embed_with(ctx, args, &InferenceConfig::default(), progress, cancel).await
+        embed_with(
+            ctx,
+            args,
+            &InferenceConfig::default(),
+            &VectorsConfig::default(),
+            progress,
+            cancel,
+        )
+        .await
     }
 
     /// The op against `server`.
@@ -1379,6 +1412,7 @@ mod tests {
             ctx,
             args,
             &server.config(),
+            &VectorsConfig::default(),
             &Progress::none(),
             &Cancel::none(),
         )
@@ -1519,6 +1553,7 @@ mod tests {
                 ..Default::default()
             },
             &inference,
+            &VectorsConfig::default(),
             &Progress::none(),
             &Cancel::none(),
         )
@@ -1565,7 +1600,7 @@ mod tests {
                 batch: None,
                 limit: None,
                 dry_run: true,
-                ann_index: false,
+                reindex: false,
                 ..Default::default()
             },
             &Progress::none(),
@@ -1597,6 +1632,7 @@ mod tests {
                 ..Default::default()
             },
             &crate::inference::fake::nothing_listening(),
+            &VectorsConfig::default(),
             &Progress::none(),
             &Cancel::none(),
         )
@@ -1613,7 +1649,7 @@ mod tests {
                 batch: None,
                 limit: None,
                 dry_run: false,
-                ann_index: false,
+                reindex: false,
                 ..Default::default()
             },
             &Progress::none(),
@@ -1945,7 +1981,7 @@ mod tests {
                 batch: Some(8),
                 limit: None,
                 dry_run: true,
-                ann_index: false,
+                reindex: false,
                 ..Default::default()
             },
             &Progress::none(),
@@ -1965,7 +2001,7 @@ mod tests {
                 batch: Some(0),
                 limit: None,
                 dry_run: true,
-                ann_index: false,
+                reindex: false,
                 ..Default::default()
             },
             &Progress::none(),
@@ -2145,6 +2181,7 @@ mod tests {
             &ctx,
             EmbedArgs::default(),
             &config,
+            &VectorsConfig::default(),
             &Progress::none(),
             &Cancel::none(),
         )
@@ -2389,6 +2426,7 @@ mod tests {
             &ctx,
             EmbedArgs::default(),
             &config,
+            &VectorsConfig::default(),
             &Progress::none(),
             &Cancel::none(),
         )

@@ -16,7 +16,7 @@
 
 use crate::index::Index;
 use crate::store::Store;
-use crate::vectors::{VectorLock, VectorTable, key_of};
+use crate::vectors::{Indexing, VectorLock, VectorTable, key_of};
 
 use super::classifications::Classifications;
 
@@ -83,7 +83,9 @@ pub async fn sync_vectors(store: &Store) -> anyhow::Result<VectorSync> {
         done.rows += rows.len();
     }
     if done.rows > MAINTAIN_AFTER_ROWS {
-        table.maintain(&lock, false).await?;
+        // Keeps an index there is up to date and never starts a build: this runs in `serve`,
+        // and a build reads every vector.
+        table.maintain(&lock, Indexing::Keep).await?;
     }
     tracing::debug!(
         documents = done.documents,

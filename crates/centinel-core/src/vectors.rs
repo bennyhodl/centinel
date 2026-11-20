@@ -28,6 +28,30 @@
 //! lock, `workspace/vectors.lock`: each writing method takes a [`VectorLock`], so a write
 //! without it does not compile, and each starts from the table's latest version.
 //!
+//! ## The vector index
+//!
+//! Without one, a query compares with every row, and that reads the whole vector column:
+//! 44 GB at 2.7 million rows of 4,096 dimensions, measured at 107 s a query on a 3.3 GB
+//! VM whose disk reads 266 MB/s, because none of it stays cached. `[vectors]`
+//! ([`crate::config::VectorsConfig`]) names the index that replaces the scan:
+//!
+//! - **IVF_PQ**, the default. Vectors are sorted into partitions by meaning, and each is
+//!   kept again as `sub_vectors` bytes of codes: 256 bytes at 4,096 dimensions, so the
+//!   index is ~0.7 GB where the vectors are 44 and stays in the index cache. A query
+//!   reads the codes of the `probes` nearest partitions, and re-scores the best
+//!   `refine` × its depth against the full vectors, so the order it returns is exact.
+//! - **IVF_FLAT**: the partitions alone, over the full vectors. A query reads every
+//!   vector in the partitions it probes, about `probes / partitions` of the table.
+//! - **None**: the scan.
+//!
+//! [`VectorTable::maintain`] builds the configured index when the table has none and holds
+//! [`ANN_MIN_ROWS`], keeps whatever index there is up to date, and replaces it only when
+//! asked ([`Indexing::Rebuild`]): a build reads every vector and trains on as many of them
+//! as the memory budget holds ([`training`]), so it runs long on a large table. A build
+//! reserves the whole budget's room and runs alone. Rows appended since
+//! the last build or maintenance are scanned beside the index until the next maintenance
+//! folds them in.
+//!
 //! ## What a filter costs
 //!
 //! With an IVF index, a filter is applied **before** distance: Lance reads the probed
@@ -120,7 +144,11 @@ use lance::dataset::optimize::{CompactionOptions, commit_compaction, plan_compac
 use lance::dataset::transaction::{Operation, Transaction};
 use lance::dataset::write::CommitBuilder;
 use lance::index::DatasetIndexExt;
+use lance::index::vector::VectorIndexParams;
 use lance::session::{CacheSpec, Session};
+use lance_index::IndexType;
+use lance_index::vector::ivf::IvfBuildParams;
+use lance_index::vector::pq::PQBuildParams;
 use lancedb::arrow::arrow_array::builder::{ListBuilder, StringBuilder};
 use lancedb::arrow::arrow_array::{
     Array, BooleanArray, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator,
@@ -128,13 +156,14 @@ use lancedb::arrow::arrow_array::{
 };
 use lancedb::arrow::arrow_schema::{DataType, Field, Schema, SchemaRef};
 use lancedb::index::scalar::{BTreeIndexBuilder, BitmapIndexBuilder, LabelListIndexBuilder};
-use lancedb::index::{Index as LanceIndex, vector::IvfFlatIndexBuilder};
+use lancedb::index::{Index as LanceIndex, IndexConfig, IndexType as LanceIndexType};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::OptimizeAction;
 use lancedb::{DistanceType, Table};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::config::{VectorIndexKind, VectorsConfig};
 use crate::index::Filter;
 use crate::inference::Endpoint;
 use crate::op::{Cancel, Progress};
@@ -249,6 +278,20 @@ const COMPACT_IO_BUFFER_BYTES: u64 = 64 << 20;
 /// fast enough and loses nothing.
 const ANN_MIN_ROWS: usize = 4096;
 
+/// The name a vector index is built under: Lance's own for the column, so an index an
+/// earlier release built is the one a rebuild replaces.
+const VECTOR_INDEX_NAME: &str = "vector_idx";
+
+/// Training vectors per IVF partition, when memory allows: Lance's default, after faiss.
+const IVF_SAMPLE_RATE: usize = 256;
+
+/// Codes per PQ sub-vector at eight bits. PQ trains on this many vectors times its
+/// sample rate.
+const PQ_CODES: usize = 256;
+
+/// PQ's training vectors per code, when memory allows: Lance's default.
+const PQ_SAMPLE_RATE: usize = 256;
+
 /// How many times [`VectorTable::nearest`] doubles its fetch when shared passages leave it
 /// short of distinct chunks. A chunk carried by hundreds of pages fills a page of rows on
 /// its own; four doublings reach sixteen times the ask before the arm settles for less.
@@ -336,6 +379,21 @@ pub struct Maintenance {
     /// Superseded versions whose manifests and data files were deleted.
     pub versions_removed: u64,
     pub bytes_removed: u64,
+    /// The vector index this maintenance built, when it built one.
+    pub index_built: Option<VectorIndexKind>,
+}
+
+/// What [`VectorTable::maintain`] does about the vector index, beyond bringing one that
+/// exists up to date.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Indexing {
+    /// Build nothing. For a writer that is not `embed` — `serve` carrying tags onto rows —
+    /// which must not start a build that reads every vector.
+    Keep,
+    /// Build the configured index when the table is large enough and has none.
+    Build,
+    /// Replace the index with the configured one, or drop it when that is `none`.
+    Rebuild,
 }
 
 /// One fragment the table cannot read back.
@@ -447,6 +505,9 @@ pub struct VectorTable {
     schema: SchemaRef,
     space: Space,
     dims: usize,
+    /// How a search reads the index, and what [`Self::maintain`] builds. The defaults until
+    /// [`Self::configured`] says otherwise.
+    config: VectorsConfig,
 }
 
 /// Names the space and the width, not the Lance handle — which is a connection pool and
@@ -551,6 +612,7 @@ impl VectorTable {
             schema,
             space: space.clone(),
             dims,
+            config: VectorsConfig::default(),
         })
     }
 
@@ -585,7 +647,14 @@ impl VectorTable {
             schema,
             space,
             dims,
+            config: VectorsConfig::default(),
         })
+    }
+
+    /// This table, searched and indexed as `config` says.
+    pub fn configured(mut self, config: &VectorsConfig) -> Self {
+        self.config = config.clone();
+        self
     }
 
     pub fn dims(&self) -> usize {
@@ -782,8 +851,8 @@ impl VectorTable {
     /// For a writer to call between its commits, so a long run keeps its fragments to tens
     /// rather than thousands whether or not it reaches [`Self::maintain`]. It never
     /// rewrites a fragment an index covers, deleted rows or not: rewriting one rewrites
-    /// every index over it, and an IVF_FLAT index holds every vector in the table — work
-    /// for `maintain`, not for the middle of a run. A backlog bigger than one pass is
+    /// every index over it, and the vector index covers every row in the table — work for
+    /// `maintain`, not for the middle of a run. A backlog bigger than one pass is
     /// folded a pass per call.
     pub async fn compact_appended(&self, lock: &VectorLock) -> anyhow::Result<()> {
         self.table.checkout_latest().await?;
@@ -1001,16 +1070,16 @@ impl VectorTable {
     /// merges join on, the hash `embed` copies by, and the source, tags and exclusion a
     /// search filters on — are created when missing and brought up to date when present;
     /// then every version older than `VERSION_RETENTION` (ten minutes) is dropped with its
-    /// files, and so is whatever an interrupted write left behind. Creating an ANN index
-    /// stays opt-in through `build_index` — small corpora keep exact search, and IVF_FLAT
-    /// keeps full-precision vectors, so only partition selection is approximate. An index
-    /// that exists is brought up to date either way.
+    /// files, and so is whatever an interrupted write left behind. The vector index is
+    /// built, replaced or left as `indexing` says ([`Self::index_vectors`]); one that exists
+    /// is brought up to date whatever it says, which adds the rows appended since without
+    /// training it again.
     pub async fn maintain(
         &self,
         lock: &VectorLock,
-        build_index: bool,
+        indexing: Indexing,
     ) -> anyhow::Result<Maintenance> {
-        self.maintain_keeping(lock, build_index, VERSION_RETENTION)
+        self.maintain_keeping(lock, indexing, VERSION_RETENTION)
             .await
     }
 
@@ -1018,7 +1087,7 @@ impl VectorTable {
     async fn maintain_keeping(
         &self,
         lock: &VectorLock,
-        build_index: bool,
+        indexing: Indexing,
         retention: Duration,
     ) -> anyhow::Result<Maintenance> {
         self.table.checkout_latest().await?;
@@ -1061,20 +1130,7 @@ impl VectorTable {
                 }
             }
         }
-        let indexed = existing.contains(VECTOR_COLUMN);
-        if !indexed && build_index && rows >= ANN_MIN_ROWS {
-            self.table
-                .create_index(
-                    &[VECTOR_COLUMN],
-                    LanceIndex::IvfFlat(
-                        IvfFlatIndexBuilder::default()
-                            .distance_type(DistanceType::Cosine)
-                            .num_partitions((rows as f64).sqrt() as u32),
-                    ),
-                )
-                .execute()
-                .await?;
-        }
+        let index_built = self.index_vectors(lock, indexing, rows).await?;
         if rows > 0 {
             self.table
                 .optimize(OptimizeAction::Index(Default::default()))
@@ -1086,7 +1142,7 @@ impl VectorTable {
         let (versions_removed, bytes_removed) = self.prune(lock, retention).await?;
         tracing::debug!(
             rows,
-            indexed = indexed || (build_index && rows >= ANN_MIN_ROWS),
+            index_built = ?index_built,
             fragments_removed,
             fragments_added,
             versions_removed,
@@ -1098,7 +1154,145 @@ impl VectorTable {
             fragments_added,
             versions_removed,
             bytes_removed,
+            index_built,
         })
+    }
+
+    /// Builds, replaces or drops the vector index as `indexing` asks, and says which kind
+    /// it built.
+    ///
+    /// [`Indexing::Keep`] touches nothing. [`Indexing::Build`] builds the configured index
+    /// when the table holds [`ANN_MIN_ROWS`] and has none; an index of another kind is left
+    /// in place and named in a warning, because replacing it reads every vector again and
+    /// that is the operator's call. [`Indexing::Rebuild`] replaces whatever is there, or
+    /// drops it when the configuration says `none`.
+    async fn index_vectors(
+        &self,
+        lock: &VectorLock,
+        indexing: Indexing,
+        rows: usize,
+    ) -> anyhow::Result<Option<VectorIndexKind>> {
+        let replace = match indexing {
+            Indexing::Keep => return Ok(None),
+            Indexing::Build => false,
+            Indexing::Rebuild => true,
+        };
+        let existing = self.vector_index().await?;
+        let wanted = self.config.index;
+        if wanted == VectorIndexKind::None {
+            if let (true, Some(index)) = (replace, existing) {
+                self.table.drop_index(&index.name).await?;
+                tracing::info!(
+                    name = %index.name,
+                    "vector index dropped; search compares with every vector"
+                );
+            }
+            return Ok(None);
+        }
+        if rows < ANN_MIN_ROWS {
+            return Ok(None);
+        }
+        if let (false, Some(index)) = (replace, &existing) {
+            let has = kind_of(&index.index_type);
+            if has != Some(wanted) {
+                tracing::warn!(
+                    has = ?index.index_type,
+                    configured = %wanted,
+                    "the vector index is not the one [vectors] names; \
+                     `centinel embed --limit 0 --reindex` rebuilds it"
+                );
+            }
+            return Ok(None);
+        }
+        let name = existing.map_or_else(|| VECTOR_INDEX_NAME.to_string(), |index| index.name);
+        self.build_vector_index(lock, wanted, rows, name).await?;
+        Ok(Some(wanted))
+    }
+
+    /// Trains and writes a vector index of `kind` over every row, replacing any index
+    /// called `name`, in one commit.
+    ///
+    /// Built through Lance rather than lancedb because lancedb sets no PQ sample and no
+    /// streaming IVF sample, and both are what keep training inside the budget: Lance's
+    /// defaults hold 256 vectors a partition at once, 6.9 GB for 1,658 partitions of 4,096
+    /// dimensions, on a 3.3 GB machine. The whole room is reserved first, so nothing else
+    /// in this process holds memory beside the training, and [`training`] sizes both
+    /// samples to it. A larger budget trains on more of the table, up to Lance's defaults.
+    async fn build_vector_index(
+        &self,
+        _lock: &VectorLock,
+        kind: VectorIndexKind,
+        rows: usize,
+        name: String,
+    ) -> anyhow::Result<()> {
+        let partitions = self
+            .config
+            .partitions
+            .map_or_else(|| default_partitions(rows), |p| p as usize);
+        let budget = crate::memory::budget();
+        let _room = budget.reserve(budget.room()).await;
+        let sample = training(budget.room(), self.dims, partitions);
+        let mut ivf = IvfBuildParams::new(partitions);
+        ivf.sample_rate = IVF_SAMPLE_RATE;
+        // Below the full rate, Lance trains in steps of `partitions × this` vectors.
+        if sample.ivf < IVF_SAMPLE_RATE {
+            ivf.streaming_sample_rate = Some(sample.ivf);
+        }
+        let (params, sub_vectors) = match kind {
+            VectorIndexKind::IvfPq => {
+                let sub_vectors = sub_vectors(self.config.sub_vectors, self.dims)?;
+                let mut pq = PQBuildParams::new(sub_vectors, 8);
+                pq.sample_rate = sample.pq;
+                (
+                    VectorIndexParams::with_ivf_pq_params(DistanceType::Cosine.into(), ivf, pq),
+                    Some(sub_vectors),
+                )
+            }
+            VectorIndexKind::IvfFlat => (
+                VectorIndexParams::with_ivf_flat_params(DistanceType::Cosine.into(), ivf),
+                None,
+            ),
+            VectorIndexKind::None => return Ok(()),
+        };
+        tracing::info!(
+            %kind,
+            rows,
+            partitions,
+            sub_vectors = ?sub_vectors,
+            ivf_sample_rate = sample.ivf,
+            pq_sample_rate = sample.pq,
+            "building the vector index; it reads every vector once"
+        );
+        let started = Instant::now();
+        let handle = self.table.dataset().ok_or_else(not_a_local_table)?;
+        let mut dataset = (*handle.get().await?).clone();
+        dataset
+            .create_index(
+                &[VECTOR_COLUMN],
+                IndexType::Vector,
+                Some(name),
+                &params,
+                true,
+            )
+            .await?;
+        // lancedb's handle learns of a commit it did not make only by being told.
+        handle.update(dataset);
+        tracing::info!(
+            %kind,
+            secs = started.elapsed().as_secs(),
+            "vector index built"
+        );
+        Ok(())
+    }
+
+    /// The index over the vector column, if there is one.
+    async fn vector_index(&self) -> anyhow::Result<Option<IndexConfig>> {
+        Ok(self
+            .table
+            .list_indices()
+            .await?
+            .into_iter()
+            .find(|index| index.columns == [VECTOR_COLUMN]))
     }
 
     /// Reads every fragment back, every column, and names the ones that cannot be read.
@@ -1297,9 +1491,9 @@ impl VectorTable {
             // under L2. Relying on that would make the ranking depend on a property of
             // the embedder that this module cannot see.
             .distance_type(DistanceType::Cosine)
-            // The backend's 20-partition default lost too many candidates in the
-            // synthetic recall benchmark. Search more partitions before reranking.
-            .nprobes(64)?
+            // `[vectors] probes`. The backend's 20-partition default lost too many
+            // candidates in the synthetic recall benchmark.
+            .nprobes(self.config.probes)?
             // Before distance, which is lancedb's default for a filter on a vector query;
             // said here because the arm's correctness under a narrow filter depends on it.
             .only_if(predicate)
@@ -1310,10 +1504,16 @@ impl VectorTable {
                 DERIVED_COLUMN.to_string(),
             ]))
             .limit(limit);
-        let search = if use_index {
-            search
-        } else {
+        // `[vectors] index = "none"` turns an index that is there off, without dropping it.
+        // `refine` re-scores IVF_PQ's best against the full vectors, which puts them in
+        // exact order and makes `_distance` the true distance; IVF_FLAT holds the full
+        // vectors already. Lance ignores it where there is no index to refine.
+        let search = if !use_index || self.config.index == VectorIndexKind::None {
             search.bypass_vector_index()
+        } else if self.config.index == VectorIndexKind::IvfPq && self.config.refine > 0 {
+            search.refine_factor(self.config.refine)
+        } else {
+            search
         };
         let mut stream = search.execute().await?;
 
@@ -1440,7 +1640,7 @@ fn compaction(excluded: Vec<u32>) -> CompactionOptions {
 /// to cover every fragment, as Lance's own remapping takes it.
 ///
 /// Rewriting one of these moves its rows, so every index over it is rewritten with it,
-/// and an IVF_FLAT index holds every vector in the table.
+/// and the vector index covers every row in the table.
 async fn indexed_fragments(dataset: &Dataset) -> anyhow::Result<HashSet<u32>> {
     let indices = dataset.load_indices().await?;
     Ok(dataset
@@ -1490,6 +1690,68 @@ async fn settled_fragments(dataset: &Dataset) -> anyhow::Result<HashSet<u32>> {
             (indexed.contains(&id) && !worth_writing_out).then_some(id)
         })
         .collect())
+}
+
+/// The kind of a vector index lancedb reports, as `[vectors]` names it. `None` for one this
+/// module does not build.
+fn kind_of(index: &LanceIndexType) -> Option<VectorIndexKind> {
+    match index {
+        LanceIndexType::IvfPq => Some(VectorIndexKind::IvfPq),
+        LanceIndexType::IvfFlat => Some(VectorIndexKind::IvfFlat),
+        _ => None,
+    }
+}
+
+/// Partitions when `[vectors]` names none: the square root of the rows, so a partition
+/// holds about as many vectors as there are partitions.
+fn default_partitions(rows: usize) -> usize {
+    ((rows as f64).sqrt() as usize).max(1)
+}
+
+/// The bytes each IVF_PQ code holds: `configured`, or a sixteenth of the width, an eighth
+/// when sixteen does not divide it, one when neither does. A configured count must divide
+/// the width, since each code covers an equal slice of the vector.
+fn sub_vectors(configured: Option<u32>, dims: usize) -> anyhow::Result<usize> {
+    match configured.map(|n| n as usize) {
+        Some(n) => {
+            anyhow::ensure!(
+                n > 0 && dims % n == 0,
+                "[vectors] sub_vectors = {n} does not divide the vectors' {dims} dimensions"
+            );
+            Ok(n)
+        }
+        None if dims % 16 == 0 => Ok(dims / 16),
+        None if dims % 8 == 0 => Ok(dims / 8),
+        None => Ok(1),
+    }
+}
+
+/// How many vectors a build trains on, as Lance's per-partition and per-code rates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Training {
+    /// IVF vectors per partition held at once: Lance's [`IVF_SAMPLE_RATE`] when they fit.
+    ivf: usize,
+    /// PQ vectors per code: Lance's [`PQ_SAMPLE_RATE`] when they fit.
+    pq: usize,
+}
+
+/// The training samples that fit in `room` for vectors of `dims` sorted into
+/// `partitions`.
+///
+/// A training vector is counted twice over, its floats and the normalized or residual
+/// copy kmeans works on, so 32 KiB at 4,096 dimensions. The IVF sample streams: Lance
+/// holds `partitions × ivf` vectors at a time and works through the full sample in steps
+/// of that, so a small room trains in more steps rather than on less of the table. PQ
+/// holds its sample whole. Neither drops below one vector a partition or a code, which is
+/// the least kmeans can train on; with more partitions than fit, the room is overrun by
+/// that much, and `[vectors] partitions` is the way down.
+fn training(room: u64, dims: usize, partitions: usize) -> Training {
+    let per_vector = (dims as u64 * 4 * 2).max(1);
+    let fit = (room / per_vector) as usize;
+    Training {
+        ivf: (fit / partitions.max(1)).clamp(1, IVF_SAMPLE_RATE),
+        pq: (fit / PQ_CODES).clamp(1, PQ_SAMPLE_RATE),
+    }
 }
 
 /// The scalar index a column is served from: a bitmap for the few values a filter narrows
@@ -1755,8 +2017,11 @@ pub(crate) mod tests {
         assert!(parse_key("not a key").is_none());
     }
 
+    /// `embed` builds the configured index once the table is large enough, a writer that
+    /// is not `embed` never does, rows appended since are found beside it, and the index
+    /// changes kind only when a rebuild is asked for.
     #[tokio::test]
-    async fn maintenance_indexes_large_tables_and_preserves_appended_rows() {
+    async fn maintenance_builds_the_configured_index_and_preserves_appended_rows() {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         let rows: Vec<Row> = (0..4096u32)
@@ -1778,7 +2043,11 @@ pub(crate) mod tests {
         t.append(&lock(dir.path()).await, &rows[2048..])
             .await
             .unwrap();
-        t.maintain(&lock(dir.path()).await, false).await.unwrap();
+        let kept = t
+            .maintain(&lock(dir.path()).await, Indexing::Keep)
+            .await
+            .unwrap();
+        assert_eq!(kept.index_built, None);
         async fn indexed(t: &VectorTable) -> HashSet<String> {
             t.table
                 .list_indices()
@@ -1789,7 +2058,10 @@ pub(crate) mod tests {
                 .collect()
         }
         let scalar = indexed(&t).await;
-        assert!(!scalar.contains(VECTOR_COLUMN), "ANN must be opt-in");
+        assert!(
+            !scalar.contains(VECTOR_COLUMN),
+            "only embed builds a vector index"
+        );
         for column in [
             KEY_COLUMN,
             HASH_COLUMN,
@@ -1799,8 +2071,22 @@ pub(crate) mod tests {
         ] {
             assert!(scalar.contains(column), "no scalar index on {column}");
         }
-        t.maintain(&lock(dir.path()).await, true).await.unwrap();
-        assert!(indexed(&t).await.contains(VECTOR_COLUMN));
+        async fn vector_kind(t: &VectorTable) -> Option<VectorIndexKind> {
+            t.vector_index()
+                .await
+                .unwrap()
+                .and_then(|i| kind_of(&i.index_type))
+        }
+        let built = t
+            .maintain(&lock(dir.path()).await, Indexing::Build)
+            .await
+            .unwrap();
+        assert_eq!(
+            built.index_built,
+            Some(VectorIndexKind::IvfPq),
+            "IVF_PQ is the default"
+        );
+        assert_eq!(vector_kind(&t).await, Some(VectorIndexKind::IvfPq));
         let query = unit([-1.0, 0.0, 0.0, 0.0]);
         let added = "f".repeat(64);
         t.append(
@@ -1819,8 +2105,21 @@ pub(crate) mod tests {
             t.nearest(&query, 1, &Filter::default()).await.unwrap()[0].chunk_hash,
             added
         );
-        t.maintain(&lock(dir.path()).await, true).await.unwrap();
-        let reopened = table(dir.path()).await;
+        // An index that exists is brought up to date, not trained again.
+        let again = t
+            .maintain(&lock(dir.path()).await, Indexing::Build)
+            .await
+            .unwrap();
+        assert_eq!(again.index_built, None);
+        // IVF_PQ ranks by the compressed copy, so which rows reach the re-check is
+        // approximate, and how many a small `refine` recovers is the benchmark's question.
+        // A re-check that covers the table must agree exactly with the index, including the
+        // row folded into it after it was trained.
+        let covering = VectorsConfig {
+            refine: 4097,
+            ..VectorsConfig::default()
+        };
+        let reopened = table(dir.path()).await.configured(&covering);
         assert_eq!(reopened.len().await.unwrap(), 4097);
         assert_eq!(all_keys(&reopened).await.len(), 4097);
         let hits = reopened
@@ -1828,7 +2127,13 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(hits[0].chunk_hash, added);
-        assert!((hits[0].similarity - 1.0).abs() < 1e-5);
+        // Re-checked against the full vector, so the similarity is the true one, not the
+        // compressed copy's estimate.
+        assert!(
+            (hits[0].similarity - 1.0).abs() < 1e-5,
+            "{}",
+            hits[0].similarity
+        );
         let exact = reopened
             .nearest_exact(&query, 4097, &Filter::default())
             .await
@@ -1846,6 +2151,115 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(pinellas[0].chunk_hash, added);
         assert!(pinellas.iter().all(|h| h.document.source == "pinellas"));
+
+        // Another kind in the configuration is not a rebuild until one is asked for.
+        let flat = VectorsConfig {
+            index: VectorIndexKind::IvfFlat,
+            ..VectorsConfig::default()
+        };
+        let t = table(dir.path()).await.configured(&flat);
+        let left = t
+            .maintain(&lock(dir.path()).await, Indexing::Build)
+            .await
+            .unwrap();
+        assert_eq!(left.index_built, None);
+        assert_eq!(vector_kind(&t).await, Some(VectorIndexKind::IvfPq));
+        let rebuilt = t
+            .maintain(&lock(dir.path()).await, Indexing::Rebuild)
+            .await
+            .unwrap();
+        assert_eq!(rebuilt.index_built, Some(VectorIndexKind::IvfFlat));
+        assert_eq!(vector_kind(&t).await, Some(VectorIndexKind::IvfFlat));
+        assert_eq!(
+            t.nearest(&query, 1, &Filter::default()).await.unwrap()[0].chunk_hash,
+            added
+        );
+
+        // `none` searches without the index while it is still there, and a rebuild drops it.
+        let off = VectorsConfig {
+            index: VectorIndexKind::None,
+            ..VectorsConfig::default()
+        };
+        let t = table(dir.path()).await.configured(&off);
+        assert_eq!(
+            t.nearest(&query, 1, &Filter::default()).await.unwrap()[0].chunk_hash,
+            added
+        );
+        t.maintain(&lock(dir.path()).await, Indexing::Build)
+            .await
+            .unwrap();
+        assert_eq!(
+            vector_kind(&t).await,
+            Some(VectorIndexKind::IvfFlat),
+            "a build never drops"
+        );
+        t.maintain(&lock(dir.path()).await, Indexing::Rebuild)
+            .await
+            .unwrap();
+        assert!(t.vector_index().await.unwrap().is_none());
+        assert_eq!(
+            t.nearest(&query, 1, &Filter::default()).await.unwrap()[0].chunk_hash,
+            added
+        );
+    }
+
+    /// A configured compression that does not divide the vector is refused when the index
+    /// is built, by name, rather than as whatever Lance makes of it.
+    #[tokio::test]
+    async fn a_sub_vector_count_that_does_not_divide_the_width_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows: Vec<Row> = (0..4096u32)
+            .map(|i| Row {
+                chunk_hash: format!("{i:064x}"),
+                document: doc((i % 7) as u8),
+                state: DocState::default(),
+                vector: unit([i as f32, 1.0, (i % 13) as f32, 2.0]),
+            })
+            .collect();
+        let t = table(dir.path()).await.configured(&VectorsConfig {
+            sub_vectors: Some(3),
+            ..VectorsConfig::default()
+        });
+        t.append(&lock(dir.path()).await, &rows).await.unwrap();
+        let err = t
+            .maintain(&lock(dir.path()).await, Indexing::Build)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("[vectors] sub_vectors"), "{err:#}");
+    }
+
+    /// Training fits the room: a small machine trains in more, smaller steps and a large
+    /// one on Lance's full sample, and no step drops below one vector a partition.
+    #[test]
+    fn training_is_sized_to_the_room() {
+        const GIB: u64 = 1 << 30;
+        // The field VM: ~1.7 GiB of room, 2.7 million rows of 4,096 dimensions.
+        let partitions = default_partitions(2_749_062);
+        assert_eq!(partitions, 1658);
+        let small = training(17 * GIB / 10, 4096, partitions);
+        assert!(small.ivf < IVF_SAMPLE_RATE, "{small:?}");
+        let bytes = |vectors: usize| vectors as u64 * 4096 * 4 * 2;
+        assert!(bytes(small.ivf * partitions) <= 17 * GIB / 10, "{small:?}");
+        assert!(bytes(small.pq * PQ_CODES) <= 17 * GIB / 10, "{small:?}");
+        // A machine with room for all of it trains on Lance's defaults.
+        assert_eq!(
+            training(64 * GIB, 4096, partitions),
+            Training {
+                ivf: IVF_SAMPLE_RATE,
+                pq: PQ_SAMPLE_RATE
+            }
+        );
+        // No room is still one vector a partition and a code.
+        assert_eq!(training(0, 4096, partitions), Training { ivf: 1, pq: 1 });
+    }
+
+    #[test]
+    fn sub_vectors_default_to_a_sixteenth_and_must_divide_the_width() {
+        assert_eq!(sub_vectors(None, 4096).unwrap(), 256);
+        assert_eq!(sub_vectors(None, 1032).unwrap(), 129);
+        assert_eq!(sub_vectors(None, 4).unwrap(), 1);
+        assert_eq!(sub_vectors(Some(512), 4096).unwrap(), 512);
+        assert!(sub_vectors(Some(300), 4096).is_err());
     }
 
     #[tokio::test]
@@ -1858,7 +2272,9 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        t.maintain(&lock(dir.path()).await, true).await.unwrap();
+        t.maintain(&lock(dir.path()).await, Indexing::Build)
+            .await
+            .unwrap();
         assert!(
             !t.table
                 .list_indices()
@@ -1944,7 +2360,7 @@ pub(crate) mod tests {
         );
 
         let done = t
-            .maintain_keeping(&lock(dir.path()).await, false, Duration::ZERO)
+            .maintain_keeping(&lock(dir.path()).await, Indexing::Keep, Duration::ZERO)
             .await
             .unwrap();
 
@@ -2075,7 +2491,9 @@ pub(crate) mod tests {
             .unwrap();
         }
 
-        t.maintain(&lock(dir.path()).await, false).await.unwrap();
+        t.maintain(&lock(dir.path()).await, Indexing::Keep)
+            .await
+            .unwrap();
         let ids = fragment_ids(&t).await;
         assert!(
             !ids.contains(&deleting),
@@ -2124,7 +2542,9 @@ pub(crate) mod tests {
             .join(".tmpyRgYfx");
         std::fs::write(&debris, b"").unwrap();
 
-        t.maintain(&lock(dir.path()).await, false).await.unwrap();
+        t.maintain(&lock(dir.path()).await, Indexing::Keep)
+            .await
+            .unwrap();
 
         assert!(!debris.exists(), "the staging file outlived maintenance");
         assert_eq!(all_keys(&t).await.len(), 1);
@@ -2684,7 +3104,9 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        t.maintain(&lock(dir.path()).await, false).await.unwrap();
+        t.maintain(&lock(dir.path()).await, Indexing::Keep)
+            .await
+            .unwrap();
         assert_eq!(all_keys(&t).await.len(), 2);
         assert_eq!(
             t.nearest(&unit([1.0, 0.0, 0.0, 0.0]), 1, &Filter::default())
@@ -2725,7 +3147,7 @@ pub(crate) mod tests {
         std::fs::write(&file, original).unwrap();
         let done = table(dir.path())
             .await
-            .maintain(&lock(dir.path()).await, false)
+            .maintain(&lock(dir.path()).await, Indexing::Keep)
             .await
             .unwrap();
         assert_eq!(done.fragments_removed, 2, "{done:?}");
