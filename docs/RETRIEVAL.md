@@ -316,9 +316,9 @@ re-embed rather than a config edit, so a second model is a rebuild.
 **ANN indexing is configured, under `[vectors]`.** With no index, Lance scans flat — exact,
 and the right answer while the table is small. A full corpus is 397,830 × 2,560 × 4 bytes =
 **3.79 GiB**; the field store reached 2.7 million rows of 4,096 dimensions, 44 GB, and a
-flat scan of it took 107 s a query. `embed` builds `IVF_PQ` by default once the table holds
-4,096 vectors, trained on as much of it as the memory budget holds, and a query re-scores
-its best against the full vectors. See `crates/centinel-core/src/vectors.rs`.
+flat scan of it took 107 s a query. `centinel vector-index` builds `IVF_PQ` by default once
+the table holds 4,096 vectors, trained on as much of it as the memory budget holds, and a
+query re-scores its best against the full vectors. See `crates/centinel-core/src/vectors.rs`.
 
 Dependency: `lancedb = { version = "0.33.0", default-features = false }`. The default
 features are the S3, GCS, Azure and OSS object stores — every one a network path out of a

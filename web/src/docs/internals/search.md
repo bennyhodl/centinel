@@ -211,10 +211,17 @@ refine = 2         # ivf_pq: answers re-checked against the full vectors, times 
   in the partitions it probes, about `probes / partitions` of the table.
 - **`none`** is the scan. It also turns an index that is there off, without dropping it.
 
-`embed` builds the configured index when the table holds 4,096 vectors and has none, and
-every later `embed` adds the vectors appended since without training it again. Until then
-they are scanned beside it, so a new passage is searchable at once. The server's own
-background sync keeps an index up to date and never starts a build.
+Build the index with its own command, once the table holds 4,096 vectors:
+
+```sh
+centinel vector-index
+```
+
+Nothing else builds one, because a build reads every vector. Every `embed` adds the
+vectors appended since to the index without training it again, and until it does they are
+scanned beside it, so a new passage is searchable at once. When the table has no index, or
+has another than `[vectors]` names, `embed` ends its report saying so and naming the
+command.
 
 | To | Change |
 |---|---|
@@ -224,13 +231,8 @@ background sync keeps an index up to date and never starts a build.
 | turn the index off | `index = "none"` |
 
 `probes` and `refine` apply to the next search. `index`, `partitions` and `sub_vectors`
-apply when the index is rebuilt, which also drops it for `none`:
-
-```sh
-centinel embed --limit 0 --reindex
-```
-
-Rebuild too once the table has grown several times over since the index was trained. A
+apply on the next `centinel vector-index`, which replaces the index there, or drops it for
+`none`. Run it again too once the table has grown several times over since the index was trained. A
 build reads every vector and trains on as many as the memory budget holds, `[resources]
 memory`: it reserves the whole budget and runs alone, so a larger budget trains on more of
 the table, up to Lance's own sample. It needs disk for the index beside the vectors, about
@@ -243,9 +245,9 @@ questions you know before trusting a setting:
 centinel search --exact "question"
 ```
 
-`--limit 0` still checks the configured server against the space the table records, so
-`[inference.embed]` must name the server that wrote it — or adopt it first. Maintenance
-runs after ingestion, never on the query path. `--dry-run` builds nothing.
+Maintenance runs after ingestion, never on the query path. [Tuning for a
+machine](../operate/tuning.md) works out every one of these settings from the machine they
+run on.
 
 A reproducible synthetic benchmark reports warm exact/indexed latency, recall@10, and the
 build time, for `ivf_pq` or `ivf_flat`:

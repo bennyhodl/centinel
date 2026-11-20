@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
     let exact_filtered_time = started.elapsed();
 
     let started = Instant::now();
-    table.maintain(&lock, Indexing::Build).await?;
+    table.maintain(&lock, Indexing::Rebuild).await?;
     let build_time = started.elapsed();
     table.nearest(&queries[0], 10, &plain).await?;
 
