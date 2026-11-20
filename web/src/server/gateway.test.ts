@@ -6,6 +6,7 @@ import { get } from 'node:http'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { createIdentity } from './auth'
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
 import { serve } from '@hono/node-server'
 import { brotliCompressSync } from 'node:zlib'
 import { createGateway } from './gateway'
@@ -163,6 +164,28 @@ test('signup approval, OAuth MCP access, and revocation share current account pe
   expect((await (await request('/api/account', undefined, nostrCookie)).json()).account).toMatchObject({ role: 'user', access: 'pending' })
   expect((await request('/api/auth/nostr/login', body, undefined, { authorization: authorizationHeader })).status).toBe(401)
 }, 30_000)
+
+test('a token the server cannot check, because its own keys cannot be read, is a 503 and not a 401 or a bare 500', async () => {
+  const brokenRoot = mkdtempSync(join(tmpdir(), 'centinel-auth-'))
+  const broken = await createGateway({ root: brokenRoot, origin: 'https://centinel.invalid', backend: 'http://127.0.0.1:9', secret: 'private-test-credential', relays: [] })
+  try {
+    const db = new DatabaseSync(join(brokenRoot, 'auth.sqlite'))
+    db.exec('DROP TABLE jwks')
+    db.close()
+    const part = (value: object) => Buffer.from(JSON.stringify(value)).toString('base64url')
+    const token = `${part({ alg: 'EdDSA', kid: 'any' })}.${part({ sub: 'anyone' })}.${part({})}`
+    const response = await broken.handle(new Request('https://centinel.invalid/mcp', {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    }))
+    expect(response?.status).toBe(503)
+    expect(response?.headers.get('retry-after')).toBe('30')
+    expect((await response!.json()).error.message).toContain('could not check the access token')
+  } finally {
+    broken.close()
+    rmSync(brokenRoot, { recursive: true, force: true })
+  }
+})
 
 test('a script goes out as the brotli copy the build made, to a browser that takes brotli', async () => {
   const packed = await request('/web/assets/app.js', undefined, undefined, { 'accept-encoding': 'gzip, deflate, br' })
