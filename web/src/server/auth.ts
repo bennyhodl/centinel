@@ -40,6 +40,11 @@ export async function createIdentity(root: string, origin: string) {
       scopes: ['openid', 'profile', 'offline_access', 'mcp:tools'],
       allowDynamicClientRegistration: true,
       allowUnauthenticatedClientRegistration: true,
+      // An MCP client that registers a loopback callback (`http://127.0.0.1:<port>/callback`)
+      // without saying `application_type` is a native app (RFC 8252 §7.3), not a web client
+      // that must use https. Only exact loopback http and custom schemes infer native; every
+      // other http redirect is still refused.
+      clientRegistrationDefaultApplicationType: 'infer',
       grantTypes: ['authorization_code', 'refresh_token'],
     })],
   } satisfies BetterAuthOptions
