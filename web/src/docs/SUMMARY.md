@@ -24,6 +24,7 @@
 # Operate it
 
 - [The machine](operate/doctor.md)
+- [Tuning for a machine](operate/tuning.md)
 - [Investigate and check](operate/investigate.md)
 - [Crumbs](operate/crumbs.md)
 - [Sources](operate/sources.md)
