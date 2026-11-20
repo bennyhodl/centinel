@@ -102,12 +102,17 @@ test('signup approval, OAuth MCP access, and revocation share current account pe
   })
   expect(registration.status, await registration.clone().text()).toBe(201)
   const client = await registration.json()
+  // The grant comes from a browser session of its own, so signing it out below leaves the
+  // reader's other session to the rest of the test.
+  const signIn = await request('/api/auth/sign-in/email', { email: 'reader@example.com', password: 'twelve-or-more-characters' })
+  expect(signIn.status).toBe(200)
+  const browser = signIn.headers.getSetCookie().map(c => c.split(';')[0]).join('; ')
   const verifier = randomBytes(32).toString('base64url')
   const query = new URLSearchParams({ client_id: client.client_id, redirect_uri: 'http://127.0.0.1:19451/callback',
     response_type: 'code', scope: 'openid mcp:tools offline_access', state: 'test-state',
     code_challenge_method: 'S256', code_challenge: createHash('sha256').update(verifier).digest('base64url'), resource: `${origin}/mcp` })
   const authorization = await new Promise<Response>((resolve, reject) => {
-    get(`${origin}/api/auth/oauth2/authorize?${query}`, { headers: { cookie: first.cookie, accept: 'text/html', 'sec-fetch-mode': 'navigate' } }, response => {
+    get(`${origin}/api/auth/oauth2/authorize?${query}`, { headers: { cookie: browser, accept: 'text/html', 'sec-fetch-mode': 'navigate' } }, response => {
       response.resume()
       resolve(new Response(null, { status: response.statusCode, headers: { location: response.headers.location! } }))
     }).on('error', reject)
@@ -115,7 +120,7 @@ test('signup approval, OAuth MCP access, and revocation share current account pe
   expect(authorization.status).toBe(302)
   const consentUrl = new URL(authorization.headers.get('location')!, origin)
   expect(consentUrl.pathname).toBe('/web/consent')
-  const consent = await request('/api/auth/oauth2/consent', { accept: true, oauth_query: consentUrl.search.slice(1) }, first.cookie)
+  const consent = await request('/api/auth/oauth2/consent', { accept: true, oauth_query: consentUrl.search.slice(1) }, browser)
   expect(consent.status).toBe(200)
   const callback = new URL((await consent.json()).url)
   expect(callback.searchParams.get('state')).toBe('test-state')
@@ -134,15 +139,25 @@ test('signup approval, OAuth MCP access, and revocation share current account pe
   const rejected = await request('/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' }, undefined, { authorization: `Bearer ${forged}` })
   expect(rejected.status).toBe(401)
   expect(rejected.headers.get('www-authenticate')).toContain('error="invalid_token"')
+  // Signing in once is enough. The browser session the grant came from ends, and the client
+  // still trades its refresh token for a working access token, as it does every hour.
+  expect((await request('/api/auth/sign-out', {}, browser)).status).toBe(200)
+  expect((await request('/api/account', undefined, browser).then(r => r.json())).account).toBeNull()
+  const refreshed = await fetch(metadata.token_endpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: token.refresh_token, client_id: client.client_id, resource: `${origin}/mcp` }) })
+  expect(refreshed.status, await refreshed.clone().text()).toBe(200)
+  const renewed = await refreshed.json()
+  expect(renewed.access_token).not.toBe(token.access_token)
+  const call = await request('/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' }, undefined, { authorization: `Bearer ${renewed.access_token}` })
+  expect(call.status, await call.clone().text()).toBe(200)
   // An agent's token is not a browser session. It never reaches /workspace, where an
   // administrator can start collection — only the browser carries that authority.
   expect((await request('/workspace/sources', undefined, undefined, { authorization: `Bearer ${token.access_token}` })).status).toBe(401)
   expect((await request('/workspace/investigations', { url: 'https://example.gov/' }, undefined, { authorization: `Bearer ${token.access_token}` })).status).toBe(401)
-  expect(forwarded).toBe(5)
+  expect(forwarded).toBe(6)
   expect((await request('/api/admin/users', { id: first.account.id, access: 'revoked' }, admin.cookie)).status).toBe(200)
   expect((await request('/workspace/documents', undefined, first.cookie)).status).toBe(403)
   expect((await request('/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/list' }, undefined, { authorization: `Bearer ${token.access_token}` })).status).toBe(403)
-  expect(forwarded).toBe(5)
+  expect(forwarded).toBe(6)
   const { users } = await (await request('/api/admin/users', undefined, admin.cookie)).json()
   expect(users.find((u: { id: string }) => u.id === first.account.id).access).toBe('revoked')
   const reopened = await createIdentity(root, origin)
