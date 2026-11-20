@@ -94,8 +94,9 @@ test('signup approval, OAuth MCP access, and revocation share current account pe
   const discoveryResponse = await request('/.well-known/oauth-authorization-server/api/auth')
   expect(discoveryResponse.status).toBe(200)
   const metadata = await discoveryResponse.json()
+  // What an MCP client sends: a loopback callback, and no `application_type`.
   const registration = await request('/api/auth/oauth2/register', {
-    client_name: 'Integration test', application_type: 'native', redirect_uris: ['http://127.0.0.1:19451/callback'],
+    client_name: 'Integration test', redirect_uris: ['http://127.0.0.1:19451/callback'],
     token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'],
     response_types: ['code'], scope: 'openid mcp:tools offline_access',
   })
@@ -164,6 +165,32 @@ test('signup approval, OAuth MCP access, and revocation share current account pe
   expect((await (await request('/api/account', undefined, nostrCookie)).json()).account).toMatchObject({ role: 'user', access: 'pending' })
   expect((await request('/api/auth/nostr/login', body, undefined, { authorization: authorizationHeader })).status).toBe(401)
 }, 30_000)
+
+test('a client registers a loopback callback without saying it is native, and nothing else on http', async () => {
+  // Each case comes from its own address, as separate clients would: registration allows five
+  // a minute from one.
+  let client = 0
+  const register = (redirect_uris: string[], extra: Record<string, string> = {}) => request('/api/auth/oauth2/register', {
+    client_name: 'Registration test', redirect_uris, token_endpoint_auth_method: 'none', ...extra,
+  }, undefined, { 'x-centinel-client-ip': `192.0.2.${++client}` })
+  for (const callback of ['http://127.0.0.1:53682/callback', 'http://localhost:53682/callback', 'http://[::1]:53682/callback']) {
+    const registered = await register([callback])
+    expect(registered.status, await registered.clone().text()).toBe(201)
+    expect((await registered.json()).application_type).toBe('native')
+  }
+  expect((await register(['http://127.0.0.1:53682/callback'], { application_type: 'native' })).status).toBe(201)
+  // A client that says it is a web app is held to https, and loopback does not make a
+  // non-loopback http callback beside it acceptable.
+  for (const [uris, extra] of [
+    [['http://centinel.example/callback'], {}],
+    [['http://127.0.0.1:53682/callback', 'http://centinel.example/callback'], {}],
+    [['http://127.0.0.1:53682/callback'], { application_type: 'web' }],
+  ] as const) {
+    const refused = await register([...uris], extra)
+    expect(refused.status).toBe(400)
+    expect((await refused.json()).error).toBe('invalid_redirect_uri')
+  }
+})
 
 test('a token the server cannot check, because its own keys cannot be read, is a 503 and not a 401 or a bare 500', async () => {
   const brokenRoot = mkdtempSync(join(tmpdir(), 'centinel-auth-'))
