@@ -26,6 +26,7 @@ Each is what `run` does for you, available on its own.
 | `transcribe` | Transcribe collected audio on the configured transcription server. |
 | `index` | Chunk extracted text into the search index. |
 | `embed` | Embed indexed chunks into the vector table. |
+| `vector-index` | Build the vector index `[vectors]` names, replacing the one there, or drop it for `none`. *(operator)* |
 | `ingest` | Fetch one or more URLs into the content-addressed store. |
 
 ## Classifiers
@@ -104,6 +105,7 @@ centinel collect --source agartha --match /assets/ --rps 5
 centinel embed --dry-run
 centinel embed --limit 100
 centinel embed --batch 64
+centinel vector-index
 centinel search "budget" --source agartha -n 20 --snippet-chars 0
 centinel search "permits" --tag record_type:minutes --not-tag record_type:data_table
 centinel classify --dry-run

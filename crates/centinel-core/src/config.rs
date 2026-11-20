@@ -207,12 +207,12 @@ impl ResourcesConfig {
 /// is exact. See [`crate::vectors`] for what each costs.
 ///
 /// `probes` and `refine` take effect on the next search. `index`, `partitions` and
-/// `sub_vectors` shape a build: `embed` builds the index when the table has none, and
-/// `embed --reindex` rebuilds it with what this says.
+/// `sub_vectors` shape a build, which is `centinel vector-index`'s: `embed` keeps the index
+/// current and says when the table has none or another, but never builds one.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VectorsConfig {
-    /// The index `embed` builds, and whether a search uses one.
+    /// The index `centinel vector-index` builds, and whether a search uses one.
     #[serde(default)]
     pub index: VectorIndexKind,
 
@@ -1217,10 +1217,11 @@ model = "whisper-large-v3-turbo"
 #                       stay in memory; the best are re-checked against the full vectors
 #   index = "ivf_flat"  partitions over the full vectors; reads far more per query
 #   index = "none"      compare with every vector
-# `embed` builds the index once the table holds 4,096 vectors, and `centinel embed --limit 0
-# --reindex` rebuilds it after `index`, `partitions` or `sub_vectors` change. Building it
-# trains on as much of the table as [resources] memory holds. `probes` and `refine` apply
-# to the next search.
+# `centinel vector-index` builds it, once the table holds 4,096 vectors, and builds it again
+# after `index`, `partitions` or `sub_vectors` change; `embed` keeps it current and says
+# when it is missing. Building it trains on as much of the table as [resources] memory
+# holds. `probes` and `refine` apply to the next search. web/src/docs/operate/tuning.md
+# works these out for a machine.
 #   [vectors]
 #   index = "ivf_pq"
 #   probes = 64        # partitions a query reads: more is better recall, and slower

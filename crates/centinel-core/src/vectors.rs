@@ -44,13 +44,14 @@
 //!   vector in the partitions it probes, about `probes / partitions` of the table.
 //! - **None**: the scan.
 //!
-//! [`VectorTable::maintain`] builds the configured index when the table has none and holds
-//! [`ANN_MIN_ROWS`], keeps whatever index there is up to date, and replaces it only when
-//! asked ([`Indexing::Rebuild`]): a build reads every vector and trains on as many of them
-//! as the memory budget holds ([`training`]), so it runs long on a large table. A build
-//! reserves the whole budget's room and runs alone. Rows appended since
-//! the last build or maintenance are scanned beside the index until the next maintenance
-//! folds them in.
+//! The index is built only when asked, by `centinel vector-index` ([`Indexing::Rebuild`]):
+//! a build reads every vector and trains on as many of them as the memory budget holds
+//! ([`training`]), so it runs long on a large table, and it reserves the whole budget's room
+//! and runs alone. Below [`ANN_MIN_ROWS`] it builds nothing. Every
+//! [`VectorTable::maintain`] keeps whatever index there is up to date, and
+//! [`VectorTable::index_state`] says when the index is missing or not the configured one,
+//! which `embed` passes on. Rows appended since the last maintenance are scanned beside
+//! the index until the next one folds them in.
 //!
 //! ## What a filter costs
 //!
@@ -276,7 +277,7 @@ const COMPACT_IO_BUFFER_BYTES: u64 = 64 << 20;
 
 /// Below this many rows an ANN index is not worth its partition loss; exact search is
 /// fast enough and loses nothing.
-const ANN_MIN_ROWS: usize = 4096;
+pub(crate) const ANN_MIN_ROWS: usize = 4096;
 
 /// The name a vector index is built under: Lance's own for the column, so an index an
 /// earlier release built is the one a rebuild replaces.
@@ -387,13 +388,60 @@ pub struct Maintenance {
 /// exists up to date.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Indexing {
-    /// Build nothing. For a writer that is not `embed` — `serve` carrying tags onto rows —
-    /// which must not start a build that reads every vector.
+    /// Build nothing: what every writer asks for, `embed` and `serve` carrying tags onto
+    /// rows alike. A build reads every vector, so it is never a side effect of a write.
     Keep,
-    /// Build the configured index when the table is large enough and has none.
-    Build,
-    /// Replace the index with the configured one, or drop it when that is `none`.
+    /// Replace the index with the one `[vectors]` names, or drop it when that is `none`.
+    /// What `centinel vector-index` asks for.
     Rebuild,
+}
+
+/// The vector index a table has, against the one `[vectors]` names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexState {
+    /// What `[vectors]` names: that index, or none where it says `none` or the table holds
+    /// too few rows to want one.
+    Current,
+    /// `[vectors]` names an index and the table, large enough for one, has none.
+    Missing(VectorIndexKind),
+    /// The table has `has`, an index of a kind this module does not build when `None`, and
+    /// `[vectors]` names `wanted`.
+    Other {
+        has: Option<VectorIndexKind>,
+        wanted: VectorIndexKind,
+    },
+}
+
+impl IndexState {
+    /// What to tell the operator, when the index is not the configured one.
+    pub fn advice(&self) -> Option<String> {
+        let has = |has: &Option<VectorIndexKind>| {
+            has.map_or_else(
+                || "of a kind centinel does not build".to_string(),
+                |k| k.to_string(),
+            )
+        };
+        match self {
+            Self::Current => None,
+            Self::Missing(wanted) => Some(format!(
+                "no vector index: every search compares with every vector. \
+                 `centinel vector-index` builds the {wanted} index [vectors] names"
+            )),
+            Self::Other {
+                has: index,
+                wanted: VectorIndexKind::None,
+            } => Some(format!(
+                "the vector index is {} and [vectors] names none, so search passes it by. \
+                 `centinel vector-index` drops it",
+                has(index)
+            )),
+            Self::Other { has: index, wanted } => Some(format!(
+                "the vector index is {} and [vectors] names {wanted}. \
+                 `centinel vector-index` rebuilds it",
+                has(index)
+            )),
+        }
+    }
 }
 
 /// One fragment the table cannot read back.
@@ -1158,29 +1206,25 @@ impl VectorTable {
         })
     }
 
-    /// Builds, replaces or drops the vector index as `indexing` asks, and says which kind
-    /// it built.
+    /// Replaces or drops the vector index when `indexing` asks, and says which kind it
+    /// built.
     ///
-    /// [`Indexing::Keep`] touches nothing. [`Indexing::Build`] builds the configured index
-    /// when the table holds [`ANN_MIN_ROWS`] and has none; an index of another kind is left
-    /// in place and named in a warning, because replacing it reads every vector again and
-    /// that is the operator's call. [`Indexing::Rebuild`] replaces whatever is there, or
-    /// drops it when the configuration says `none`.
+    /// [`Indexing::Keep`] touches nothing. [`Indexing::Rebuild`] replaces whatever is
+    /// there with the configured index, when the table holds [`ANN_MIN_ROWS`], or drops it
+    /// when the configuration says `none`.
     async fn index_vectors(
         &self,
         lock: &VectorLock,
         indexing: Indexing,
         rows: usize,
     ) -> anyhow::Result<Option<VectorIndexKind>> {
-        let replace = match indexing {
-            Indexing::Keep => return Ok(None),
-            Indexing::Build => false,
-            Indexing::Rebuild => true,
-        };
+        if indexing == Indexing::Keep {
+            return Ok(None);
+        }
         let existing = self.vector_index().await?;
         let wanted = self.config.index;
         if wanted == VectorIndexKind::None {
-            if let (true, Some(index)) = (replace, existing) {
+            if let Some(index) = existing {
                 self.table.drop_index(&index.name).await?;
                 tracing::info!(
                     name = %index.name,
@@ -1190,18 +1234,6 @@ impl VectorTable {
             return Ok(None);
         }
         if rows < ANN_MIN_ROWS {
-            return Ok(None);
-        }
-        if let (false, Some(index)) = (replace, &existing) {
-            let has = kind_of(&index.index_type);
-            if has != Some(wanted) {
-                tracing::warn!(
-                    has = ?index.index_type,
-                    configured = %wanted,
-                    "the vector index is not the one [vectors] names; \
-                     `centinel embed --limit 0 --reindex` rebuilds it"
-                );
-            }
             return Ok(None);
         }
         let name = existing.map_or_else(|| VECTOR_INDEX_NAME.to_string(), |index| index.name);
@@ -1283,6 +1315,20 @@ impl VectorTable {
             "vector index built"
         );
         Ok(())
+    }
+
+    /// Whether the table's vector index is the one `[vectors]` names.
+    pub async fn index_state(&self) -> anyhow::Result<IndexState> {
+        let wanted = self.config.index;
+        Ok(match (self.vector_index().await?, wanted) {
+            (None, VectorIndexKind::None) => IndexState::Current,
+            (None, wanted) if self.len().await? >= ANN_MIN_ROWS => IndexState::Missing(wanted),
+            (None, _) => IndexState::Current,
+            (Some(index), wanted) => match kind_of(&index.index_type) {
+                Some(has) if has == wanted => IndexState::Current,
+                has => IndexState::Other { has, wanted },
+            },
+        })
     }
 
     /// The index over the vector column, if there is one.
@@ -2017,11 +2063,11 @@ pub(crate) mod tests {
         assert!(parse_key("not a key").is_none());
     }
 
-    /// `embed` builds the configured index once the table is large enough, a writer that
-    /// is not `embed` never does, rows appended since are found beside it, and the index
-    /// changes kind only when a rebuild is asked for.
+    /// Maintenance never builds or drops the vector index and says when it is missing or
+    /// another kind; a rebuild builds the configured one; rows appended since are found
+    /// beside it, and maintenance folds them in without training it again.
     #[tokio::test]
-    async fn maintenance_builds_the_configured_index_and_preserves_appended_rows() {
+    async fn the_configured_index_is_built_when_asked_and_keeps_appended_rows() {
         let dir = tempfile::tempdir().unwrap();
         let t = table(dir.path()).await;
         let rows: Vec<Row> = (0..4096u32)
@@ -2060,7 +2106,7 @@ pub(crate) mod tests {
         let scalar = indexed(&t).await;
         assert!(
             !scalar.contains(VECTOR_COLUMN),
-            "only embed builds a vector index"
+            "maintenance never builds a vector index"
         );
         for column in [
             KEY_COLUMN,
@@ -2077,10 +2123,16 @@ pub(crate) mod tests {
                 .unwrap()
                 .and_then(|i| kind_of(&i.index_type))
         }
+        // Large enough to want one, and without one: said, so `embed` can say it.
+        assert_eq!(
+            t.index_state().await.unwrap(),
+            IndexState::Missing(VectorIndexKind::IvfPq)
+        );
         let built = t
-            .maintain(&lock(dir.path()).await, Indexing::Build)
+            .maintain(&lock(dir.path()).await, Indexing::Rebuild)
             .await
             .unwrap();
+        assert_eq!(t.index_state().await.unwrap(), IndexState::Current);
         assert_eq!(
             built.index_built,
             Some(VectorIndexKind::IvfPq),
@@ -2107,10 +2159,11 @@ pub(crate) mod tests {
         );
         // An index that exists is brought up to date, not trained again.
         let again = t
-            .maintain(&lock(dir.path()).await, Indexing::Build)
+            .maintain(&lock(dir.path()).await, Indexing::Keep)
             .await
             .unwrap();
         assert_eq!(again.index_built, None);
+        assert_eq!(t.index_state().await.unwrap(), IndexState::Current);
         // IVF_PQ ranks by the compressed copy, so which rows reach the re-check is
         // approximate, and how many a small `refine` recovers is the benchmark's question.
         // A re-check that covers the table must agree exactly with the index, including the
@@ -2152,14 +2205,21 @@ pub(crate) mod tests {
         assert_eq!(pinellas[0].chunk_hash, added);
         assert!(pinellas.iter().all(|h| h.document.source == "pinellas"));
 
-        // Another kind in the configuration is not a rebuild until one is asked for.
+        // Another kind in the configuration is said, and left until a rebuild is asked for.
         let flat = VectorsConfig {
             index: VectorIndexKind::IvfFlat,
             ..VectorsConfig::default()
         };
         let t = table(dir.path()).await.configured(&flat);
+        assert_eq!(
+            t.index_state().await.unwrap(),
+            IndexState::Other {
+                has: Some(VectorIndexKind::IvfPq),
+                wanted: VectorIndexKind::IvfFlat
+            }
+        );
         let left = t
-            .maintain(&lock(dir.path()).await, Indexing::Build)
+            .maintain(&lock(dir.path()).await, Indexing::Keep)
             .await
             .unwrap();
         assert_eq!(left.index_built, None);
@@ -2185,18 +2245,28 @@ pub(crate) mod tests {
             t.nearest(&query, 1, &Filter::default()).await.unwrap()[0].chunk_hash,
             added
         );
-        t.maintain(&lock(dir.path()).await, Indexing::Build)
+        assert!(
+            t.index_state()
+                .await
+                .unwrap()
+                .advice()
+                .unwrap()
+                .contains("drops it"),
+            "an index [vectors] turned off is named for dropping"
+        );
+        t.maintain(&lock(dir.path()).await, Indexing::Keep)
             .await
             .unwrap();
         assert_eq!(
             vector_kind(&t).await,
             Some(VectorIndexKind::IvfFlat),
-            "a build never drops"
+            "maintenance never drops"
         );
         t.maintain(&lock(dir.path()).await, Indexing::Rebuild)
             .await
             .unwrap();
         assert!(t.vector_index().await.unwrap().is_none());
+        assert_eq!(t.index_state().await.unwrap(), IndexState::Current);
         assert_eq!(
             t.nearest(&query, 1, &Filter::default()).await.unwrap()[0].chunk_hash,
             added
@@ -2222,7 +2292,7 @@ pub(crate) mod tests {
         });
         t.append(&lock(dir.path()).await, &rows).await.unwrap();
         let err = t
-            .maintain(&lock(dir.path()).await, Indexing::Build)
+            .maintain(&lock(dir.path()).await, Indexing::Rebuild)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("[vectors] sub_vectors"), "{err:#}");
@@ -2272,9 +2342,10 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        t.maintain(&lock(dir.path()).await, Indexing::Build)
+        t.maintain(&lock(dir.path()).await, Indexing::Rebuild)
             .await
             .unwrap();
+        assert_eq!(t.index_state().await.unwrap(), IndexState::Current);
         assert!(
             !t.table
                 .list_indices()

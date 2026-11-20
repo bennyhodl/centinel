@@ -205,8 +205,8 @@ A full corpus is 397,830 × 2,560 × 4 bytes.
 ## The vector index
 
 With no index, Lance scans flat: exact, and the right answer while the table is small,
-but it reads every vector. `[vectors]` names the index `embed` builds once the table holds
-4,096 vectors: `IVF_PQ` by default, `IVF_FLAT`, or `none`. See [Search](search.md#large-corpora).
+but it reads every vector. `[vectors]` names the index `centinel vector-index` builds once
+the table holds 4,096 vectors: `IVF_PQ` by default, `IVF_FLAT`, or `none`. See [Search](search.md#large-corpora).
 
 ## Not built yet
 

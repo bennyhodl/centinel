@@ -153,15 +153,6 @@ pub struct EmbedArgs {
     #[serde(default)]
     pub dry_run: bool,
 
-    /// Rebuild the vector index with what `[vectors]` says, replacing the one there or
-    /// dropping it for `index = "none"`. Without it, `embed` builds the configured index
-    /// only when the table has none. For a changed `index`, `partitions` or `sub_vectors`,
-    /// or a table that has grown several times over since its index was trained. Reads
-    /// every vector.
-    #[arg(long)]
-    #[serde(default)]
-    pub reindex: bool,
-
     /// Take the stored vectors over to the configured server: embed a sample of stored
     /// chunks there, and record the server as the table's own if every one matches what is
     /// stored. Refused, with what was measured, if they do not.
@@ -225,9 +216,11 @@ pub struct EmbedReport {
     /// Superseded table versions whose files this run removed.
     #[serde(default)]
     pub versions_removed: u64,
-    /// The vector index this run built, `IVF_PQ` or `IVF_FLAT`, when it built one.
+    /// What to do about the vector index, when the table has none and is large enough to
+    /// want one, or has another than `[vectors]` names. `embed` keeps an index current but
+    /// never builds one: that is `centinel vector-index`, which reads every vector.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub index_built: Option<String>,
+    pub vector_index: Option<String>,
     pub elapsed_secs: f64,
     /// Sustained rate of the model, for planning the rest of a corpus.
     pub chunks_per_sec: f64,
@@ -286,10 +279,7 @@ pub(crate) async fn embed_with(
     cancel.check()?;
     if let Some(source) = &args.source {
         SourceId::new(source.clone())?;
-        anyhow::ensure!(
-            !args.adopt && !args.reindex,
-            "--adopt and --reindex require the whole vector table"
-        );
+        anyhow::ensure!(!args.adopt, "--adopt requires the whole vector table");
     }
     anyhow::ensure!(args.batch != Some(0), "--batch must be at least 1");
     // Before the work list is worked out, so a second run cannot work out the same one.
@@ -465,7 +455,7 @@ pub(crate) async fn embed_with(
         stale: stale.len(),
         pruned: 0,
         versions_removed: 0,
-        index_built: None,
+        vector_index: None,
         elapsed_secs: 0.0,
         chunks_per_sec: 0.0,
         batch: None,
@@ -489,10 +479,6 @@ pub(crate) async fn embed_with(
         }
     };
     let table = table.configured(vectors);
-    let indexing = match args.reindex {
-        true => Indexing::Rebuild,
-        false => Indexing::Build,
-    };
     let dims = table.dims();
     let base = EmbedReport {
         dims: Some(dims),
@@ -568,30 +554,31 @@ pub(crate) async fn embed_with(
     if let Some(limit) = args.limit {
         todo.truncate(limit);
     }
-    let finish = |writer: &Writer,
-                  embedded: usize,
-                  skipped: Vec<Skipped>,
-                  batch: Option<usize>,
-                  done: crate::vectors::Maintenance| {
-        let elapsed = started.elapsed().as_secs_f64();
-        EmbedReport {
-            filled,
-            embedded,
-            remaining: writer.remaining_rows(),
-            pruned,
-            versions_removed: done.versions_removed,
-            index_built: done.index_built.map(|kind| kind.to_string()),
-            elapsed_secs: elapsed,
-            chunks_per_sec: embedded as f64 / elapsed.max(f64::EPSILON),
-            batch,
-            skipped,
-            ..base
-        }
-    };
+    let finish =
+        |writer: &Writer,
+         embedded: usize,
+         skipped: Vec<Skipped>,
+         batch: Option<usize>,
+         (done, vector_index): (crate::vectors::Maintenance, Option<String>)| {
+            let elapsed = started.elapsed().as_secs_f64();
+            EmbedReport {
+                filled,
+                embedded,
+                remaining: writer.remaining_rows(),
+                pruned,
+                versions_removed: done.versions_removed,
+                vector_index,
+                elapsed_secs: elapsed,
+                chunks_per_sec: embedded as f64 / elapsed.max(f64::EPSILON),
+                batch,
+                skipped,
+                ..base
+            }
+        };
     if todo.is_empty() {
         cancel.check()?;
         progress.say("maintaining the vector table");
-        let done = maintain(&ctx.store, &table, indexing).await?;
+        let done = maintain(&ctx.store, &table).await?;
         crate::workspace::sync_vectors(&ctx.store).await?;
         return Ok(finish(&writer, 0, Vec::new(), None, done));
     }
@@ -619,7 +606,7 @@ pub(crate) async fn embed_with(
 
     cancel.check()?;
     progress.say("maintaining the vector table");
-    let done = maintain(&ctx.store, &table, indexing).await?;
+    let done = maintain(&ctx.store, &table).await?;
     crate::workspace::sync_vectors(&ctx.store).await?;
     Ok(finish(
         &writer,
@@ -937,17 +924,24 @@ impl Writer {
 }
 
 /// Compacts the table and brings its indexes up to date, under the write lock — released
-/// before returning, since the sync that follows takes it again.
+/// before returning, since the sync that follows takes it again — and says what to do
+/// about the vector index when it is not the one `[vectors]` names. Building it is not
+/// done here: it reads every vector, and is `centinel vector-index`'s to do.
 async fn maintain(
     store: &Store,
     table: &VectorTable,
-    indexing: Indexing,
-) -> anyhow::Result<crate::vectors::Maintenance> {
+) -> anyhow::Result<(crate::vectors::Maintenance, Option<String>)> {
     let lock = VectorLock::take(store).await?;
-    table
-        .maintain(&lock, indexing)
+    let done = table
+        .maintain(&lock, Indexing::Keep)
         .await
-        .with_context(|| verify_hint("maintaining the vector table"))
+        .with_context(|| verify_hint("maintaining the vector table"))?;
+    drop(lock);
+    let advice = table.index_state().await?.advice();
+    if let Some(advice) = &advice {
+        tracing::warn!("{advice}");
+    }
+    Ok((done, advice))
 }
 
 /// Held for a whole `embed`, so two runs cannot both work out the same missing rows and
@@ -1229,8 +1223,8 @@ impl Render for EmbedReport {
                 rate.push_str(&format!(" \u{00b7} {batch} per request"));
             }
             p.line(p.paint(&rate, Ink::Dim))?;
-            if let Some(kind) = &self.index_built {
-                p.marked(Mark::Ok, format!("built the {kind} vector index"))?;
+            if let Some(advice) = &self.vector_index {
+                p.marked(Mark::Warn, advice)?;
             }
 
             // Only when there is something to estimate, and only when a rate exists to
@@ -1600,7 +1594,6 @@ mod tests {
                 batch: None,
                 limit: None,
                 dry_run: true,
-                reindex: false,
                 ..Default::default()
             },
             &Progress::none(),
@@ -1649,7 +1642,6 @@ mod tests {
                 batch: None,
                 limit: None,
                 dry_run: false,
-                reindex: false,
                 ..Default::default()
             },
             &Progress::none(),
@@ -1981,7 +1973,6 @@ mod tests {
                 batch: Some(8),
                 limit: None,
                 dry_run: true,
-                reindex: false,
                 ..Default::default()
             },
             &Progress::none(),
@@ -2001,7 +1992,6 @@ mod tests {
                 batch: Some(0),
                 limit: None,
                 dry_run: true,
-                reindex: false,
                 ..Default::default()
             },
             &Progress::none(),

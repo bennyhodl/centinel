@@ -43,6 +43,7 @@ mod status;
 pub(crate) mod target;
 mod transcribe;
 mod update;
+mod vector_index;
 mod verify;
 
 pub use check::{CheckArgs, CheckReport, Checked, Enumerated, check};
@@ -85,6 +86,7 @@ pub use transcribe::{
 pub use update::{
     Applied, InstalledFrom, Provenance, ReleaseCheck, RepoCheck, UpdateArgs, UpdateReport, update,
 };
+pub use vector_index::{VectorIndexArgs, VectorIndexReport, vector_index};
 pub use verify::{VerifyReport, VerifyTableArgs, repair_verified, verify};
 
 // ── shared plumbing ───────────────────────────────────────────────────────────
