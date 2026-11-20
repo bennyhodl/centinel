@@ -74,6 +74,11 @@ lancedb = { version = "0.41.0", default-features = false }
 # adding a second copy of it; `default-features = false` for the same reason as lancedb
 # above: the defaults are the object stores this machine never talks to.
 lance = { version = "=14.0.2", default-features = false }
+# The IVF and PQ build parameters `VectorTable::maintain` sizes to the memory budget:
+# lancedb's builders set no PQ sample and no streaming IVF sample, and Lance does not
+# re-export the types. Pinned with `lance` for the same reason, to the copy already in the
+# tree.
+lance-index = { version = "=14.0.2", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

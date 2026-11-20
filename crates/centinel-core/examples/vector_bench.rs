@@ -1,15 +1,18 @@
 //! Compare exact and indexed search on a reproducible synthetic corpus, plain and
 //! filtered to one source of ten.
-//! cargo run --release -p centinel-core --example vector_bench -- 100000 2560
+//! cargo run --release -p centinel-core --example vector_bench -- 100000 2560 ivf_pq
+//! The third argument is the index, `ivf_pq` (the default) or `ivf_flat`, built with the
+//! rest of `[vectors]` at its defaults.
 //! Reports warm query latency and recall separately from index construction time. The
 //! filtered figure is the one to read before narrowing a search by source: an IVF
 //! prefilter skips distance work for the rows it masks but still reads the probed
 //! partitions, so expect it near the plain latency, not a tenth of it.
 use std::time::Instant;
 
+use centinel_core::config::{VectorIndexKind, VectorsConfig};
 use centinel_core::index::Filter;
 use centinel_core::store::Store;
-use centinel_core::vectors::{Nearest, Row, Space, VectorLock, VectorTable};
+use centinel_core::vectors::{Indexing, Nearest, Row, Space, VectorLock, VectorTable};
 use centinel_core::workspace::{DocState, DocumentId};
 
 /// Sources the rows are spread over, so a filter to one keeps a tenth.
@@ -41,6 +44,11 @@ async fn main() -> anyhow::Result<()> {
         .map(|s| s.parse())
         .transpose()?
         .unwrap_or(64usize);
+    let index = match args.get(2).map(String::as_str) {
+        None | Some("ivf_pq") => VectorIndexKind::IvfPq,
+        Some("ivf_flat") => VectorIndexKind::IvfFlat,
+        Some(other) => anyhow::bail!("`{other}` is not an index; use ivf_pq or ivf_flat"),
+    };
     anyhow::ensure!(
         rows >= 4096 && dims > 0,
         "use at least 4096 rows and a positive width"
@@ -50,7 +58,12 @@ async fn main() -> anyhow::Result<()> {
         model: "synthetic-benchmark".to_string(),
         endpoint: None,
     };
-    let table = VectorTable::open(dir.path(), &space, dims).await?;
+    let table = VectorTable::open(dir.path(), &space, dims)
+        .await?
+        .configured(&VectorsConfig {
+            index,
+            ..VectorsConfig::default()
+        });
     let lock = VectorLock::take(&Store::at(dir.path())).await?;
     let mut state = 42u64;
     let mut vector = || {
@@ -100,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
     let exact_filtered_time = started.elapsed();
 
     let started = Instant::now();
-    table.maintain(&lock, true).await?;
+    table.maintain(&lock, Indexing::Build).await?;
     let build_time = started.elapsed();
     table.nearest(&queries[0], 10, &plain).await?;
 
@@ -117,7 +130,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let indexed_filtered_time = started.elapsed();
 
-    println!("{rows} rows, {dims} dimensions, {} queries", queries.len());
+    println!(
+        "{rows} rows, {dims} dimensions, {index}, {} queries",
+        queries.len()
+    );
     println!("index build: {build_time:.2?}");
     println!(
         "plain:              exact {:.2?}/query; indexed {:.2?}/query; recall@10: {:.1}%",

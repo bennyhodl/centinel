@@ -25,6 +25,8 @@
 //! - **collect**, per body: its declared length, or the size ceiling (at most the default
 //!   one) while the server has not declared one, until the body is read. See
 //!   [`crate::fetch`].
+//! - **a vector index build**: the whole room, while it trains, and its training samples
+//!   are sized to fit it. See [`crate::vectors`].
 //!
 //! Embed and classify wait on a server, not on memory, and keep their `concurrency`. The
 //! Lance caches are sized from the budget ([`Budget::metadata_cache`],
