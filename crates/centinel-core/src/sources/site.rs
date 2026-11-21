@@ -2215,35 +2215,41 @@ mod tests {
         );
     }
 
-    /// Legistar names its documents on `*.legistar1.com`, not on the seed's host, and that
-    /// host's robots.txt disallows everything. Its rules are read from it, not borrowed from
-    /// the seed's, and the operator's ruling reaches them through the source.
+    /// Seeded with the Legistar Web API, the walk reads each meeting's page and keeps its
+    /// documents on the client's InSite host, which is not the seed's. That host's rules
+    /// are read from it, not borrowed from the seed's: where they disallow everything its
+    /// pages are not fetched, and the operator's ruling reaches them through the source.
     #[tokio::test]
     async fn a_ruling_reaches_the_rules_of_hosts_the_seed_is_not_on() {
-        let calendar = "https://hillsboroughcounty.legistar.com/Calendar.aspx";
-        let events = "https://webapi.legistar.com/v1/hillsboroughcounty/events?%24orderby=EventDate+desc%2CEventId+desc&%24top=1000";
+        let seed =
+            "https://webapi.legistar.com/v1/hillsboroughcounty/events?$filter=EventId%20gt%201390";
+        let events = "https://webapi.legistar.com/v1/hillsboroughcounty/events?%24filter=EventId+gt+1390&%24orderby=EventDate+desc%2CEventId+desc&%24top=1000";
         let items = "https://webapi.legistar.com/v1/hillsboroughcounty/events/1398/eventitems?AgendaNote=1&MinutesNote=1&Attachments=1";
-        let agenda = "https://hillsboroughcounty.legistar1.com/hillsboroughcounty/meetings/2026/11/1398_A_Zoning_Hearing_Master_26-11-16_Agenda.pdf";
+        let meeting =
+            "https://hillsboroughcounty.legistar.com/MeetingDetail.aspx?LEGID=1398&GID=761";
+        let agenda = "https://hillsboroughcounty.legistar.com/View.ashx?M=A&ID=1351680&GUID=137FE552-0FD6-46F6-8DEC-3B993A5F1AE1";
+        let listed = format!(r#"[{{"EventId":1398,"EventInSiteURL":"{meeting}"}}]"#);
+        let asked = Arc::new(Mutex::new(Vec::new()));
         let source = |ignore_robots: bool| {
-            let pages = Scripted::default()
-                .refusing(
-                    "https://hillsboroughcounty.legistar.com/robots.txt",
-                    Liveness::Gone,
-                )
-                .serving_as(calendar, "text/html", "<html><span>Legistar</span></html>")
-                .serving_as(
-                    events,
-                    "application/json; charset=utf-8",
-                    &format!(r#"[{{"EventId":1398,"EventAgendaFile":"{agenda}","EventMinutesFile":null}}]"#),
-                )
-                .serving_as(items, "application/json; charset=utf-8", "[]")
-                .serving(
-                    "https://hillsboroughcounty.legistar1.com/robots.txt",
-                    "User-agent: * \nDisallow: / \n",
-                );
+            let pages = Scripted {
+                asked: Arc::clone(&asked),
+                ..Scripted::default()
+            }
+            .refusing("https://webapi.legistar.com/robots.txt", Liveness::Gone)
+            .serving_as(seed, "application/json; charset=utf-8", &listed)
+            .serving_as(events, "application/json; charset=utf-8", &listed)
+            .serving_as(
+                meeting,
+                "text/html; charset=utf-8",
+                r#"<html><a id="ctl00_ContentPlaceHolder1_hypAgenda" href="View.ashx?M=A&amp;ID=1351680&amp;GUID=137FE552-0FD6-46F6-8DEC-3B993A5F1AE1&amp;G=3144BC14-0EA0-4A0F-BC83-C4F8B333D0E8">Agenda</a></html>"#,
+            )
+            .serving(
+                "https://hillsboroughcounty.legistar.com/robots.txt",
+                "User-agent: * \nDisallow: / \n",
+            );
             SiteSource::new(
                 SourceId::new("hillsborough-legistar").unwrap(),
-                calendar,
+                seed,
                 HostPolicy {
                     max_requests_per_second: 1000.0,
                     ignore_robots,
@@ -2272,14 +2278,18 @@ mod tests {
         assert!(
             out.warnings
                 .iter()
-                .any(|w| w.starts_with("hillsboroughcounty.legistar1.com's robots.txt")),
+                .any(|w| w.starts_with("hillsboroughcounty.legistar.com's robots.txt")),
             "{:?}",
             out.warnings
+        );
+        assert!(
+            !asked.lock().unwrap().iter().any(|a| a == meeting),
+            "a disallowed page is not fetched"
         );
 
         let ruled = source(true);
         let out = ruled.enumerate(&Progress::none()).await.unwrap();
-        assert_eq!(keys(&out), [agenda, items]);
+        assert_eq!(keys(&out), [items, agenda]);
     }
 
     /// The feed is read and recognised; its one address is the feed, and robots.txt

@@ -28,7 +28,8 @@ Calendar's public `…/basic.ics`. Each article or event it carries is stored as
 entry; see [Acquisition](../internals/acquire.md#feeds).
 
 Some vendors that host public meetings turn every crawler away in `robots.txt`: Granicus,
-and the hosts Legistar keeps its agendas on. A run reports that by name. Where you have
+for one. (Legistar's document hosts do too, so `legistar` reads the same documents from
+the client's own `{client}.legistar.com`, which does not.) A run reports that by name. Where you have
 read the evidence and judge the documents public, rule that the host's robots.txt does not
 bind this source:
 
