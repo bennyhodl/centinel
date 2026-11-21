@@ -363,6 +363,15 @@ impl<'a, T: std::fmt::Display> Pass<'a, T> {
         self.visits
     }
 
+    /// How many places are queued and not yet visited.
+    ///
+    /// For a walk that queues its next stage only once the current one is drained: an
+    /// empty queue after [`Self::next_to_visit`] answers `None` means the stage finished,
+    /// and a non-empty one means a ceiling stopped it.
+    pub fn pending(&self) -> usize {
+        self.queue.len()
+    }
+
     /// Whether the address cap is reached, so an inner loop stops offering.
     pub fn full(&self) -> bool {
         self.out.addresses.len() >= self.walk.max_addresses()

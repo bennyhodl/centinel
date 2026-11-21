@@ -40,6 +40,7 @@ lever.
 | 5 | Six ordinary city and county sites | five of six enumerate perfectly and still lose most of their content; one loses all 579 addresses to a relative `Sitemap:` line | **extract and report** — not enumerate | every CMS site, which is most of them |
 | 6 | A full run on the box: 37 Tampa Bay sources | one 830 MB file killed every run; CMS redirect pages are fetched off-host and counted as the city's failures; `<base href>` is ignored, so largo's links resolve to 404s; a footer PDF is fetched once per page (21.5 GB of repeats); a 10 s crawl delay over a WooCommerce shop holds the run ~13 h; extract peaks at ~670 MB per vector PDF and glibc keeps it; one 17,162-font PDF stalls extract with no deadline; index's chrome learner holds every CSV row and is killed | **collect** (memory, redirects), **enumerate** (links), **extract** and **index** (memory, time) | every run on a small machine; every CivicPlus/Granicus "external link" page; every site that declares `<base href>` |
 | 7 | Council agendas: OnBase, Legistar, Granicus | robots.txt turned the walk away and the report read "empty"; a strategy's off-host addresses were checked against the seed's rules | **enumerate** and **report** | every vendor that admits only search engines; every strategy whose documents live on another host |
+| 8 | Agenda item attachments: OnBase, Legistar, Granicus | the agreements a council votes on are attached to items, and no source collected one: OnBase never opened an item, Legistar's are on robots-disallowed hosts | **enumerate** | every agenda product: the meeting's PDF names the item, the item holds the document |
 
 **Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
@@ -2187,6 +2188,150 @@ Entry 2's findings, rechecked:
 
 - 2026-11-20 — strategies written; the live runs against throwaway stores are recorded in
   the pull request.
+
+---
+
+## 8. Agenda item attachments — what a council actually voted on
+
+*Seen 2026-11-21, with plain HTTP requests against Tampa, Manatee and Osceola's OnBase, and
+Hillsborough's Legistar Web API, and with the box's `log/*/source.toml` and run logs.*
+
+Researching Water Street Tampa Phase 2 found four council approvals — the Phase 3A
+Infrastructure Development Agreement (Res. 2022-464), the Subphase 3A Subdivision Agreement
+(Res. 2026-365), a maintenance agreement (Res. 2026-366) and a Multi-Modal Transportation
+Impact Fee Credit agreement (Res. 2026-494) — and the corpus held only their titles and
+votes. The agreements are attached to agenda items, and nothing collected an item's
+attachments.
+
+### OnBase: three requests down from the meeting
+
+Tampa meeting 2824, May 7, 2026:
+
+1. `Documents/ViewAgenda?meetingId=2824&doctype=1` — 447 KB of HTML. Items are
+   `javascript:loadAgendaItem(<id>,false)`, sections `…,true)`: 119 items and 30 sections.
+   `Meetings/ViewMeeting?id=2824` builds the same address with `&type=agenda`, which the
+   server does not need.
+2. `Meetings/ViewMeetingAgendaItem?meetingId=2824&itemId=23596&isSection=false&type=agenda`
+   — 6 KB, a "Supporting Documents" list of anchors:
+   `/251agendaonline/Documents/DownloadFile/<name>.pdf?documentType=1&meetingId=2824&itemId=23596&publishId=192328&isSection=False&isAttachment=True`.
+3. That address answers 200 `text/html`, a 1,448-byte "Downloading, Please wait…" page whose
+   script swaps in `DownloadFileBytes`. With the same query, `DownloadFileBytes` answers 200
+   `application/pdf`, 493,937 bytes: *RESO AND AGMT - SUBDIVISION FPT-24-0000003 - WATER
+   STREET 3A*, the Subphase 3A agreement. No cookie, no referer.
+
+Which keys decide the file, measured on that one (`DownloadFileBytes/x.pdf?…`):
+
+| Query | Answer |
+|---|---|
+| all six keys, any file name | the agreement, 493,937 bytes, same hash |
+| `documentType`, `meetingId`, `itemId`, `publishId` | the agreement |
+| without `isSection` or without `isAttachment` | the agreement |
+| without `itemId` | **the meeting's agenda**, 287,563 bytes |
+| without `documentType`, or without `meetingId` | 302 to the error page |
+| `publishId=999999999`, or another item's `itemId` | 302 to the error page |
+| `documentType=3` with the four keys | 3,505 bytes: the "not published" page typed `application/pdf` |
+
+So the name is decorative here too, the two flags are, and the four keys are the address.
+Dropping `itemId` is the trap: it returns a real PDF, the wrong one. The walk writes
+`DownloadFileBytes/<publishId>.pdf?documentType=1&meetingId=…&itemId=…&publishId=…`, read
+from the anchor and never assembled from guesses.
+
+**Same product at all three.** Manatee meeting 763: 45 items, 39 sections; item 66526 had
+four documents (the SWFWMD well-permitting agreement, 1,209,982 bytes through
+`DownloadFileBytes`, `DownloadFile` again the 1,454-byte wait page). Osceola meeting 2048:
+63 items, 34 sections; items 45352, 45387, 45393 and 45007 had 4, 3, 5 and 2 documents,
+each led by an "Agenda Item Summary Sheet". Neither county serves a robots.txt (both 404),
+nor does Tampa's host.
+
+**Sections carry nothing.** Four Tampa sections, three Manatee and three Osceola: no
+`DownloadFile` link on any. The walk does not ask for them, which saves a fifth of the
+item requests.
+
+**No cheaper route found.** Neither `ViewMeeting` nor `ViewAgenda` names a `publishId`;
+the item page is the only place one appears. Packets (doc types 5, 6) would hold the same
+documents in one file, but Tampa publishes none.
+
+**Items start in 2024 at Tampa.** Before January 2024 every Tampa agenda is a Word export
+uploaded whole: `ViewAgenda` holds no `loadAgendaItem` at all (Council Regular, June 2022 to
+November 2023, sampled quarterly). The first structured agenda is meeting 117, January 11,
+2024, with 89 items. So the Phase 3A agreement (Res. 2022-464, meeting 1845, June 2, 2022)
+is out of this walk's reach: its agenda names no item to open. The three 2026 agreements are
+in it.
+
+### Cost, and how a walk is bounded
+
+One request per published agenda, one per item, one per attachment fetched later. At
+Tampa that is about a hundred item pages per council meeting. The walk keeps every
+meeting's own documents from the search answers first, then opens meetings newest first and
+finishes each before starting the next, so a request budget that runs out costs the oldest
+attachments and never an agenda or minutes. The seed bounds the date range
+(`Meetings/Search?dropid=11&dropsv=…&dropev=…`), and `--max-sitemaps` bounds the requests
+inside it.
+
+Measured at Tampa on 2026-11-21 (all at the box's 1 request a second):
+
+| Walk | Discover requests | Attachments to collect |
+|---|---|---|
+| May 2026 (search seed) | 17 agendas + 232 items = **249**, about 4 minutes | about 930 |
+| Everything (front door) | 79 searches + 2,443 agendas + 6,659 items = **9,181**, about 2.6 hours | about 26,600, about 7.4 hours |
+
+The 6,659 items are in 251 of the 348 agendas published since January 2024; the other
+2,095 agendas are older uploads with none, each still one request. Attachments are 4.0 per
+item over a 40-item sample, so that column is an estimate. Code Enforcement agendas carry
+no items. A full backfill is about ten hours of one host's time.
+
+That second bound matters for scheduled runs: `centinel run` discovers with the default
+200-request budget. A front-door Tampa source spends most of that on the search, so a
+weekly run collects the newest meeting or two's attachments and says `truncated`. A
+backfill is a `discover --max-sitemaps N` over a search seed.
+
+### Legistar: walked, and turned away at the door
+
+`legistar` already reads `events/{id}/eventitems?…&Attachments=1` and keeps every
+`MatterAttachmentHyperlink`. Hillsborough meeting 1398 (Nov 16, 2026): 51 items, 80
+attachments, e.g. `hillsboroughcounty.legistar1.com/hillsboroughcounty/attachments/ae602428-….pdf`
+(229,516 bytes, `application/pdf`). Every one is on a `*.legistar1.com` host whose
+robots.txt is `User-agent: *` / `Disallow: /`, and none of the box's four Legistar sources
+sets `ignore_robots`. Their logs hold **no** `legistar1.com` address — no attachment, and no
+agenda or minutes either. The walk is right; the ruling is the operator's.
+
+The route around a ruling does not come from the API: `View.ashx?M=F&ID=<MatterAttachmentId>&GUID=<MatterAttachmentGuid>`
+redirects to `Confirmation.aspx?M1=Gone`, and `LegislationDetail.aspx?ID=<MatterId>&GUID=<MatterGuid>`
+answers 19 bytes. InSite's ids are its own, as entry 7 found for meetings.
+
+### Granicus and CivicPlus Agenda Center
+
+`granicus` keeps each `AgendaViewer.php` and `MinutesViewer.php`, which redirect to one PDF
+per meeting. Item attachments, where a client uses Granicus's agenda manager, would be
+`MetaViewer.php` links inside the viewer's HTML; not built, and no source on the box uses
+the strategy. Every `*.granicus.com` host disallows all crawlers in any case.
+
+Agenda Center has no strategy. Eight box sources (Indian Shores, Oldsmar, Pinellas Park,
+Safety Harbor, Seminole, St. Pete Beach, Tarpon Springs, Temple Terrace) reach it by
+`sitemap` or `links`, and each holds exactly one address there, `/AgendaCenter` itself: the
+agendas are loaded by script, so none were collected, let alone item attachments.
+
+### Against the three levers
+
+None. It is enumeration: the content kind is a PDF and reads; the enclosure is three
+requests down and only the product's own markup says where.
+
+### Left on the table
+
+- A per-source request budget, so a scheduled run of an item-walking source reaches past
+  the newest meetings without raising every source's budget.
+- Legistar without a ruling: InSite's `MeetingDetail.aspx` → `LegislationDetail.aspx` →
+  `View.ashx?M=F`, two more requests per item, and its own design.
+- Granicus `MetaViewer.php`, and a CivicPlus Agenda Center strategy.
+- The item's title as the attachment's title: the item page names it ("File No.
+  DEO26-23596", "Resolution approving…"), and a Resource still has nowhere to put it.
+
+### Running log
+
+- 2026-11-21 — endpoint shapes measured by hand at Tampa, Manatee, Osceola and
+  Hillsborough; `onbase-agenda` walks items.
+- 2026-11-21 — Tampa since 2024 counted: 348 agendas, 6,659 items; May 2026 is 249
+  discover requests. Pre-2024 agendas name no items, so Res. 2022-464 is out of reach.
 
 ---
 
