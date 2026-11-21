@@ -665,9 +665,9 @@ pub struct SourceConfig {
     /// this key existed.
     ///
     /// For a vendor that hosts public records and turns every crawler away: each
-    /// `*.granicus.com` and `*.legistar1.com` host serves `User-agent: *` / `Disallow: /`
-    /// and admits Googlebot. `Crawl-delay` and the source's own rate still apply, and every
-    /// run notes that the rules were set aside.
+    /// `*.granicus.com` host serves `User-agent: *` / `Disallow: /` and admits Googlebot.
+    /// `Crawl-delay` and the source's own rate still apply, and every run notes that the
+    /// rules were set aside.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ignore_robots: Option<bool>,
 }

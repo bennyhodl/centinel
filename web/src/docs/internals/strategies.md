@@ -107,7 +107,7 @@ Seven strategies are registered today:
 | Strategy | Keys on | Addresses |
 |---|---|---|
 | `onbase-agenda` | Hyland OnBase Agenda Online (product) | the agenda, minutes and summary PDF of every meeting the application's search lists |
-| `legistar` | Legistar, on `{client}.legistar.com` or its Web API (product) | per meeting, the agenda and minutes PDFs, the meeting's items from the API, and every attachment those items name |
+| `legistar` | Legistar, on `{client}.legistar.com` or its Web API (product) | per meeting, the meeting's items from the API, and from the client's InSite site the agenda, minutes and other meeting documents and every attachment of every item's legislation |
 | `granicus` | a Granicus `ViewPublisher.php` page or agenda feed (product) | the `AgendaViewer.php` and `MinutesViewer.php` documents it lists |
 | `sitemap` | a `Sitemap:` line in `robots.txt` (standard) | every `<loc>` the sitemaps list |
 | `listing` | an IIS or Apache/nginx directory index (server default) | the files under the seed's directory |
@@ -124,11 +124,12 @@ capped date range is halved until every answer is whole.
 
 ### When `robots.txt` says no
 
-Granicus, and the hosts Legistar keeps its documents on (`*.legistar1.com`,
+Granicus, and the hosts Legistar's Web API names its documents on (`*.legistar1.com`,
 `legistar2.granicus.com`), serve `User-agent: *` / `Disallow: /` and admit search
 engines. The rules are honoured, and a run that collected nothing because of them says so
-by name instead of reporting an empty site. A strategy whose addresses are on another host
-than the seed asks that host's rules, not the seed's.
+by name instead of reporting an empty site. `legistar` reads the same documents from the
+client's InSite site, `{client}.legistar.com`, which serves no robots.txt. A strategy
+whose addresses are on another host than the seed asks that host's rules, not the seed's.
 
 An operator who has read the evidence can rule that a host's robots.txt does not bind a
 source: `ignore_robots = true` in its definition, written by `source add --ignore-robots`.

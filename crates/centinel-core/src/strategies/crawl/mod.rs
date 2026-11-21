@@ -166,9 +166,9 @@ pub trait Walk: Send + Sync {
     ///
     /// For an address on another host than the seed: [`Seed::robots`] is the seed host's,
     /// and asking it about a path on a different host answers a question nobody asked.
-    /// Legistar's Web API names its documents on `*.legistar1.com`, whose robots.txt says
-    /// `Disallow: /` while the seed's says nothing. Read once per host and counted against
-    /// the budget like any other request; the host keeps the rules, so an operator's
+    /// Seeded with Legistar's Web API, `legistar` reads and keeps pages on the client's
+    /// InSite host, which the seed's rules say nothing about. Read once per host and counted
+    /// against the budget like any other request; the host keeps the rules, so an operator's
     /// ruling (`ignore_robots`) reaches them without the strategy knowing it was made.
     fn robots<'a>(&'a self, url: &'a str) -> BoxFuture<'a, std::sync::Arc<Robots>>;
 }
