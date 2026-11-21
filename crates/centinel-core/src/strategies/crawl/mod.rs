@@ -79,6 +79,7 @@ pub mod listing;
 pub mod onbase;
 pub mod scope;
 pub mod sitemap;
+pub mod window;
 
 use super::Recognition;
 
