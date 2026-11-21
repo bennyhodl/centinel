@@ -41,6 +41,7 @@ lever.
 | 6 | A full run on the box: 37 Tampa Bay sources | one 830 MB file killed every run; CMS redirect pages are fetched off-host and counted as the city's failures; `<base href>` is ignored, so largo's links resolve to 404s; a footer PDF is fetched once per page (21.5 GB of repeats); a 10 s crawl delay over a WooCommerce shop holds the run ~13 h; extract peaks at ~670 MB per vector PDF and glibc keeps it; one 17,162-font PDF stalls extract with no deadline; index's chrome learner holds every CSV row and is killed | **collect** (memory, redirects), **enumerate** (links), **extract** and **index** (memory, time) | every run on a small machine; every CivicPlus/Granicus "external link" page; every site that declares `<base href>` |
 | 7 | Council agendas: OnBase, Legistar, Granicus | robots.txt turned the walk away and the report read "empty"; a strategy's off-host addresses were checked against the seed's rules | **enumerate** and **report** | every vendor that admits only search engines; every strategy whose documents live on another host |
 | 8 | Agenda item attachments: OnBase, Legistar, Granicus | the agreements a council votes on are attached to items, and no source collected one: OnBase never opened an item, Legistar's are on robots-disallowed hosts | **enumerate** | every agenda product: the meeting's PDF names the item, the item holds the document |
+| 9 | CivicPlus Agenda Center (`/AgendaCenter`) | eight box sources reach it and hold only the front door; seven of the eight modules are empty, and the one that is not lists one year per category, with older years behind a POST | **enumerate** | every CivicEngage site: the module is at the same path, and its search is a GET per year |
 
 **Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
@@ -2369,10 +2370,10 @@ per meeting. Item attachments, where a client uses Granicus's agenda manager, wo
 `MetaViewer.php` links inside the viewer's HTML; not built, and no source on the box uses
 the strategy. Every `*.granicus.com` host disallows all crawlers in any case.
 
-Agenda Center has no strategy. Eight box sources (Indian Shores, Oldsmar, Pinellas Park,
-Safety Harbor, Seminole, St. Pete Beach, Tarpon Springs, Temple Terrace) reach it by
-`sitemap` or `links`, and each holds exactly one address there, `/AgendaCenter` itself: the
-agendas are loaded by script, so none were collected, let alone item attachments.
+Agenda Center is entry 9. Eight box sources reach it and hold only `/AgendaCenter` itself;
+seven of those modules are empty, and the eighth, Indian Shores, builds no HTML agendas, so
+it has no item attachments. Lake Wales, off the box, does: `ViewFile/Item/ITEM?fileID=FILE`
+from each HTML agenda.
 
 ### Against the three levers
 
@@ -2385,7 +2386,7 @@ requests down and only the product's own markup says where.
   the newest meetings without raising every source's budget.
 - Legistar's `ViewReport.ashx?M=R&N=Text`, each matter's text as a report, one more file
   per matter; and the legislation page itself, which carries the matter's history.
-- Granicus `MetaViewer.php`, and a CivicPlus Agenda Center strategy.
+- Granicus `MetaViewer.php`. (The CivicPlus Agenda Center strategy is entry 9.)
 - The item's title as the attachment's title: the item page names it ("File No.
   DEO26-23596", "Resolution approving…"), and a Resource still has nowhere to put it.
 
@@ -2399,6 +2400,153 @@ requests down and only the product's own markup says where.
   `EventInSiteURL` → `MeetingDetail.aspx` → `LegislationDetail.aspx` → `View.ashx?M=F`,
   keys `M`/`ID`/`GUID`; `legistar` collects through it and drops the robots-blocked API
   links. A Hillsborough month is about 70 discover requests.
+
+## 9. CivicPlus Agenda Center — the module every CivicEngage site ships
+
+*Seen 2026-11-21, with plain HTTP requests at ten seconds apart against the eight box hosts
+and Lake Wales (`lakewalesfl.gov`), and with the box's `log/*/source.toml`, run logs and
+crumbs. The store was read, not written.*
+
+Eight box sources (Indian Shores, Oldsmar, Pinellas Park, Safety Harbor, Seminole, St. Pete
+Beach, Tarpon Springs, Temple Terrace) are CivicEngage sites collected by `sitemap`. Each
+holds one address in the module, `/AgendaCenter` itself, and no agenda, minutes or packet.
+
+### Seven of the eight modules are empty
+
+Every one of the eight answers `/AgendaCenter` with 200 and the module's page. Only Indian
+Shores lists anything: 9 categories, 82 `ViewFile` links. The other seven serve the search
+form with no category in it. Where their meetings are, from their crumbs and their own text:
+
+| Source | Agenda Center | Where the meetings are |
+|---|---|---|
+| indian-shores | 9 categories, 2018–2026 | here |
+| oldsmar | empty; "previous years … in the Document Center" | CivicWeb (`myoldsmar.civicweb.net`, 51 crumbs) |
+| pinellas-park | empty; the same Document Center sentence | Document Center, by its own text |
+| safety-harbor | empty | Granicus (`safetyharbor.granicus.com`, 2 crumbs) |
+| seminole | empty | CivicClerk (`seminolefl.portal.civicclerk.com`, 12) |
+| st-pete-beach | empty | CivicClerk (`stpetebeachfl.civicclerk.com`, 9) |
+| tarpon-springs | empty | CivicClerk (`tarponspringsfl.portal.civicclerk.com`, 28) |
+| temple-terrace | empty | no agenda vendor among its crumbs |
+
+So the box's one Agenda Center source is Indian Shores. A second populated sighting came
+from off the box: Lake Wales, 28 categories, 2008–2026, with HTML agendas, packets and item
+attachments. Two other CivicPlus sites tried, Ocoee and DeLand, were empty or redirected
+elsewhere.
+
+### How the listing loads
+
+The front door renders **one year per category**, that category's newest, as plain anchors.
+Every other year is a tab, `javascript:changeYear(2025, 4, 'a1')`, whose script POSTs
+`{year, catID, startDate, endDate, term}` to `/AgendaCenter/UpdateCategoryList` and swaps the
+answer in. `UpdateCategoryList?year=2025&catID=3` as a GET answers the same fragment, but a
+walk need not ask per category: the module's search is a GET.
+
+```text
+/AgendaCenter/Search/?term=&CIDs=all&startDate=01/01/2025&endDate=12/31/2025&dateRange=&dateSelector=
+```
+
+- A search **inside one calendar year** answers every category's meetings in that year on one
+  page. Lake Wales 2026: the same 117 meetings, file for file, as the front door's 2026 rows.
+  Lake Wales 2019: 116 meetings in 19 categories, and the city commission's 96 files equal
+  what `UpdateCategoryList?year=2019&catID=4` answers.
+- A search **across years** answers like the front door: each category's newest year in the
+  range, the rest behind tabs. `01/01/2000`–`12/31/2027` at Indian Shores answered 41
+  meetings, the front door's 41. So the walk asks one year at a time.
+- No answer was paged or capped. Lake Wales' largest year, 2021, is 158 meetings on one page.
+- The tabs name the years that hold meetings and no others: Lake Wales lists 2008 and
+  2010–2026; 2009 is not a tab, and its search answers nothing.
+
+### Which files, and what decides one
+
+Each row links its files under `/AgendaCenter/ViewFile/`. Measured at Lake Wales (and the
+bare id at Indian Shores too):
+
+| Address | Answer |
+|---|---|
+| `Agenda/_11172026-1765` | the agenda, `application/pdf`, 71,990 bytes |
+| `Agenda/_01012000-1765`, `Agenda/1765` | the same bytes |
+| `Agenda/_11172026-999999` | 404 `text/html` |
+| `Agenda/_11172026-1765?packet=true`, `Agenda/1765?packet=true` | the packet, 28,810,001 bytes, same hash |
+| `Minutes/_11032026-1762`, `Minutes/_01012000-1762`, `Minutes/1762` | the minutes, 172,906 bytes, same hash |
+| `Agenda/_11172026-1765?html=true` | the agenda as HTML, 32,631 bytes |
+| `Item/18398?fileID=23880` | an item's document, `application/pdf`, 97,264 bytes |
+| `Item/18398?fileID=23880&foo=1` | the same bytes |
+| `Item/1?fileID=23880`, `Item/18398` | 404 |
+| `Agenda/1186`, `Agenda/_07142026-1186` (Indian Shores) | the same 462,130 bytes |
+
+The day in a file name is decoration: the id decides the meeting, and `packet=true` or
+`html=true` the form. An item's document needs both its item id and `fileID`; other keys are
+ignored. Every miss is a real 404, not entry 2's 200 error page. So `agenda-center` writes
+`Agenda/ID`, `Agenda/ID?packet=true`, `Minutes/ID` and `Item/ITEM?fileID=FILE`: one address
+per document, and a meeting moved to another day keeps it. The server ignores a `Range:`
+header, so each probe of the packet cost the whole 28.8 MB.
+
+A row also links `PreviousVersions/_MMDDYYYY-ID`, the superseded versions of an amended
+agenda. Not collected.
+
+### Per-item attachments: where the agenda was built in the module
+
+An agenda built in the module has an HTML form, and the HTML links each item's documents
+as `/AgendaCenter/ViewFile/Item/ITEM?fileID=FILE`. Lake Wales' November 17, 2026 commission
+agenda: 19 items, 57 documents. Six HTML agendas sampled across years held 57, 44, 14, 0, 0
+and 0 (the zeros an airport board and two workshops): about 20 each. The HTML also links the
+minutes it approves on the product's other host name, `fl-lakewales.civicplus.com`, which the
+walk drops as off-host.
+
+An agenda uploaded as a finished PDF has no HTML form and no items. **Every Indian Shores
+agenda is one**: no `html=true` link anywhere, so the box's one Agenda Center source has no
+item attachments to collect. The packet binds the same documents into one PDF; both are kept.
+
+### robots.txt
+
+All nine hosts serve the same CivicPlus template: `User-agent: *` disallows `/admin`,
+`/Search`, `/RSS.aspx` and similar, none under `/AgendaCenter` (`/Search` is a root prefix,
+not `/AgendaCenter/Search/`), and sets **`Crawl-delay: 10`**. Baiduspider and Yandex are
+disallowed outright. The pacer honours the delay, so these hosts run at ten seconds a
+request, not one. The recognition says so.
+
+### Cost, and how a walk is bounded
+
+One request per year the seed's tabs name, then one per HTML agenda, newest first; the
+listings are all read before any HTML agenda. A search seed with a range asks only the years
+it touches, cut to the range; a range inside one year is the seed itself and asks nothing.
+`--max-sitemaps` bounds the requests inside that.
+
+| Walk | Discover requests | At 10 s (the hosts' delay) | At 1 req/s | Files to collect |
+|---|---|---|---|---|
+| Indian Shores, front door | 9 years + 0 HTML agendas = **9** | 1.5 min | 9 s | agendas and minutes only: 57 meetings and 1 minutes in 2025 |
+| Lake Wales, front door | 18 years + 1,151 HTML agendas = **1,169** | 3 h 15 min | 19.5 min | 1,541 agendas, 1,149 packets, 1,236 minutes, about 22,000 attachments |
+| Lake Wales, a 2026 search seed | 0 + 101 = **101** | 17 min | 1.7 min | 117 agendas, 101 packets, 105 minutes, about 2,000 attachments |
+
+Collecting is the larger cost: Lake Wales' 3,926 meeting files are 11 hours at ten seconds,
+and its attachments about 61 hours more. At the default 200-request budget a front-door walk
+of Lake Wales reads every year's listing and the newest 182 HTML agendas, about a year and
+three quarters of attachments, and says `truncated`.
+
+### Which box sources would switch
+
+One. `indian-shores` would gain a second source, `https://www.myindianshores.com/AgendaCenter`
+with `strategy = "agenda-center"`, about nine requests to discover. The site source stays on
+`sitemap`. The other seven have nothing in the module; their meetings want CivicWeb,
+CivicClerk or Granicus (entry 7), or a Document Center walk. No box source was changed.
+
+### Against the three levers
+
+None. Enumeration again: the files are PDFs that read, and the only faults are that the
+module lists one year at a time and a script fetches the rest.
+
+### Left on the table
+
+- `PreviousVersions/…`, an amended agenda's earlier versions.
+- CivicPlus Document Center, where Oldsmar and Pinellas Park say their older agendas are.
+- The meeting's title and category as the document's title: the row names both.
+- A per-source request budget (entry 8), which Lake Wales' 1,169-request walk wants too.
+
+### Running log
+
+- 2026-11-21 — robots.txt and `/AgendaCenter` read at all eight box hosts; seven empty.
+  Indian Shores and Lake Wales measured: year searches, file keys, item attachments, every
+  Lake Wales year counted. `agenda-center` written; unbuilt and untested here.
 
 ---
 
