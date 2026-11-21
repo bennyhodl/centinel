@@ -2194,7 +2194,8 @@ Entry 2's findings, rechecked:
 ## 8. Agenda item attachments — what a council actually voted on
 
 *Seen 2026-11-21, with plain HTTP requests against Tampa, Manatee and Osceola's OnBase, and
-Hillsborough's Legistar Web API, and with the box's `log/*/source.toml` and run logs.*
+Hillsborough's Legistar Web API and the InSite sites of Hillsborough, Pinellas, Clearwater
+and Belleair, and with the box's `log/*/source.toml` and run logs.*
 
 Researching Water Street Tampa Phase 2 found four council approvals — the Phase 3A
 Infrastructure Development Agreement (Res. 2022-464), the Subphase 3A Subdivision Agreement
@@ -2285,19 +2286,81 @@ That second bound matters for scheduled runs: `centinel run` discovers with the 
 weekly run collects the newest meeting or two's attachments and says `truncated`. A
 backfill is a `discover --max-sitemaps N` over a search seed.
 
-### Legistar: walked, and turned away at the door
+### Legistar: turned away at the API's door, let in at InSite's
 
-`legistar` already reads `events/{id}/eventitems?…&Attachments=1` and keeps every
+`legistar` read `events/{id}/eventitems?…&Attachments=1` and kept every
 `MatterAttachmentHyperlink`. Hillsborough meeting 1398 (Nov 16, 2026): 51 items, 80
 attachments, e.g. `hillsboroughcounty.legistar1.com/hillsboroughcounty/attachments/ae602428-….pdf`
-(229,516 bytes, `application/pdf`). Every one is on a `*.legistar1.com` host whose
-robots.txt is `User-agent: *` / `Disallow: /`, and none of the box's four Legistar sources
-sets `ignore_robots`. Their logs hold **no** `legistar1.com` address — no attachment, and no
-agenda or minutes either. The walk is right; the ruling is the operator's.
+(229,516 bytes, `application/pdf`). Every one is on a `*.legistar1.com` host (Clearwater's
+on `legistar2.granicus.com`) whose robots.txt is `User-agent: *` / `Disallow: /`, and none
+of the box's four Legistar sources sets `ignore_robots`. Their logs hold **no**
+`legistar1.com` address — no attachment, and no agenda or minutes either.
 
-The route around a ruling does not come from the API: `View.ashx?M=F&ID=<MatterAttachmentId>&GUID=<MatterAttachmentGuid>`
+The API's ids open nothing on InSite: `View.ashx?M=F&ID=<MatterAttachmentId>&GUID=<MatterAttachmentGuid>`
 redirects to `Confirmation.aspx?M1=Gone`, and `LegislationDetail.aspx?ID=<MatterId>&GUID=<MatterGuid>`
-answers 19 bytes. InSite's ids are its own, as entry 7 found for meetings.
+answers 19 bytes ("Invalid parameters!"). InSite's ids are its own, as entry 7 found for
+meetings. But the API hands over the door: **every event carries `EventInSiteURL`**,
+`https://hillsboroughcounty.legistar.com/MeetingDetail.aspx?LEGID=1398&GID=761&G=…` — 269 of
+269 at Hillsborough back to 2020, and 40 of 40 recent at Pinellas, Clearwater and Belleair.
+None of the four `{client}.legistar.com` hosts serves a robots.txt (404). From there it is
+two pages down, measured on 2026-11-21 at one request a second:
+
+1. `MeetingDetail.aspx` (228–265 KB) links the meeting's documents —
+   `View.ashx?M=A` agenda (PDF), `M=M` minutes (PDF), `M=AADA` and `M=MADA` the same two
+   as accessible HTML (595 and 616 KB against 208 and 199 KB of PDF), `M=E1` a "Meeting
+   Extra" (a change sheet, PDF), `M=AO` the meeting's own attachments (a QR code, JPEG) —
+   and one `LegislationDetail.aspx?ID=…&GUID=…` per matter on the agenda: 32 for 1398's 32
+   matters, 6 for Pinellas 10174's 6, 17 for Clearwater 3158's 17.
+2. `LegislationDetail.aspx` (92–125 KB) has an Attachments table of raw-ampersand links,
+   `View.ashx?M=F&ID=15691876&GUID=A1DDDE62-…`. The counts match the API's, matter for
+   matter: MM 26-0546 6 and 6, RZ-PD 26-0706 5 and 5, Clearwater ID#26-1339 1 and 1,
+   ID#26-1145 0 and 0. Each answered 200 `application/pdf` (199,737 to 337,299 bytes).
+
+**Nowhere else.** The meeting page links no `M=F`; an item's `HistoryDetail.aspx` links no
+`View.ashx` at all. A legislation page also links the other meetings its matter was heard
+at (RZ-PD 26-0706: five) and a `ViewReport.ashx?M=R&N=Text` report; neither is an
+attachment.
+
+Which keys decide the file, on attachment 15494315 (`View.ashx?…`):
+
+| Query | Answer |
+|---|---|
+| `M`, `ID`, `GUID`, `G` | 200 `application/pdf`, 199,737 bytes |
+| `M`, `ID`, `GUID` | the same bytes |
+| `GUID` lowercased | the same bytes |
+| without `GUID`, or without `ID` | 302 to `Confirmation.aspx?M1=Gone` |
+| without `M` | 410, 35 bytes |
+| `GUID` one digit off, or `ID` one off | 302 to `…M1=Gone` |
+| `M=A` with the attachment's `ID` and `GUID` | 302 to `…M1=Gone` |
+
+`M=AO` without its `N=` (the name, base64) returned the same JPEG. So `M`, `ID` and `GUID`
+are the address, and `G` and `N` are decoration — a page fetched without `G` links its
+attachments without it. Unlike OnBase, no partial query returns the wrong file.
+`LegislationDetail.aspx` needs `ID` and `GUID` (alone, `ID` answers the 19 bytes);
+`MeetingDetail.aspx?LEGID=…&GID=…` serves without `G`.
+
+**What `legistar` does now:** reads every page of meetings, keeping each meeting's
+`eventitems` address (the votes) without reading it; then opens meetings newest first, each
+`EventInSiteURL` page followed by its legislation pages; keeps every `View.ashx` link cut to
+`M`, `ID`, `GUID`, except `AADA` and `MADA`. It no longer keeps `EventAgendaFile`,
+`EventMinutesFile` or `MatterAttachmentHyperlink`: InSite serves those documents, and a
+ruled source would have held each twice. Every request is checked against its own host's
+robots.txt before it is made.
+
+**Cost, Hillsborough, at one request a second.** 269 meetings since 2020, about 3.3 a month.
+Thirteen meetings sampled evenly from the API: 22.0 matters and 62.7 attachments a meeting,
+2.85 attachments a matter, 6 of 286 matters with none.
+
+| Walk | Discover requests | Attachments to collect |
+|---|---|---|
+| A month | 1 page of meetings + 3 meeting pages + about 66 legislation = **about 70**, about 1.2 minutes | about 190, about 3 minutes |
+| Everything | 1 + 269 + about 5,900 = **about 6,200**, about 1.7 hours | about 16,900, about 4.7 hours |
+
+Both are ceilings: a matter heard at several meetings is read once, and RZ-PD 26-0706 was
+heard at five. The old walk spent 270 requests on everything and collected no document. The
+default 200-request budget of a scheduled run reaches the newest eight or so meetings. The
+other clients are bigger: Pinellas lists 8,845 events back to 1912 (51 in 2025), Clearwater
+1,635 since 2014 (144 in 2025).
 
 ### Granicus and CivicPlus Agenda Center
 
@@ -2320,8 +2383,8 @@ requests down and only the product's own markup says where.
 
 - A per-source request budget, so a scheduled run of an item-walking source reaches past
   the newest meetings without raising every source's budget.
-- Legistar without a ruling: InSite's `MeetingDetail.aspx` → `LegislationDetail.aspx` →
-  `View.ashx?M=F`, two more requests per item, and its own design.
+- Legistar's `ViewReport.ashx?M=R&N=Text`, each matter's text as a report, one more file
+  per matter; and the legislation page itself, which carries the matter's history.
 - Granicus `MetaViewer.php`, and a CivicPlus Agenda Center strategy.
 - The item's title as the attachment's title: the item page names it ("File No.
   DEO26-23596", "Resolution approving…"), and a Resource still has nowhere to put it.
@@ -2332,6 +2395,10 @@ requests down and only the product's own markup says where.
   Hillsborough; `onbase-agenda` walks items.
 - 2026-11-21 — Tampa since 2024 counted: 348 agendas, 6,659 items; May 2026 is 249
   discover requests. Pre-2024 agendas name no items, so Res. 2022-464 is out of reach.
+- 2026-11-21 — Legistar InSite measured at Hillsborough, Pinellas, Clearwater and Belleair:
+  `EventInSiteURL` → `MeetingDetail.aspx` → `LegislationDetail.aspx` → `View.ashx?M=F`,
+  keys `M`/`ID`/`GUID`; `legistar` collects through it and drops the robots-blocked API
+  links. A Hillsborough month is about 70 discover requests.
 
 ---
 
