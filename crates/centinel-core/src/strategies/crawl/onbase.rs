@@ -40,12 +40,42 @@
 //! The PDF over the `ViewAgenda` HTML, for entry 2's reason: the HTML export inlines the
 //! letterhead as base64, and the PDF read more real text out of the same minutes.
 //!
+//! ## What the council voted on: each item's supporting documents
+//!
+//! The agreements, contracts and staff reports are attached to agenda items, not to the
+//! meeting, and the agenda PDF carries only their titles. They are three requests down
+//! (`docs/FIELD-NOTES.md` entry 8):
+//!
+//! 1. `Documents/ViewAgenda?meetingId=ID&doctype=1`, the agenda as HTML, names each item as
+//!    `loadAgendaItem(ITEM,false)`; `true` marks a section, and no section seen at Tampa,
+//!    Manatee or Osceola carried a document, so sections are not asked for.
+//! 2. `Meetings/ViewMeetingAgendaItem?meetingId=ID&itemId=ITEM&isSection=false&type=agenda`
+//!    lists the item's "Supporting Documents", each linked as
+//!    `Documents/DownloadFile/<name>.pdf?documentType=1&meetingId=…&itemId=…&publishId=…&isSection=False&isAttachment=True`.
+//! 3. That address is a "Downloading, Please wait…" page whose script swaps in
+//!    `DownloadFileBytes`. The same query on `DownloadFileBytes` is the file.
+//!
+//! `documentType`, `meetingId`, `itemId` and `publishId` decide which file; the name and the
+//! two flags do not. So an attachment is written with the publish id as its name and those
+//! four keys alone — one document, one address. Drop `itemId` and the server answers with
+//! the meeting's agenda instead, so the four are never trimmed further.
+//!
+//! The items cost one request each, which is most of a walk: a Tampa council agenda runs to
+//! about a hundred items. (An agenda uploaded as a finished document — every Tampa agenda
+//! before 2024 — names none, and costs its one request.) So the meetings' own documents are
+//! all kept first, from the search answers alone, and then meetings are opened **one at a
+//! time, newest first**, each agenda followed by its items. A walk that runs out of requests
+//! has every agenda, minutes and summary, every attachment of the newest meetings it
+//! finished, and at most one meeting part-read.
+//!
 //! ## Bounding a walk
 //!
 //! The seed bounds it, as a path bounds `links`. Handed the application's front door, the
 //! walk covers every meeting since [`EARLIEST`]. Handed a search page —
 //! `…/Meetings/Search?dropid=11&dropsv=08/22/2026&dropev=11/20/2026` — it covers that range,
-//! and the first answer is the seed already in hand.
+//! and the first answer is the seed already in hand. The request budget (`--max-sitemaps`)
+//! still applies inside that range, and an item walk spends it: May 2026 at Tampa is 17
+//! agendas and 232 items, 249 requests, more than the default budget of 200.
 
 use std::fmt;
 
@@ -130,69 +160,117 @@ impl Strategy for OnBaseAgenda {
             let mut pass = Pass::new(crawl, "meeting search", MAX_DEPTH);
             pass.note(Note::new("application", root.to_string()));
             pass.note(Note::new("window", first.to_string()));
-            pass.push(first, 0);
+            pass.push(Ask::Search(first), 0);
 
-            let (mut meetings, mut documents, mut windows) = (0u64, 0u64, 0u64);
-            while let Some((window, depth)) = pass.next_to_visit() {
-                pass.visiting(format!("meetings {window}"));
-                let body = match (depth, seeded) {
-                    (0, Some(_)) => seed.page.bytes.clone(),
-                    _ => match pass.walk().get(window.search(&root).as_str()).await {
+            // Meetings whose agenda is published, opened once every search is answered;
+            // see the module docs. Sorted oldest first, so `pop` takes the newest.
+            let mut agendas: Vec<(Option<jiff::Timestamp>, u64)> = Vec::new();
+            let mut tally = Tally::default();
+            loop {
+                let Some((ask, depth)) = pass.next_to_visit() else {
+                    // Nothing queued: open the next meeting. A ceiling leaves the queue
+                    // holding what it stopped before, and ends the walk here.
+                    if pass.pending() == 0
+                        && let Some((_, meeting)) = agendas.pop()
+                    {
+                        pass.push(Ask::Agenda(meeting), 0);
+                        continue;
+                    }
+                    break;
+                };
+                pass.visiting(match &ask {
+                    Ask::Search(window) => format!("meetings {window}"),
+                    _ => ask.to_string(),
+                });
+                let body = match (&ask, depth, seeded) {
+                    (Ask::Search(_), 0, Some(_)) => seed.page.bytes.clone(),
+                    _ => match pass.walk().get(ask.url(&root).as_str()).await {
                         Ok(f) => f.bytes,
                         Err(refusal) => {
-                            pass.refused(&window, &refusal);
+                            pass.refused(&ask, &refusal);
                             continue;
                         }
                     },
                 };
                 let text = String::from_utf8_lossy(&body);
-                let Some(results) = results_in(&text) else {
-                    pass.warn(format!("{window}: the answer carries no meeting list"));
-                    continue;
-                };
-                if results.error_occurred {
-                    pass.warn(format!(
-                        "{window}: the search reported an error ({})",
-                        results.error_code.as_deref().unwrap_or("no code")
-                    ));
-                    continue;
-                }
-                pass.read_surface();
-
-                if results.capped() {
-                    match window.halves() {
-                        Some((older, newer)) => {
-                            pass.push(newer, depth + 1);
-                            pass.push(older, depth + 1);
+                match &ask {
+                    Ask::Search(window) => {
+                        let Some(results) = results_in(&text) else {
+                            pass.warn(format!("{window}: the answer carries no meeting list"));
+                            continue;
+                        };
+                        if results.error_occurred {
+                            pass.warn(format!(
+                                "{window}: the search reported an error ({})",
+                                results.error_code.as_deref().unwrap_or("no code")
+                            ));
                             continue;
                         }
-                        None => pass.short(format!(
-                            "{window}: one day holds more meetings than the search answers \
-                             ({}); the rest of that day is not collected",
-                            results.meetings.len()
-                        )),
+                        pass.read_surface();
+
+                        if results.capped() {
+                            match window.halves() {
+                                Some((older, newer)) => {
+                                    pass.push(Ask::Search(newer), depth + 1);
+                                    pass.push(Ask::Search(older), depth + 1);
+                                    continue;
+                                }
+                                None => pass.short(format!(
+                                    "{window}: one day holds more meetings than the search \
+                                     answers ({}); the rest of that day is not collected",
+                                    results.meetings.len()
+                                )),
+                            }
+                        }
+
+                        tally.windows += 1;
+                        for meeting in &results.meetings {
+                            tally.meetings += 1;
+                            if meeting.is_agenda_available {
+                                agendas.push((meeting.held(), meeting.id));
+                            }
+                            for (doc_type, published) in meeting.published() {
+                                if !published {
+                                    continue;
+                                }
+                                if pass.full() {
+                                    break;
+                                }
+                                tally.documents += 1;
+                                pass.keep(document(&root, meeting.id, doc_type), &seed.robots);
+                            }
+                        }
+                        agendas.sort();
                     }
-                }
-
-                windows += 1;
-                for meeting in &results.meetings {
-                    meetings += 1;
-                    for (doc_type, published) in meeting.published() {
-                        if !published {
-                            continue;
+                    &Ask::Agenda(meeting) => {
+                        // A bid opening's agenda can hold no items at all, so an empty
+                        // list is a figure and not a warning.
+                        let items = items_in(&text);
+                        tally.agendas += 1;
+                        tally.items += items.len() as u64;
+                        for item in items {
+                            pass.push(Ask::Item { meeting, item }, 0);
                         }
-                        if pass.full() {
-                            break;
+                    }
+                    Ask::Item { .. } => {
+                        let at = Url::parse(&ask.url(&root))?;
+                        for address in attachments_in(&text, &at, &root) {
+                            if pass.full() {
+                                break;
+                            }
+                            tally.attachments += 1;
+                            pass.keep(address, &seed.robots);
                         }
-                        documents += 1;
-                        pass.keep(document(&root, meeting.id, doc_type), &seed.robots);
                     }
                 }
             }
 
-            pass.figure("meetings", meetings);
-            pass.figure("documents", documents);
-            pass.figure("windows", windows);
+            pass.figure("meetings", tally.meetings);
+            pass.figure("documents", tally.documents);
+            pass.figure("windows", tally.windows);
+            pass.figure("agendas", tally.agendas);
+            pass.figure("items", tally.items);
+            pass.figure("attachments", tally.attachments);
             Ok(pass.finish())
         })
     }
@@ -213,6 +291,107 @@ fn document(root: &Url, meeting: u64, doc_type: u8) -> String {
     format!(
         "{root}Documents/DownloadFileBytes/{meeting}.pdf?documentType={doc_type}&meetingId={meeting}"
     )
+}
+
+/// One request this walk makes.
+#[derive(Clone, Copy, Debug)]
+enum Ask {
+    /// The meetings held in a range of days.
+    Search(Window),
+    /// One meeting's agenda as HTML, for the items it names.
+    Agenda(u64),
+    /// One item's page, for its supporting documents.
+    Item { meeting: u64, item: u64 },
+}
+
+impl Ask {
+    fn url(&self, root: &Url) -> String {
+        match self {
+            Self::Search(window) => window.search(root),
+            Self::Agenda(meeting) => {
+                format!("{root}Documents/ViewAgenda?meetingId={meeting}&doctype=1")
+            }
+            Self::Item { meeting, item } => format!(
+                "{root}Meetings/ViewMeetingAgendaItem?meetingId={meeting}&itemId={item}\
+                 &isSection=false&type=agenda"
+            ),
+        }
+    }
+}
+
+/// How it reads in a warning, and what [`Pass`] dedups on.
+impl fmt::Display for Ask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            // The window alone, as a refused search has always been reported.
+            Self::Search(window) => write!(f, "{window}"),
+            Self::Agenda(meeting) => write!(f, "agenda of meeting {meeting}"),
+            Self::Item { meeting, item } => write!(f, "item {item} of meeting {meeting}"),
+        }
+    }
+}
+
+#[derive(Default)]
+struct Tally {
+    meetings: u64,
+    documents: u64,
+    windows: u64,
+    agendas: u64,
+    items: u64,
+    attachments: u64,
+}
+
+/// The items an agenda names, in agenda order: `loadAgendaItem(23596,false)`.
+///
+/// Sections, `loadAgendaItem(10996,true)`, are left out; see the module docs.
+fn items_in(agenda: &str) -> Vec<u64> {
+    const CALL: &str = "loadAgendaItem(";
+    let mut seen = std::collections::HashSet::new();
+    agenda
+        .match_indices(CALL)
+        .filter_map(|(i, _)| {
+            let rest = &agenda[i + CALL.len()..];
+            let (id, flag) = rest.split_once(',')?;
+            let id = id.trim().parse::<u64>().ok()?;
+            flag.trim_start().starts_with("false)").then_some(id)
+        })
+        .filter(|id| seen.insert(*id))
+        .collect()
+}
+
+/// Each supporting document an item page links, as the address that serves the file.
+///
+/// Read from the page's anchors, never a scan of its text, and only the links into this
+/// application's `Documents/DownloadFile/`. See the module docs for why the address is
+/// rewritten to `DownloadFileBytes` and cut to four keys.
+fn attachments_in(page: &str, at: &Url, root: &Url) -> Vec<String> {
+    let scan = crate::html::Scan::new(page);
+    let base = scan.base(at);
+    let under = format!("{}Documents/DownloadFile/", root.path());
+    scan.tags(&["a"])
+        .into_iter()
+        .filter_map(|tag| base.join(tag.attr("href")?))
+        .filter(|u| u.host_str() == root.host_str() && u.path().starts_with(&under))
+        .filter_map(|u| attachment(root, &u))
+        .collect()
+}
+
+/// `…/Documents/DownloadFileBytes/<publish>.pdf?documentType=N&meetingId=M&itemId=I&publishId=P`,
+/// from the `DownloadFile` link an item page carries. `None` unless all four keys are there
+/// and numeric.
+fn attachment(root: &Url, link: &Url) -> Option<String> {
+    let query: std::collections::BTreeMap<_, _> = link.query_pairs().collect();
+    let key = |k: &str| query.get(k)?.parse::<u64>().ok();
+    let (doc_type, meeting, item, publish) = (
+        key("documentType")?,
+        key("meetingId")?,
+        key("itemId")?,
+        key("publishId")?,
+    );
+    Some(format!(
+        "{root}Documents/DownloadFileBytes/{publish}.pdf?documentType={doc_type}\
+         &meetingId={meeting}&itemId={item}&publishId={publish}"
+    ))
 }
 
 /// Where the application is mounted, read off the addresses its scripts build.
@@ -280,6 +459,10 @@ struct Meeting {
     is_minutes_available: bool,
     #[serde(default)]
     is_summary_available: bool,
+    /// When it is held, `2026-10-15T09:00:00-04:00`. Kept as text, so a deployment that
+    /// writes it another way loses only the ordering and not the meeting.
+    #[serde(default)]
+    time: Option<String>,
 }
 
 impl Meeting {
@@ -291,6 +474,11 @@ impl Meeting {
             (2, self.is_minutes_available),
             (3, self.is_summary_available),
         ]
+    }
+
+    /// When it is held, for opening the newest meetings first.
+    fn held(&self) -> Option<jiff::Timestamp> {
+        self.time.as_deref()?.parse().ok()
     }
 }
 
@@ -408,6 +596,47 @@ mod tests {
         format!("{ROOT}Meetings/Search?dropid=11&dropsv={from}&dropev={to}")
     }
 
+    fn agenda_of(meeting: u64) -> String {
+        format!("{ROOT}Documents/ViewAgenda?meetingId={meeting}&doctype=1")
+    }
+
+    fn item_of(meeting: u64, item: u64) -> String {
+        format!(
+            "{ROOT}Meetings/ViewMeetingAgendaItem?meetingId={meeting}&itemId={item}&isSection=false&type=agenda"
+        )
+    }
+
+    /// An agenda that names no items, as a bid opening's does.
+    const NO_ITEMS: &str = "<html><body><p>Bid Opening</p></body></html>";
+
+    /// Meeting 2824's agenda as Tampa served it on 2026-11-21, cut to a section and two
+    /// items. The item ids sit in `javascript:` links; nothing else on the page names them.
+    const AGENDA_2824: &str = r#"<div><h3><a href="javascript:loadAgendaItem(10996,true);">Consent Agenda</a></h3>
+<td><h4><a name="I23596"></a><a href="javascript:loadAgendaItem(23596,false);" style="text-decoration:none"><span>File No. DEO26-23596</span></a></h4><h4><span>Resolution</span><span> approving a Subdivision Agreement … Water Street Tampa Subphase 3A</span></h4></td>
+<td><h4><a name="I23601"></a><a href="javascript:loadAgendaItem(23601,false);"><span>File No. CM26-23601</span></a></h4></td>
+<td><a href="javascript:loadAgendaItem(23596,false);">again, in the outline</a></td></div>"#;
+
+    /// Item 23596's page, cut to its navigation and its two supporting documents, links
+    /// escaped as served.
+    const ITEM_23596: &str = r##"<html><head><title> - OnBase Agenda Online</title></head><body>
+<a href="/251agendaonline/Meetings" id="lnkNavMeetings">Meetings</a>
+<h2 class="header item-view-title">Item Details</h2><span class="item-view-title-text">File No. DEO26-23596</span>
+<h2 class="header item-view-header">Supporting Documents</h2>
+<a href="/251agendaonline/Documents/DownloadFile/Summary%20Sheet-%20COVER%20SHEET.pdf?documentType=1&amp;meetingId=2824&amp;itemId=23596&amp;publishId=192327&amp;isSection=False&amp;isAttachment=True" id="lnkAttachment_6885432" target="_blank">Summary Sheet- COVER SHEET</a>
+<a href="/251agendaonline/Documents/DownloadFile/RESO%20AND%20AGMT%20-%20SUBDIVISION%20FPT-24-0000003%20-%20WATER%20STREET%203A.PDF.pdf?documentType=1&amp;meetingId=2824&amp;itemId=23596&amp;publishId=192328&amp;isSection=False&amp;isAttachment=True" id="lnkAttachment_6885433" target="_blank">RESO AND AGMT - SUBDIVISION FPT-24-0000003 - WATER STREET 3A.PDF</a>
+<a href="#" onclick="focusBackToTreeItem(); return false;">Back to Meeting Outline</a>
+</body></html>"##;
+
+    /// An item with nothing attached.
+    const ITEM_BARE: &str =
+        r#"<html><body><h2 class="header item-view-title">Item Details</h2></body></html>"#;
+
+    fn attached(meeting: u64, item: u64, publish: u64) -> String {
+        format!(
+            "{ROOT}Documents/DownloadFileBytes/{publish}.pdf?documentType=1&meetingId={meeting}&itemId={item}&publishId={publish}"
+        )
+    }
+
     #[test]
     fn the_application_is_recognised_wherever_it_is_mounted() {
         let s = seed(&answer(&[(2936, true, true, false)], false), ROOT);
@@ -433,8 +662,9 @@ mod tests {
         assert!(OnBaseAgenda.recognise(&s).is_none());
     }
 
-    /// A search seed is a window already answered: no request, and an address per document
-    /// the meeting publishes — never one it does not.
+    /// A search seed is a window already answered: no search is asked, and there is an
+    /// address per document the meeting publishes — never one it does not. The only
+    /// requests are the agendas of the two meetings that publish one, read for items.
     #[tokio::test]
     async fn a_search_seed_is_its_own_first_answer() {
         let at = search("08/22/2026", "11/20/2026");
@@ -449,7 +679,10 @@ mod tests {
             ),
             &at,
         );
-        let crawl = Fake::new([]);
+        let crawl = Fake::new([
+            (agenda_of(2936).as_str(), NO_ITEMS.to_string()),
+            (agenda_of(2950).as_str(), NO_ITEMS.to_string()),
+        ]);
 
         let got = OnBaseAgenda.enumerate(&s, &crawl).await.unwrap();
 
@@ -463,7 +696,11 @@ mod tests {
             ]
         );
         assert_eq!(got.figures["meetings"], 3);
-        assert_eq!(crawl.requests(), 0, "the seed answered");
+        assert_eq!(
+            crawl.requests(),
+            2,
+            "no search, since the seed answered it; one agenda per meeting publishing one"
+        );
         assert!(!got.truncated && !got.discovery_failed);
     }
 
@@ -483,6 +720,8 @@ mod tests {
                 search("07/02/2024", "12/31/2024").as_str(),
                 answer(&[(2555, true, false, false)], false),
             ),
+            (agenda_of(117).as_str(), NO_ITEMS.to_string()),
+            (agenda_of(2555).as_str(), NO_ITEMS.to_string()),
         ]);
 
         let got = OnBaseAgenda.enumerate(&s, &crawl).await.unwrap();
@@ -496,7 +735,11 @@ mod tests {
             ],
             "newer half first, and nothing from the capped answer itself"
         );
-        assert_eq!(crawl.requests(), 2);
+        assert_eq!(
+            crawl.requests(),
+            4,
+            "two searches, then the two meetings' agendas"
+        );
         assert_eq!(got.figures["windows"], 2);
         assert!(!got.truncated, "{:?}", got.warnings);
     }
@@ -534,6 +777,105 @@ mod tests {
             got.warnings.iter().any(|w| w.starts_with("2000-01-01 to ")),
             "{:?}",
             got.warnings
+        );
+    }
+
+    /// The agreements are attached to items. Every meeting's own documents come first, then
+    /// the agenda is read for its items and each item for its supporting documents — the
+    /// sections are not asked for, and an item named twice is opened once.
+    #[tokio::test]
+    async fn each_item_gives_its_supporting_documents() {
+        let at = search("05/01/2026", "05/31/2026");
+        let s = seed(&answer(&[(2824, true, true, false)], false), &at);
+        let crawl = Fake::new([
+            (agenda_of(2824).as_str(), AGENDA_2824.to_string()),
+            (item_of(2824, 23596).as_str(), ITEM_23596.to_string()),
+            (item_of(2824, 23601).as_str(), ITEM_BARE.to_string()),
+        ]);
+
+        let got = OnBaseAgenda.enumerate(&s, &crawl).await.unwrap();
+
+        assert_eq!(
+            got.addresses,
+            [
+                format!("{ROOT}Documents/DownloadFileBytes/2824.pdf?documentType=1&meetingId=2824"),
+                format!("{ROOT}Documents/DownloadFileBytes/2824.pdf?documentType=2&meetingId=2824"),
+                attached(2824, 23596, 192327),
+                attached(2824, 23596, 192328),
+            ]
+        );
+        assert_eq!(got.figures["items"], 2);
+        assert_eq!(got.figures["attachments"], 2);
+        assert_eq!(crawl.requests(), 3, "one agenda and two items");
+        assert!(
+            !got.truncated && got.warnings.is_empty(),
+            "{:?}",
+            got.warnings
+        );
+    }
+
+    /// The newest meeting is opened first and finished before the next is begun, so a
+    /// budget that runs out keeps every meeting's documents and the newest one's
+    /// attachments, and says it stopped.
+    #[tokio::test]
+    async fn a_walk_out_of_budget_has_the_newest_meetings_attachments() {
+        let at = search("05/01/2026", "05/31/2026");
+        // 2700 is listed first and held a month earlier.
+        let page = answer(
+            &[(2700, true, false, false), (2824, true, false, false)],
+            false,
+        )
+        .replacen("2026-10-15T09:00:00", "2026-09-15T09:00:00", 1);
+        let s = seed(&page, &at);
+        let crawl = Fake::new([
+            (agenda_of(2824).as_str(), AGENDA_2824.to_string()),
+            (item_of(2824, 23596).as_str(), ITEM_23596.to_string()),
+            (item_of(2824, 23601).as_str(), ITEM_BARE.to_string()),
+            (agenda_of(2700).as_str(), AGENDA_2824.to_string()),
+        ])
+        .with_budget(3);
+
+        let got = OnBaseAgenda.enumerate(&s, &crawl).await.unwrap();
+
+        assert_eq!(
+            got.addresses,
+            [
+                format!("{ROOT}Documents/DownloadFileBytes/2700.pdf?documentType=1&meetingId=2700"),
+                format!("{ROOT}Documents/DownloadFileBytes/2824.pdf?documentType=1&meetingId=2824"),
+                attached(2824, 23596, 192327),
+                attached(2824, 23596, 192328),
+            ]
+        );
+        assert_eq!(crawl.requests(), 3, "2700's agenda was never fetched");
+        assert!(got.truncated, "{:?}", got.warnings);
+    }
+
+    /// The name and the two flags are decoration; the four keys are the document. Without
+    /// `itemId` the server answers with the meeting's agenda, so such a link is not kept.
+    #[test]
+    fn an_attachment_has_one_address_whatever_its_name() {
+        let root = Url::parse(ROOT).unwrap();
+        let link = |q: &str| {
+            Url::parse(&format!(
+                "{ROOT}Documents/DownloadFile/Any%20Name.PDF.pdf?{q}"
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            attachment(
+                &root,
+                &link(
+                    "documentType=1&meetingId=2824&itemId=23596&publishId=192328&isSection=False&isAttachment=True"
+                )
+            ),
+            Some(attached(2824, 23596, 192328))
+        );
+        assert_eq!(
+            attachment(
+                &root,
+                &link("documentType=1&meetingId=2824&publishId=192328&isAttachment=True")
+            ),
+            None
         );
     }
 
