@@ -84,6 +84,7 @@ use jiff::civil::Date;
 use serde::Deserialize;
 use url::Url;
 
+use super::window::Window;
 use super::{Addresses, Enumerated, Pass, Seed, Strategy, StrategyDef, Walk};
 use crate::domain::Note;
 use crate::strategies::{Keyed, Recognition};
@@ -307,7 +308,7 @@ enum Ask {
 impl Ask {
     fn url(&self, root: &Url) -> String {
         match self {
-            Self::Search(window) => window.search(root),
+            Self::Search(window) => search_at(root, window),
             Self::Agenda(meeting) => {
                 format!("{root}Documents/ViewAgenda?meetingId={meeting}&doctype=1")
             }
@@ -482,51 +483,13 @@ impl Meeting {
     }
 }
 
-/// A range of days, both ends included.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Window {
-    from: Date,
-    to: Date,
-}
-
-impl Window {
-    /// The search for this window, as the application's own form builds it.
-    fn search(&self, root: &Url) -> String {
-        format!(
-            "{root}Meetings/Search?dropid=11&dropsv={}&dropev={}",
-            self.from.strftime("%m/%d/%Y"),
-            self.to.strftime("%m/%d/%Y")
-        )
-    }
-
-    /// The two halves, older first, or `None` for a single day.
-    fn halves(&self) -> Option<(Window, Window)> {
-        let days = self.from.until(self.to).ok()?.get_days();
-        if days < 1 {
-            return None;
-        }
-        let mid = self
-            .from
-            .checked_add(jiff::Span::new().days(i64::from(days / 2)))
-            .ok()?;
-        let next = mid.tomorrow().ok()?;
-        Some((
-            Window {
-                from: self.from,
-                to: mid,
-            },
-            Window {
-                from: next,
-                to: self.to,
-            },
-        ))
-    }
-}
-
-impl fmt::Display for Window {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} to {}", self.from, self.to)
-    }
+/// The search for a window, as the application's own form builds it.
+fn search_at(root: &Url, window: &Window) -> String {
+    format!(
+        "{root}Meetings/Search?dropid=11&dropsv={}&dropev={}",
+        window.from.strftime("%m/%d/%Y"),
+        window.to.strftime("%m/%d/%Y")
+    )
 }
 
 /// Every meeting the application could hold: [`EARLIEST`] to a year from today.
@@ -877,21 +840,5 @@ mod tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn halving_covers_every_day_once() {
-        let w = Window {
-            from: jiff::civil::date(2024, 1, 1),
-            to: jiff::civil::date(2024, 1, 4),
-        };
-        let (a, b) = w.halves().unwrap();
-        assert_eq!((a.from, a.to), (w.from, jiff::civil::date(2024, 1, 2)));
-        assert_eq!((b.from, b.to), (jiff::civil::date(2024, 1, 3), w.to));
-        let day = Window {
-            from: w.from,
-            to: w.from,
-        };
-        assert!(day.halves().is_none());
     }
 }
