@@ -43,6 +43,7 @@ lever.
 | 8 | Agenda item attachments: OnBase, Legistar, Granicus | the agreements a council votes on are attached to items, and no source collected one: OnBase never opened an item, Legistar's are on robots-disallowed hosts | **enumerate** | every agenda product: the meeting's PDF names the item, the item holds the document |
 | 9 | CivicPlus Agenda Center (`/AgendaCenter`) | eight box sources reach it and hold only the front door; seven of the eight modules are empty, and the one that is not lists one year per category, with older years behind a POST | **enumerate** | every CivicEngage site: the module is at the same path, and its search is a GET per year |
 | 16 | Procurement: OpenGov, Bonfire, DemandStar, VendorLink, PlanetBids, IonWave, OnBase Public Access, and the governments' own pages | 26 governments and clerks; every vendor platform gates documents behind an account, a bot challenge or `Disallow: /`; the one public system addresses each document by a token that changes per search, and serves scans | **before acquire** — login, challenge, robots, POST; then **identity** and OCR | every procurement vendor; every search whose hits carry no stable address |
+| 17 | Public-records request portals: GovQA, JustFOIA, NextRequest | 25 Tampa Bay agencies run a request portal; GovQA's robots.txt turns away every crawler at 11 of 12 hosts, JustFOIA's request list answers a Cloudflare challenge at every host tried, and the two NextRequest portals publish 12 requests and no documents | **enumerate**, closed by the vendor | every GovQA and JustFOIA client; NextRequest only where the agency turns publishing on |
 
 **Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
@@ -2780,6 +2781,209 @@ images.
   its directory. One request each; none repeated.
 - 2026-11-22 — no strategy written; two Pinellas sources ready to add, and one Hillsborough
   source that needs an `ignore_robots` ruling.
+
+---
+
+## 17. Public-records request portals — the requests, and what agencies released
+
+*Seen 2026-11-22, with plain HTTP requests (about 175, at least 1.1 s apart, JustFOIA hosts
+at their 10 s `Crawl-delay`), the box's crumbs, and web searches for the agencies the crumbs
+did not name. No account, no login, no form submitted. The store was read, not written.*
+
+The question: Florida agencies take public-records requests through vendor portals, and some
+portals publish the requests and the files released for them. Which Tampa Bay agencies use
+one, and what can be collected without signing in?
+
+The answer is almost nothing. Two of the three vendors close their portals to crawlers, and
+the agencies on the third publish no documents.
+
+### Who uses what
+
+30 agencies, from the box's crumbs and each agency's own public-records page. 25 run a
+vendor portal:
+
+| Agency | Platform | Host |
+|---|---|---|
+| City of Tampa | GovQA | `cityoftampa.govqa.us` |
+| St. Petersburg | GovQA (older domain) | `stpetefl.mycusthelp.com` |
+| Safety Harbor, Gulfport | GovQA | `cityofsafetyharbor.govqa.us`, `gulfportflorida.govqa.us` |
+| Pinellas County | GovQA | `pinellas.govqa.us` |
+| Pinellas Clerk | GovQA | `pinellascountyfl.govqa.us` |
+| Pinellas Sheriff | GovQA | `pcso.govqa.us` |
+| Hillsborough Sheriff | GovQA | `hillsboroughsheriff.govqa.us` |
+| Pasco County | GovQA, now branded Catalis | `pascocountyfl.govqa.us` (also `pascocounty.govqa.us`) |
+| Pasco Sheriff | JustFOIA since 2026-09-07; GovQA for older requests | `pascosheriff.justfoia.com`, `pascocountysheriff.govqa.us` |
+| Manatee Sheriff | GovQA (older domain) | `manateecountyfl.mycusthelp.com` |
+| Largo, Clearwater, Oldsmar, Pinellas Park, Treasure Island, St. Pete Beach, Madeira Beach, Indian Rocks Beach | JustFOIA | `largofl`, `clearwaterfl`, `myoldsmar`, `pinellas-park`, `mytreasureisland`, `stpetebeachfl`, `madeirabeachfl`, `indian-rocks-beach` `.justfoia.com` |
+| Manatee County | JustFOIA | `mymanatee.justfoia.com` |
+| Hillsborough Clerk, Manatee Clerk | JustFOIA | `hillsclerk.justfoia.com`, `manateeclerk.justfoia.com` |
+| HART (Hillsborough transit) | NextRequest | `gohart.nextrequest.com` |
+| Hernando County | NextRequest | `hernandocountyfl.nextrequest.com` |
+| Hillsborough County | ServiceNow customer portal | `hcfl.gov/AtYourService` → `hcflgov.service-now.com/cs` |
+| Hillsborough, Pinellas, Pasco, Manatee school districts | a form on the district site; ScribOrder for student records | — |
+| Tampa Bay Water | email, phone, mail | — |
+
+No Tampa Bay agency other than HART runs NextRequest. 82 `{agency}.nextrequest.com` names
+were tried (the agencies above, plus transit, ports, airports, housing, colleges and nearby
+cities): an unknown name answers 302 to CivicPlus's "requester direction" page, a
+client answers 204 at `/`. Hernando was found by search. It is the fourth county of the
+Tampa–St. Petersburg metro, so it is counted here.
+
+### GovQA — robots.txt turns every crawler away
+
+Every GovQA host except one serves the same file:
+
+```text
+User-agent: PowerMapper
+Allow: /
+
+User-agent: *
+Disallow: /
+```
+
+That is 11 hosts: Tampa, Safety Harbor, Gulfport, Pinellas County, the Pinellas Clerk, PCSO,
+Pasco County (both names), the old Pasco Sheriff portal, and the two `mycusthelp.com` hosts
+(St. Pete and Manatee Sheriff, the same file without the PowerMapper line). The product has
+a public archive, `OpenRecordsSummary.aspx` → `RequestArchiveDetails.aspx?rid=…`. I fetched
+Tampa's `SupportHome.aspx` once, in the same command as its robots.txt and before I had read
+the file. That page links the archive. Nothing else on a disallowed host was fetched.
+
+**Hillsborough Sheriff is the exception:** it serves no robots.txt (404). Its archive renders
+**"No Records to display"** on first load, and the filter is a DevExpress postback. Two
+`RequestArchiveDetails.aspx?rid=` guesses (1, 100000) went to `error.aspx?err_msg=Issue+Not+Found`,
+which answers 200, entry 2's fault again. So it has an archive page and publishes nothing in
+it.
+
+Addresses carry an ASP.NET cookieless session, `/WEBAPP/_rs/(S(5b5kze25hsaj3hlyrccpvlcv))/…`.
+The crumbs hold 12 distinct session paths across 6 hosts. Any strategy would have to cut the
+`(S(…))` segment out to get one address per page.
+
+### JustFOIA — a Cloudflare challenge on the one path robots.txt allows
+
+All 12 JustFOIA hosts serve one byte-identical robots.txt:
+
+```text
+User-agent: *
+Crawl-delay: 10
+Disallow: /
+Allow: /publicportal$
+Allow: /publicportal/$
+Allow: /publicportal/requests
+```
+
+`/publicportal` answers 200 with a 1.5 KB single-page-app shell. Its scripts, under
+`/publicportal/dist/`, are disallowed, so their API was not read. `/publicportal/requests`,
+the allowed path and the one Pasco Sheriff's own page describes as a searchable archive,
+answered **403 with a Cloudflare managed challenge** ("Enable JavaScript and cookies to
+continue") at all three hosts tried: Largo, Clearwater, Pasco Sheriff. Centinel does not
+solve challenges, so whether any of the 12 publishes requests is unknown. The root of each
+host redirects to staff sign-in (`auth.justfoia.com`).
+
+### NextRequest — open, and the Tampa Bay clients publish almost nothing
+
+The product is open to crawlers. robots.txt (the same 571 bytes on every host and on
+`assets.nextrequest.com`) disallows only named SEO bots. The front end is a Vue app over a
+JSON API that answers without a session:
+
+| Address | Answer |
+|---|---|
+| `/client/requests?page_number=N` | `{total_count, requests:[…]}`: id (`26-122`), date, state, departments, point of contact, `request_text`, `requester_name` |
+| `/client/requests/{id}` | one request: the text as HTML, departments, submit type, a `requester` object |
+| `/client/requests/{id}/timeline?page_number=N` | the request's history; "Document(s) Released" entries list the released file names |
+| `/client/request_documents?request_id={id}&page_number=1` | the request's **public** documents |
+| `/client/documents?page_number=N` | every public document the portal holds |
+| `/documents/{id}` | an HTML page for one document |
+| `/documents/{id}/download` | **302** to `nextrequestdev.s3.amazonaws.com/{client}/{request}/{uuid}?…X-Amz-…`, a signed URL that expires |
+
+The numeric document `id` decides the file. `/documents/{id}/download` is the stable address,
+and the S3 location must never be kept, because it stops working when the signature expires.
+`page_size` is refused above 50 (`422 {"page_size":["must be less than or equal to 50"]}`).
+`sort_field=created_at&sort_order=desc` returns newest first.
+
+What the two Tampa Bay clients publish:
+
+| Portal | Public requests | Public documents |
+|---|---|---|
+| HART | **12**, 2023-09-27 to 2026-09-22, every one closed. Ids reach `26-122`, so about 4 of 2026's 122+ requests are published | **0**: `request_documents` is empty for all 12. Request 26-122's timeline shows ten files "released" to the requester, and none of them is public |
+| Hernando County | **0** | **0** |
+
+To show the shape when an agency does publish, Miami was measured with five requests: 51,417
+public documents, 50 per page, newest uploaded 2026-11-20, oldest from 2018. A Tampa Bay
+agency could turn publishing on at any time, and the API would then be the route.
+
+### Requester names
+
+- **NextRequest** has a `requester_name` field, and a `requester` object on each request. Both
+  were null on all 12 HART requests and on Oakland's first page. But HART staff paste the
+  emailed request into `request_text`, and request 26-122 carries the requester's name, title,
+  email address, and the names and payroll numbers of the five employees whose records were
+  requested. Requester identity can therefore appear in the text even where the field is
+  empty.
+- **GovQA** and **JustFOIA**: not seen. The archives were disallowed, challenged or empty.
+
+Nothing is built here, so nothing indexes requesters. If a NextRequest strategy is ever
+built, it should keep the text as published and leave `requester_name` alone.
+
+### Against the three levers
+
+None. Every finding is at **enumerate**, and for two of three vendors the block is the
+vendor's own choice, not a fault. It is entry 7's shape again: a vendor that admits only
+named bots (GovQA admits PowerMapper; Granicus admits Googlebot). JustFOIA adds a new
+version: robots.txt allows the path and Cloudflare refuses it anyway.
+
+### Cost
+
+| What | Requests | Yield |
+|---|---|---|
+| HART, everything public | 1 list page + 12 × (request, timeline, documents) = **37**, about 40 s | 12 request records, about 3 KB of text, 0 documents |
+| Hernando | 2 | nothing |
+| The 11 GovQA hosts | — | needs an `ignore_robots` ruling per host, then an ASP.NET archive grid behind postbacks; the archive size is unmeasured |
+| The 12 JustFOIA hosts | — | not reachable without solving a challenge |
+| *Miami, for scale (not Tampa Bay)* | 1,029 list pages + 51,417 downloads | 51,417 documents |
+
+### What would be built, and why it was not
+
+The brief said to build a strategy for a platform whose **public released documents** recur
+at two agencies. NextRequest recurs at two, and publishes documents at neither. Building one
+for 12 short request texts is not worth it, so **no strategy was written**.
+
+If it is wanted later, the measurements above settle its shape:
+
+- keyed on the product (the `nextrequest.com` host, or the API's JSON);
+- `client/documents?sort_field=created_at&sort_order=desc&page_number=N`, 50 per page, newest
+  first, so a short walk keeps the newest;
+- each document kept once, as `/documents/{id}/download`;
+- each request kept as `/client/requests/{id}` (its text) and its timeline;
+- bounded by the seed (`upload_start_date`/`upload_end_date`, which the API accepts) plus
+  `--max-sitemaps`.
+
+Its first real client would be outside Tampa Bay: Miami, Orange County Sheriff, Oviedo.
+
+### Source-add commands
+
+None to run. No portal here has anything collectable that an existing strategy can reach:
+GovQA hosts need an operator ruling, JustFOIA can't be reached, and HART's 12 requests are an
+SPA with no links for `links` to follow.
+
+### Left on the table
+
+- An `ignore_robots` ruling for the GovQA archives. Florida's records law makes the
+  requests public records, but the vendor's file says no to every crawler. That is Ben's
+  call, made per source with `investigate --ignore-robots` first (entry 7).
+- Hillsborough County's ServiceNow portal. Its robots.txt is empty, but requests there are
+  per account. Not explored.
+- The school districts and Tampa Bay Water take requests by form or email. There is no
+  portal to collect.
+
+### Running log
+
+- 2026-11-22 — 30 Tampa Bay agencies catalogued (25 portals) from the box's crumbs and agency pages.
+  robots.txt read at 11 GovQA, 12 JustFOIA and 3 NextRequest hosts. Tampa's GovQA
+  `SupportHome.aspx` fetched once before its robots.txt was read. JustFOIA's
+  `/publicportal/requests` challenged at Largo, Clearwater and Pasco Sheriff. HCSO's GovQA
+  archive empty. NextRequest's API mapped at HART and Hernando (12 requests, 0 documents)
+  and at Miami for scale (51,417 documents; `/documents/{id}/download` → signed S3). No
+  strategy built: no platform here publishes documents at two agencies.
 
 ---
 
