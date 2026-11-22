@@ -131,7 +131,10 @@ fn resolve(base: &crate::html::Base, page: &url::Url, candidate: &str) -> Option
 /// middle piece read on its own resolves to `/251agendaonline/.pdf?documentType=`. That
 /// address was fetched on every page collected, and because the host answers HTTP 200 on
 /// error it came back as a live Observation titled *"Error - OnBase Agenda Online"*.
-fn is_document(path: &str) -> bool {
+///
+/// Shared with the strategies that read a product's file list as addresses
+/// ([`crate::strategies::crawl::campus_suite`]), so "a document we can read" has one test.
+pub(crate) fn is_document(path: &str) -> bool {
     let last = path.rsplit('/').next().unwrap_or(path);
     let Some((stem, ext)) = last.rsplit_once('.') else {
         return false;

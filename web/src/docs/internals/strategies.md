@@ -102,7 +102,7 @@ This is content-kind detection one level up: magic bytes are a list of *(signatu
 kind)* where each element answers for itself, and a strategy registry is magic bytes for
 websites. Registration is link-time, so there is nowhere to forget to add one.
 
-Eleven strategies are registered today:
+Twelve strategies are registered today:
 
 | Strategy | Keys on | Addresses |
 |---|---|---|
@@ -113,6 +113,7 @@ Eleven strategies are registered today:
 | `civicclerk` | a CivicClerk portal, `{tenant}.portal.civicclerk.com`, or its API's events address (product) | from the tenant's public API, every event's published files (agenda, packet, minutes, notices) and every agenda item's attachments |
 | `openbook` | a Questica OpenBook front door, or the API address of one of its books (product) | each budget book as the one PDF the product publishes of it |
 | `opengov-stories` | an OpenGov Stories book's table of contents (product) | every published page the contents name, by its `data-public-url` |
+| `campus-suite` | a page assembled by `Campussuite.Widgets` (product) | the site's pages, and every document they link under `/files/` on the site's host, newest upload first |
 | `sitemap` | a `Sitemap:` line in `robots.txt` (standard) | every `<loc>` the sitemaps list |
 | `listing` | an IIS or Apache/nginx directory index (server default) | the files under the seed's directory |
 | `feed` | an RSS, Atom or iCalendar seed (standard) | the feed itself; its entries are split at [acquisition](acquire.md#feeds) |
@@ -136,6 +137,13 @@ never reaches the server or the strategy. OpenGov Stories
 serves a book's table of contents at an editor's preview address whose entries keep each
 page's public address in `data-public-url`, not in `href`; the walk is the seed, and costs no
 request.
+
+`campus-suite` is the website product most Hillsborough community development districts
+run. It serves no sitemap, and its file lists put 39 to 262 documents on one page, oldest
+first — past the 25 the enclosure scan keeps from a page — so it walks the site as `links`
+does and keeps every listed document as an address of its own. It does not follow the
+calendar, which links the next month forever; the calendar's attachments are copies, on
+another host, of files the site lists, and a walk warns about any that are not.
 
 ### When `robots.txt` says no
 
