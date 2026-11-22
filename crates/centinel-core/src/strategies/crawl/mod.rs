@@ -72,6 +72,7 @@
 //! [`HostPolicy`]: crate::policy::HostPolicy
 
 pub mod agenda_center;
+pub mod campus_suite;
 pub mod civicclerk;
 pub mod feed;
 pub mod granicus;

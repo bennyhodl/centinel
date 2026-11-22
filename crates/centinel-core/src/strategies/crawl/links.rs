@@ -148,7 +148,10 @@ impl Strategy for Links {
 
 /// Every `<a href>` on a page that could be a page: http(s), fragment dropped, and not an
 /// address whose name says it is a document.
-fn pages_in(html: &str, page: &Url) -> Vec<Url> {
+///
+/// Also how [`super::campus_suite`] finds a site's pages, so the two walks agree on what a
+/// page is.
+pub(super) fn pages_in(html: &str, page: &Url) -> Vec<Url> {
     let mut out = Vec::new();
     let scan = crate::html::Scan::new(html);
     let base = scan.base(page);
