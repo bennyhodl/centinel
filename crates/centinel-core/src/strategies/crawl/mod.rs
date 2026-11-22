@@ -84,6 +84,7 @@ pub mod openbook;
 pub mod opengov_stories;
 pub mod scope;
 pub mod sitemap;
+pub mod voterfocus;
 pub mod window;
 pub mod wmis;
 
