@@ -49,6 +49,29 @@
 //! them at Treasure Island, against a 200-request budget, and a run that would then read as
 //! truncated when nothing was missed.
 //!
+//! ## What was said: each recording's captions
+//!
+//! A row with a recording opens `MediaPlayer.php?view_id=V&clip_id=C` — from an `onclick`,
+//! `window.open('//{client}.granicus.com/MediaPlayer.php?…', 'player', …)`, never an
+//! `href`, at all seven clients measured. The player loads its captions from
+//! `/videos/{clip}/captions.vtt` on the client's host: WebVTT, with the speaker turns a
+//! captioner types (`>>Mayor Cretekos:`; Gulfport's open `[Captioner present]`), back to
+//! 2007 at Dunedin and 2014 at Clearwater. The clip id alone decides
+//! the file — a `view_id` added to it changes nothing, and a clip that does not exist
+//! answers 500 — so every recording's track is kept, read off the seed without a request.
+//!
+//! A clip nobody captioned answers with the header alone, eight bytes. That is kept too,
+//! and extraction records it as holding no text: which recordings have captions cannot be
+//! told from the publisher (Clearwater captions its council back to 2014 and, in a sample,
+//! its boards only from about 2021; St. Petersburg, Safety Harbor and Treasure Island
+//! caption none), and a track costs one request at collection, once, where a probe would
+//! cost the discovery budget every run.
+//!
+//! The recording itself is not kept. Every route to it — the player's download link,
+//! `DownloadFile.php`, a podcast feed's enclosure — ends at an MP4 on
+//! `archive-video.granicus.com`, which answers this crawler with CloudFront's 403
+//! "Request blocked", as the HLS stream on `archive-stream.granicus.com` does.
+//!
 //! ## robots.txt
 //!
 //! Every `*.granicus.com` host serves `User-agent: *` / `Disallow: /` and admits Googlebot.
@@ -82,6 +105,9 @@ const VIEWERS: [(&str, &str); 2] = [
 /// See the module docs.
 const PROBE: u64 = 3;
 
+/// The player a publisher row opens for a recorded meeting.
+const PLAYER: &str = "/MediaPlayer.php";
+
 /// The agenda manager's rendering of an agenda, at the viewer's query.
 const GENERATED: &str = "/GeneratedAgendaViewer.php";
 
@@ -101,8 +127,10 @@ impl Strategy for Granicus {
         }
         // Confirmed on the bytes, not only the address: a publisher with nothing in it is
         // not one this can collect.
-        let found = viewers(seed, &url);
-        if found.is_empty() {
+        let links = linked(seed, &url);
+        let found = viewers(&links);
+        let tracks = caption_tracks(&links);
+        if found.is_empty() && tracks.is_empty() {
             return None;
         }
         let mut r = Recognition::new(self.name(), Keyed::Product("Granicus"))
@@ -113,6 +141,15 @@ impl Strategy for Granicus {
             if n > 0 {
                 r = r.seeing(noun, format!("{n} {path} link(s)"));
             }
+        }
+        if !tracks.is_empty() {
+            r = r.seeing(
+                "recordings",
+                format!(
+                    "{} {PLAYER} link(s), each clip's captions at /videos/{{clip}}/captions.vtt",
+                    tracks.len()
+                ),
+            );
         }
         if Format::sniff(&seed.page.bytes).is_some() {
             r = r.warning(
@@ -140,12 +177,15 @@ impl Strategy for Granicus {
             }
             pass.read_surface();
 
-            let found = viewers(seed, &at);
+            let links = linked(seed, &at);
+            let found = viewers(&links);
             for (path, noun) in VIEWERS {
                 let n = found.iter().filter(|u| u.path() == path).count();
                 pass.figure(noun, n as u64);
             }
-            for url in &found {
+            let tracks = caption_tracks(&links);
+            pass.figure("recordings", tracks.len() as u64);
+            for url in found.iter().chain(&tracks) {
                 if pass.full() {
                     break;
                 }
@@ -206,12 +246,13 @@ impl Strategy for Granicus {
     }
 }
 
-/// Every viewer address the seed links, on the seed's own host, in the order listed.
+/// Every address the seed links on its own host, in the order listed.
 ///
-/// From the feed's item links when the seed is a feed, and from the page's anchors when it
-/// is the publisher page. Never a scan of the text: the page's scripts build player links
-/// that are not documents.
-fn viewers(seed: &Seed, at: &Url) -> Vec<Url> {
+/// From the feed's item links when the seed is a feed. From the publisher page's anchors
+/// when it is the page: each one's `href`, and the address its `onclick` opens, which is
+/// how a row links its player. Both are attributes read as parsed; never a scan of the
+/// page's text, whose scripts assemble addresses that name nothing.
+fn linked(seed: &Seed, at: &Url) -> Vec<Url> {
     let candidates: Vec<Url> = match Format::sniff(&seed.page.bytes) {
         Some(_) => crate::feed::entries(&seed.page.bytes)
             .map(|split| {
@@ -229,19 +270,62 @@ fn viewers(seed: &Seed, at: &Url) -> Vec<Url> {
             let base = scan.base(at);
             scan.tags(&["a"])
                 .into_iter()
-                .filter_map(|tag| tag.attr("href").and_then(|href| base.join(href)))
+                .flat_map(|tag| [tag.attr("href"), tag.attr("onclick").and_then(opened)])
+                .flatten()
+                .filter_map(|href| base.join(href))
                 .collect()
         }
     };
     candidates
         .into_iter()
         .filter(|u| u.host_str() == at.host_str())
-        .filter(|u| VIEWERS.iter().any(|(path, _)| u.path() == *path))
         .map(|mut u| {
             u.set_fragment(None);
             u
         })
         .collect()
+}
+
+/// The address `window.open('…', …)` opens: its first argument, when that is one whole
+/// string rather than pieces a script joins.
+fn opened(onclick: &str) -> Option<&str> {
+    let (_, args) = onclick.split_once("window.open(")?;
+    crate::html::quoted_strings(args)
+        .into_iter()
+        .next()
+        .filter(|q| !q.concatenated && args.trim_start().starts_with(['\'', '"']))
+        .map(|q| q.text)
+}
+
+/// The viewers among the seed's links.
+fn viewers(links: &[Url]) -> Vec<Url> {
+    links
+        .iter()
+        .filter(|u| VIEWERS.iter().any(|(path, _)| u.path() == *path))
+        .cloned()
+        .collect()
+}
+
+/// Each recorded clip's caption track, `/videos/{clip}/captions.vtt` on the player's host,
+/// in the order the players are listed and once per clip.
+fn caption_tracks(links: &[Url]) -> Vec<Url> {
+    let mut out: Vec<Url> = Vec::new();
+    for player in links.iter().filter(|u| u.path() == PLAYER) {
+        let Some(clip) = player
+            .query_pairs()
+            .find(|(k, _)| k == "clip_id")
+            .and_then(|(_, v)| v.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let mut track = player.clone();
+        track.set_path(&format!("/videos/{clip}/captions.vtt"));
+        track.set_query(None);
+        if !out.contains(&track) {
+            out.push(track);
+        }
+    }
+    out
 }
 
 /// Each agenda viewer's generated page, newest meeting first.
@@ -396,11 +480,13 @@ mod tests {
                 "https://treasureislandfl.granicus.com/AgendaViewer.php?view_id=1&clip_id=1045",
                 "https://treasureislandfl.granicus.com/AgendaViewer.php?view_id=1&clip_id=1009",
                 "https://treasureislandfl.granicus.com/MinutesViewer.php?view_id=1&clip_id=1009&doc_id=4bd7",
+                "https://treasureislandfl.granicus.com/videos/1045/captions.vtt",
             ],
-            "the viewers only: no player, no feed, no other host"
+            "the viewers, then the recorded clip's captions: no player, no feed, no other host"
         );
         assert_eq!(got.figures["agendas"], 2);
         assert_eq!(got.figures["minutes"], 1);
+        assert_eq!(got.figures["recordings"], 1);
         assert_eq!(got.figures["documents"], 0);
         assert!(!got.truncated && !got.discovery_failed);
         assert_eq!(
@@ -441,7 +527,10 @@ mod tests {
         let crawl = Fake::new([]);
         let got = Granicus.enumerate(&honoured, &crawl).await.unwrap();
         assert!(got.addresses.is_empty());
-        assert_eq!(got.figures["disallowed"], 3);
+        assert_eq!(
+            got.figures["disallowed"], 4,
+            "three viewers and a caption track"
+        );
         assert_eq!(
             crawl.requests(),
             0,
@@ -456,7 +545,7 @@ mod tests {
             .enumerate(&overruled, &Fake::new([]))
             .await
             .unwrap();
-        assert_eq!(got.addresses.len(), 3);
+        assert_eq!(got.addresses.len(), 4);
     }
 
     /// Safety Harbor's publisher, recorded 2026-11-21 and cut to three rows in two bodies'
@@ -506,6 +595,10 @@ mod tests {
         format!("https://{SH}/AgendaViewer.php?view_id=6&clip_id={clip}")
     }
 
+    fn track(host: &str, clip: u32) -> String {
+        format!("https://{host}/videos/{clip}/captions.vtt")
+    }
+
     /// The agenda manager's documents, read from each generated agenda, newest meeting
     /// first whatever table its body is listed in, and each at its one address.
     #[tokio::test]
@@ -524,11 +617,13 @@ mod tests {
                 viewer(2988),
                 viewer(3176),
                 viewer(3190),
+                track(SH, 2988),
                 meta(199147),
                 meta(199149),
                 meta(189377),
             ],
-            "the viewers as listed, then Nov 17's documents, then Sep 22's"
+            "the viewers as listed, the one recording's captions, then Nov 17's documents, \
+             then Sep 22's"
         );
         assert_eq!(got.figures["generated"], 3);
         assert_eq!(got.figures["documents"], 3);
@@ -557,6 +652,7 @@ mod tests {
                 viewer(2988),
                 viewer(3176),
                 viewer(3190),
+                track(SH, 2988),
                 meta(199147),
                 meta(199149)
             ]
@@ -611,6 +707,86 @@ mod tests {
             <a href="https://cityofdoral.granicus.com/MetaViewer.php?view_id=2&clip_id=68&meta_id=9770">another client</a>
             <a href="https://safetyharbor.granicus.com/MediaPlayer.php?view_id=6&clip_id=3190&meta_id=9">player</a>"#;
         assert_eq!(documents_in(page, &at), [meta(7), meta(8)]);
+    }
+
+    /// Clearwater's publisher, recorded 2026-11-22 and cut to two rows: the City Council
+    /// meeting of November 5, 2026, whose captions are 5,336 cues, and a board meeting with
+    /// a recording and nothing else. The player is opened from an `onclick`, as served.
+    const CW_PUBLISHER: &str = r#"<html><body><table>
+<tr class="listingRow">
+  <td class="listItem" tabindex="0" headers="Name" id="City-Council-on-2026-11-05-6:00-PM" scope="row">City Council on 2026-11-05 6:00 PM</td>
+  <td class="listItem" tabindex="0" headers="Duration City-Council-on-2026-11-05-6:00-PM"><span class="visuallyHidden">Duration, </span>03h&nbsp;00m</td>
+  <td class="listItem"><a href="//clearwater.granicus.com/AgendaViewer.php?view_id=50&clip_id=5317" target="_blank" aria-label="Agenda, City Council on 2026-11-05 6:00 PM">Agenda</a></td>
+  <td class="listItem">&nbsp;</td>
+  <td class="listItem" headers="VideoLink City-Council-on-2026-11-05-6:00-PM">
+    <a href="javascript:void(0);" onClick="window.open('//clearwater.granicus.com/MediaPlayer.php?view_id=50&clip_id=5317','player','toolbar=no,directories=no,status=yes,scrollbars=yes,resizable=yes,menubar=no')" aria-label="Video, City Council on 2026-11-05 6:00 PM">Video</a>
+  </td></tr>
+<tr class="listingRow">
+  <td class="listItem" tabindex="0" headers="Name" id="Affordable-Housing-Advisory-Committee-on-2026-11-17-9:00-AM" scope="row">Affordable Housing Advisory Committee on 2026-11-17 9:00 AM</td>
+  <td class="listItem">&nbsp;</td>
+  <td class="listItem" headers="VideoLink Affordable-Housing-Advisory-Committee-on-2026-11-17-9:00-AM">
+    <a href="javascript:void(0);" onClick="window.open('//clearwater.granicus.com/MediaPlayer.php?view_id=50&clip_id=5338','player','toolbar=no,directories=no,status=yes,scrollbars=yes,resizable=yes,menubar=no')" aria-label="Video, Affordable Housing Advisory Committee">Video</a>
+  </td></tr>
+</table>
+<a href="javascript:void(0);" onClick="window.open('//support.granicus.com/s/article/Public-Help-Video-Streaming')">Help</a>
+</body></html>"#;
+
+    const CW_PAGE: &str = "https://clearwater.granicus.com/ViewPublisher.php?view_id=50";
+    const CW: &str = "clearwater.granicus.com";
+
+    /// Every recorded clip's caption track, read off the publisher with no request for it:
+    /// the clip id from the player's address is the whole of the track's.
+    #[tokio::test]
+    async fn each_recording_names_its_caption_track_without_a_request() {
+        let s = seed(CW_PUBLISHER, CW_PAGE);
+        let r = Granicus.recognise(&s).expect("a Granicus publisher");
+        assert!(r.evidence.iter().any(|n| n.label == "recordings"));
+
+        let crawl = Fake::new([(generated(CW, 50, 5317).as_str(), EMPTY_TEMPLATE.to_string())]);
+        let got = Granicus.enumerate(&s, &crawl).await.unwrap();
+
+        assert_eq!(
+            got.addresses,
+            [
+                "https://clearwater.granicus.com/AgendaViewer.php?view_id=50&clip_id=5317"
+                    .to_string(),
+                track(CW, 5317),
+                track(CW, 5338),
+            ],
+            "the agenda, then both recordings' captions; no player and no help page"
+        );
+        assert_eq!(got.figures["recordings"], 2);
+        assert_eq!(
+            crawl.requests(),
+            1,
+            "only the generated agenda is asked for; captions are collected, not probed"
+        );
+    }
+
+    /// A view that publishes recordings and no agenda is still a publisher this collects.
+    #[test]
+    fn a_publisher_of_recordings_alone_is_recognised() {
+        let page = r#"<html><body><table><tr><td>
+            <a href="javascript:void(0);" onClick="window.open('//clearwater.granicus.com/MediaPlayer.php?view_id=50&clip_id=5338','player')">Video</a>
+            </td></tr></table></body></html>"#;
+        assert!(Granicus.recognise(&seed(page, CW_PAGE)).is_some());
+    }
+
+    /// Only a whole address is opened: a script's variable or a string it assembles names
+    /// no player.
+    #[test]
+    fn an_onclick_opens_only_a_whole_address() {
+        assert_eq!(
+            opened("window.open('//h.granicus.com/MediaPlayer.php?clip_id=1','player')"),
+            Some("//h.granicus.com/MediaPlayer.php?clip_id=1")
+        );
+        assert_eq!(opened("window.open(loc)"), None);
+        assert_eq!(opened("window.open(base + 'x', 'player')"), None);
+        assert_eq!(
+            opened("window.open('//h/MediaPlayer.php?clip_id=' + id)"),
+            None
+        );
+        assert_eq!(opened("return false;"), None);
     }
 
     #[test]

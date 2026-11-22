@@ -44,6 +44,10 @@ ignore_robots = true
 `source add --ignore-robots` writes the key. `Crawl-delay` and the request rate still
 apply, and every run notes that the rules were set aside.
 
+A Granicus source also collects each recorded meeting's captions, the WebVTT file its
+player loads, and extraction reads them as timed text — no transcription needed. The
+recording itself is not collected: Granicus's video host refuses this crawler.
+
 ## Adding one
 
 ```bash
