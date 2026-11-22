@@ -50,6 +50,7 @@ lever.
 | 19 | Budgets, ACFRs and codes of ordinances: Tampa Bay's nine governments; Questica OpenBook, OpenGov Stories, Municode | adopted budgets on two vendor platforms no crawl reads; ACFRs on finance pages past the 25-document enclosure cap; every code publisher answers a Cloudflare challenge though robots.txt allows | **enumerate**, and **collect** (the enclosure cap) | every OpenBook and OpenGov Stories client; every finance page that lists its years; every code on Municode, American Legal or eCode360 |
 | 13 | Special districts and authorities: CDDs, CRAs, Port, airports, transit, water, expressway, MPO, regional council | none is a source but two; 14 of 24 sampled CDDs run Campus Suite, whose file lists put 39–262 documents on a page, past the enclosure scan's 25; 10 of those 14 fail TLS on a new Let's Encrypt root; HART fails TLS on CBC-only ciphers; two products and SharePoint disallow the documents in robots.txt | **acquire** (TLS), **enumerate** (listings), and **robots** | every Campus Suite site; every host on Let's Encrypt's Gen Y chain without the cross-sign; every WordPress page listing more than 25 documents |
 | 18 | Southwest Florida WMD permits (WMIS) and governing board | the permit search is a postback and every document opens at a new random address per request; the main site, board packets included, answers a Cloudflare challenge | **enumerate** | every district whose GIS layer names each permit's record page (SFWMD too); every site that serves a file through a one-time redirect |
+| 20 | Money and influence: lobbyists, campaign finance, financial disclosures | four counties' campaign finance sit on one vendor nobody collected, and every CSV it exports would have been Underivable (CSV served as `vnd.ms-excel`); Tampa's lobbyist log is a RadGrid behind a POST; Florida's disclosure system is a JSON API; no CivicPlus box source holds one Document Center file | **enumerate**, **content kind**, **enclosure** | every county on VoterFocus; every server that declares CSV as Excel; every CivicEngage site |
 
 **Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
@@ -4245,6 +4246,253 @@ every request (bypassed through the token that produces it).
   four counties, 13.7 documents each; rolling `CURRENT_DATE - 30` accepted. `wmis` written;
   unbuilt and untested here.
 
+## 20. Money and influence — lobbyists, campaign finance, financial disclosures
+
+*Seen 2026-11-22, with plain HTTP requests at one a second or slower under Centinel's user
+agent, robots.txt read first, no login and no registration; and with the box's
+`log/*/source.toml`, logs and crumbs, read and not written.*
+
+Who is paid to talk to a government, who pays for its campaigns, and what its officials
+own. Ben ruled the personal data in scope: collected as published, never enriched,
+cross-indexed or assembled into a profile of anyone.
+
+### Where each record set lives
+
+| Record set | Publisher | Where | Without a login | On the box |
+|---|---|---|---|---|
+| Lobbyist activity reports, quarterly | Hillsborough County Attorney | PDFs on `assets.contentstack.io`, listed by `hcfl.gov`'s sitemap | yes | **yes**: 39 reports, 2016 Q3 to 2026 Q3, in `hillsborough` |
+| Lobbyist registrations | Hillsborough County | LIRA, Oracle APEX at `public-solutions.hillsboroughcounty.org/enterprise/f?p=370` | no: a login form | no |
+| Lobbyist meeting sign-in | Hillsborough County | APEX `f?p=321`, a kiosk page | a sign-in form, no records | no |
+| Registered lobbyists, by year | City of Tampa | `apps.tampagov.net/Lobbyist_log_webapp/default.aspx?Page=RegisteredLobbyists` | yes, page 1 by GET | no |
+| Lobbyist and visitor meeting log | City of Tampa | `…/default.aspx?Page=RequestedMeetings` | yes, page 1 by GET; all of it by POST | no |
+| Lobbyist expenditure report form | City of Tampa | `tampa.gov` | yes | yes, in `tampa` |
+| Registered lobbyists, 2024–2026 | Pinellas County | `pinellas.gov/20NN-registered-lobbyists-for-pinellas-county-government/` | yes | no: `pinellas.gov` is not a source |
+| Registered lobbyists, older years | Pinellas Clerk | PDFs on `mypinellasclerk.gov` | Cloudflare challenge | no |
+| Lobbyist registrations | St. Pete Beach | CivicPlus Document Center, folder 313 | yes | the page about them; **no file** |
+| Lobbyist registration | Clearwater | redirects to a Smartsheet form | no list found | — |
+| Campaign treasurer's reports | Hillsborough, Pinellas, Pasco, Manatee SOEs | VoterFocus, `www.voterfocus.com/CampaignFinance/` | yes | no |
+| Form 1 and Form 6 | Florida Commission on Ethics | EFDMS, `disclosure.floridaethics.gov` | yes | no |
+| Candidates' Form 1 and Form 6 at qualifying | each SOE | VoterFocus, as scanned PDFs | yes | no |
+
+Not found: a lobbyist registry for St. Petersburg. Not measured: Tampa International
+Airport's (HCAA Policy P156) list of registrations.
+
+### Lobbyists
+
+**Hillsborough County is collected already.** The County Attorney publishes a quarterly
+*Lobbyist Activity Report* PDF; `hcfl.gov`'s sitemap lists each one and the box's
+`hillsborough` source holds 39, from 2016 Q3 to 2026 Q3, two quarters absent (2024 Q3 and
+2026 Q1). The page that presents them (`/government/codes-and-ordinances/lobbying-information`)
+renders its table in the browser and serves "No data available" to a fetch; the sitemap is
+what reaches them. Registrations themselves are in LIRA, behind a login, and the kiosk
+sign-in page records nothing a visitor can read.
+
+**Tampa's log is a Telerik RadGrid, and the whole of it is one POST away.** The app's two
+reports answer a GET with their first page and a footer: *221 items in 23
+pages* for 2026's registered lobbyists (a year menu reaches back to 2017), and *6074 items
+in 304 pages* for requested meetings. The pager, the year menu and the Excel and PDF
+exports are `__doPostBack` calls, the shape entry 3 met at CTTV on the same host. One POST
+of the meeting log's Export to Excel, carrying only the hidden fields of the GET it
+followed and no cookie, answered `CityOfTampaLobbyistMeetingLog.xls`: 2,029,077 bytes, an
+OLE workbook of 6,074 rows, eight columns (date, employee, lobbyist or visitor, principal,
+principal's business, subject, cancelled), from 2014-05-18 to 2026-11-23. 2,675 of those
+rows are *visitors*, not lobbyists: residents meeting staff about code enforcement or a
+garnishment, by name. robots.txt disallows nothing under `/Lobbyist_log_webapp`.
+
+**Pinellas County publishes a page a year** on `pinellas.gov`, 2024, 2025 and 2026, each a
+table of every registered lobbyist with an address and the principals they represent (32
+rows in 2026). The Yoast sitemap lists all three among 3,008 pages, and robots.txt allows
+them. Lobbyists file meeting logs by a form; no published log was found. Older years are
+PDFs on the Clerk's site (2020, 2021 and 2023 named by a search), which answers our client
+with Cloudflare's "Just a moment" challenge, 403, while its robots.txt allows `*`.
+
+**St. Pete Beach files each registration as a PDF in its Document Center**
+(`/DocumentCenter/Index/313`; the 2026 list at `/DocumentCenter/View/7167/Lobbyists-Annual-Registration-2026`).
+The box's `st-pete-beach` source holds the page that links them and none of them, and that
+is the fault below, not a choice.
+
+### Fault — no CivicPlus box source holds a single Document Center file
+
+The eight CivicEngage sources of entry 9 hold, between them, **zero** observations under
+`/DocumentCenter/View/`: St. Pete Beach 0 of 339 observations, and Indian Shores, Oldsmar,
+Pinellas Park, Safety Harbor, Seminole, Tarpon Springs and Temple Terrace the same. A
+Document Center link names no extension — `/DocumentCenter/View/7167/Lobbyists-Annual-Registration-2026`
+— and the enclosure scan keeps only a path ending in an extension a reader claims
+(`enclosure::is_document`), so the file one level away is never fetched. The CivicPlus
+sitemap does not list them either. It is the **enclosure** lever, and it reaches every
+CivicEngage site. Not built here: either the enclosure test learns that an address can be
+a document without saying so (it cannot know until it fetches), or a `document-center`
+strategy walks `/DocumentCenter/Index/<folder>`, which entry 9 already left on the table for
+Oldsmar and Pinellas Park.
+
+### Campaign finance: four counties, one vendor
+
+`votehillsborough.gov` and `votepinellas.gov` answer our client with Cloudflare's challenge,
+403, robots.txt included. It does not matter: both send a reader to VoterFocus, and so do
+Pasco and Manatee, all on one host with the county as a parameter. Hernando, Polk and
+Sarasota answered the same page.
+
+| County | Reporting groups | Filers | Oldest group |
+|---|---|---|---|
+| Hillsborough | 27 | 2,264 | General Election of 11/7/2000 |
+| Pinellas | 15 | 382 | 2016 candidates; committees from 2007 |
+| Pasco | 24 | 1,655 | General Election (11/7/2006) |
+| Manatee | 169 (8 empty) | 1,781 | 2002 |
+
+A **reporting group** is an election cycle, a municipal election, or the committees or
+parties reporting through a date. Every group is an `<option>` of a GET form, and each
+answers all its filers on one page, unpaged: Hillsborough's 2026 cycle links 224 filers and
+its candidate CSV has 224 rows. The largest page was 454 KB. No filer is listed in two
+groups. A filer is a candidate, a political committee or a party.
+
+**What decides each document**, measured on Hillsborough filer 2621:
+
+| Address | Keys that decide it | What the others do |
+|---|---|---|
+| `candidate_pr.php?c=C&el=G` — a group | `c`, `el` | |
+| `candidate_pr.php?op=cv&e=G&c=C&ca=N` — a filer's page | `c`, `ca` | `e` and `committee` are copied into the page's links; without `c`, 14 bytes; another county's `c`, 200 with an empty body |
+| `candidate_pr.php?op=rp&e=G&c=C&ca=N&sdc=S&dhc=D` — one report | `c`, `ca`, `dhc` for the rows; `e` and `sdc` for the PDF link | another filer's `ca`: 200, an empty report dated 12/31/1969; without `e` or `sdc` the page links no PDF; `rellevel` changes nothing |
+| `pdf_C/e27c2621_Q2_dhc13282sdc1039.pdf` — the report as filed | the file name | another `e` in the name: a real 404 |
+| `pdf_C/doc_2621_20260611111456_Financial_Disclosure.pdf` — a qualifying document | the file name | |
+| `export.php?op=CFINANCE&cand_id=N&dhc=0&county=C` — every transaction, CSV | `cand_id`, `county`; `dhc` picks one report, `0` all | `rptStatus` changes nothing |
+| `export.php?op=candidates&county=C&election=G` — the group's filers, CSV | | |
+
+So the walk asks each filer's page with its group, keeps every report link with `op`, `e`,
+`c`, `ca`, `sdc` and `dhc` as read, and drops `rellevel` and `committee`. The filed PDF and
+the qualifying documents are taken off those pages by acquisition, as enclosures. The CSV
+for filer 2621 is 363 rows over 19 reports: every report on the page but a $0 amendment.
+
+**A report as filed** (998,421 bytes, three pages, Helvetica and Courier) has a text layer.
+**A qualifying Form 1 or Form 6** (54,426 bytes) is a scan with no font, so it reads as
+nothing until an OCR reader exists. Forty filers sampled across the four counties held 6.05
+reports and 4.5 qualifying documents each; 18 of the 40 had filed no report.
+
+### Fault — every VoterFocus CSV would have been Underivable
+
+Both exports answer `application/vnd.ms-excel` over plain CSV, the usual way to get Excel to
+open one. `ContentKind::classify` believes a declared type it knows, so these were
+`spreadsheet`; the one spreadsheet reader, calamine, opens OLE and ZIP workbooks and
+answers anything else with "spreadsheet parse failed", which records an Underivable. That is
+the **content kind** lever. Fixed in this change: a declared spreadsheet over bytes that
+prove no format (`from_magic` is `None`) and hold no NUL is `csv`, and reaches the
+passthrough reader. A real workbook under the same header, such as Tampa's OLE `.xls`, stays
+a spreadsheet; so do empty bytes.
+
+### robots.txt and pace
+
+`www.voterfocus.com/robots.txt` answered **503**, "This service is temporarily unavailable
+for maintenance", on three tries over about twenty-five minutes, while every page
+answered 200. RFC 9309 lets a crawler treat a 5xx as *disallow everything*; Centinel's host policy
+(`unreachable_robots`) defaults to allow, and the strategy leaves that call to it. No
+`Crawl-delay` was ever readable. `disclosure.floridaethics.gov/robots.txt` redirects to the
+site's own "404 Not Found" page, answered **200** `text/html`, which parses as no rules.
+
+### Cost, and how a walk is bounded
+
+Discovery is one request per group and one per filer. Collection is the filer's page, its
+CSV if it reported, each report page with its PDF, and each qualifying document: about 18
+requests a filer at the sample's means, an estimate. At one request a second:
+
+| Walk | Discover | Collect, estimated |
+|---|---|---|
+| Hillsborough, every group | 27 + 2,264 = **2,291**, 38 min | about 41,000, 11.4 h |
+| Pinellas, every group | 15 + 382 = **397**, 7 min | about 7,000, 1.9 h |
+| Pasco, every group | 24 + 1,655 = **1,679**, 28 min | about 30,000, 8.4 h |
+| Manatee, every group | 169 + 1,781 = **1,950**, 33 min | about 32,000, 9 h |
+| Hillsborough, 2026 cycle (`&el=27`) | **224**, 4 min | about 4,100, 1.1 h |
+
+All four counties are about 6,300 discovery requests and 110,000 collection requests, some
+31 hours of one host. A scheduled run's default 200-request budget reads every listing of a
+county and then the filers' pages in the order the groups are listed, the current group
+first, so it keeps every filer's page and the newest reports. A backfill is a `discover
+--max-sitemaps N` with N above the discovery figure.
+
+### Financial disclosures: one publisher, an open JSON API
+
+EFDMS's public search is a JavaScript page over GET endpoints that need no token:
+
+1. `api/PublicFiling/SearchPublicFilers?filterByFormYear=2025&pageSize=50&pageNumber=1` —
+   JSON, 40,065 filers for form year 2025 and 117,986 with no filter, paged.
+   `filterByFormTypeCode=6` narrows 2025 to 2,904 Form 6 filers. `filterByCountyId=39`
+   (Hillsborough; Pinellas 62, Pasco 61, Manatee 51) is echoed back and narrows nothing; the
+   county search's real parameters were not found.
+2. Each filer carries `filingHistoryUrl`, `PublicSearch/FilingHistory/<userId>`, another
+   shell; its data is `api/PublicFiling/SearchFilingHistory?userId=<userId>`, one row a form
+   year.
+3. A row filed electronically carries `printUrl`, `Report/PrintForm/?filingId=<id>`, a viewer
+   whose PDF is `Report/GetFormContent?filingId=<id>`, a redirect to
+   `api/Report/RenderPdf/<id>/False`: 544,039 bytes, four pages, with a text layer. An
+   unknown `filingId` answers 200 with an empty body.
+4. A Form 1 filed before form year 2023 went to the county SOE: its row says
+   `isScannedForm`, carries no URL, and says to contact the Commission. Those are not
+   online here. The old search, `public.ethics.state.fl.us`, timed out.
+
+The rows also name each organisation's coordinator with an email and a telephone. One
+publisher, so no strategy. If a second state's system turns out to be this product, the
+walk is plain: filers by form type and year, each filer's history, each `GetFormContent`.
+
+### Personal data, by source
+
+For a later rule that keeps some of these out of search:
+
+| Source | Private individuals named | With addresses |
+|---|---|---|
+| VoterFocus report pages, report PDFs, transaction CSVs | every contributor, with occupation | **street address** |
+| VoterFocus candidate CSV (`op=candidates`) and filer pages | candidates | **home address**, email, telephone |
+| VoterFocus qualifying documents | candidates; Form 1 and Form 6 list their finances | home address on the forms |
+| Tampa meeting log | 2,675 visitor rows: residents meeting staff, by name, with the subject | no |
+| Pinellas lobbyist pages | lobbyists, as registrants | business address |
+| EFDMS forms and API | officials and appointees: income sources, real property, liabilities | home address, except filers exempt under s. 119.071 |
+| EFDMS API | organisation coordinators | work email, telephone |
+| Hillsborough activity reports | lobbyists and principals | — |
+
+### Against the three levers
+
+- **Enumerate**: VoterFocus. Built, `voterfocus`.
+- **Content kind**: CSV declared as Excel. Fixed.
+- **Enclosure**: Document Center links name no extension. Recorded, not fixed.
+
+### What a POST walk would need (Tampa), recorded not built
+
+`Walk` is one paced GET. The meeting log, the lobbyist list per year and CTTV's transcripts
+(entry 3) are all one ASP.NET postback away, and two sightings on one publisher is one
+sighting by this file's rule, so nothing is built. What was measured narrows the design:
+
+- The POST needs **no cookie and no session**: only the hidden inputs of the GET it follows,
+  plus `__EVENTTARGET`. So the state is in the page, not in a jar.
+- Its answer has **no address of its own**: the `.xls` is what a URL plus a body produced.
+  A Resource is an address, so it needs one, the way a feed entry is `<feed>#entry=<id>`:
+  `…/default.aspx?Page=RequestedMeetings#postback=RadGridLogReport$ctl00$ctl02$ctl00$RadGridLogExportToExcel`.
+- The view state is per response, so the POST cannot be done at discovery and replayed at
+  collection. Acquisition owns it: an address with `#postback=` is a GET of the page without
+  the fragment, then one POST of its hidden fields with that target, paced and counted as two
+  requests. One capability in `fetch`, not in any strategy, and no strategy has to hold state.
+
+A third sighting on another publisher should be checked against that before it is built.
+
+### Left on the table
+
+- Tampa's two RadGrid reports, behind the design above.
+- Older Pinellas registrations and Clerk records behind Cloudflare's challenge.
+- An OCR reader for the scanned qualifying Form 1s and Form 6s.
+- EFDMS, one publisher with an open API.
+- The filer's name as the title of its report and CSV: the listing names both.
+- The report pages are kept to reach their PDFs, so each report is in the corpus as HTML
+  and as the filed PDF, and its rows again in the filer's CSV.
+
+### Running log
+
+- 2026-11-22 — robots.txt read at nine hosts; VoterFocus 503, two SOE sites behind
+  Cloudflare. Tampa's RadGrid measured; one POST of the export returned all 6,074 meetings.
+- 2026-11-22 — Hillsborough LIRA is a login; its 39 quarterly reports are on the box.
+  Pinellas' three yearly pages found in its sitemap; the Clerk's PDFs behind Cloudflare.
+- 2026-11-22 — VoterFocus keys measured at Hillsborough; every group of four counties counted
+  (235 requests, 6,082 filers); 40 filers sampled. Found the CSV classification fault.
+- 2026-11-22 — EFDMS's GET API traced from search to PDF.
+- 2026-11-22 — Document Center gap found at St. Pete Beach, confirmed at all eight
+  CivicEngage sources on the box.
+- 2026-11-22 — `voterfocus` strategy and the CSV classification fix written; unbuilt here.
+
 ---
 
 ## Recurring shapes
@@ -4626,6 +4874,11 @@ and serves every attached document only as the answer to a postback inside a ses
 record page opened. So the sequence is wanted by acquire too, and the seam belongs in the
 fetch layer that both stages share, not in either stage.
 
+Fourth sighting, entry 20: Tampa's lobbyist meeting log, a RadGrid on CTTV's host. It narrows
+the claim: the export POST needed no cookie, only the hidden fields of the GET before it, so
+the sequence is two requests and the state is in the page. Entry 20 records the smallest
+design that follows. OnBase has since moved its search to a GET (entry 7).
+
 **The visible URL is not the fetchable one.** — *2 sightings: OpenGov Stories, OnBase Agenda
 Online*
 
@@ -4728,8 +4981,18 @@ would invent a corpus rather than observe one.
   video makes the `transcribe` stage redundant work for a worse result. (3: CTTV; 14:
   Granicus, a WebVTT track beside every player, captioned at four of seven clients —
   **second sighting**, and the one that built a reader)
+- **A document link names no extension.** The enclosure scan keeps only paths with a
+  reader's extension, so neither CivicPlus Document Center's
+  `/DocumentCenter/View/7167/Lobbyists-Annual-Registration-2026` nor Liferay's
+  `/documents/d/guest/{slug}?download=true` is ever a candidate, and eight box sources hold
+  none of their files. (19: `hillsclerk.com`, seven ACFRs; 20: every CivicEngage source on
+  the box, one product, eight sites — **two products**)
+- **A server declares CSV as a spreadsheet.** `application/vnd.ms-excel` over plain text, so
+  Excel opens it; believed, it is Underivable. (20: VoterFocus — fixed)
 - **Errors answer HTTP 200.** A dead address becomes a live Observation and its error text
-  is indexed. (2: OnBase)
+  is indexed. (2: OnBase; 20: VoterFocus, an unknown filer is 200 with an empty body and
+  another filer's report an empty report; EFDMS, an unknown filing is 200 with an empty body
+  — **second and third sightings**. Built from anchors, neither walk asks for one.)
 - **Enclosure detection matches JavaScript source.** A URL template in a `<script>` becomes
   a fetch. (2: OnBase; 6: `tampa.gov`, a download widget's bare `fileName`, 196 × 404 a run
   — **second sighting**)
@@ -4760,10 +5023,11 @@ would invent a corpus rather than observe one.
   document because the enclosure scan will. (19: Largo's document center, 165 PDFs, ACFRs at
   112–120; Pasco's budget office, 38, older adopted budgets at 27–33; Hillsborough's Clerk, 99
   — **three sightings**, all finance pages. A framework decision, proposed in entry 19)
-- **A document link names no extension.** Liferay's `/documents/d/guest/{slug}?download=true`
-  is never an enclosure candidate. (19: `hillsclerk.com`, seven ACFRs)
 - **A school district's files are in a script payload on another host.** Apptegy names each
   file on `files-backend.assets.thrillshare.com` only inside the page's Nuxt state. (19:
   Manatee and Hillsborough schools — two sightings, enumeration unmeasured)
 - **The rules admit Centinel and the edge does not.** `robots.txt` allows `*`, and every page
-  answers a Cloudflare challenge. (19: Municode, American Legal, eCode360; the Pinellas Clerk)
+  answers a Cloudflare managed challenge, "Just a moment" or "Attention Required", 403. (19:
+  Municode, American Legal, eCode360, the Pinellas Clerk; 20: `votehillsborough.gov`,
+  `votepinellas.gov`, `mypinellasclerk.gov`, the first two publishing their records on a
+  vendor that answers)
