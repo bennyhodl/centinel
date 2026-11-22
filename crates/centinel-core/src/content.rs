@@ -58,6 +58,14 @@ pub enum ContentKind {
     /// trusted to a content-type — which also means blobs collected before this kind
     /// existed are recognised on the next `extract`.
     Captions,
+    /// A WebVTT caption track: what a meeting publisher's own player loads beside its video.
+    ///
+    /// Not [`Captions`], though it is captions. Three of the four questions this type answers
+    /// come out differently — a server calls it `text/vtt` where a `json3` track is
+    /// `application/json`, it is named `.vtt`, and it is read by another parser — and the
+    /// reader that spoke is the record's account of where the words came from: YouTube's
+    /// speech recognition for one, the publisher's captioner for the other.
+    WebVtt,
     Json,
     Xml,
     /// RSS or Atom: a document listing other documents, and usually carrying them. Often
@@ -131,6 +139,7 @@ const FORMATS: &[Format] = &[
     f("rss", "application/rss+xml", Feed),
     f("atom", "application/atom+xml", Feed),
     f("ics", "text/calendar", Calendar),
+    f("vtt", "text/vtt", WebVtt),
     f("csv", "text/csv", Csv),
     f(
         "xlsx",
@@ -191,6 +200,7 @@ impl ContentKind {
         Text,
         Markdown,
         Captions,
+        WebVtt,
         Json,
         Xml,
         Feed,
@@ -217,6 +227,7 @@ impl ContentKind {
             Text => "text",
             Markdown => "markdown",
             Captions => "captions",
+            WebVtt => "webvtt",
             Json => "json",
             Xml => "xml",
             Feed => "feed",
@@ -364,6 +375,9 @@ impl ContentKind {
             Some(crate::feed::Format::Calendar) => return Some(Calendar),
             Some(_) => return Some(Feed),
             None => {}
+        }
+        if crate::captions::looks_like_webvtt(bytes) {
+            return Some(WebVtt);
         }
         if bytes.starts_with(b"PK\x03\x04") {
             return Some(ZipContainer);
@@ -627,6 +641,24 @@ mod tests {
             Document
         );
         assert_eq!(classify("application/octet-stream", &OLE_MAGIC), Document);
+    }
+
+    /// Granicus serves a clip's captions as `text/vtt;charset=UTF-8`, the empty file for a
+    /// clip nobody captioned included. Before `webvtt` had a row the declared type named
+    /// nothing, the header is no magic anything knew, and `.vtt` no extension: every track
+    /// would have been collected as `other` and read by nothing.
+    #[test]
+    fn a_webvtt_track_is_its_own_kind_and_file() {
+        let served = b"WEBVTT\n\n00:02:10.000 --> 00:02:12.000\n>> [ GAVEL ]\n";
+        assert_eq!(classify("text/vtt;charset=UTF-8", served), WebVtt);
+        assert_eq!(classify("text/vtt;charset=UTF-8", b"WEBVTT\n\n"), WebVtt);
+        assert_eq!(classify("application/octet-stream", served), WebVtt);
+        assert_eq!(classify("", served), WebVtt);
+        assert_eq!(WebVtt.extension(served), "vtt");
+        assert_eq!(
+            ContentKind::from_path(Path::new("videos/5317/captions.vtt")),
+            Some(WebVtt)
+        );
     }
 
     /// Medium serves its feed as `text/xml` and calendars arrive as `text/plain`; the root

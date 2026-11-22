@@ -85,7 +85,10 @@ pub const PIPELINE: &str = "centinel-extract";
 ///
 /// `4` — `feed` and `calendar` became readable, so an RSS feed stored as `xml` and an
 /// `.ics` file stored as `other` are worth another attempt.
-pub const PIPELINE_VERSION: &str = "4";
+///
+/// `5` — `webvtt` became readable, so a caption track stored as `other` is worth another
+/// attempt.
+pub const PIPELINE_VERSION: &str = "5";
 
 /// What extraction produced.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -246,6 +249,8 @@ pub enum Reader {
     AnyDoc,
     Spreadsheet,
     Captions,
+    /// A WebVTT track, as a meeting publisher's player loads it.
+    WebVtt,
     /// An RSS or Atom feed, or one entry cut from one: its title, date, author and link,
     /// then the article it carries.
     Feed,
@@ -268,6 +273,7 @@ impl Reader {
             Self::AnyDoc => "anydoc",
             Self::Spreadsheet => "calamine",
             Self::Captions => "youtube-asr-json3",
+            Self::WebVtt => "webvtt",
             Self::Feed => "feed",
             Self::Calendar => "icalendar",
             Self::Passthrough => "passthrough",
@@ -275,7 +281,7 @@ impl Reader {
     }
 
     /// Every reader, for finding one by the name a record carries.
-    const ALL: [Reader; 11] = [
+    const ALL: [Reader; 12] = [
         Self::Marked,
         Self::Readability,
         Self::WholePage,
@@ -284,6 +290,7 @@ impl Reader {
         Self::AnyDoc,
         Self::Spreadsheet,
         Self::Captions,
+        Self::WebVtt,
         Self::Feed,
         Self::Calendar,
         Self::Passthrough,
@@ -304,7 +311,7 @@ impl Reader {
             Self::PdfInspector | Self::Poppler => "pdf",
             Self::AnyDoc => "document",
             Self::Spreadsheet => "spreadsheet",
-            Self::Captions => "video",
+            Self::Captions | Self::WebVtt => "video",
             Self::Feed => "feed",
             Self::Calendar => "calendar",
             Self::Passthrough => "text",
@@ -343,7 +350,7 @@ impl Reader {
             Self::PdfInspector => extract_pdf(blob.bytes),
             Self::AnyDoc => extract_document(blob.bytes),
             Self::Spreadsheet => extract_spreadsheet(blob.bytes),
-            Self::Captions => extract_captions(blob.bytes, blob.title),
+            Self::Captions | Self::WebVtt => extract_captions(self, blob.bytes, blob.title),
             Self::Feed | Self::Calendar => extract_feed(self, blob.bytes),
             Self::Passthrough => passthrough(blob.bytes),
             Self::Poppler => unreachable!("a spawning reader is never read in process"),
@@ -388,6 +395,7 @@ pub fn readers_for(kind: ContentKind) -> &'static [Reader] {
         // the same question, and `anydoc` is where it gets answered.
         Document | ZipContainer => &[Reader::AnyDoc],
         Captions => &[Reader::Captions],
+        WebVtt => &[Reader::WebVtt],
         Feed => &[Reader::Feed],
         Calendar => &[Reader::Calendar],
         Text | Csv | Json | Xml => &[Reader::Passthrough],
@@ -648,7 +656,8 @@ fn no_text_reason(outcome: &Extracted) -> String {
     }
 }
 
-/// A YouTube `json3` caption track, rendered as timestamped markdown.
+/// A caption track — YouTube's `json3`, or a publisher's WebVTT — rendered as timestamped
+/// markdown.
 ///
 /// Deliberately **not** the passthrough the `json` arm would apply. Indexing the raw
 /// document would put `wireMagic`, `acAsrConf` and 4,250 newline markers into the search
@@ -660,16 +669,22 @@ fn no_text_reason(outcome: &Extracted) -> String {
 /// identifying fact about a meeting is absent from the index and the obvious query finds
 /// nothing. As an `# H1` it becomes the chunker's heading path, so **every** chunk of the
 /// meeting carries it.
-fn extract_captions(bytes: &[u8], title: Option<&str>) -> Extracted {
-    match crate::captions::parse_json3(bytes) {
+fn extract_captions(reader: Reader, bytes: &[u8], title: Option<&str>) -> Extracted {
+    let parsed = match reader {
+        Reader::WebVtt => crate::captions::parse_webvtt(bytes),
+        _ => crate::captions::parse_json3(bytes),
+    };
+    match parsed {
         Ok(caps) => Extracted::Text(Extraction {
             text: caps.to_markdown(title),
             title: title.map(str::to_string),
-            // Named for what produced the *captions*, not for what parsed them: these are
-            // YouTube's ASR, and a reader of the provenance needs to know the words were
-            // never transcribed locally. `whisper.cpp` on the same audio is a different
-            // tool at a different quality, and the two must not look alike in the log.
-            tool: "youtube-asr-json3".into(),
+            // Named for what produced the *captions*, not only for what parsed them: a
+            // `json3` track is YouTube's ASR, and a reader of the provenance needs to know
+            // the words were never transcribed locally. `whisper.cpp` on the same audio is
+            // a different tool at a different quality, and the two must not look alike in
+            // the log; nor must either look like a WebVTT track a publisher's captioner
+            // typed.
+            tool: reader.name().into(),
             version: env!("CARGO_PKG_VERSION").into(),
             notes: vec![format!(
                 "{} cues from {} events; {} carried no text",
@@ -1568,6 +1583,52 @@ mod tests {
         let text = out.text().expect("captions should extract");
         assert!(!text.starts_with('#'));
         assert!(text.contains("[00:00:01] I am proud to present"));
+    }
+
+    /// A Granicus caption track as served — `text/vtt`, the bytes of Clearwater's council
+    /// meeting — classified the way `extract` classifies it and read by its reader list. The
+    /// record names the WebVTT reader, never YouTube's ASR.
+    #[test]
+    fn a_publishers_webvtt_track_classifies_and_reads_as_timed_text() {
+        use std::collections::BTreeMap;
+        let served = crate::captions::tests::CLEARWATER_5317.as_bytes();
+        let meta = BTreeMap::from([(
+            "content-type".to_string(),
+            "text/vtt;charset=UTF-8".to_string(),
+        )]);
+        let kind = ContentKind::classify(&meta, served);
+        assert_eq!(kind, ContentKind::WebVtt);
+
+        let out = extract(kind, served, None, None);
+        let text = out.text().expect("a captioned meeting reads");
+        assert!(
+            text.starts_with("[00:02:10] >> [ GAVEL ] >> Okay."),
+            "{text}"
+        );
+        assert!(
+            !text.contains("-->"),
+            "no timing line reaches the index: {text}"
+        );
+        assert_eq!(out.tool().map(|(tool, _)| tool), Some("webvtt"));
+        assert_eq!(
+            Reader::named("webvtt 0.37.0").map(Reader::reads),
+            Some("video")
+        );
+    }
+
+    /// The eight bytes Granicus serves for a clip nobody captioned are a verdict, not a
+    /// document: nothing to index, and the reason says so.
+    #[test]
+    fn an_uncaptioned_clip_is_unextractable_with_a_reason() {
+        match extract(
+            ContentKind::WebVtt,
+            crate::captions::tests::UNCAPTIONED,
+            None,
+            None,
+        ) {
+            Extracted::Unextractable { reason } => assert!(reason.contains("no text"), "{reason}"),
+            other => panic!("an empty track has nothing to read: {other:?}"),
+        }
     }
 
     /// A caption track is `application/json`, and so is a video's metadata document. The

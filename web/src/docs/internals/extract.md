@@ -12,6 +12,7 @@ pub fn readers_for(kind: ContentKind) -> &'static [Reader] {
         Spreadsheet          => &[Reader::Spreadsheet],
         Document | ZipContainer => &[Reader::AnyDoc],
         Captions             => &[Reader::Captions],
+        WebVtt               => &[Reader::WebVtt],
         Text | Csv | Json | Xml => &[Reader::Passthrough],
         Markdown | Audio | Other => &[],
     }

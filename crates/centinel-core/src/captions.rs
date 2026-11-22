@@ -1,4 +1,5 @@
-//! YouTube caption tracks, `json3` → timestamped text.
+//! Caption tracks → timestamped text: YouTube's `json3`, and the WebVTT a meeting
+//! publisher's own player loads ([`parse_webvtt`]).
 //!
 //! `json3` is archived rather than `srt`/`vtt` because it is the only format carrying
 //! **per-word** offsets; the others are lossy conversions that collapse to cue timing.
@@ -165,8 +166,97 @@ pub fn parse_json3(bytes: &[u8]) -> anyhow::Result<Captions> {
     })
 }
 
+/// Whether the bytes open the way every WebVTT file must: `WEBVTT`, after an optional
+/// byte-order mark, then a space, a tab, a line break or nothing.
+pub fn looks_like_webvtt(bytes: &[u8]) -> bool {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    bytes
+        .strip_prefix(b"WEBVTT")
+        .is_some_and(|rest| matches!(rest.first(), None | Some(b' ' | b'\t' | b'\n' | b'\r')))
+}
+
+/// Parses a WebVTT caption track: the format a publisher's player loads beside its video.
+///
+/// Measured on Granicus, whose players load `/videos/{clip}/captions.vtt`: cues with no
+/// identifier, one timing line, then the words, sometimes behind `>>` and a speaker's name
+/// the captioner typed. A cue's own markup — `<v Name>`, `<i>`, an inline timestamp — and
+/// its character references are taken out the way a page's are. `NOTE`, `STYLE` and
+/// `REGION` blocks carry no timing line and are not cues.
+///
+/// A file that is only the header — eight bytes, `WEBVTT` and two line breaks, which is
+/// what Granicus serves for a clip nobody captioned — is an error, as a `json3` track with
+/// no text is: there is nothing here to derive.
+pub fn parse_webvtt(bytes: &[u8]) -> anyhow::Result<Captions> {
+    anyhow::ensure!(looks_like_webvtt(bytes), "no WEBVTT header");
+    let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+
+    let mut cues = Vec::new();
+    let (mut blocks, mut empty) = (0usize, 0usize);
+    // The first block is the header, and anything written beside it.
+    for block in text.split("\n\n").skip(1) {
+        let mut lines = block.lines().skip_while(|l| l.trim().is_empty());
+        let Some(first) = lines.next() else { continue };
+        // A cue may carry an identifier above its timing line.
+        let timing = if first.contains("-->") {
+            first
+        } else {
+            match lines.next() {
+                Some(line) if line.contains("-->") => line,
+                _ => continue,
+            }
+        };
+        let Some((start, end)) = cue_times(timing) else {
+            continue;
+        };
+        blocks += 1;
+        let words = crate::html::text(&lines.collect::<Vec<_>>().join(" "));
+        if words.is_empty() {
+            empty += 1;
+            continue;
+        }
+        cues.push(Cue {
+            start_ms: start,
+            end_ms: end,
+            text: words,
+        });
+    }
+
+    anyhow::ensure!(
+        !cues.is_empty(),
+        "WebVTT file has {blocks} cues but no text"
+    );
+    Ok(Captions {
+        cues,
+        events: blocks,
+        empty_events: empty,
+    })
+}
+
+/// `00:02:12.200 --> 00:02:14.200 align:start` → the two offsets in milliseconds.
+fn cue_times(line: &str) -> Option<(i64, i64)> {
+    let (start, rest) = line.split_once("-->")?;
+    let end = rest.split_whitespace().next()?;
+    Some((timestamp_ms(start.trim())?, timestamp_ms(end)?))
+}
+
+/// `HH:MM:SS.mmm`, or `MM:SS.mmm` — WebVTT leaves the hours out under one.
+fn timestamp_ms(stamp: &str) -> Option<i64> {
+    let (clock, millis) = stamp.split_once('.')?;
+    let millis: i64 = millis.parse().ok()?;
+    let parts: Vec<i64> = clock
+        .split(':')
+        .map(|p| p.parse().ok())
+        .collect::<Option<_>>()?;
+    let seconds = match parts[..] {
+        [h, m, s] => h * 3600 + m * 60 + s,
+        [m, s] => m * 60 + s,
+        _ => return None,
+    };
+    Some(seconds * 1000 + millis)
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The verbatim shape of a real track's opening events.
@@ -319,5 +409,85 @@ mod tests {
             .to_string();
         assert!(err.contains("events"), "{err}");
         assert!(parse_json3(b"not json").is_err());
+    }
+
+    // ── WebVTT ─────────────────────────────────────────────────────────────────
+
+    /// Clearwater City Council, November 5, 2026, as
+    /// `clearwater.granicus.com/videos/5317/captions.vtt` served it on 2026-11-22: the
+    /// first four cues and the last, of 5,336.
+    pub(crate) const CLEARWATER_5317: &str = "WEBVTT\n\n\
+00:02:10.000 --> 00:02:12.000\n>> [ GAVEL ]\n\n\
+00:02:12.200 --> 00:02:14.200\n>> Okay. This time I'll call\n\n\
+00:02:14.200 --> 00:02:15.200\nto order the November 5,\n\n\
+00:02:15.200 --> 00:02:17.200\n2026, meeting of the\n\n\
+02:59:54.100 --> 02:59:56.100\nNovember 5, 2026.\n\n\n";
+
+    /// What Granicus serves for a clip with no captions: the header and two line breaks.
+    pub(crate) const UNCAPTIONED: &[u8] = b"WEBVTT\n\n";
+
+    #[test]
+    fn a_webvtt_track_is_recognised_by_its_header_alone() {
+        assert!(looks_like_webvtt(CLEARWATER_5317.as_bytes()));
+        assert!(looks_like_webvtt(UNCAPTIONED));
+        assert!(looks_like_webvtt(b"\xEF\xBB\xBFWEBVTT - a title\n\n"));
+        assert!(looks_like_webvtt(b"WEBVTT"));
+        assert!(!looks_like_webvtt(b"WEBVTTX\n"));
+        assert!(!looks_like_webvtt(b"<html>WEBVTT"));
+        assert!(!looks_like_webvtt(b""));
+    }
+
+    #[test]
+    fn a_granicus_track_reads_as_timed_cues() {
+        let caps = parse_webvtt(CLEARWATER_5317.as_bytes()).unwrap();
+        assert_eq!(caps.cues.len(), 5);
+        assert_eq!(caps.cues[0].text, ">> [ GAVEL ]");
+        assert_eq!(caps.cues[0].start_ms, 130_000);
+        assert_eq!(caps.cues[0].end_ms, 132_000);
+        assert_eq!(
+            caps.duration_ms(),
+            (2 * 3600 + 59 * 60 + 56) * 1000 + 100,
+            "hours are read, so a three-hour meeting ends at three hours"
+        );
+
+        let md = caps.to_markdown(None);
+        assert!(
+            md.starts_with("[00:02:10] >> [ GAVEL ] >> Okay. This time I'll call to order"),
+            "{md}"
+        );
+        assert!(md.contains("[02:59:54] November 5, 2026."), "{md}");
+    }
+
+    /// The parts of the format Granicus did not use, from the WebVTT specification: an
+    /// identifier, cue settings, hours left out, a voice span, an inline timestamp, an
+    /// escaped character, a comment and a style block.
+    #[test]
+    fn identifiers_settings_markup_and_comments_are_not_words() {
+        let vtt = "WEBVTT - Council\r\n\r\n\
+NOTE written by the captioner\r\n\r\n\
+STYLE\r\n::cue { color: yellow }\r\n\r\n\
+intro\r\n00:01.000 --> 00:04.500 align:start line:0\r\n<v Mayor Cretekos>Call to order, <i>please</i>.</v>\r\n\r\n\
+00:05.000 --> 00:07.000\r\nQ&amp;A <00:06.000>follows\r\n\r\n\
+00:08.000 --> 00:09.000\r\n\r\n";
+        let caps = parse_webvtt(vtt.as_bytes()).unwrap();
+        assert_eq!(
+            caps.cues
+                .iter()
+                .map(|c| (c.start_ms, c.end_ms, c.text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (1_000, 4_500, "Call to order, please."),
+                (5_000, 7_000, "Q&A follows"),
+            ]
+        );
+        assert_eq!(caps.events, 3, "three timing lines");
+        assert_eq!(caps.empty_events, 1, "the last cue carried no words");
+    }
+
+    #[test]
+    fn a_track_nobody_captioned_has_nothing_to_derive() {
+        let err = parse_webvtt(UNCAPTIONED).unwrap_err().to_string();
+        assert!(err.contains("no text"), "{err}");
+        assert!(parse_webvtt(b"<html>error</html>").is_err());
     }
 }

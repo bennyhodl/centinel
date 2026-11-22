@@ -652,7 +652,7 @@ fn extension_for(kind: ContentKind, item: &Item) -> String {
     //
     // Exhaustive on purpose: a new kind has to say which side of that line it falls on.
     let from_kind = match kind {
-        Html | Pdf | Text | Csv | Json | Captions | Xml | Feed | Calendar => {
+        Html | Pdf | Text | Csv | Json | Captions | WebVtt | Xml | Feed | Calendar => {
             Some(kind.extension(&item.bytes))
         }
         // Knowable from the bytes, and the one kind where guessing wrong means no player
