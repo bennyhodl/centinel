@@ -44,6 +44,7 @@ lever.
 | 9 | CivicPlus Agenda Center (`/AgendaCenter`) | eight box sources reach it and hold only the front door; seven of the eight modules are empty, and the one that is not lists one year per category, with older years behind a POST | **enumerate** | every CivicEngage site: the module is at the same path, and its search is a GET per year |
 | 16 | Procurement: OpenGov, Bonfire, DemandStar, VendorLink, PlanetBids, IonWave, OnBase Public Access, and the governments' own pages | 26 governments and clerks; every vendor platform gates documents behind an account, a bot challenge or `Disallow: /`; the one public system addresses each document by a token that changes per search, and serves scans | **before acquire** — login, challenge, robots, POST; then **identity** and OCR | every procurement vendor; every search whose hits carry no stable address |
 | 17 | Public-records request portals: GovQA, JustFOIA, NextRequest | 25 Tampa Bay agencies run a request portal; GovQA's robots.txt turns away every crawler at 11 of 12 hosts, JustFOIA's request list answers a Cloudflare challenge at every host tried, and the two NextRequest portals publish 12 requests and no documents | **enumerate**, closed by the vendor | every GovQA and JustFOIA client; NextRequest only where the agency turns publishing on |
+| 15 | Accela Citizen Access (`aca-prod.accela.com/{AGENCY}`): Tampa, Hillsborough, Pinellas | records are a GET and an ArcGIS layer lists their addresses; every attached document is a WebForms postback inside a session that names the record, and has no GET address at all | **acquire** — and the fetch layer, which cannot POST or hold a cookie | every agency on Accela Citizen Access; every WebForms page whose files are `__doPostBack` links |
 
 **Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
@@ -2586,6 +2587,198 @@ module lists one year at a time and a script fetches the rest.
   Indian Shores and Lake Wales measured: year searches, file keys, item attachments, every
   Lake Wales year counted. `agenda-center` written; unbuilt and untested here.
 
+## 15. Accela Citizen Access — permits, rezonings and site plans
+
+*Seen 2026-11-22, with plain HTTP requests at about one a second against
+`aca-prod.accela.com` (agencies `TAMPA`, `HCFL`, `PINELLAS`), Tampa's ArcGIS server
+(`arcgis.tampagov.net`), Hillsborough's ArcGIS Online layer and CivicData. No account, no
+login. Four POSTs in all, each the request a click on a public link makes.*
+
+Water Street Tampa's council approvals (entry 8) name a Final Plat, an Infrastructure
+Construction permit and subdivision and maintenance agreements. Those are development cases,
+and Tampa keeps them in Accela Citizen Access (ACA), as do Hillsborough and Pinellas
+Counties. Clearwater has an ACA agency too (`/CLEARWATER/` answers 200); not measured.
+St. Petersburg does not use ACA: its permits are in Click2Gov (`stpe-egov.aspgov.com`).
+
+| Agency | Path | Modules on the front door |
+|---|---|---|
+| City of Tampa | `/TAMPA/` | Building, Business, Enforcement, Licenses, Planning, RightOfWay, Utilities |
+| Hillsborough County | `/HCFL/` ("HillsGovHub") | Administrative, Building, Enforcement, Fire, LandDevelopment, Licenses |
+| Pinellas County | `/PINELLAS/` | Building, DRS, Planning and ten others |
+
+Hillsborough's rezonings are not in its ACA: a "rezoning" search there answers subdivision
+and site-plan records. Its RZ-PD matters are in Legistar (entry 8).
+
+### Records are a GET
+
+A record is `Cap/CapDetail.aspx?Module=M&TabName=M&capID1=…&capID2=…&capID3=…&agencyCode=A`.
+Anonymous GET, no cookie, 200 with the whole record (Tampa VRB-26-0000129: 247,024 bytes;
+Hillsborough HC-BLD-23-0043181: 311,288). The three capIDs are Accela's internal key and
+cannot be derived from the record number. Three ways to get them, all GETs:
+
+1. **An open-data layer that carries the link.** Tampa publishes two on its own ArcGIS
+   server, each row with a `URL` field holding the `CapDetail` address:
+   `Planning/ActiveEntitlementLocations` (273 records: 74 rezonings, 42 variances, 38
+   formal decisions, 29 design exceptions, 27 special uses, 25 vacatings and others; the
+   oldest created January 2021) and `Planning/PermitsAll` (2,573 permits, created 2006 to
+   now). Both hold **active** records only: a record drops out when it closes, so neither
+   is an archive. Hillsborough publishes
+   `services.arcgis.com/apTfC6SUmnNfnxuF/…/AccelaDashBoard_MapService20211019/FeatureServer/0`,
+   110,574 issued and CO'd building records from April 2019 to November 12, 2026, every one
+   with an `ACA_LINK`. One search found no Pinellas layer.
+2. **The record number.** `Cap/GlobalSearchResults.aspx?QueryText=FPT-24-0000003` answers 302
+   to that record's `CapDetail` when exactly one record matches, at all three agencies, and
+   case does not matter. An unknown number answers 200 "returned no results" (70 KB);
+   a number that a second record also matches answers the result list (Pinellas DRM-25-00102:
+   two rows, itself and DRM-26-00035).
+3. **The global search**, a GET (`QueryText=water street`): ten rows a page, "100+" past a
+   hundred, the record links and the pager all `__doPostBack`. Not a listing a walk can use.
+
+CivicData's Tampa permit datasets (BLDS) list 11 resources, and the datastore answers "not
+found" for the three tried; the datasets were last modified in July 2026.
+
+### Documents are not addressable
+
+The record page holds an iframe:
+
+```text
+../FileUpload/AttachmentsList.aspx?iframeid=ctl00_PlaceHolderMain_attachmentEdit&module=Planning&isInConfirm=False&isdetail=True&isaccountmanager=False&isAdmin=False&isPeopleDocument=&agencyCode=TAMPA&isForConditionDocument=N
+```
+
+It names no record. The record is whatever the session last opened:
+
+| Request | Answer |
+|---|---|
+| the iframe, no cookie | 302, "Object moved" (175 bytes) |
+| the iframe, with the cookies `CapDetail` set (`ACA_SS_STORE`, `.ASPXANONYMOUS`, …) | 200, the list, 51,911 bytes, five rows a page |
+| a file name in the list | `javascript:__doPostBack('attachmentList$gdvAttachmentList$ctl02$lnkFileName','')` |
+| that postback, POSTed with the page's `__VIEWSTATE` and the session | 200 `application/octet-stream`, `attachment; filename=site%20plan.pdf`, 4,422,591 bytes, `%PDF-1.4` |
+| page 2 of the list | another postback; a new `__VIEWSTATE` |
+| two downloads from page 2's one `__VIEWSTATE` | both served: 6,172,755 and 59,972 bytes |
+
+So a document's bytes are the answer to a POST, inside a session that a GET of the record
+set up, keyed by the row's position on a page of the list. The list's script builds no
+download URL, and none of the twenty scripts the two pages load names a download handler.
+
+The document **does** have a stable identity. Each row carries a `documentNo`
+(`ViewDocumentDetails('TAMPA','6595308',…)`), and
+`FileUpload/DocumentDetail.aspx?agencyCode=TAMPA&documentNo=6595308` answers by GET, with no
+cookie: file name, size, type, upload date and the record it belongs to ("Variance Review
+Board - VRB-26-0000129"). Metadata only; no bytes, no link to them.
+
+Same at all three agencies: Tampa VRB-26-0000129, Hillsborough HC-BLD-23-0043181 (five rows,
+two pages) and Pinellas TY2-22-00004 (a survey and a concept plan, 5.09 and 14.49 MB) list
+their attachments publicly, each behind the same iframe and the same postback. Nothing
+here needed a login.
+
+### Water Street
+
+The record number reaches it. Tampa FPT-24-0000003, the Phase 3A Final Plat (Complete, so in
+neither active layer), has 36–40 attachments over eight list pages, among them *03 -
+2023.10.04 WST Ph3A- Final Plat.pdf*, *06 - 2023.09.21 WST Ph3A OM Agreement.docx* and *07 -
+2023.09.26 WST Ph3A- Subdivision Agreement.doc* — the drafts of the agreements entry 8 found
+the council voting on — and a bonding cost estimate and a closure report. PLN-21-0000019,
+Infrastructure Construction at 200 S Caesar St, has 26–30. Five Water St building permits are
+in `PermitsAll` today. A walk seeded by the active layers would reach the open records and
+miss the plat.
+
+### Cost
+
+One record is two GETs (record, list), one POST per extra list page, and one POST per
+document. Attachment counts, from the list's first page and its pager:
+
+| Sample | Attachments a record | List pages a record | Requests a record |
+|---|---|---|---|
+| Tampa, 10 records (6 from the entitlement layer, 4 by number) | 12–15 (0 to 45) | 3.1 | about 17 |
+| Hillsborough, the layer's 6 newest (CO'd, mostly new construction) | 29–33 (16 to 45) | 6.7 | about 39 |
+
+At one request a second:
+
+| Walk | Records | Requests | Time |
+|---|---|---|---|
+| Tampa active entitlements | 273 | 1 layer query + about 4,800 | about 80 min |
+| Tampa active permits, record pages only | 2,573 | 2 layer queries + 2,573 | about 43 min |
+| Hillsborough, record pages only | 110,574 | 56 layer queries + 110,574 | about 31 h |
+| Hillsborough, one month with documents | about 1,200 | about 47,000 | about 13 h |
+
+Hillsborough's sample is six records, newest first and all CO'd, so its per-record figure is
+a guess at the order of magnitude. Tampa issued about 128 rezonings in fiscal 2026
+(`REZ-26-0000128` is a record and `…129` is not, by bisection, which assumes no gaps).
+
+### robots and headers
+
+`aca-prod.accela.com/robots.txt` is a 404, `arcgis.tampagov.net`'s too, and
+`services.arcgis.com` answers 403 "Invalid URL": no rules anywhere. But every `CapDetail` and
+`GlobalSearchResults` answer carries
+
+```text
+X-Robots-Tag: noindex, nofollow, noarchive, nosnippet, nocache
+```
+
+and Centinel reads no `X-Robots-Tag`. `DocumentDetail.aspx` and the ArcGIS answers carry
+none; the attachment list was not checked. A record page also names the applicant, owner and
+contractor, often with a phone number and an email address.
+
+### What Centinel can do today, and what it cannot
+
+`Walk` is one paced GET and `Fetch` is one GET; the client holds no cookie store (reqwest is
+built without its `cookies` feature). A strategy could enumerate records today: page an
+ArcGIS layer and keep each row's link. It could not collect one attached document, because
+no address names a document's bytes. Entry 3 and entry 2 found the same wall at enumerate
+("Enumerate is not a GET"); this is the same wall at **acquire**.
+
+### What would be built
+
+The smallest design, in order. Nothing is built yet.
+
+| | Lever | Generality |
+|---|---|---|
+| 1 | a **session** in the fetch layer: one cookie jar for a sequence of requests to one host, `get` and `post_form`, through the same pacer, budget, robots check and memory budget as a GET | every WebForms site: CTTV's pager (entry 3), OnBase's old search (entry 2), Agenda Center's year tabs (entry 9), ACA |
+| 2 | a pure **WebForms form reader**: the form's action and hidden fields, and the body of one `__doPostBack(target)` | the same; tested over stored pages |
+| 3 | an artifact address for a document **cut from a record**: `<CapDetail URL>#document=<documentNo>`, the feed entry's rule (`<feed>#entry=<id>`) one product over | ACA; any page that serves documents only through itself |
+| 4 | a strategy may say **how its documents are reached** from a page it named, given a session: ACA's GET record, GET list, POST each page, POST each document not already held | ACA first; the open question below |
+
+The address in 3 is built from the publisher's id, never from the row index or the view
+state, and `DocumentDetail.aspx?documentNo=` proves the id is the server's. The record page
+stays the marker. Lever 4 is the one that wants a decision: today a strategy owns enumerate
+and `addresses_are`, and nothing after. Either a strategy gains an acquisition route beside
+`addresses_are`, or ACA becomes its own adapter, as `ChannelSource` is for a video's three
+artifacts. The first keeps a product in one file; the second keeps strategies free of
+acquisition.
+
+With 1–4, an `accela` strategy seeded by an ArcGIS layer collects records and documents at
+Tampa and Hillsborough. Pinellas has no layer found, and a walk over guessed record numbers
+would invent a corpus rather than observe one (entry 4's HOVER), so it stays a seed a person
+writes: one record number at a time.
+
+### Against the three levers
+
+None of the three. The documents are PDF, Word and RTF and would read; the content kind and
+reader list are not in question, and there is no enclosure address to find. It is acquisition,
+and below it the fetch layer.
+
+### Left on the table
+
+- Clearwater's ACA agency.
+- The record page's own text — description, status, conditions, inspections — collectable by
+  GET today with an ArcGIS-seeded strategy, if the documents wait.
+- Pinellas: a layer, if one exists; its DRS and Planning modules hold the development cases.
+- St. Petersburg's Click2Gov.
+- A ruling on `X-Robots-Tag: noarchive`, which no Centinel source has met before.
+
+### Running log
+
+- 2026-11-22 — `TAMPA`, `HCFL`, `PINELLAS` confirmed; St. Pete is Click2Gov. robots.txt 404
+  at ACA; `X-Robots-Tag: noindex, nofollow, noarchive` on record pages.
+- 2026-11-22 — Tampa and Hillsborough ArcGIS layers carry `CapDetail` links (273 + 2,573
+  active at Tampa, 110,574 at Hillsborough). CivicData's Tampa datastore is gone.
+- 2026-11-22 — attachments: session-bound iframe, `__doPostBack` per file, bytes in the POST
+  answer; `documentNo` is a stable id with a GET metadata page and no GET bytes. Same at all
+  three agencies. Water Street Ph3A plat FPT-24-0000003 reached by record number: 36–40
+  attachments including the subdivision and O&M agreement drafts.
+- 2026-11-22 — 16 records sampled for cost. No strategy built: documents need POST and a
+  session, and the fetch layer has neither. Design above.
+
 ---
 
 ## 16. Procurement records — where Tampa Bay publishes solicitations, awards and contracts
@@ -3360,6 +3553,11 @@ cookie jar, read a token out of a page, or carry opaque state from one request t
 so on both sites, discovery is not merely wrong, it is unexpressible. CTTV is the harder of
 the two and shows where the seam has to sit: the state is opaque, so whatever performs
 enumeration must be able to do a *sequence* of requests, not one.
+
+Entry 15 meets the same wall one stage later. Accela Citizen Access lists its records by GET,
+and serves every attached document only as the answer to a postback inside a session the
+record page opened. So the sequence is wanted by acquire too, and the seam belongs in the
+fetch layer that both stages share, not in either stage.
 
 **The visible URL is not the fetchable one.** — *2 sightings: OpenGov Stories, OnBase Agenda
 Online*
