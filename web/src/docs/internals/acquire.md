@@ -132,6 +132,12 @@ a guess in the record at the one point where nothing has read enough of the file
 and every stage downstream would carry the guess. The precise format is a **different
 question, answered later**, by a reader holding the whole verified blob.
 
+Coarse is not the same as merged. A YouTube `json3` track is `captions` and a WebVTT track
+a meeting publisher's player loads is `webvtt`, though both are captions: a server calls
+one `application/json` and the other `text/vtt`, they are named `.json` and `.vtt`, each has
+its own parser, and the reader that spoke is the record's account of who wrote the words —
+YouTube's speech recognition, or the publisher's captioner.
+
 ### The evidence order
 
 `classify` asks, in order:

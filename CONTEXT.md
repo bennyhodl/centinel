@@ -131,6 +131,12 @@ only ever answer what the first bytes prove: a `.docx` and a `.pptx` are both
 making it say `docx` — would put a guess in the record at the one point where nothing has
 read enough of the file to know, and every stage downstream would carry the guess.
 
+Coarse is not merged, though. `captions` is a YouTube `json3` track and `webvtt` the track a
+meeting publisher's player loads (Granicus, `/videos/{clip}/captions.vtt`): a server calls
+them `application/json` and `text/vtt`, they are named `.json` and `.vtt`, and each has its
+own reader. The reader that spoke is the record's account of who wrote the words, so one
+kind for both would have recorded a publisher's captioner as YouTube's speech recognition.
+
 It is a **type**, in `content`, and the four questions it answers — *what is this*, *what
 would a server have called it*, *what should the file be named*, *is it worth fetching on
 its own* — are all projections of one table. They were five tables in three modules that
