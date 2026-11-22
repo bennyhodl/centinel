@@ -108,7 +108,7 @@ Nine strategies are registered today:
 |---|---|---|
 | `onbase-agenda` | Hyland OnBase Agenda Online (product) | the agenda, minutes and summary PDF of every meeting the application's search lists |
 | `legistar` | Legistar, on `{client}.legistar.com` or its Web API (product) | per meeting, the meeting's items from the API, and from the client's InSite site the agenda, minutes and other meeting documents and every attachment of every item's legislation |
-| `granicus` | a Granicus `ViewPublisher.php` page or agenda feed (product) | the `AgendaViewer.php` and `MinutesViewer.php` documents it lists |
+| `granicus` | a Granicus `ViewPublisher.php` page or agenda feed (product) | the `AgendaViewer.php` and `MinutesViewer.php` documents it lists, every recorded meeting's caption track (`/videos/{clip}/captions.vtt`), and each item's documents where the agenda was built in Granicus |
 | `agenda-center` | a CivicPlus `/AgendaCenter` page or its search (product) | the agenda, packet and minutes of every meeting the module lists, year by year, and each item's documents where the agenda was built in the module |
 | `civicclerk` | a CivicClerk portal, `{tenant}.portal.civicclerk.com`, or its API's events address (product) | from the tenant's public API, every event's published files (agenda, packet, minutes, notices) and every agenda item's attachments |
 | `sitemap` | a `Sitemap:` line in `robots.txt` (standard) | every `<loc>` the sitemaps list |
