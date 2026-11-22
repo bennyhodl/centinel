@@ -214,7 +214,7 @@ impl Strategy for CampusSuite {
             let only_stored = stored.iter().filter(|n| !names.contains(*n)).count() as u64;
 
             // Newest upload first; undated after, in the order linked (the sort is stable).
-            documents.sort_by(|a, b| b.uploaded.cmp(&a.uploaded));
+            documents.sort_by_key(|d| std::cmp::Reverse(d.uploaded));
             let total = documents.len() as u64;
             for doc in documents {
                 if pass.full() {
