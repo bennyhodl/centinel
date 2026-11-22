@@ -42,6 +42,7 @@ lever.
 | 7 | Council agendas: OnBase, Legistar, Granicus | robots.txt turned the walk away and the report read "empty"; a strategy's off-host addresses were checked against the seed's rules | **enumerate** and **report** | every vendor that admits only search engines; every strategy whose documents live on another host |
 | 8 | Agenda item attachments: OnBase, Legistar, Granicus | the agreements a council votes on are attached to items, and no source collected one: OnBase never opened an item, Legistar's are on robots-disallowed hosts | **enumerate** | every agenda product: the meeting's PDF names the item, the item holds the document |
 | 9 | CivicPlus Agenda Center (`/AgendaCenter`) | eight box sources reach it and hold only the front door; seven of the eight modules are empty, and the one that is not lists one year per category, with older years behind a POST | **enumerate** | every CivicEngage site: the module is at the same path, and its search is a GET per year |
+| 16 | Procurement: OpenGov, Bonfire, DemandStar, VendorLink, PlanetBids, IonWave, OnBase Public Access, and the governments' own pages | 26 governments and clerks; every vendor platform gates documents behind an account, a bot challenge or `Disallow: /`; the one public system addresses each document by a token that changes per search, and serves scans | **before acquire** — login, challenge, robots, POST; then **identity** and OCR | every procurement vendor; every search whose hits carry no stable address |
 
 **Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
@@ -2586,6 +2587,202 @@ module lists one year at a time and a script fetches the rest.
 
 ---
 
+## 16. Procurement records — where Tampa Bay publishes solicitations, awards and contracts
+
+*Seen 2026-11-22. Plain HTTP requests at about one a second (five at `pcsb.org`, as its
+`Crawl-delay` asks), with Centinel's User-Agent, no account and no login, plus the box's
+`crumbs/*.jsonl` and `log/*` read but not written. About 70 requests in all.*
+
+The question was where the region's solicitations (RFP, ITB, RFQ), addenda, bid
+tabulations, awards and contracts are, and whether any of them can be collected. The box's
+crumbs name the vendors already: 31 links to DemandStar from eleven sources, 22 to
+Hillsborough's Bonfire portal, 11 to OpenGov Procurement from three, 6 to PlanetBids.
+
+### The catalogue
+
+| Government | Where solicitations are | Documents without a login? | robots.txt | How a record is addressed |
+|---|---|---|---|---|
+| Tampa (Purchasing) | OpenGov Procurement, `procurement.opengov.com/portal/cityoftampa` | not to us: Cloudflare challenge, 403 | none: `/robots.txt` answers 200 with the app's HTML shell | `/portal/{slug}/projects/{id}`, `…/document?section=all`; a client-side app |
+| Tampa (Contract Administration) | `tampa.gov/rfq/…`, `tampa.gov/contract-administration/construction-bids/…` | **yes**, on `tampa.gov` | Drupal default; allows these | one Drupal page per solicitation; documents at `/sites/default/files/rfq/{docs,addenda,attached}/…` |
+| Hillsborough County | Bonfire (Euna Procurement), `hillsboroughcounty.bonfirehub.com` | no: registration to download | `Disallow: /` | client-side app |
+| Hillsborough County (contracts) | Term Contract Report PDF, `mediaweb.hillsboroughcounty.org/newsroom/documents/Procurement/` | **yes** | **`Disallow: /`** | an IIS directory listing of three PDFs; the report was replaced 2026-11-20 |
+| Hillsborough Clerk (executed contracts) | OnBase Public Access, `publicaccess.hillsclerk.com/br199/` | **yes** | none (404) | a POSTed search; each hit's document is a GET on a token that changes per search |
+| Pinellas County | OpenGov Procurement, `/portal/pinellasfl` | not to us: Cloudflare | as Tampa | as Tampa |
+| Pinellas County (awards) | `pinellas.gov/awarded-contract-list`, `/awarded-contracts-list` (CCNA) | **yes** | WordPress; `/wp-content/uploads/*` allowed | one page each, linking a dated PDF on the same host |
+| Pinellas Clerk | Bonfire, `mypinellasclerk.bonfirehub.com` | no | `Disallow: /` | — |
+| St. Petersburg | OpenGov, `/portal/stpete` and `/portal/stpete/contracts` | not to us: Cloudflare | as Tampa | `stpete.org/business/procurement/bid_results.php` links OpenGov and holds no documents |
+| Clearwater | OpenGov, `/portal/myclearwater` | not to us: Cloudflare | as Tampa | — |
+| Plant City | OpenGov, `/portal/plantcitygov` | not to us: Cloudflare | as Tampa | — |
+| Pasco County | Bonfire, `pascocountyfl.bonfirehub.com`, since 2022-12-12; BidNet Direct before | no: the county says registration is needed to view and download | Bonfire `Disallow: /`; BidNet allows its public pages | — |
+| Manatee County | its own RFP Post, `public.mymanatee.org/rfp_post/controller`; also DemandStar and BidSync | the county says yes, no registration; **to us, a Cloudflare challenge**, 403, even for `/robots.txt` | unreadable | `controller?view=home&list=…` with a display-tag pager |
+| Largo | PlanetBids, `vendors.planetbids.com/portal/84253` | no: vendor login | `/robots.txt` answers **202 with an empty body**, a WAF | client-side app |
+| Tarpon Springs | Bonfire, `ctsfl.bonfirehub.com` | no | `Disallow: /` | — |
+| Belleair, Dunedin, Kenneth City, Largo, Oldsmar, Pinellas Park, Redington Beach, Redington Shores, Seminole, Temple Terrace, Treasure Island | DemandStar | no: free registration to download, by the governments' own pages | `User-agent: *` and nothing else | `/app/limited/bids/{id}/details` and the old `bid_list.asp?mi=…` both answer a 2,243-byte app shell with no record in it |
+| Hillsborough County Public Schools | VendorLink, `myvendorlink.com/external/bids?a=55` | **no**: the details are public, the documents are not | allows `/`, disallows `/Internal` and AI crawlers by name; `Content-signal: ai-train=no` | an ASP.NET WebForms grid; every row and every document is a `__doPostBack` |
+| Manatee County Schools | VendorLink, `?a=59` | no | as above | as above |
+| Pinellas County Schools | OpenGov, `/portal/pcsb`; intents to award on `pcsb.org` | OpenGov: not to us; `pcsb.org`: yes | `pcsb.org` disallows `/fs/` and allows only `/fs/pages/N` | the intents are `/fs/resource-manager/view/{uuid}`: disallowed |
+| Pasco County Schools | IonWave, `pascok12.ionwave.net`; tabulations on `pasco.k12.fl.us/purchasing/page/board_recommendations/` | IonWave: registration | IonWave `Disallow: /` | the recommendations page linked no file when read |
+
+### What the platforms do to a client that is not a browser
+
+**OpenGov Procurement** is the region's most common platform: six governments (Tampa,
+Pinellas County, Pinellas Schools, St. Petersburg, Clearwater, Plant City). Its project and
+document pages are indexed by search engines, so they are public to a person. To Centinel,
+every portal and document address answered **403 with Cloudflare's "Just a moment…"
+challenge**, and `/robots.txt` answered 200 with the single-page app's HTML (50,246 bytes,
+titled "Page Not Found"), which `Robots::parse` reads as no rules. The fetcher already files
+a 403 as **Blocked**, not Gone, and that is right. Getting past the challenge would mean
+posing as a browser, and that is not done. Nothing to build.
+
+**Manatee's RFP Post** is the county's own system, and the county's page says registration
+is not required. It is behind the same Cloudflare challenge, on `/robots.txt` as well.
+
+**Bonfire and IonWave** serve `Disallow: /` to every crawler: all four Bonfire hosts
+measured, and IonWave. Documents also need a login. Two requests went to these hosts
+before the rules were read (see the running log).
+
+**DemandStar** answers every record address with the same 2,243-byte shell, and the
+records come from an API. Every government's page says downloads need a free account.
+
+**VendorLink** shows the most without a login. The grid lists every solicitation back to
+2020 (HCPS: at least 11 pages of 20). A View postback returns the full detail: scope, dates,
+contacts, questions and answers, and a list of documents with names and types. Pressing a
+document's download postback answers the same page with *"In order to download the
+solicitation document, you must sign in or register online."* So the documents are gated.
+The details are public, but every address in them is a POST in a WebForms session, which
+no `Walk` can make.
+
+### The one public document system: OnBase Public Access
+
+Hyland's **Public Access Viewer** (`_obpa/obpa_app.js`, an Angular app over `api/`) is up
+at two sites in the region, with no login and no robots.txt:
+
+| Host | What its queries hold |
+|---|---|
+| `publicaccess.hillsclerk.com/br199/` | query 199, *PAV - Contract Certified Documents*: Hillsborough's executed agreements, contracts, modifications, work orders and change orders |
+| `tampagov.hylandcloud.com/251publicaccess/` | query 104, *DOC - PAV*: Tampa's CRA resolutions, executive orders, ordinances and resolutions |
+
+How it works, from its own script and config (`obpa-config.json`):
+
+- `GET api/CustomQuery` and `GET api/DocumentType` list the queries and document types.
+- The search is `POST api/CustomQuery/KeywordSearch` with JSON
+  `{QueryID, Keywords, FromDate, ToDate, QueryLimit}`. Hillsborough's config caps
+  `queryLimit` at 300. One search for 2026-11-01 to 2026-11-21 returned 202 documents with
+  `"Truncated": false`: 67 work orders, 51 agreements, 41 contracts, 19 modifications and
+  the rest. Each hit carries 16 columns: board doc number, supplier, bid number, amount,
+  dates and department.
+- A document is `GET api/Document/{ID}/?ViewerMode=PDF&OverlayMode=View`. That served a
+  34-page agreement as `application/pdf`, 3,530,200 bytes.
+
+Three facts stop this from being a strategy today:
+
+1. **The search is a POST.** `Walk` is one paced GET, by design (`strategies::crawl`).
+2. **A document's address changes with every search.** The same search run twice returned
+   202 IDs each time, with **0 in common**. The IDs are encrypted tokens, not document
+   numbers. A token from the first search still served the PDF after the second. So the
+   same document gets a new address every run. That breaks the one rule a Resource rests
+   on: one address per document. The stable name is the board doc number (`26-1129`), and
+   no URL carries it.
+3. **The documents are scans.** `pdffonts` lists no font, and `pdftotext` returns 34 bytes
+   for 34 pages. Collected today, the corpus would gain zero searchable characters,
+   because OCR is still `planned` (`CONTEXT.md`, *Need*).
+
+Only one of the two sightings is procurement. As a product, though, it is two, and Tampa's
+resolutions approve contracts too.
+
+### What is already collected
+
+**Tampa Contract Administration is collected now.** The `tampa` source walks `tampa.gov`'s
+sitemap and the enclosure scan takes the documents: 108 `/rfq/` pages, about 353
+construction-bid pages, and 640 PDFs under `/sites/default/files/rfq/` (300 `attached`, 230
+`docs`, 99 `addenda`, 11 `protected`). One RFQ page,
+`/rfq/26-d-00044-assesment-fire-stattion-6-9-and-10-renovation`, links one addendum and
+five solicitation documents on the same host. No other government's procurement is in the
+store. Hillsborough's 144 matching addresses are policy documents and impact-fee offsets,
+not solicitations. Pinellas County's own site is not a box source at all.
+
+### What the open files hold
+
+| File | Size | Holds |
+|---|---|---|
+| Pinellas *Purchasing Contract Listings* PDF, report date 2026-08-18 | 1,249,441 bytes, 332 pages, text layer | 1,268 contract/vendor records: contract number, title, department, contact, vendor, amount, term |
+| Pinellas *CCNA Contract List* PDF | not fetched | linked from `/awarded-contracts-list` |
+| Hillsborough *Term Contract Report* PDF, replaced 2026-11-20 | 398,460 bytes, 94 pages, text layer | every term contract: agreement number, title, dates, buyer, contract manager, department, vendor, source (ITB, RFP, SS), bid number, amount, balance |
+
+The two county lists are the regional contract database the brief asked about. They are
+lists, not the contracts. The contracts themselves are Hillsborough's BR199 scans above.
+
+### Cost
+
+Measuring: about 70 requests and 9.1 MB, most of it one 3.5 MB contract scan and the 1.2 MB
+Pinellas list.
+
+Collecting what is open and allowed:
+
+| Source | Discover | Collect |
+|---|---|---|
+| `pinellas-contracts` (`links` at the list page) | 1 page | 1 page + 1 PDF (1.2 MB) per change |
+| `pinellas-ccna-contracts` | 1 page | 1 page + 1 PDF |
+| `hillsborough-term-contracts` (`listing`, **needs a robots ruling**) | 1 listing | 3 PDFs, about 2 MB |
+
+All three republish in place, so the value is in the history: each run that finds new
+bytes records a new version of the region's awarded contracts.
+
+### Against the three levers
+
+None of them fails. Every barrier here comes before Centinel holds any bytes: a login, a
+bot challenge, robots.txt, or a POST. The one public system that clears those (OnBase
+Public Access) has an identity problem and an OCR problem, not an extraction problem.
+
+### Strategy: none built
+
+The brief asked for a strategy for the platform that serves the most governments with
+public, no-login documents, if it recurs at two. None does in a form a strategy can collect:
+
+- OpenGov's six are public to people and challenged for us. Building around that is
+  evading a bot wall.
+- DemandStar (12), Bonfire (4), VendorLink (2), PlanetBids (1) and IonWave (1) gate their
+  documents behind a vendor account.
+- OnBase Public Access is public at two sites. Collecting it needs a POST in `Walk`, a
+  Resource whose identity is not its fetch URL, and OCR. Those are design changes, not
+  work inside one strategy.
+
+The design that would make OnBase Public Access collectable, offered for a decision and not
+built: the strategy mints a stable address, `…/br199/api/Document?query=199&doc=26-1129`,
+from the hit's board doc number, the way a feed entry is `<feed>#entry=<id>`. `acquire`
+resolves it through a fresh search for that one document. That puts the POST in acquire,
+not enumerate, and still needs both a POST and an OCR reader. Until OCR exists, it collects
+images.
+
+### Left on the table
+
+- **OnBase Public Access**: the design above.
+- **VendorLink's public details**: scope, dates, contacts and Q&A for every HCPS and
+  Manatee Schools solicitation since 2020, as WebForms postbacks.
+- **Pasco Schools' board recommendations**: tabulations, by the district's account; the
+  page linked no file when read, so they may be loaded by script.
+- **Bid tabulations generally**: every platform that holds them gates or walls them, except
+  Tampa's addenda pages.
+- **Council agendas as the award record**: every award over the threshold goes to a board
+  vote, and entries 7–8 collect those agendas and their item attachments. For OpenGov
+  governments, that may be the only collectable record of an award.
+
+### Running log
+
+- 2026-11-22 — box crumbs read for vendor hosts; robots.txt and one portal page read at
+  each platform; VendorLink's detail and download postbacks pressed once; OnBase Public
+  Access's two GET lists read and one BR199 search run twice; Tampa's procurement coverage
+  counted in the box's log.
+- 2026-11-22 — four requests went to robots-disallowed hosts before their rules were read.
+  The robots fetch and the page fetch were batched in one command:
+  `hillsboroughcounty.bonfirehub.com/portal/?tab=openOpportunities`,
+  `pascok12.ionwave.net/`, and `mediaweb.hillsboroughcounty.org`'s Term Contract Report and
+  its directory. One request each; none repeated.
+- 2026-11-22 — no strategy written; two Pinellas sources ready to add, and one Hillsborough
+  source that needs an `ignore_robots` ruling.
+
+---
+
 ## Recurring shapes
 
 A shape is promoted here when **two** sites show it.
@@ -3060,6 +3257,14 @@ would invent a corpus rather than observe one.
 - **An address with a decorative segment.** The path carries a filename the server ignores,
   so one document has unbounded addresses and Resource identity needs canonicalising.
   (2: OnBase)
+- **Public to a browser, challenged for a client.** The government publishes the document
+  without a login, and a bot challenge answers anything that is not a browser, robots.txt
+  included. It is filed as Blocked, and that is correct; no lever. (16: OpenGov Procurement,
+  six governments; Manatee's RFP Post — **second sighting**; PlanetBids answers `202` with an
+  empty body, a third of the same kind)
+- **A search hit carries no stable address.** Each run's results name documents by a token
+  minted for that search, so the same document is a new Resource every run. (16: OnBase
+  Public Access at the Hillsborough Clerk — 202 hits twice, 0 IDs in common)
 - **The page is a wrapper and the content is one address away.** (`tampa.gov` PDF viewer
   pages — already solved by enclosures; recorded here so the next site of this shape is
   recognised rather than rediscovered)
