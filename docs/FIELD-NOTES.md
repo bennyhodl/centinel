@@ -48,6 +48,7 @@ lever.
 | 10 | CivicClerk (`{tenant}.portal.civicclerk.com`) | the portal is a script with no meeting in it; the meetings are in a public OData API, fifteen to a page, and the JSON's own document links are blob URLs signed for a day | **enumerate** | every CivicClerk tenant: the API is at `{tenant}.api.civicclerk.com/v1`, and the portal's own download routes are stable addresses |
 | 14 | Meeting video: Granicus players and the cities' YouTube channels | the recording is refused (CloudFront 403) but its captions sit beside it at `/videos/{clip}/captions.vtt` — 6,400 hours already transcribed — and a `.vtt` classified `other` and was read by nothing; the box has no channel source and no transcription server | **content kind** and **reader list** | every publisher whose player loads a WebVTT track |
 | 19 | Budgets, ACFRs and codes of ordinances: Tampa Bay's nine governments; Questica OpenBook, OpenGov Stories, Municode | adopted budgets on two vendor platforms no crawl reads; ACFRs on finance pages past the 25-document enclosure cap; every code publisher answers a Cloudflare challenge though robots.txt allows | **enumerate**, and **collect** (the enclosure cap) | every OpenBook and OpenGov Stories client; every finance page that lists its years; every code on Municode, American Legal or eCode360 |
+| 13 | Special districts and authorities: CDDs, CRAs, Port, airports, transit, water, expressway, MPO, regional council | none is a source but two; 14 of 24 sampled CDDs run Campus Suite, whose file lists put 39–262 documents on a page, past the enclosure scan's 25; 10 of those 14 fail TLS on a new Let's Encrypt root; HART fails TLS on CBC-only ciphers; two products and SharePoint disallow the documents in robots.txt | **acquire** (TLS), **enumerate** (listings), and **robots** | every Campus Suite site; every host on Let's Encrypt's Gen Y chain without the cross-sign; every WordPress page listing more than 25 documents |
 
 **Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
@@ -3804,6 +3805,261 @@ centinel source add manatee --site https://www.mymanatee.org/ --match financial-
 
 ---
 
+## 13. Special districts and authorities — the governments that are not a city or a county
+
+*Seen 2026-11-22, with plain GETs at one request a second per host from a workstation, and
+`centinel investigate` (v0.36.0) and `crumbs` on the box. The store was read, not written.*
+
+Tampa Bay's special districts — community development districts (CDDs), community
+redevelopment agencies (CRAs), and the authorities that run the port, the airports, transit,
+water and the expressway — publish their own meetings, and the corpus held almost none of
+it. Of the bodies in scope, two are box sources (`tbrpc`, and Plan Hillsborough as
+`hillsborough-transportation`); three more reach the corpus through a city's or county's
+agenda source (Tampa's CRA in OnBase, Clearwater's CRA board and PIE's governing board in
+Legistar). The corpus links to **no CDD host at all**: of 4,460 crumb hosts, none is a
+district's site.
+
+### Finding the districts
+
+The state's list is the Department of Commerce's official list of special districts
+(`specialdistrictreports.floridajobs.org/OfficialList/CustomList`). It answers 403 with an
+Azure WAF JavaScript challenge, robots.txt included, so it was not read. The Auditor
+General's e-file index (`flauditor.gov/pages/special districts_efiles.html`) lists 1,689
+districts and no county; the FRS's Appendix K, which has the county, never answered (HTTP/2
+`INTERNAL_ERROR`, then a hang over HTTP/1.1). So the districts were found by name — legal
+notices, management firms' agendas, search — and **24 of Hillsborough's roughly hundred CDDs
+were sampled, across every management firm found, and two of Pinellas's three** (Entrada was
+not found). This entry is a sample of the field, not a census of it.
+
+Water Street Tampa's district is not a CDD: it is the **Water Street Tampa Improvement
+District**, created by special act (ch. 2017-206, Laws of Florida), at `wstid.net`.
+
+### The catalogue
+
+`robots` is what the host's robots.txt says for this crawler. `TLS` is the root the served
+chain ends at, when centinel's client refuses it.
+
+**Districts (CDDs and the improvement district)**
+
+| Body | Manager | Site | Platform | robots | TLS | Collected by |
+|---|---|---|---|---|---|---|
+| Water Street Tampa ID | — | `wstid.net` | `_assets` template; sitemap.xml by convention, 8 pages | `Disallow: /_assets/documents/` — **every document** | ok | nothing: pages only, documents need a ruling |
+| South Fork III CDD | Inframark | `southfork3cdd.org` | Campus Suite | 404 | **Root YR** | blocked (TLS) |
+| MTERC CDD | Rizzetta | `mterccdd.org` | Campus Suite | 404 | **Root YR** | blocked (TLS) |
+| Riverbend West CDD | — | `riverbendwestcdd.com` | Campus Suite | 404 | **Root YR** | blocked (TLS) |
+| Reserve at Pradera CDD | — | `reserveatpraderacdd.org` | Campus Suite | 404 | **Root YR** | blocked (TLS) |
+| Cypress Creek CDD | — | `cypresscreekcdd.org` | Campus Suite | 404 | **Root YR** | blocked (TLS) |
+| Waterset South CDD | Rizzetta | `watersetsouthcdd.org` | Campus Suite | 404 | **Root YR** | blocked (TLS) |
+| Highlands CDD | — | `highlandscdd.com` | Campus Suite | 404 | **Root YR** | blocked (TLS) |
+| Cordoba Estates CDD | — | `cordobaestatescdd.com` | Campus Suite | 404 | **Root YR** | blocked (TLS) |
+| Shell Point CDD | — | `shellpointcdd.com` | Campus Suite | 404 | **Root YR** | blocked (TLS) |
+| Westchase CDD | — | `westchasecdd.us` | Campus Suite | 404 | **Root YR** | blocked (TLS) |
+| Panther Trace II CDD | — | `panthertracecdd2.net` | Campus Suite, behind Cloudflare | Cloudflare's comment header, no rules | ok | `campus-suite` |
+| Highland Trails CDD | — | `highlandtrailscdd.org` | Campus Suite, behind Cloudflare | Cloudflare's comment header, no rules | ok | `campus-suite` |
+| Heritage Harbor CDD | — | `heritageharborcdd.org` | Campus Suite, behind Cloudflare | Cloudflare's comment header, no rules | ok | `campus-suite` |
+| K-Bar Ranch II CDD | — | `kbarranchiicdd.org` | Campus Suite, behind Cloudflare | `Allow: /`, content signals, AI crawlers named and disallowed | ok | `campus-suite` |
+| Wynnmere East CDD | Rizzetta (was PFM) | `wynnmereeastcdd.com` | WordPress, `wp-sitemap.xml` | wp-admin only | ok | `sitemap`; `/documents` lists 75, enclosure keeps 25 |
+| Newport Tampa Bay CDD | PFM | `newporttampabaycdd.com` (http) | WordPress, sitemap | wp-admin only | — | `sitemap` |
+| Villages of Westport CDD | Vesta (proposed) | `villagesofwestportcdd.com` | WordPress, `wp-sitemap.xml` | wp-admin, wpforms | ok | `sitemap` |
+| Ballentrae Hillsborough CDD | GMS | `ballentraehillsboroughcdd.org` | CommunityXS (Next.js) | `Disallow: /documents/*/download` — **every document** | ok | pages only; 494 documents disallowed |
+| Park Creek CDD | GMS-Tampa | `parkcreekcdd.org` | CommunityXS | the same | ok | pages only |
+| Waterleaf CDD | GMS-Tampa | `waterleafcdd.org` | CommunityXS | the same | ok | pages only |
+| Cory Lakes CDD | GMS | `corylakescdd.net` | `_assets` template (`documents.php`) | `Disallow: /_assets/documents/` — **every document** | ok | pages only |
+| Tampa Palms OST CDD | — | `tampapalmscdd.net` (http) | hand-built HTML | allows | — | `links` |
+| S. Bay CDD | — | `sbaycdd.org` | — | — | — | did not answer, http or https |
+| Clearwater Cay CDD (Pinellas) | — | `clearwatercaycdd.com` | WordPress, one post per meeting | 404 | ok | `sitemap` (441 by convention) |
+| Eastlake Oaks CDD (Pinellas) | — | `eastlakeoakscdd.com` | hand-built HTML, a page per year | 404 | ok | `links` |
+
+**CRAs.** A CRA's board is its city commission or county board, so its meetings ride on
+that government's agenda platform (entry 7), not on a site of its own.
+
+| CRA | Where its meetings are | Collected by |
+|---|---|---|
+| Tampa | OnBase: "CRA Regular", "CRA Special" (7 of 76 meetings, May–July 2026) | `tampa-agendas` |
+| Clearwater | Legistar body "Community Redevelopment Agency"; the CRA's own site `myclearwatercra.com` (Granicus OpenCities, 11 pages) holds no agendas | `clearwater-legistar`; the site is not a source |
+| St. Petersburg | inside the council's agenda (convenes as the CRA mid-meeting); files on `cms5.revize.com/revize/stpete/`, whose robots.txt admits only `*.pdf`, `*.doc(x)`, `*.ppt(x)`; 739 crumb links | **nothing**: off-host from `stpete.org` |
+| Lealman (Pinellas County) | the BCC | `pinellas-legistar` (not checked by meeting) |
+| Largo, Dunedin, Tarpon Springs, Oldsmar, Pinellas Park, Gulfport, Plant City, Temple Terrace | the city commission's platform (entry 7: CivicWeb, Granicus, CivicClerk, Document Center) | as entry 7 left them; not rechecked here |
+
+**Authorities**
+
+| Body | Site | Meetings published on | robots | Collected by |
+|---|---|---|---|---|
+| Port Tampa Bay | `porttb.com` (WordPress, sitemap) | **BoardBook Premier**, `meetings.boardbook.org/Public/Organization/1448`: 22 meetings, each `Public/Agenda/1448?meeting=N` linking one `DownloadAgenda` packet | site: wp paths; BoardBook: 404 | nothing — `links` from the organization page is scoped to `/Public/Organization/` and keeps only the seed |
+| Hillsborough County Aviation Authority (TPA) | `tampaairport.com` (Drupal) | its own page; minutes under `/sites/default/files/YYYY-MM/` | Drupal default | nothing. From the box `investigate` reads a sitemap (500+ by convention); from a workstation every page answers 403 |
+| St. Pete–Clearwater airport (PIE) | `fly2pie.com` | a county department; its governing body is the BCC | 403, robots.txt included, from both | the BCC by `pinellas-legistar`; the site is blocked |
+| HART | `gohart.org` (SharePoint 2013) | `Pages/AboutUS-PublicMeetings.aspx`, packets under `/Board PDFs/` | `_layouts`, `_vti_bin`, `_catalogs` | **blocked (TLS)**: only CBC cipher suites |
+| PSTA | `psta.net` (WordPress, sitemap, 410) | Granicus `psta.granicus.com`, view 4: 489 addresses | Granicus: `Disallow: /` | site: nothing yet; meetings need a ruling |
+| Tampa Bay Water | `tampabaywater.org` (WordPress) | Granicus `tampabaywater.granicus.com`, view 1: 129 addresses; older years as PDFs on the site | site: none; Granicus: `Disallow: /` | nothing. The site's sitemap does not parse ("unexpected XML declaration at 2:1") |
+| THEA (expressway) | `tampa-xway.com` (WordPress, Yoast) | its own page: 32 PDFs under `wp-content/uploads` | empty `Disallow:` | nothing; `sitemap` would, but the page's 32 is past 25 |
+| Forward Pinellas (MPO) | `forwardpinellas.org` (WordPress, Yoast) | WordPress Download Manager: `document-portal/<slug>/?wpdmdl=ID&refresh=…&filename=X.pdf` | `/?s=`, calendar variants | nothing; and the `.pdf` is only in the query, so no enclosure scan would take it |
+| Plan Hillsborough (MPO/TPO, Planning Commission) | `planhillsborough.org` | SharePoint sharing links, `planhillsborough.sharepoint.com/:b:/…`, 22 on the agendas page | SharePoint: `Disallow: /` | `hillsborough-transportation` (pages); the documents, nothing |
+| Tampa Bay Regional Planning Council | `tbrpc.org` | SharePoint folders, `tampabayplanning.sharepoint.com/:f:/s/Public/…`, 151 on the library page | site: empty `Disallow:` and a stray `Crawl-delay: 10`; SharePoint: `Disallow: /` | `tbrpc` (pages); the documents, nothing |
+
+### Fault 1 — the newest Let's Encrypt root, and an error that does not name it
+
+`investigate https://www.southfork3cdd.org/` on the box: `robots.txt unreachable (error
+sending request for url …)`, the seed the same, the sitemap the same, and `addresses: 1`. The
+server answers a browser. The chain it serves is the leaf and **YR2**, issued by **ISRG Root
+YR** — Let's Encrypt's Gen Y root — and nothing that links Root YR to ISRG Root X1:
+
+```text
+0 s:CN=www.southfork3cdd.org   i:C=US, O=Let's Encrypt, CN=YR2
+1 s:C=US, O=Let's Encrypt, CN=YR2   i:C=US, O=ISRG, CN=Root YR
+```
+
+`webpki-roots` 1.0.12, which reqwest's `rustls-tls` compiles in, holds ISRG Root X1 and X2
+and not Root YR; neither does the box's OpenSSL store (`curl` there fails the same way). A
+browser follows the leaf's AIA address (`http://yr2.i.lencr.org/`) to fetch what is missing;
+rustls does not fetch. **10 of the 14 Campus Suite districts serve this chain**; the four
+that do not sit behind Cloudflare, which serves its own certificate. None of the authority
+sites does — yet. This is the chain Let's Encrypt is moving its subscribers to, so it will
+reach sites beyond these.
+
+**HART** fails the same way for another reason: `www.gohart.org` negotiates TLS 1.2 with
+`ECDHE-RSA-AES256-SHA384` and refuses every GCM and ChaCha20 suite. rustls implements no CBC
+suite. OpenSSL verifies the chain (GoDaddy G2).
+
+Both reach the operator as `error sending request for url`, the outermost layer of the error.
+The cause — `UnknownIssuer`, or no shared cipher — is in the error's source chain and is not
+printed. *The pipeline measures the fault and does not report it* (Recurring shapes), once
+more.
+
+**The lever** is not a strategy. It is a decision about trust roots: add ISRG Root YR to the
+client's roots, take roots from the platform verifier, or wait for `webpki-roots` to carry
+it. And separately, print the error's source chain. Not built here.
+
+### Fault 2 — a file list is a listing, and the enclosure scan keeps 25 from a page
+
+A Campus Suite district publishes through the product's file manager:
+`/files/documents/<folder>/<name>.pdf` on its own host, listed by a `FileList` widget that
+renders every folder inline, oldest first, each file an anchor wrapping its title and an
+`uploaded October 8, 2026 10:26 AM` line. No Campus Suite site serves a sitemap; robots.txt
+is 404, Cloudflare's comment header with no rules, or Cloudflare's managed `Allow: /`. So `sitemap` gives way to `links`, which walks the pages
+and names no document, and the enclosure scan takes at most `MAX_PER_PAGE` = 25 from each
+page, in page order.
+
+| | South Fork III | K-Bar Ranch II |
+|---|---|---|
+| pages one click from the front door (calendar left out) | 17 | 17 |
+| documents on `/documents` | 102 | 187 |
+| documents on `/meetings` | 71 | 157 |
+| distinct documents across every page | 109 | 189 |
+| what enclosures would keep from `/documents` | the first 25: 2021–2022 agendas | the first 25 |
+
+Across the 14 sites, `/documents` lists **1,893** files (39 to 262 a site), and a walk with
+enclosures keeps the oldest 25 to 50 of each — none of 2026. The calendar module shows the
+latest five meetings, each with its agenda attached on `campussuite-storage.s3.amazonaws.com`;
+at seven districts all 27 of those were copies, by name, of files under `/files/`.
+
+The same cap meets WordPress: Wynnmere East's `/documents` lists 75 PDFs, Newport Tampa
+Bay's front door 144, Villages of Westport's front door 102, THEA's meeting page 32. Those are
+plain pages, not a product, and want the framework answer, not a strategy.
+
+**Built: `campus-suite`.** Recognised by `Campussuite.Widgets.run(` — on all 14 Campus Suite
+front doors and on none of the other ten. It walks the site's pages as `links` does, minus
+the calendar (`/calendar` links the next month forever), and keeps every document the pages
+link under `/files/` on the site's host as an address, newest upload first; undated inline
+links follow in the order found. It keeps none of the storage copies, counts them, and warns
+for any whose name matches no kept file. One request per page: 17 at each district measured.
+It does not fix Fault 1: ten of the fourteen still cannot be reached.
+
+### Fault 3 — the documents are where robots.txt says no
+
+Three systems publish the pages and forbid the documents:
+
+- **CommunityXS** (GMS's district sites; three sightings): every document is
+  `/documents/<id>/download`, served `application/pdf` with a `Content-Disposition` name,
+  and robots.txt says `Disallow: /documents/*/download`. Ballentrae's walk on the box
+  counted 494 disallowed against 80 pages kept.
+- **The `_assets` template** (Water Street Tampa ID, Cory Lakes; two): documents at
+  `/_assets/documents/<folder>/<name>.pdf?v=…`, and robots.txt is exactly
+  `Disallow: /_assets/documents/`. (Wrathell Hunt's River Hall and WildBlue, outside the
+  bay, serve the same template.)
+- **SharePoint Online** (Plan Hillsborough, TBRPC; two): `User-Agent: *` / `Disallow: /`,
+  and the links are sharing links to folders a script renders.
+
+So Water Street's own district — the reason this entry started — has every agenda, minutes
+and budget behind a `Disallow`. `--ignore-robots` is the operator's ruling to make; no
+strategy is written for any of the three. A CommunityXS strategy would read the ids off the
+page instead of fetching each to learn it is a PDF, which is worth building only once the
+ruling is made.
+
+### Smaller, recorded not ranked
+
+- **A sitemap with a blank line before its XML declaration does not parse.** Tampa Bay
+  Water: `not valid XML: unexpected XML declaration at 2:1`, so the run falls to `links`.
+  One sighting.
+- **BoardBook Premier is not collectable by `links`.** The organization page is
+  `/Public/Organization/1448` and its meetings are `/Public/Agenda/1448?meeting=N`, outside
+  the scope the seed's path draws. One sighting in the bay (BoardBook is a Texas-heavy
+  product); a strategy would be the organization page's 22 meetings and one
+  `DownloadAgenda` per meeting, with no request between.
+- **WordPress Download Manager puts the file name in the query.** Forward Pinellas:
+  `…/document-portal/<slug>/?wpdmdl=65348&refresh=<token>&filename=April-2026-CAC-Meeting-Agenda.pdf`.
+  The path names no document, and `refresh` changes per view, so `wpdmdl` alone would be
+  the address. One sighting.
+- **A WAF that answers by network, not by agent.** `tampaairport.com` answers 403 to every
+  page from a workstation and serves its sitemap to the box, with the same User-Agent.
+  `fly2pie.com` answers 403 to both, robots.txt included.
+- **Cloudflare's managed robots.txt** (K-Bar Ranch II) carries `Content-Signal: search=yes, ai-train=no,
+  use=reference` for `User-agent: *` and disallows named AI crawlers. Nothing reads content
+  signals; for an archive that serves search, `search=yes` is the one that applies.
+
+### Against the three levers
+
+None. Fault 1 is acquisition below the content kind: nothing was fetched to classify.
+Fault 2 is enumeration, entry 8's shape again — a document one level down from a listing
+— answered by reading the listing. Fault 3 is the publisher's own rule.
+
+### Cost
+
+| Walk | Discover requests | Documents |
+|---|---|---|
+| `campus-suite`, one district | about 17 | 108 to 262 at the four reachable today; 720 together |
+| `campus-suite`, all 14 sampled, once TLS is fixed | about 240 | about 1,900 |
+| `granicus`, Tampa Bay Water and PSTA, with a ruling | 2, plus the agenda manager's probe | 129 and 489 addresses |
+
+### Left on the table
+
+- The other ~75 Hillsborough CDDs. The sample says most are Campus Suite; the Commerce list
+  would name them, and it is behind a JavaScript challenge.
+- Every Campus Suite site Root YR blocks, until the trust-root decision.
+- The robots rulings: Water Street Tampa ID, Cory Lakes, the three GMS CommunityXS sites,
+  Tampa Bay Water's and PSTA's Granicus, and the two SharePoint libraries.
+- St. Petersburg's council and CRA agendas on `cms5.revize.com`. Revize's file hosts appear
+  under Largo, Treasure Island and South Pasadena in the crumbs too; a city-council
+  question, not this entry's.
+- Port Tampa Bay's BoardBook; Forward Pinellas's download manager.
+- `PreviousVersions`-like history: a Campus Suite file list says "updated …" beside
+  "uploaded …", and a replaced file keeps its address.
+
+### Running log
+
+- 2026-11-22 — box sources and crumbs read: no CDD host among 4,460; PSTA, Forward Pinellas,
+  Tampa Bay Water, HART, TPA, PIE and the Clearwater CRA appear only as crumbs.
+- 2026-11-22 — Commerce's official list: Azure WAF JS challenge, not read. Auditor General
+  index read (1,689 districts, no county). FRS Appendix K: no answer.
+- 2026-11-22 — Water Street's district is the WSTID (special act), not a CDD; its robots.txt
+  disallows every document.
+- 2026-11-22 — 24 Hillsborough and 2 Pinellas districts fingerprinted: 14 Campus Suite, 4
+  WordPress, 3 CommunityXS, 2 `_assets`, 2 hand-built, 1 no answer.
+- 2026-11-22 — Campus Suite on the box: `error sending request` on every request. Chain ends
+  at ISRG Root YR; not in `webpki-roots` 1.0.12 nor the box's store. 10 of 14.
+- 2026-11-22 — Campus Suite file lists measured: 39–262 documents on `/documents`, oldest
+  first; enclosures keep 25. Storage copies matched by name at seven districts: 27 of 27.
+- 2026-11-22 — authorities fingerprinted and investigated on the box: BoardBook (Port),
+  Granicus with `Disallow: /` (PSTA, Tampa Bay Water), SharePoint (Plan Hillsborough, TBRPC),
+  HART CBC-only TLS, PIE 403, TPA 403 from a workstation only.
+- 2026-11-22 — one request broke the measuring rules: a `curl` to
+  `ballentraehillsboroughcdd.org/documents/9596/download`, made by hand outside the
+  robots-checking script, in the same command that first printed the host's robots.txt —
+  which disallows that path. It answered `application/pdf`. No other disallowed path was
+  fetched.
+- 2026-11-22 — `campus-suite` written; unbuilt and untested here.
+
+---
+
 ## Recurring shapes
 
 A shape is promoted here when **two** sites show it.
@@ -4216,6 +4472,21 @@ not be crawled — there is no Resource set behind a query box, and generating c
 would invent a corpus rather than observe one.
 
 ### Candidates, at one sighting each
+
+- **A page that lists more than 25 documents loses the rest.** The enclosure cap is right for
+  a wrapper and wrong for a listing, and it keeps the first 25 in page order — the oldest,
+  when the list is chronological. (13: every Campus Suite file list, 39–262 a page — answered
+  for that product by `campus-suite`; Wynnmere East 75, Newport Tampa Bay 144, Villages of
+  Westport 102, THEA 32 on WordPress pages — **past two sightings**, and no product to key on.)
+- **A TLS failure reaches the operator as "error sending request".** Two causes behind the
+  one message: a chain to ISRG Root YR, which the compiled-in roots lack (13: ten Campus
+  Suite districts), and a server offering only CBC suites (13: HART). The cause is in the
+  error's source chain and is not printed.
+- **robots.txt admits the pages and forbids the documents.** (13: CommunityXS at three GMS
+  districts, `Disallow: /documents/*/download`; the `_assets` template at Water Street Tampa
+  ID and Cory Lakes, `Disallow: /_assets/documents/`; SharePoint Online at Plan Hillsborough
+  and TBRPC.) The ruling exists (`ignore_robots`); what is missing is a report that says a
+  source's documents, as against its pages, were the part refused.
 
 - **A CMS "external link" page redirects to a vendor, and the vendor's refusal is counted
   as the city's.** Two sites already (6: `dunedin.gov`, `myclearwater.com`), so this one is
