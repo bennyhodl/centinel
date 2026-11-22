@@ -102,7 +102,7 @@ This is content-kind detection one level up: magic bytes are a list of *(signatu
 kind)* where each element answers for itself, and a strategy registry is magic bytes for
 websites. Registration is link-time, so there is nowhere to forget to add one.
 
-Nine strategies are registered today:
+Eleven strategies are registered today:
 
 | Strategy | Keys on | Addresses |
 |---|---|---|
@@ -111,6 +111,8 @@ Nine strategies are registered today:
 | `granicus` | a Granicus `ViewPublisher.php` page or agenda feed (product) | the `AgendaViewer.php` and `MinutesViewer.php` documents it lists, every recorded meeting's caption track (`/videos/{clip}/captions.vtt`), and each item's documents where the agenda was built in Granicus |
 | `agenda-center` | a CivicPlus `/AgendaCenter` page or its search (product) | the agenda, packet and minutes of every meeting the module lists, year by year, and each item's documents where the agenda was built in the module |
 | `civicclerk` | a CivicClerk portal, `{tenant}.portal.civicclerk.com`, or its API's events address (product) | from the tenant's public API, every event's published files (agenda, packet, minutes, notices) and every agenda item's attachments |
+| `openbook` | a Questica OpenBook front door, or the API address of one of its books (product) | each budget book as the one PDF the product publishes of it |
+| `opengov-stories` | an OpenGov Stories book's table of contents (product) | every published page the contents name, by its `data-public-url` |
 | `sitemap` | a `Sitemap:` line in `robots.txt` (standard) | every `<loc>` the sitemaps list |
 | `listing` | an IIS or Apache/nginx directory index (server default) | the files under the seed's directory |
 | `feed` | an RSS, Atom or iCalendar seed (standard) | the feed itself; its entries are split at [acquisition](acquire.md#feeds) |
@@ -125,6 +127,15 @@ CivicClerk API events address with an OData `$filter`, or an Agenda Center searc
 that range, and the application's front door covers everything. Agenda Center lists one
 year per category on a page, so its walk asks one search per year. OnBase's search answers at most a hundred meetings and says so, so a
 capped date range is halved until every answer is whole.
+
+Two more products publish budget books. OpenBook draws a book from a JSON API and
+publishes it whole as one PDF; the walk reads the front door's cards, or the one book a seed
+names by its API address (`…/api/digitalbudgetbookviewer/versionIds/FY26AdoptedBudget`), and
+keeps each book's PDF. The book's own link, `#/budget-book/…`, cannot be a seed: the fragment
+never reaches the server or the strategy. OpenGov Stories
+serves a book's table of contents at an editor's preview address whose entries keep each
+page's public address in `data-public-url`, not in `href`; the walk is the seed, and costs no
+request.
 
 ### When `robots.txt` says no
 
