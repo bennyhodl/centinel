@@ -47,6 +47,7 @@ lever.
 | 15 | Accela Citizen Access (`aca-prod.accela.com/{AGENCY}`): Tampa, Hillsborough, Pinellas | records are a GET and an ArcGIS layer lists their addresses; every attached document is a WebForms postback inside a session that names the record, and has no GET address at all | **acquire** — and the fetch layer, which cannot POST or hold a cookie | every agency on Accela Citizen Access; every WebForms page whose files are `__doPostBack` links |
 | 10 | CivicClerk (`{tenant}.portal.civicclerk.com`) | the portal is a script with no meeting in it; the meetings are in a public OData API, fifteen to a page, and the JSON's own document links are blob URLs signed for a day | **enumerate** | every CivicClerk tenant: the API is at `{tenant}.api.civicclerk.com/v1`, and the portal's own download routes are stable addresses |
 | 14 | Meeting video: Granicus players and the cities' YouTube channels | the recording is refused (CloudFront 403) but its captions sit beside it at `/videos/{clip}/captions.vtt` — 6,400 hours already transcribed — and a `.vtt` classified `other` and was read by nothing; the box has no channel source and no transcription server | **content kind** and **reader list** | every publisher whose player loads a WebVTT track |
+| 19 | Budgets, ACFRs and codes of ordinances: Tampa Bay's nine governments; Questica OpenBook, OpenGov Stories, Municode | adopted budgets on two vendor platforms no crawl reads; ACFRs on finance pages past the 25-document enclosure cap; every code publisher answers a Cloudflare challenge though robots.txt allows | **enumerate**, and **collect** (the enclosure cap) | every OpenBook and OpenGov Stories client; every finance page that lists its years; every code on Municode, American Legal or eCode360 |
 
 **Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
@@ -3548,6 +3549,261 @@ captions need none of this.
 
 ---
 
+## 19. Budgets, ACFRs and codes of ordinances — what governments publish about their money and their law
+
+*Seen 2026-11-22, with the box's `log/*/` and `crumbs/*.jsonl` read (not written), one
+`centinel search` on the box, and plain HTTP requests at one a second or the host's
+`Crawl-delay` from a laptop and, for the code publishers, once from the box.*
+
+Two things every government publishes about itself and the corpus may lack: its **adopted
+budget and annual comprehensive financial report (ACFR)**, and its **code of ordinances**.
+
+### Part A — coverage on the box
+
+Counted from every observed address whose name says budget, ACFR, CAFR or comprehensive
+annual financial report, and is a PDF or spreadsheet; at these governments every one was
+derived. "No source" means no box source covers the government's site at all.
+
+| Government | Adopted budgets | ACFRs | Verdict |
+|---|---|---|---|
+| Tampa | budget books FY2007–FY2017; FY2027 recommended package. FY2018–FY2026 adopted books are only on OpenGov Stories | FY2016–FY2021, FY2024, FY2025 (FY2022, FY2023 not seen) | partly |
+| Hillsborough County | FY2014–FY2027 adopted, recommended, CIP, in-brief: 86 PDFs on `assets.contentstack.io` | **none.** The Clerk publishes FY2019–FY2025 at `hillsclerk.com`; the box holds the page and none of the files | budgets covered, ACFRs missing |
+| Pinellas County | no source. FY2027 adopted as a PDF on `pinellas.gov`; FY2025 adopted and the capital plans only on Questica OpenBook | the Clerk, `mypinellasclerk.gov`, answers a Cloudflare challenge | missing |
+| St. Petersburg | FY2022–FY2025 adopted, FY2026 30-day adopted | 2022–2025 | covered |
+| Clearwater | FY2025–26 operating and capital; budget brief; CRA budgets | 2025 | partly; older years not measured |
+| Largo | FY2018 only. FY2025–FY2027 adopted, proposed, tentative and CIPs are on Questica OpenBook | FY2019–FY2025 linked from `largo.com/document_center`, none collected | missing |
+| Pasco County | no source. FY2022–FY2026 adopted PDFs on `pascocountyfl.gov`; FY2026–2030 CIP only on OpenGov Stories | not on the Clerk's Financial Reports page; not found | missing |
+| Manatee County | no source. FY2016–FY2026 adopted books named in `mymanatee.org`'s sitemap | the Clerk, `manateeclerk.com/departments/finance/financial-reporting/`; not measured further | missing |
+| Hillsborough schools | no source; an Apptegy site | Apptegy | missing |
+| Pinellas schools | no source; Finalsite, and robots.txt disallows `/fs/`, where Finalsite keeps files | — | missing |
+| Pasco schools | no source; `pascoschools.org` timed out | — | not measured |
+| Manatee schools | no source; Apptegy. ACFR 2023–24 and 2024–25 are in the folder page's script payload, on `files-backend.assets.thrillshare.com` | Apptegy | missing |
+
+One search proves the counts are text and not titles: `annual comprehensive financial report
+statement of net position`, `--source tampa`, answered five passages from the FY2025 ACFR's
+statements of net position and fiduciary net position (BM25, 22 s).
+
+### Why each gap is a gap
+
+**A budget platform the crawl cannot see.** The crumbs name four: ClearGov at Clearwater,
+Dunedin, Gulfport and Plant City; Questica OpenBook at Largo (433 links); OpenGov Stories at
+Tampa (35); OpenGov Transparency at St. Pete. Each is a script on another host, so it is a
+crumb and never a page.
+
+- **ClearGov** is not a gap. All four ClearGov cities post the same adopted budget as a PDF on
+  their own site, and the box holds it: Dunedin FY2025–FY2027, Gulfport FY2026, Plant City
+  FY2020–FY2023, Clearwater FY2025–26. The book itself is an AngularJS shell over a 2.4 MB
+  panel API (`/api/budgetBook/{id}/panels/all`), and the documents product (`*-cleardoc`) a
+  second script app. Nothing to build.
+- **Questica OpenBook** is a gap at two governments, and is built: `openbook` (below).
+- **OpenGov Stories** is a gap at two governments, and is built: `opengov-stories` (below).
+  Tampa posts no adopted budget PDF after FY2017; its budget pages link the books. Pasco posts
+  its adopted budgets as PDFs, and its FY2026–2030 capital plan only as a book.
+
+**A page that lists more documents than a page may enclose.** The enclosure scan keeps 25
+documents a page (`enclosure::MAX_PER_PAGE`), because "a page carrying more than this is a
+listing, and a listing's documents belong to `enumerate`". `links` does not follow a link to
+a document, because "a PDF linked from a page is found again by the enclosure scan". Each
+defers to the other, so a listing's 26th document is collected by neither. Three sightings,
+all of them a government's own finance documents:
+
+| Page | Documents linked | What the box holds | Lost |
+|---|---|---|---|
+| `largo.com/document_center/index.php` (walked by `links`) | 165 PDFs | 10 | ACFRs FY2019–FY2025, at positions 112–120 |
+| `pascocountyfl.gov/…/office_of_management_and_budget/index.php` | 38 documents | no source yet | adopted FY2022–FY2024, at positions 27, 28, 33 |
+| `hillsclerk.com/records-and-reports/financial-reports-county` | 99 links | the page, no file | ACFRs FY2019–FY2025, and the links name no extension |
+
+The lever is a framework decision, not a strategy, and it changes what every source collects,
+so it is proposed here and not built: **a page's documents past the cap are addresses**, and
+go back to the pass's frontier, bounded by the source's address ceiling, rather than being
+counted and dropped.
+
+**A document link with no extension.** Hillsborough's Clerk runs Liferay, and links each file
+as `/documents/d/guest/hillsborough-fy24_acfr_final-pdf?download=true`. The enclosure scan
+decides a document by its extension, so none is a candidate even below the cap. One sighting.
+
+**No source at all.** Pinellas, Pasco and Manatee counties and all four school districts. For
+the three counties, an existing strategy collects most of it (commands below).
+
+### Questica OpenBook (`openbook`)
+
+`pinellascounty.openbook.questica.com` and `largo.openbook.questica.com` serve one shell,
+titled `OpenBook`, that draws everything from a JSON API on the same host. `robots.txt`
+redirects to `/error` (no rules). A book is at `#/budget-book/{key}`; the same route as a path
+answers the error page.
+
+| Request | Answer |
+|---|---|
+| `api/home/cards` | the front door's cards. `cardType: "BudgetBook"` cards carry the book's **version** id as `id` (Largo 11 of 13 cards, Pinellas 3 of 18) |
+| `api/digitalbudgetbookviewer/versionIds/FY27AdoptedBudget` | `"395fc3b1-e3fe-4419-aa94-1008fbee725a"`, the version for a custom name |
+| `…/versionIds/{a card's id}` | the nil GUID: the route takes names, not ids |
+| `api/digitalbudgetbookviewer/versions/{version id}` | the book: `name`, contents, `showPDFLink`, `publishedPdfHref` |
+| `…/versions/FY27AdoptedBudget` | 400, `"The specified budget book version could not be found."` |
+| `publishedPdfHref` | `opendatastorageprodus.blob.core.windows.net/{client}-pdf-{version}/{name}.pdf`: `application/pdf`, ranges honoured; that host's `robots.txt` answers 400 |
+
+All fifteen published PDFs, measured: Largo's eleven, 12.7 MB to 198 MB (the four CIPs are
+184–198 MB); Pinellas's four, 27 MB (FY2027 adopted), 60 MB (FY2025 adopted), 319 MB and 366 MB
+(the FY2026–31 and FY2025–30 six-year capital plans). Total 1.81 GB.
+
+**Pinellas hides half its books.** The FY2026 and FY2027 adopted books and both newer capital
+plans have their cards turned off and are linked only from `pinellas.gov` by custom name. Four
+of Pinellas's eight books publish no PDF (`showPDFLink: false`), FY2026 adopted among them.
+One page of that book, `pages/{id}`, answered `publishedMarkup: " "`: its text is somewhere
+this did not find.
+
+**Why the book seed is the API address.** A seed of `…/#/budget-book/FY26-31_CIP` arrives at
+the strategy as the front door: reqwest records a response's URL from tower-http's
+`RequestUri`, an `http::Uri`, which has no fragment. So a book is seeded by its viewer address,
+`…/api/digitalbudgetbookviewer/versionIds/FY26-31_CIP`, and that answer is the seed, so the
+walk does not ask for it again.
+
+**What `openbook` does.** Front door: the cards, then each book's version, keeping each
+`publishedPdfHref` where `showPDFLink` is true, and naming in a warning each book that
+publishes none. A book seed: the version, then the same. Every address is a document.
+
+**Cost.** Largo's front door: 1 + 11 + 1 (the blob host's `robots.txt`) = 13 discover
+requests; collect is 11 PDFs, 1.04 GB. Pinellas's front door keeps one PDF, the FY2025–30 CIP,
+and the default 256 MiB body ceiling refuses it; its FY2025 adopted book (60 MB) is a book seed.
+
+### OpenGov Stories (`opengov-stories`)
+
+Entry 1's finding holds three months on, at both clients. A book's contents page,
+`stories.opengov.com/{client}/{uuid}/published/{slug}?currentPageId=TOC`, still says "Preview
+link expired" and still names every page in `data-public-url`:
+
+| Book | Entries |
+|---|---|
+| Tampa FY2027 Online Budget (`mHPI_6Pa9`, entry 1's) | 75 |
+| Tampa FY2026 Operating & Capital Budget (`4rwPtXRZO`) | 74 |
+| Tampa FY2025 Online Budget (`qrLf8u3HE`) | 74 |
+| Tampa FY2024 Online Budget (`ib-4Hif6A`) | 74 |
+| Pasco Budget Book FY 2026 (`eBgL6jMBk`) | 105 |
+| Pasco Capital Budget Book FY 2026 (`4EufQHtfa`) | 16 |
+
+A public page is server-rendered text: Pasco's "Introduction & Overview", 20 KB, 2,660
+characters of narrative, no `data-public-url`, a few neighbour links. The contents page's only
+other link is `https://opengov.com`. `robots.txt` is a 404. Tampa's FY2023 link
+(`/tampa/published/sJ8L0XY6r`) is a public page, not a contents page, so it is not a seed.
+
+**What `opengov-stories` does.** Recognises a page whose anchors carry class `toc-story-link`
+and a `data-public-url`, and keeps each such address on the same host, in order. No request:
+the seed is the walk. The pages are pages, so acquisition still scans them for documents.
+
+### Part B — codes of ordinances
+
+**Where they are.** The crumbs name the publishers. Municode (`library.municode.com`) is
+linked from 30 of 43 box sources: Belleair Beach 880 links, Indian Rocks Beach 1,316, Plant
+City 1,044, Belleair Bluffs 1,030, St. Pete 810 (and 119 to `www.municode.com`), Treasure
+Island 551, Gulfport 596, Largo 506, and Tampa, Hillsborough and Pinellas County among them.
+eCode360 (General Code) at South Pasadena, 490 links. American Legal (`codelibrary.amlegal.com`):
+no box source links it.
+
+**Measured, and refused.** Every publisher's host answers a Cloudflare managed challenge to
+Centinel's User-Agent:
+
+| Address | Answer |
+|---|---|
+| `library.municode.com/fl/tampa/codes/code_of_ordinances` | 403, `cf-mitigated: challenge`, "Just a moment..." |
+| `api.municode.com/Clients/name?clientName=tampa&stateAbbr=fl` | 403, challenge |
+| `api.municode.com/`, `library.municode.com/sitemap.xml`, `www.municode.com/`, `municode.com/` | 403, challenge |
+| the same two from the box's address | 403, challenge |
+| the same two from Python's `urllib` instead of curl | 403, challenge |
+| `codelibrary.amlegal.com/codes/pompanobeach/latest/overview`, `…/api/client-regions/` | 403, challenge |
+| `ecode360.com/SO1390` | 403, challenge |
+
+Yet each `robots.txt` answers 200 and admits every crawler not named: `User-agent: *`,
+`Allow: /`, under Cloudflare's managed block, which disallows named AI crawlers by name and
+sets `Content-Signal: search=yes,ai-train=no,use=reference`. American Legal adds
+`Crawl-delay: 5` for a list of SEO bots; eCode360 disallows `/print`, `/output`,
+`/documents`, `/search` and others, and bingbot outright. So the rules let Centinel in and the
+edge does not.
+
+**Not built.** A strategy that cannot fetch its first answer would be a confident
+half-answer, and getting past a bot challenge is evasion, not collection. What would unblock
+it, for Ben to choose: ask the publishers to allow Centinel's User-Agent (all three declare
+`search=yes`), or a city's own copy of its code. Not measured here: the JSON routes behind
+the challenge, which keys decide a section, and whether full-text or PDF downloads exist.
+
+### Against the three levers
+
+None for the strategies built: enumeration, both of them, of PDFs and HTML that read. The
+listing-cap gap is the **enclosure** lever: the documents are one address away, and the cap
+drops them.
+
+### Ready to run
+
+Needs this pull request's build for the two new strategies; the rest run on v0.37.0. A source
+id is a suggestion.
+
+```sh
+# Questica OpenBook
+centinel source add largo-openbook --site https://largo.openbook.questica.com/ --strategy openbook
+centinel source add pinellas-budget-fy2025 --site https://pinellascounty.openbook.questica.com/api/digitalbudgetbookviewer/versionIds/FY25Adopted --strategy openbook
+
+# OpenGov Stories
+centinel source add tampa-budget-fy2027 --site 'https://stories.opengov.com/tampa/79cac2e9-83c9-4198-b664-6903cc9d9338/published/mHPI_6Pa9?currentPageId=TOC' --strategy opengov-stories
+centinel source add tampa-budget-fy2026 --site 'https://stories.opengov.com/tampa/f9ac8a22-1024-454b-bb87-f5f980e98715/published/4rwPtXRZO?currentPageId=TOC' --strategy opengov-stories
+centinel source add tampa-budget-fy2025 --site 'https://stories.opengov.com/tampa/7e25e05b-cbac-4b7f-ab7f-3497a3ac5138/published/qrLf8u3HE?currentPageId=TOC' --strategy opengov-stories
+centinel source add tampa-budget-fy2024 --site 'https://stories.opengov.com/tampa/ff0baa7f-cfd2-4e5f-9094-189c84b0ca98/published/ib-4Hif6A?currentPageId=TOC' --strategy opengov-stories
+centinel source add pasco-cip-fy2026 --site 'https://stories.opengov.com/pascocountyfl/12ec6ff1-6593-4332-9f8f-144328e0ead4/published/4EufQHtfa?currentPageId=TOC' --strategy opengov-stories
+
+# Existing strategies
+centinel source add pinellas --site https://pinellas.gov/
+centinel source add pasco --site https://www.pascocountyfl.gov/
+centinel source add manatee --site https://www.mymanatee.org/ --match financial-management-department
+```
+
+- `pinellas` is a WordPress sitemap of 11,279 addresses; the FY2027 adopted book is enclosed by
+  `adopted-fy27-annual-operating-and-capital-budget-print/`.
+- `pasco` has no `robots.txt` and a 500-address sitemap that names the budget office's page;
+  FY2026 adopted is enclosed, and FY2022–FY2024 fall past the 25-document cap until it is
+  decided.
+- `manatee`'s sitemap is 23,167 addresses, 269 under the finance department, which names the
+  eleven adopted books directly; `--match` keeps the walk to them.
+- Pinellas's FY2027 adopted book is on `pinellas.gov` (21.8 MB) and on OpenBook (26.9 MB, a
+  different file); only the first is in these commands.
+
+### Left on the table
+
+- The listing cap (above): Largo's and Hillsborough's ACFRs, Pasco's older adopted budgets.
+- Extensionless document links (Liferay `/documents/d/guest/…`).
+- OpenBook books without a PDF: Pinellas FY2026 adopted, FY2027–32 CIP, FY2025 adopted "V1",
+  FY2025–30 proposed CIP.
+- The two Pinellas capital plans over the 256 MiB ceiling, a second sighting of *a real report
+  bigger than the ceiling*.
+- Apptegy, at two school districts: files on `files-backend.assets.thrillshare.com`, named only
+  in each folder page's script payload (Manatee's ACFR folder page is 7.3 MB). The documents
+  module's enumeration is not measured.
+- The Pinellas Clerk (challenged), the Pasco and Manatee Clerks' ACFRs, Pasco schools.
+- OpenGov Stories' charts: the figures are iframes from `{client}.opengov.com/transparency`.
+- Codes of ordinances, all of them, until a publisher lets Centinel in.
+
+### Running log
+
+- 2026-11-22 — box read: 43 sources in `log/`, 139,062 observations. Budget and ACFR
+  documents counted per source; Pinellas, Pasco, Manatee and the school districts have no
+  source. One search confirms Tampa's ACFR text is indexed.
+- 2026-11-22 — crumbs read: Municode at 30 sources, eCode360 at one, American Legal at none;
+  ClearGov at four, Questica at Largo, OpenGov at Tampa and St. Pete.
+- 2026-11-22 — Municode, American Legal and eCode360: every host challenges, from two
+  addresses and two HTTP stacks; robots.txt allows. Part B stops at measurement.
+- 2026-11-22 — ClearGov: AngularJS shell and panel API; every ClearGov city posts the PDF too. No gap.
+- 2026-11-22 — Tampa's budget pages link only OpenGov books for FY2024–FY2027; the FY2026 contents
+  page names 74 pages by `data-public-url`. Entry 1 holds.
+- 2026-11-22 — Pinellas: WordPress sitemap; FY2027 adopted as a PDF; FY2025 and FY2026 on
+  Questica. Questica's viewer API measured: cards → version → `publishedPdfHref`.
+- 2026-11-22 — survey of Pasco, Manatee, both clerks and the school districts started.
+- 2026-11-22 — Pasco's budget office links OpenGov Stories: second sighting. `opengov-stories`
+  and `openbook` written.
+- 2026-11-22 — every Largo and Pinellas book resolved and its PDF sized: 15 PDFs, 1.81 GB; two over
+  the ceiling. A seed's fragment never reaches a strategy, so a book seed is its API address.
+- 2026-11-22 — Hillsborough's ACFRs are on the Clerk's page as extensionless Liferay links; Largo's
+  are at positions 112–120 of 165 on a page the box walked; Pasco's older adopted budgets past
+  position 25. The listing cap, three sightings; proposed, not built.
+- 2026-11-22 — Manatee: eleven adopted books in the sitemap. Apptegy at two school districts.
+
+---
+
 ## Recurring shapes
 
 A shape is promoted here when **two** sites show it.
@@ -3969,7 +4225,8 @@ would invent a corpus rather than observe one.
 - **One file can be most of a run's memory.** An 830 MB slideshow took the run from 63 MB to
   2.25 GB; a body must be refused before it is held, not after. (6: Hillsborough — fixed)
 - **A real report bigger than the ceiling.** 464 MiB of flooding assessment; the ceiling is
-  a memory guard, so what it refuses needs a way to be taken on purpose. (6: Hillsborough)
+  a memory guard, so what it refuses needs a way to be taken on purpose. (6: Hillsborough;
+  19: Pinellas County's two six-year capital plans, 319 and 366 MB — **second sighting**)
 - **A relative `Sitemap:` line is never resolved, and the site is total loss.** Legal, common,
   and it takes 579 addresses to zero while blaming another host. (5: `buffalony.gov`)
 - **A capped walk over a single sitemap reports itself complete.** The cap warning needs a
@@ -4040,3 +4297,15 @@ would invent a corpus rather than observe one.
 - **The page is a wrapper and the content is one address away.** (`tampa.gov` PDF viewer
   pages — already solved by enclosures; recorded here so the next site of this shape is
   recognised rather than rediscovered)
+- **A page lists more documents than a page may enclose, and nothing takes the rest.** The
+  enclosure scan keeps 25 a page because a listing belongs to `enumerate`; `links` follows no
+  document because the enclosure scan will. (19: Largo's document center, 165 PDFs, ACFRs at
+  112–120; Pasco's budget office, 38, older adopted budgets at 27–33; Hillsborough's Clerk, 99
+  — **three sightings**, all finance pages. A framework decision, proposed in entry 19)
+- **A document link names no extension.** Liferay's `/documents/d/guest/{slug}?download=true`
+  is never an enclosure candidate. (19: `hillsclerk.com`, seven ACFRs)
+- **A school district's files are in a script payload on another host.** Apptegy names each
+  file on `files-backend.assets.thrillshare.com` only inside the page's Nuxt state. (19:
+  Manatee and Hillsborough schools — two sightings, enumeration unmeasured)
+- **The rules admit Centinel and the edge does not.** `robots.txt` allows `*`, and every page
+  answers a Cloudflare challenge. (19: Municode, American Legal, eCode360; the Pinellas Clerk)
