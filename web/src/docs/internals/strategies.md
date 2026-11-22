@@ -102,7 +102,7 @@ This is content-kind detection one level up: magic bytes are a list of *(signatu
 kind)* where each element answers for itself, and a strategy registry is magic bytes for
 websites. Registration is link-time, so there is nowhere to forget to add one.
 
-Twelve strategies are registered today:
+Thirteen strategies are registered today:
 
 | Strategy | Keys on | Addresses |
 |---|---|---|
@@ -114,6 +114,7 @@ Twelve strategies are registered today:
 | `openbook` | a Questica OpenBook front door, or the API address of one of its books (product) | each budget book as the one PDF the product publishes of it |
 | `opengov-stories` | an OpenGov Stories book's table of contents (product) | every published page the contents name, by its `data-public-url` |
 | `campus-suite` | a page assembled by `Campussuite.Widgets` (product) | the site's pages, and every document they link under `/files/` on the site's host, newest upload first |
+| `wmis` | a query on the Southwest Florida Water Management District's ERP map layer, whose features link WMIS (product) | every document on file for each environmental resource permit application the query names, newest application first |
 | `sitemap` | a `Sitemap:` line in `robots.txt` (standard) | every `<loc>` the sitemaps list |
 | `listing` | an IIS or Apache/nginx directory index (server default) | the files under the seed's directory |
 | `feed` | an RSS, Atom or iCalendar seed (standard) | the feed itself; its entries are split at [acquisition](acquire.md#feeds) |
@@ -128,6 +129,11 @@ CivicClerk API events address with an OData `$filter`, or an Agenda Center searc
 that range, and the application's front door covers everything. Agenda Center lists one
 year per category on a page, so its walk asks one search per year. OnBase's search answers at most a hundred meetings and says so, so a
 capped date range is halved until every answer is whole.
+
+`wmis` is bounded the same way, by its seed: a query on the District's ERP map layer, whose
+`where` (a date, fixed or `CURRENT_DATE - 30`) and `geometry` (a county's outline) are kept,
+while the walk sets the order, newest application first, and the paging. The layer names
+each application's WMIS page, and the page lists every document on file.
 
 Two more products publish budget books. OpenBook draws a book from a JSON API and
 publishes it whole as one PDF; the walk reads the front door's cards, or the one book a seed

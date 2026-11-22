@@ -85,6 +85,7 @@ pub mod opengov_stories;
 pub mod scope;
 pub mod sitemap;
 pub mod window;
+pub mod wmis;
 
 use super::Recognition;
 
