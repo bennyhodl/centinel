@@ -49,6 +49,7 @@ lever.
 | 14 | Meeting video: Granicus players and the cities' YouTube channels | the recording is refused (CloudFront 403) but its captions sit beside it at `/videos/{clip}/captions.vtt` — 6,400 hours already transcribed — and a `.vtt` classified `other` and was read by nothing; the box has no channel source and no transcription server | **content kind** and **reader list** | every publisher whose player loads a WebVTT track |
 | 19 | Budgets, ACFRs and codes of ordinances: Tampa Bay's nine governments; Questica OpenBook, OpenGov Stories, Municode | adopted budgets on two vendor platforms no crawl reads; ACFRs on finance pages past the 25-document enclosure cap; every code publisher answers a Cloudflare challenge though robots.txt allows | **enumerate**, and **collect** (the enclosure cap) | every OpenBook and OpenGov Stories client; every finance page that lists its years; every code on Municode, American Legal or eCode360 |
 | 13 | Special districts and authorities: CDDs, CRAs, Port, airports, transit, water, expressway, MPO, regional council | none is a source but two; 14 of 24 sampled CDDs run Campus Suite, whose file lists put 39–262 documents on a page, past the enclosure scan's 25; 10 of those 14 fail TLS on a new Let's Encrypt root; HART fails TLS on CBC-only ciphers; two products and SharePoint disallow the documents in robots.txt | **acquire** (TLS), **enumerate** (listings), and **robots** | every Campus Suite site; every host on Let's Encrypt's Gen Y chain without the cross-sign; every WordPress page listing more than 25 documents |
+| 18 | Southwest Florida WMD permits (WMIS) and governing board | the permit search is a postback and every document opens at a new random address per request; the main site, board packets included, answers a Cloudflare challenge | **enumerate** | every district whose GIS layer names each permit's record page (SFWMD too); every site that serves a file through a one-time redirect |
 
 **Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
@@ -4057,6 +4058,192 @@ Fault 2 is enumeration, entry 8's shape again — a document one level down from
   which disallows that path. It answered `application/pdf`. No other disallowed path was
   fetched.
 - 2026-11-22 — `campus-suite` written; unbuilt and untested here.
+
+---
+
+## 18. Southwest Florida Water Management District — permits and their documents
+
+*Seen 2026-11-22, with plain HTTP requests at one a second or slower against
+`www25.swfwmd.state.fl.us` (the District's map services), `www18` and `www38` (WMIS), and
+`geoweb.sfwmd.gov` (South Florida WMD), and the box's crumbs. No login; the store was read,
+not written.*
+
+The SWFWMD well-permitting agreement on a Manatee County agenda (entry 8) pointed here.
+Environmental resource permits (ERP) and water use permits (WUP) are where a development's
+wetland and water impacts are decided, and the District files every document of every
+application — the application, plans, drainage calculations, staff review, requests for
+more information, the permit — in its Water Management Information System (WMIS). No box
+source reaches it: the crumbs name `www.swfwmd.state.fl.us` 90 times, all news, water
+restrictions and conservation pages, and no permit.
+
+### What is public, and from where
+
+| Host | What | robots.txt |
+|---|---|---|
+| `www.swfwmd.state.fl.us` | the District's Drupal site: news, the governing board's meeting packets | **unreadable**: every address, `robots.txt` and PDFs included, answers 403 `cf-mitigated: challenge` |
+| `www25.swfwmd.state.fl.us` | ArcGIS map services, among them every permit as a feature | 404 |
+| `www18`, `www38.swfwmd.state.fl.us` | WMIS: one page per ERP application, one per WUP | 404 at both |
+| `swfwmd.granicus.com` | Granicus, presumably the board's video | `User-agent: *` / `Disallow: /`; not fetched |
+
+WMIS's own permit search (`erp/erp/search/ERPSearch.aspx`) is an ASP.NET WebForms
+postback. The map service is not. `…/arcgis10/rest/services/Permits/Permits/MapServer`
+holds well construction permits (0), ERP (3), WUP applications (4) and WUP issued (5), and
+says it is *"only available from 6 A.M. to 10 P.M. daily"* and that public use is allowed.
+Each ERP feature carries `ERP_EXT_URL`, the application's WMIS page
+(`https://www38.swfwmd.state.fl.us/Erp/ERP/Entry/ERP.aspx?id=1002708`); each WUP feature
+`WUP_EXT_URL` (`…/Support/WUP/WupSimple.aspx?st=8833&rev=11`). A query is a GET, pages with
+`resultOffset`, answers at most 1,000 features and says `exceededTransferLimit` while more
+remain. An unrunnable query answers **200** with `{"error":{"code":400,…}}`, not a status.
+
+The layer: 108,497 ERP features, 106,072 of them project activity areas and 2,425 total land
+areas (an application is drawn as one or both). By status: 84,851 approved, 21,175 deleted,
+1,457 incomplete, 1,010 denied. There is **no county field**; `PERMIT_DEPARTMENT_NAME` is the
+service office (Tampa 36,314, Brooksville 28,752, Sarasota 23,939, Bartow 19,486), which does
+not follow county lines. ERP moved to a new system (Appian) for new filings on 2026-07-07,
+and the layer still holds them: the newest application was received 2026-11-20, and its
+WMIS page (1002708, Manatee) lists its three documents.
+
+### Which keys decide a document
+
+An application's WMIS page is 590 KB to 1 MB, about 440 KB of it `__VIEWSTATE`. Its
+Documents tab is pre-rendered in the page, one grid, unpaged — 88 rows on application
+732499. Each row's view icon carries an opaque token in its `onclick`:
+
+```text
+javascript:ViewDocument([{"Key":"BigSix","Value":"p2avH3Qj9SNwKvPrJjl3UlOnHUFJ…"},{"Key":"MimeType",…}])
+```
+
+and the page's script opens `/Erp/Common/Controls/ExportDocument.aspx?OpaqueId=TOKEN`.
+Measured on the permit letter of application 921913 (191,777 bytes):
+
+| Request | Answer |
+|---|---|
+| `ExportDocument.aspx?OpaqueId=TOKEN`, on `www18` or `www38`, http or https | 302 to `/Erp/Export/ViewDoc/<8 random letters>.pdf`, a new name on every request |
+| the same, following the redirect, twice | 200 `application/pdf`, the same bytes both times |
+| a `ViewDoc/…pdf` a search engine indexed | 404 |
+| the parameter as `opaqueid` | the same redirect |
+| the token's last character `I`→`J` (padding bits) | the same document |
+| one character changed mid-token | 500, "Padding is invalid and cannot be removed." |
+| `OpaqueId=` empty | 500 |
+| a water use permit's token through `/Erp/…` or `/Support/…` | the same bytes |
+
+The token is an encrypted id, deterministic: application 732499 listed the same 88 tokens
+from `www18` at 16:15 and `www38` at 16:32. So the token is the address, and the `ViewDoc`
+name is not — collecting through it would store one document under a new address on every
+pass. No cookie, no referer. An unknown application id answers 500 ("There is no row at
+position 0"); no id at all, 500.
+
+### Water use permits: the documents are behind a postback
+
+`WupSimple.aspx?st=…&rev=…` (121 KB) serves the permit's general tab. Its Documents tab is
+`__doPostBack('UltraWebTabWupInfo','4')`: a POST of the page's 30 hidden fields (30 KB of
+viewstate) answers 379 KB with the grid — 89 documents on permit 8833, the same token scheme.
+No session cookie was sent and none was needed. Collecting them needs a walk that can post a
+form; `Walk` is one paced GET.
+
+### What `wmis` does
+
+Seeded with a query on the ERP layer. The query's `where` and `geometry` are the bound; the
+walk sets `outFields`, the order (`APPLICATION_RECEIVED_DT DESC, ERP_APPLICATION_ID DESC`),
+`returnGeometry=false` and the paging. It reads every page, then opens each application's
+WMIS page newest first, each once, and keeps each token as
+`https://www38.swfwmd.state.fl.us/Erp/Common/Controls/ExportDocument.aspx?OpaqueId=TOKEN`, on
+the host `ERP_EXT_URL` names. It does not keep the WMIS page: two thirds viewstate, and what
+it says is in the application and the permit. Water use permits are not collected.
+
+### How a walk is bounded
+
+The layer has no county, so a county is a geometry. One seven-point polygon around
+Hillsborough, Pinellas, Pasco and Manatee (west of −82.05 north of 27.646, west of −81.56
+south of it, down to 27.21):
+
+```text
+geometry={"rings":[[[-82.95,28.48],[-82.05,28.48],[-82.05,27.646],[-81.56,27.646],[-81.56,27.21],[-82.95,27.21],[-82.95,28.48]]]}
+&geometryType=esriGeometryPolygon&inSR=4326&spatialRel=esriSpatialRelIntersects
+```
+
+Of 28 applications sampled across its last year, 26 named one of the four counties as their
+own (9 Hillsborough, 7 Manatee, 5 Pinellas, 5 Pasco); one was Sarasota and one DeSoto, both
+on the polygon's south edge. Per-county envelopes overlap each other along Old Tampa Bay and
+over-reach more: of 17 sampled from a Hillsborough envelope reaching 27.57, four were Manatee
+or Pinellas.
+
+The date is the `where`, and the layer takes a rolling one: `APPLICATION_RECEIVED_DT >=
+CURRENT_DATE - 30` answered 122, against 127 for the fixed date thirty days back. So a
+scheduled source stays thirty days wide as the weeks pass, and a backfill is a fixed date.
+
+### Cost, at one request a second
+
+Applications in the polygon, deduplicated (1,958 features in the last year were 1,623
+applications); documents at the sample's 13.7 an application:
+
+| Walk | Discover requests | Documents to collect |
+|---|---|---|
+| Last 30 days | 1 query + about 105 pages = **about 106**, 2 minutes | about 1,400, 24 minutes |
+| Last year | 2 queries + 1,623 pages = **1,625**, 27 minutes | about 22,000, 6 hours |
+| Last five years | 9 + about 7,300 = **about 7,300**, 2 hours | about 100,000, 28 hours (an estimate) |
+| Everything (66,145 features) | 67 + about 55,000, 15 hours | not estimated: older applications were not sampled |
+
+A scheduled `centinel run` discovers with the default 200 requests, which reaches the newest
+198 applications — about two months here. The thirty-day source fits inside it.
+
+### The governing board
+
+Its meeting packets are PDFs on the Drupal site
+(`/sites/default/files/calendar/March%20Web%20Notebook_2.pdf`), and the notices say agendas
+go up a week ahead under "Meetings & Events Calendar". The whole site answers a Cloudflare
+managed challenge to a plain client, so every address there collects as a 403 — Blocked, not
+Gone. `swfwmd.granicus.com` exists and refuses every crawler; the `granicus` strategy would
+read it only under an `ignore_robots` ruling, and without one its view ids were not looked
+up. So nothing for the board is collectable today, and nothing was built.
+
+### A second sighting: South Florida WMD
+
+`geoweb.sfwmd.gov/agsext1/rest/services/Regulation_ApplicationPermits/Environmental_Resource_Permit/FeatureServer`
+(no robots.txt): twelve application layers by type. A feature carries `COUNTY`, and `LINK`
+to the application in SFWMD's own ePermitting (`my.sfwmd.gov/ePermitting/SearchPermit.do?…`),
+a different product from WMIS. So the shape that recurs is **a district's GIS layer that
+names each permit's record page** — two sightings, and the cheap way into both permit
+systems. What sits behind the link is per product: WMIS's grid here, ePermitting there, not
+measured. St. Johns River WMD was not checked.
+
+### Against the three levers
+
+None. Enumeration: the documents are PDFs that read, and the only obstacles are a
+postback search (bypassed through the map service) and a document address that changes on
+every request (bypassed through the token that produces it).
+
+### Left on the table
+
+- **Water use permit documents**, one POST per permit. The smallest design is a second method
+  on `Walk` (a paced, budgeted POST of a form), written out in the pull request.
+- The WMIS page's own record (status, county, conditions tab, dates): not kept, and the
+  layer's attributes say most of it; worth a look at what extract makes of the page.
+- WUP record pages (`WupSimple.aspx`), GET and 121 KB: permitted quantities and withdrawal
+  points.
+- Well construction permits (layer 0), self certifications (1), exemptions (2).
+- The governing board, if the Cloudflare challenge ever lets a plain client through, or under
+  a ruling on Granicus.
+- SFWMD's ePermitting behind `LINK`.
+
+### Running log
+
+- 2026-11-22 16:13 — robots.txt: main site challenged (403), `www18`/`www25`/`www38` 404,
+  `swfwmd.granicus.com` disallows all. Box crumbs: 90 links to the main site, none to WMIS.
+- 2026-11-22 16:15 — ERP page 732499 (995 KB, 88 documents); the grid carries `BigSix`
+  tokens; `ExportDocument.aspx?OpaqueId=` redirects to a fresh `ViewDoc/*.pdf` each time,
+  same bytes; tampered token 500.
+- 2026-11-22 16:20 — map service `Permits/MapServer` layers 3 and 5 carry `ERP_EXT_URL` /
+  `WUP_EXT_URL`; no county field; 108,497 ERP features; Appian-era filings still listed.
+- 2026-11-22 16:22 — WUP Documents tab is a postback; one POST, no cookie, 89 documents,
+  same tokens, served through `/Erp/` too.
+- 2026-11-22 16:25 — Hillsborough envelope: 644 applications in a year, 17.3 documents a
+  page over 17, 4 of 17 outside the county.
+- 2026-11-22 16:30 — SFWMD's ERP feature service: `COUNTY` and `LINK` per feature, a
+  second sighting of the GIS-to-record shape.
+- 2026-11-22 16:35 — Tampa Bay polygon: 1,623 applications in a year, 26 of 28 inside the
+  four counties, 13.7 documents each; rolling `CURRENT_DATE - 30` accepted. `wmis` written;
+  unbuilt and untested here.
 
 ---
 
