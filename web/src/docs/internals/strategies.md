@@ -102,7 +102,7 @@ This is content-kind detection one level up: magic bytes are a list of *(signatu
 kind)* where each element answers for itself, and a strategy registry is magic bytes for
 websites. Registration is link-time, so there is nowhere to forget to add one.
 
-Thirteen strategies are registered today:
+Fourteen strategies are registered today:
 
 | Strategy | Keys on | Addresses |
 |---|---|---|
@@ -115,6 +115,7 @@ Thirteen strategies are registered today:
 | `opengov-stories` | an OpenGov Stories book's table of contents (product) | every published page the contents name, by its `data-public-url` |
 | `campus-suite` | a page assembled by `Campussuite.Widgets` (product) | the site's pages, and every document they link under `/files/` on the site's host, newest upload first |
 | `wmis` | a query on the Southwest Florida Water Management District's ERP map layer, whose features link WMIS (product) | every document on file for each environmental resource permit application the query names, newest application first |
+| `voterfocus` | a county's VoterFocus Campaign Finance listing, `candidate_pr.php?c=<county>` (product) | every filer's page in every reporting group, and for each filer that reported, every campaign treasurer's report page and the CSV of all its transactions; the filed PDFs are taken from those pages as enclosures |
 | `sitemap` | a `Sitemap:` line in `robots.txt` (standard) | every `<loc>` the sitemaps list |
 | `listing` | an IIS or Apache/nginx directory index (server default) | the files under the seed's directory |
 | `feed` | an RSS, Atom or iCalendar seed (standard) | the feed itself; its entries are split at [acquisition](acquire.md#feeds) |
@@ -150,6 +151,11 @@ first — past the 25 the enclosure scan keeps from a page — so it walks the s
 does and keeps every listed document as an address of its own. It does not follow the
 calendar, which links the next month forever; the calendar's attachments are copies, on
 another host, of files the site lists, and a walk warns about any that are not.
+
+`voterfocus` collects campaign finance rather than meetings: the reports a county Supervisor
+of Elections publishes for local candidates and committees. A county's page covers every
+reporting group, and `…&el=<group>` covers one. The reports name contributors with their
+street addresses, and the recognition says so before anything is collected.
 
 ### When `robots.txt` says no
 
