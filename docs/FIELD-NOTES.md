@@ -46,6 +46,7 @@ lever.
 | 17 | Public-records request portals: GovQA, JustFOIA, NextRequest | 25 Tampa Bay agencies run a request portal; GovQA's robots.txt turns away every crawler at 11 of 12 hosts, JustFOIA's request list answers a Cloudflare challenge at every host tried, and the two NextRequest portals publish 12 requests and no documents | **enumerate**, closed by the vendor | every GovQA and JustFOIA client; NextRequest only where the agency turns publishing on |
 | 15 | Accela Citizen Access (`aca-prod.accela.com/{AGENCY}`): Tampa, Hillsborough, Pinellas | records are a GET and an ArcGIS layer lists their addresses; every attached document is a WebForms postback inside a session that names the record, and has no GET address at all | **acquire** — and the fetch layer, which cannot POST or hold a cookie | every agency on Accela Citizen Access; every WebForms page whose files are `__doPostBack` links |
 | 10 | CivicClerk (`{tenant}.portal.civicclerk.com`) | the portal is a script with no meeting in it; the meetings are in a public OData API, fifteen to a page, and the JSON's own document links are blob URLs signed for a day | **enumerate** | every CivicClerk tenant: the API is at `{tenant}.api.civicclerk.com/v1`, and the portal's own download routes are stable addresses |
+| 14 | Meeting video: Granicus players and the cities' YouTube channels | the recording is refused (CloudFront 403) but its captions sit beside it at `/videos/{clip}/captions.vtt` — 6,400 hours already transcribed — and a `.vtt` classified `other` and was read by nothing; the box has no channel source and no transcription server | **content kind** and **reader list** | every publisher whose player loads a WebVTT track |
 
 **Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
@@ -3349,6 +3350,204 @@ that calls an API, and the API's own links expire.
 
 ---
 
+## 14. Meeting video — Granicus players and the cities' YouTube channels
+
+*Seen 2026-11-22, with plain HTTP requests at one a second against seven Granicus clients
+and YouTube, and `doctor`, `status` and the crumbs on the box (v0.36.0), read and not
+written. Granicus was measured with `ignore_robots`, on Ben's ruling for these pages.*
+
+Council and commission meetings are the largest public record Tampa Bay produces that the
+corpus holds none of. The box has **no channel source**, **no audio blob** among its 110,366
+addresses, and no transcription server: `doctor` reports the `transcription` gate blocked,
+`[inference.transcribe]` unset, so the default (`whisper-large-v3-turbo` at
+`http://127.0.0.1:8080/v1`) is asked and nothing answers. Its `yt-dlp` is 95 days old.
+
+### Granicus: where a recording is, and where its words are
+
+Seven clients publish video, and every one links its player the same way: not an `href`, an
+`onclick`, `window.open('//{client}.granicus.com/MediaPlayer.php?view_id=V&clip_id=C',
+'player', …)`. `MediaPlayer.php` answers 302 to `player/clip/C?view_id=V&redirect=true`, a
+76–100 KB page holding
+
+```html
+<source type="application/x-mpegurl" src="https://archive-stream.granicus.com/OnDemand/_definst_/mp4:archive/clearwater/clearwater_<uuid>.mp4/playlist.m3u8">
+<track kind="captions" srclang="en" label="On" src="/videos/5317/captions.vtt">
+…
+<a href="https://archive-video.granicus.com/clearwater/clearwater_<uuid>.mp4">Video Download</a>
+```
+
+**The recording is refused.** Every route to it ends at the same MP4: the player's
+download link; `DownloadFile.php?view_id=V&clip_id=C` (302 to it); the publisher's
+`ViewPublisherRSS.php?mode=podcast` enclosures, which are that `DownloadFile.php`; and
+`ASX.php`, an ASX playlist naming `rtmp://…/clearwater_<uuid>.mp4`. St. Petersburg and
+Hillsborough also link the MP4 straight off the publisher (2,440 and 1,274 links).
+`archive-video.granicus.com` answered a `HEAD`, a `Range: bytes=0-4095` GET, and the same
+GET with the player as `Referer` with **403 from CloudFront, "Request blocked"**; the HLS
+playlist on `archive-stream.granicus.com` and `archive-video`'s own `robots.txt` answered
+the same. Whether another client is let through was not tried: this crawler does not change
+the name it gives. The `<uuid>` is in no other address, so even an allowed fetch costs the
+player page first.
+
+**The captions are not.** `/videos/{clip}/captions.vtt` is on the client's own host,
+answers `text/vtt;charset=UTF-8`, and holds what a captioner typed: speaker turns
+(`>>Mayor Cretekos: like to call to order…`, Clearwater 2014), `[ GAVEL ]`, Gulfport's
+tracks opening `[Captioner present]`. Clearwater's City Council of November 5, 2026 is
+5,336 cues, 302,028 bytes, from `00:02:10` to `02:59:56`.
+
+| Query | Answer |
+|---|---|
+| `/videos/5317/captions.vtt` | the track, 302,028 bytes |
+| `/videos/5317/captions.vtt?view_id=1` | the same bytes |
+| `/videos/5338/captions.vtt` (a clip nobody captioned) | 200 `text/vtt`, 8 bytes: `WEBVTT` and two line breaks |
+| `/videos/99999999/captions.vtt` | 500, a Slim framework error page |
+
+So the clip id is the address. The player's searchable-transcript tab (`GUB-91023` in its
+CSS) is not wired up on any page fetched; the captions file is the transcript.
+
+Per client, ten clips sampled evenly across each publisher's clip ids (Clearwater also the
+newest council meeting and a 2014 one):
+
+| Client | Publisher | Recordings | Hours listed | Captioned | Bytes a captioned track |
+|---|---|---|---|---|---|
+| Clearwater | `clearwater.granicus.com`, view 50 | 2,374 | 3,956 | 4 of 10; council back to 2014, boards in the sample from 2021 | 18 K–302 K |
+| Gulfport | `gulfport.granicus.com`, view 18 | 173 | 356 | 8 of 10 | 72 K–377 K |
+| Dunedin | `dunedin.granicus.com`, view 6 | 1,498 | 2,963 | 8 of 10, back to clip 21 (June 21, 2007) | 10 K–966 K |
+| Hillsborough County | `hillsboroughcounty.granicus.com`, view 1 | 1,274 | 2,410 | 9 of 10 | 22 K–425 K |
+| St. Petersburg | `stpete.granicus.com`, view 14 | 2,440 | 6,472 | 0 of 5 | — |
+| Safety Harbor | `safetyharbor.granicus.com`, view 6 | 619 | 1,059 | 0 of 5 | — |
+| Treasure Island | `treasureislandfl.granicus.com`, view 1 | 816 | 1,041 | 0 of 5 | — |
+
+"Hours listed" is the publisher's Duration column summed. Dunedin's newest clip and
+Hillsborough's newest had empty tracks while the next ones were captioned, so a fresh clip
+may be captioned later.
+
+### What Centinel made of a track — and what it does now
+
+Collected as a document, a track would have been stored and read by nothing:
+`text/vtt` had no row in the content-kind table, `WEBVTT` was no magic anything knew, and
+`.vtt` no extension, so it classified `other`, and `other` has no reader. The YouTube
+caption reader parses `json3` only.
+
+Built, in this entry's pull request:
+
+- **`webvtt` is a content kind**, with a row (`vtt`, `text/vtt`) and a magic (`WEBVTT`).
+  Not `captions`: a server calls the two `text/vtt` and `application/json`, they are named
+  `.vtt` and `.json`, each has its own parser, and the reader that spoke is the record's
+  account of who wrote the words. One kind would have recorded a publisher's captioner as
+  YouTube's speech recognition.
+- **A `webvtt` reader** beside the `json3` one, through the same extractor and the same
+  timestamped markdown a Whisper transcript gets. An eight-byte track is unextractable with
+  its reason. Pipeline version 5.
+- **`granicus` keeps one track per recorded clip**, read off the publisher without a
+  request, after the viewers. Uncaptioned tracks are kept too: which clips have captions
+  cannot be told from the publisher, and a track is one collect request, once, where a
+  probe would spend the discovery budget on every run. Transcription is not involved.
+
+### Against the three levers
+
+**Content kind** and **reader list**, both: the document was one address away and plainly
+named, and the pipeline would have fetched it, called it `other`, and read nothing — the
+silent shape entry 4 found for `.csv`. Not enumerate: the address set is on the publisher.
+
+### YouTube: each government's channel
+
+From the box's crumbs (the channels each city's own pages link, with the count of links),
+and for Pasco, Manatee, Hernando and Clearwater, the county or city home page. Each channel
+page was fetched once to read its canonical id and handle, and its `/streams` tab (else
+`/videos`) for the newest titles.
+
+| Government | Channel | Id | Newest, 2026-11-22 |
+|---|---|---|---|
+| Hillsborough County (meetings) | `@HillsboroughCountyMeetings` | `UCvdfJe4Q4u9YudwH89yJkDQ` | BOCC organizational meeting, 11.17.26 |
+| Hillsborough County | `@hillsboroughfl` | `UC-ltrT7T2PDRdEEoU5NtOEg` | events and storm updates, not meetings |
+| Pinellas County | `@PinellasGov` | `UCXRyq4zJBFhs8zpTiIGQL5Q` | streams end 2024; meetings are on Legistar |
+| Pasco County | `@PascoCountyGovernment` | `UCvlOC1VxmqM8_CiIYqe8iyA` | BOCC 12.8.26, Planning Commission 11.19.26 |
+| Manatee County | `@ManateeCountyFla` | `UCNb-baujcEbYoPffIc0Ch3g` | no `/streams` tab; videos are features |
+| Hernando County | `@HernandoCountyGovernment` | `UCvW76oulWUK2sZpCFk5BB3A` | town halls |
+| Tampa | `@CityofTampa` | `UCx4-4RHo_bhTMQJNh6Du0AA` | State of the City; council is CTTV (entry 3) |
+| St. Petersburg | `@StPetersburgFL` | `UCAkNPf00JA9Ri0iKw7xFjPA` | "St. Pete TV Live Stream" |
+| Clearwater | `@MyClearwater` | `UCKr9me5QJuC173tnPh_4k9g` | City Council 11/19/2026 |
+| Largo | `@largotv1` | `UCp5f-PJDTpbHifaOTaotL2g` | streams stop at Sept. 2021 |
+| Dunedin | `@CityofDunedinFL` | `UCHh0XD1oISXtkFGqExIoEMA` | City Commission 11-19-26 |
+| Oldsmar | `@CityOfOldsmar` | `UCAzoS5eveYcUaWisO0ffQDA` | Council 11/17/26 |
+| Safety Harbor | `@SafetyHarborFL` | `UC7MKhUqK-awjn_oZ23cTm2w` | City Commission 11-17-26 |
+| Tarpon Springs | `@TarponSpringsTV` | `UCT6_SxI7RxFrdJLoHi-02ag` | Board of Commissioners 11/17/26 |
+| Temple Terrace | `@cityoftempleterrace` | `UC4z9CgD1RQNAwFPMKbTKupw` | City Council 11/17/26 |
+| Plant City | `@cityofplantcitygovernment8169` | `UC1gqU0211GQktDTpfUBpmNQ` | untitled streams |
+| Pinellas Park | `@CityofPinellasPark` | `UCTjLCSCpW0bhlK7ZhLV7MVg` | City Council 10/20/26 |
+| Treasure Island | `@cityoftreasureisland` | `UCU5ocMcwbaVkK5RgaKIZK_w` | Commission 11/17/26 |
+| Madeira Beach | `@cityofmadeirabeach632` | `UCbcmYPPO9KWTxD2k2XUv5Iw` | Planning Commission 11/2/26 |
+| South Pasadena | `@CityofSouthPasadenaFL` | `UCX_4EaDefLDHi9ppxq1UWFQ` | Regular Commission 11/10/26 (in `/videos`) |
+| Belleair Beach | `@cityofbelleairbeachofficia4256` | `UCBTiCuq7bdOfOjqAnHY0zbA` | City Council 11-2-2026 |
+| Redington Shores | `@townofredingtonshores` | `UC0uVrMAzJl66mAEQ3Bg8IdQ` | 2 streams, newest 2024 |
+| Hillsborough TPO | `@hillsboroughtpo` | `UCsojHyZb_mkYIU3o32Tbg4w` | committee meetings, Nov. 2026 |
+| Tampa Bay RPC | `@TampaBayRPC` | `UCmHpFM3taiu-hIjwdjBqPHA` | one stream |
+
+Not governments' meeting channels, so not listed for collection: `@MyClearwaterFL` is
+"Visit Clearwater Florida", the tourism channel Clearwater's pages link most; St. Pete
+Beach's linked channel is its recreation department's. Gulfport's pages link no channel.
+
+The three Granicus clients that caption nothing — St. Petersburg, Safety Harbor and
+Treasure Island — all stream their meetings to YouTube, where a channel source gets
+YouTube's auto-captions and, for the ~7% without, audio for `transcribe`.
+
+### Cost
+
+| | Requests | Download | Text |
+|---|---|---|---|
+| This measurement | 158 (92 Granicus GETs and a `HEAD`, 55 YouTube, 10 county and city sites) | 147 MB, most of it seven publisher pages (Dunedin's is 30 MB) | — |
+| Discover, per Granicus source | 1 publisher page, plus the agenda manager's | 0.3–30 MB | — |
+| Collect the four captioning clients' tracks | 5,319, about 1.5 hours at one a second | about 0.8 GB, estimated from the samples | about 6,400 hours of meetings already transcribed |
+| Collect the three that caption nothing | 3,875 eight-byte tracks, about an hour, once | 31 KB | none |
+| Transcription | 0 hours for Granicus | | |
+
+A YouTube channel is a `yt-dlp` listing plus metadata, captions and, by default, audio for
+uncaptioned videos: about 63 MB of audio each, and its hours go to the transcription server.
+
+### What transcription needs on the box
+
+A server for `[inference.transcribe]`. Nothing is configured: the section is absent, so
+`doctor` asks the default, `whisper-large-v3-turbo` at `http://127.0.0.1:8080/v1`, and
+gets `Connection refused`. The box is a 3.3 GB VM without AVX2 (its own config says so);
+whisper-large there would be far slower than realtime even if it fit. The section wants a
+`base_url` on a machine with a GPU, or a hosted OpenAI-compatible endpoint with its key
+named in `api_key_env` — which sends meeting audio off the box, the choice `CONTEXT.md`
+says the config file is the one place to make. Run the server with VAD. `ffmpeg` is
+installed. `yt-dlp` (2026.08.19) wants updating before a channel source runs. Granicus
+captions need none of this.
+
+### Left on the table
+
+- **A track that fills in later.** A clip whose captions were empty when collected is not
+  fetched again; Dunedin's and Hillsborough's newest were empty while the clips before were
+  not. Collect re-fetches nothing observed, so it wants `--refresh` on the newest clips, or
+  a rule.
+- **The meeting's name as the track's title.** The publisher row names it ("City Council
+  on 2026-11-05 6:00 PM"); a track has no title, so its chunks sit under no heading. Entry
+  2's lever 6 again.
+- **Granicus clients beyond these seven.** Slugs are not guessable (research §8.1); each
+  needs a crumb or a city's link.
+- **The recording**, if Granicus's video host ever answers; the player page is the only
+  place its address appears.
+- Channel sources for the governments above; none was added.
+
+### Running log
+
+- 2026-11-22 21:00 — box read: no channel source, no audio, transcription gate blocked
+  (`[inference.transcribe]` unset, nothing on `127.0.0.1:8080`), `yt-dlp` 95 days old.
+- 2026-11-22 21:15 — Clearwater player measured: MP4 and HLS 403 from CloudFront;
+  `/videos/{clip}/captions.vtt` serves WebVTT; empty track is 8 bytes, missing clip 500.
+- 2026-11-22 21:20 — six more publishers: same player link at all seven; captions at
+  Gulfport, Dunedin, Hillsborough County; none at St. Pete, Safety Harbor, Treasure Island.
+  `DownloadFile.php`, podcast enclosures and `ASX.php` all end at the blocked MP4.
+- 2026-11-22 21:25 — ten clips sampled per captioning client; `.vtt` found to classify as
+  `other`. `webvtt` kind and reader written, `granicus` keeps one track per clip. Unbuilt
+  here; CI is the first build.
+- 2026-11-22 21:30 — 26 YouTube channels resolved (28 addresses) from the crumbs and four
+  home pages; `/streams` sampled.
+
+---
+
 ## Recurring shapes
 
 A shape is promoted here when **two** sites show it.
@@ -3811,7 +4010,9 @@ would invent a corpus rather than observe one.
   Special Discussion` — fifty rows as one 10,736-character line. (3: CTTV). Not a site
   shape; a defect any table triggers, which is why it ranks first for a fix.
 - **The publisher already produced the derived artifact.** A transcript published beside the
-  video makes the `transcribe` stage redundant work for a worse result. (3: CTTV)
+  video makes the `transcribe` stage redundant work for a worse result. (3: CTTV; 14:
+  Granicus, a WebVTT track beside every player, captioned at four of seven clients —
+  **second sighting**, and the one that built a reader)
 - **Errors answer HTTP 200.** A dead address becomes a live Observation and its error text
   is indexed. (2: OnBase)
 - **Enclosure detection matches JavaScript source.** A URL template in a `<script>` becomes
