@@ -79,6 +79,8 @@ pub mod legistar;
 pub mod links;
 pub mod listing;
 pub mod onbase;
+pub mod openbook;
+pub mod opengov_stories;
 pub mod scope;
 pub mod sitemap;
 pub mod window;
