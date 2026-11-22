@@ -269,6 +269,13 @@ impl ContentKind {
                     Some(_) if kind == Xml => Feed,
                     _ => kind,
                 },
+                // A spreadsheet type over plain text. Declaring a CSV as
+                // `application/vnd.ms-excel` is how a server gets Excel to open it, and
+                // VoterFocus serves every campaign finance export that way. The spreadsheet
+                // reader opens OLE and ZIP workbooks only, so taken at its word the header
+                // made every one Underivable. Bytes that prove no format and hold no NUL
+                // are the text the header was naming a program for.
+                Spreadsheet if Self::from_magic(bytes).is_none() && plain_text(bytes) => Csv,
                 kind => kind,
             };
         }
@@ -478,6 +485,12 @@ impl std::fmt::Display for ContentKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// Whether a head holds text: something, and no NUL. Every binary format this table names
+/// has a NUL in its first bytes, and no text encoding a `.gov` server sends puts one there.
+fn plain_text(head: &[u8]) -> bool {
+    !head.is_empty() && !head[..head.len().min(SNIFF_BYTES)].contains(&0)
 }
 
 /// Which document container, as a file extension, where the first bytes can say.
@@ -765,6 +778,29 @@ mod tests {
         ] {
             assert_eq!(classify(ct, b""), Spreadsheet, "{ct}");
         }
+    }
+
+    /// VoterFocus's campaign finance export, as served on 2026-11-22: CSV under
+    /// `application/vnd.ms-excel`. Read as a workbook it is Underivable, and every campaign
+    /// treasurer's report in four counties with it. A real workbook under the same header —
+    /// Tampa's lobbyist meeting log is an OLE `.xls`, a modern export a ZIP — stays one.
+    #[test]
+    fn a_csv_declared_as_a_spreadsheet_is_read_as_csv() {
+        let export = b"\"rpt code\",\"line number\",\"item date\",Cont/Exp,name,\"address 1\",\"address 2\",city,state,zip\r\n\
+13282,3,2025-04-22,E,\"Wix.com  wix.com\",\"2601 Mission St\",,\"San Francisco\",CA,94110\r\n";
+        assert_eq!(classify("application/vnd.ms-excel", export), Csv);
+        assert!(!crate::extract::readers_for(Csv).is_empty());
+
+        let mut xls = OLE_MAGIC.to_vec();
+        xls.extend_from_slice(&[0; 24]);
+        assert_eq!(classify("application/vnd.ms-excel", &xls), Spreadsheet);
+        assert_eq!(
+            classify(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                b"PK\x03\x04\x14\x00\x06\x00"
+            ),
+            Spreadsheet
+        );
     }
 
     /// The census path. It sees what the record holds — the declared type, then the

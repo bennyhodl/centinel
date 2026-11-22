@@ -166,6 +166,14 @@ collected, classified `other`, claimed by no reader, and recorded Underivable in
 What stays forbidden is a *supplied* filename outranking a server that declared something
 real, which is the case the rule was written for.
 
+**A header can name a program rather than a format.** A server's header names the
+program it wants to open the file, which is not always the format: `text/xml` is often a
+feed, and `application/vnd.ms-excel` over plain text is a CSV, which is how a server gets
+Excel to open one. VoterFocus serves every campaign finance export that way, and the
+spreadsheet reader opens only OLE and ZIP workbooks, so believed, the header made each one
+Underivable. A spreadsheet type is read as CSV only where the bytes prove no format and
+hold no NUL; a real workbook under it is still a workbook.
+
 **Note** — a line of provenance a Source wants shown, and how it should read. Lets a
 report print which sitemaps were walked or which channel tabs returned nothing without the
 renderer learning what a sitemap or a tab is. A new adapter explains itself through this
