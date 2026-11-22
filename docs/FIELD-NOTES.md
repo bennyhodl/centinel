@@ -45,6 +45,7 @@ lever.
 | 16 | Procurement: OpenGov, Bonfire, DemandStar, VendorLink, PlanetBids, IonWave, OnBase Public Access, and the governments' own pages | 26 governments and clerks; every vendor platform gates documents behind an account, a bot challenge or `Disallow: /`; the one public system addresses each document by a token that changes per search, and serves scans | **before acquire** — login, challenge, robots, POST; then **identity** and OCR | every procurement vendor; every search whose hits carry no stable address |
 | 17 | Public-records request portals: GovQA, JustFOIA, NextRequest | 25 Tampa Bay agencies run a request portal; GovQA's robots.txt turns away every crawler at 11 of 12 hosts, JustFOIA's request list answers a Cloudflare challenge at every host tried, and the two NextRequest portals publish 12 requests and no documents | **enumerate**, closed by the vendor | every GovQA and JustFOIA client; NextRequest only where the agency turns publishing on |
 | 15 | Accela Citizen Access (`aca-prod.accela.com/{AGENCY}`): Tampa, Hillsborough, Pinellas | records are a GET and an ArcGIS layer lists their addresses; every attached document is a WebForms postback inside a session that names the record, and has no GET address at all | **acquire** — and the fetch layer, which cannot POST or hold a cookie | every agency on Accela Citizen Access; every WebForms page whose files are `__doPostBack` links |
+| 10 | CivicClerk (`{tenant}.portal.civicclerk.com`) | the portal is a script with no meeting in it; the meetings are in a public OData API, fifteen to a page, and the JSON's own document links are blob URLs signed for a day | **enumerate** | every CivicClerk tenant: the API is at `{tenant}.api.civicclerk.com/v1`, and the portal's own download routes are stable addresses |
 
 **Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
@@ -2101,7 +2102,7 @@ was collected. Of 4,422 off-host hosts the corpus links to, the agenda platforms
 | Legistar | Hillsborough County, Pinellas County, Clearwater, Belleair | `legistar` |
 | Granicus | Treasure Island (agendas); Hillsborough, Clearwater, St. Pete, Safety Harbor, Gulfport (video) | `granicus` |
 | CivicWeb | Oldsmar, Madeira Beach, Largo | not built |
-| CivicClerk | Tarpon Springs, Seminole, St. Pete Beach | not built |
+| CivicClerk | Tarpon Springs, Seminole, St. Pete Beach | `civicclerk` (entry 10) |
 
 ### Fault 1 — robots.txt turned the walk away, and the report said "empty"
 
@@ -3177,6 +3178,174 @@ SPA with no links for `links` to follow.
   archive empty. NextRequest's API mapped at HART and Hernando (12 requests, 0 documents)
   and at Miami for scale (51,417 documents; `/documents/{id}/download` → signed S3). No
   strategy built: no platform here publishes documents at two agencies.
+
+## 10. CivicClerk — a public OData API behind a portal with nothing in it
+
+*Seen 2026-11-22, with plain HTTP requests at one a second against Seminole
+(`seminolefl`), St. Pete Beach (`stpetebeachfl`) and Tarpon Springs (`tarponspringsfl`), and
+with the box's `log/*/source.toml` and crumbs. The store was read, not written.*
+
+Seminole, St. Pete Beach and Tarpon Springs publish their meetings on CivicClerk (entry 9's
+table, from crumbs). No strategy covered it: the box's three sources for those cities are
+their CivicEngage sites, and each holds only the links.
+
+### Where each city's tenant is
+
+From the cities' own pages, in the box's crumbs:
+
+| Source | Linked from its site | Tenant |
+|---|---|---|
+| seminole | `https://seminolefl.portal.civicclerk.com/` (12 pages) | `seminolefl` |
+| tarpon-springs | `https://tarponspringsfl.portal.civicclerk.com/` (28 pages) | `tarponspringsfl` |
+| st-pete-beach | `https://stpetebeachfl.civicclerk.com/Web/Player.aspx?id=414&…` (9 pages) | `stpetebeachfl` |
+
+St. Pete Beach's site still links the product's older address; it answers a 301 to
+`https://stpetebeachfl.portal.civicclerk.com`. Every tenant's portal is the same 2,808-byte
+page: a title, *Public Portal • CivicClerk*, and a script. No meeting, no link.
+
+### Where the meetings are
+
+The portal's script names its API — `baseUrl:` `https://[TENANT].api.civicclerk.com/v1` —
+and takes the tenant from the portal host's first label. The brief's guess was right, and
+it held at all three tenants. No token, no cookie.
+
+- **`/v1/Events`** is OData. `$orderby=startDateTime desc` and `$filter` work, form-encoded
+  too (`%24filter=startDateTime+ge+2026-08-22`). Pages are **fifteen events whatever `$top`
+  asks**: `$top=100` and `$top=1000` answered fifteen and a `nextLink` asking `$top=85` and
+  `$top=985`. Each page names the next as `@odata.nextLink`, with a `$skiptoken` and the
+  filter carried. `$count=true` answers 500.
+- An event lists its **published files** — `{"fileId":747,"type":"Agenda",…}` — and names
+  its agenda, `agendaId`. Types seen: `Agenda`, `Agenda Packet`, `Minutes`, `Notice`,
+  `Other`. A scheduled event with no agenda yet has `agendaId` 0, or an agenda id and no
+  files.
+- **`/v1/Meetings/{agendaId}`** is the agenda: items nested as `childItems` (two levels at
+  Tarpon Springs), each with `attachmentsList` — the documents attached to the item — and
+  `reportsList`, the memo the clerk's template writes. An unpublished agenda (Seminole 168)
+  answers 562 bytes and no items, so an event with no published file is not worth opening.
+
+| Tenant | Events | Pages | Span | With a published file | Files |
+|---|---|---|---|---|---|
+| seminolefl | 101 | 7 | Apr 2024 – Jan 2027 | 92 | 171: 92 agendas, 79 minutes |
+| stpetebeachfl | 2,322 | 155 | Jul 2008 – Dec 2027 | 2,155 | 4,615: 2,037 agendas, 602 packets, 1,920 minutes, 40 notices, 16 other |
+| tarponspringsfl | 608 | 41 | Feb 2024 – Dec 2027 | 406 | 737: 404 agendas, 316 packets, 17 minutes |
+
+The calendars run a year ahead: the newest pages are scheduled meetings with nothing
+published.
+
+### Which address holds a document
+
+**Not the JSON's own links.** An attachment's `pdfVersionFullPath` and a report's
+`pdfMediaFullPath` are `https://civicclerk.blob.core.windows.net/stream/{TENANT}/….pdf?…`,
+signed and expiring about a day later (`se=` in the query). Unsigned, the same blob answers
+404. An event's `publishedFiles[].url` (`stream/SEMINOLEFL/….pdf`) is the same blob path.
+None of these is an address a document keeps.
+
+The portal downloads through the API instead, by three routes in its script. Measured on
+Seminole's agenda 747 and attachment 2490:
+
+| Request | Answer |
+|---|---|
+| `Meetings/GetMeetingFileStream(fileId=747,plainText=false)` | 200 `application/pdf`, 188,560 bytes |
+| `Meetings/GetMeetingFileStream(fileId=747)` | 404 |
+| `Meetings/GetMeetingFileStream(plainText=false,fileId=747)` | 404 |
+| `Meetings/GetMeetingFileStream(fileId=747,plainText=true)` | 200 `text/plain`, 3,740 bytes: the file's text |
+| `Meetings/GetMeetingFileStream(fileId=999999,plainText=false)` | **200 `application/pdf`, 0 bytes** |
+| `Meetings/GetAttachmentFile(fileId=2490)` | 200 `application/pdf`, 158,762 bytes, the attachment's `fileSize` |
+| the same with `?foo=1`, or the path lowercased | the same bytes |
+| `Meetings/GetAttachmentFile(fileId=999999)` | 404 |
+| `Meetings/GetAttachmentFile(fileId=1525)`, a report's id | 404 |
+| `Events/GetEventFileStream(fileId=747,fileType=1,plainText=false)` | 500, empty |
+
+So a published file is `GetMeetingFileStream(fileId=N,plainText=false)`, both keys in that
+order, and an item attachment is `GetAttachmentFile(fileId=N)` by the attachment's `id`. An
+unknown published-file id answers an empty 200 — entry 2's shape, a success that holds
+nothing — so the walk writes only ids the API listed.
+
+**The same at the other two.** St. Pete Beach: packet 8152, 63,585,621 bytes; minutes 8208,
+900,616; a notice 7804, 169,477; an `Other` file 8079, 5,629,807. Tarpon Springs: agenda
+3802, 170,276; attachment 7842, 161,548. All `application/pdf`.
+
+**An attachment comes back as a PDF whatever was uploaded.** St. Pete Beach 15668 and 15766
+are Word documents (`contentType` `…wordprocessingml.document`) and answered PDFs of 72,953
+and 73,100 bytes; 15640, a JPEG, answered a one-page PDF. Of 433 attachments in 31 meeting
+records read, none was unpublished, a link, deleted, or without a PDF rendition.
+
+**Reports have no stable address.** The portal shows a report from its signed URL and from
+nothing else; no API route takes its id. So reports are not collected. Where a tenant
+publishes a packet, the packet binds them (`includeInPacket: 1` on all 110 seen). Seminole
+publishes no packets, so its memos are out of reach.
+
+### Item attachments, by tenant
+
+Meetings sampled every seventh across each tenant's years:
+
+| Tenant | Sampled | With items | Attachments | Per meeting with items |
+|---|---|---|---|---|
+| seminolefl | 6 (2024–2026) | 6 | 64 | 10.7 |
+| stpetebeachfl | 14 (2010–2026) | 8 | 98 | 12.3 |
+| tarponspringsfl | 6 (2024–2026) | 6 | 148 | 24.7 |
+
+St. Pete Beach's six meetings from 2010 to 2019 have no items: the agenda was uploaded
+whole, and the event says `"publishedAgendaTimeStamp":"Agenda Posted on January 1, 1990
+12:00 AM"`, a migration's placeholder. One tenant shows it, so it earns no lever: those
+meetings cost a request each and give nothing, and they are the oldest, so they are the
+last a walk reaches.
+
+### robots.txt
+
+Every portal and API host serves Cloudflare's managed template: `User-agent: *` /
+`Allow: /`, with `Content-Signal: search=yes,ai-train=no,use=reference`, and named AI
+training crawlers (GPTBot, ClaudeBot, CCBot, Google-Extended and two dozen more) disallowed
+outright. No `Crawl-delay`. The blob host serves no robots.txt (404). Centinel is not a
+named crawler and the rules allow it. The content signal grants search and withholds
+training; `ai-input`, feeding a model at answer time, it neither grants nor withholds.
+
+### Cost, and how a walk is bounded
+
+Every page of events first, every published file kept from them; then one request per
+agenda with a published file, newest first. At one request a second:
+
+| Walk | Discover requests | Time | Published files | Attachments (estimate) |
+|---|---|---|---|---|
+| Seminole, portal | 7 + 92 = **99** | 1.7 min | 171 | about 980 |
+| St. Pete Beach, portal | 155 + 2,155 = **2,310** | 38.5 min | 4,615 | about 10,200 (830 meetings since 2021 × 12.3) |
+| Tarpon Springs, portal | 41 + 406 = **447** | 7.5 min | 737 | about 10,000 |
+| The 90 days to Nov 22, a `$filter` seed | Seminole 1 + 8, St. Pete Beach 3 + 32, Tarpon Springs 3 + 34 | under a minute each | 15, 76, 61 | about 85, 390, 840 |
+
+At the default 200-request budget a portal seed reads all of Seminole; Tarpon Springs'
+pages and its newest 159 agendas; St. Pete Beach's 155 pages and its newest 45 agendas,
+and says `truncated`. The St. Pete Beach packet above is 63.6 MB: collecting is the larger
+cost wherever packets are published.
+
+### Which box sources would switch
+
+None switch: the three site sources stay on `sitemap`. Each city would gain a source
+seeded with its portal and `strategy = "civicclerk"`. No box source was changed.
+
+### Against the three levers
+
+None. Enumeration again: the content is PDFs that read; the meetings are behind a script
+that calls an API, and the API's own links expire.
+
+### Left on the table
+
+- Item reports (the clerk's memos), whose only address is signed for a day.
+- `Meetings/{agendaId}` itself: each item's title, outline number, description and
+  `minutesItemVotes`. Searchable text no PDF holds as data — but every answer carries
+  freshly signed blob URLs, so its bytes change on every fetch, and it would be a new
+  version every run.
+- The plain-text rendition, `plainText=true`, which the extractor does not need.
+- `Events/GetEventFileStream(…)`, the portal's route for event-level files; it answered
+  500 for every id tried, and every file seen is reachable through `GetMeetingFileStream`.
+- The meeting's name and category as the document's title (entries 2, 8 and 9).
+- CivicWeb (Oldsmar, Madeira Beach, Largo), the last vendor in entry 7's table.
+
+### Running log
+
+- 2026-11-22 — robots.txt read on the portal, API, legacy and blob hosts. The portal's
+  script read for the API base and download routes. Events walked to the end at all three
+  tenants; file routes, keys, unknown ids and attachment renditions measured; meetings
+  sampled across years. `civicclerk` written; unbuilt and untested here.
 
 ---
 
