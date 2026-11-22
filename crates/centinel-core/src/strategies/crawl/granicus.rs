@@ -1,8 +1,8 @@
 //! `granicus` — the agendas and minutes a Granicus publisher lists.
 //!
 //! Keyed on a **product**. Granicus hosts council meetings for most of Tampa Bay at
-//! `{client}.granicus.com`: Treasure Island and Hillsborough County publish agendas there,
-//! and Clearwater, St. Petersburg, Safety Harbor and Gulfport their video. Each client
+//! `{client}.granicus.com`: Treasure Island, Safety Harbor and Hillsborough County publish
+//! agendas there, and Clearwater, St. Petersburg and Gulfport their video. Each client
 //! serves the same two pages for a view:
 //!
 //! - `ViewPublisher.php?view_id=N`, a table of every meeting the view holds. Each row links
@@ -21,10 +21,41 @@
 //! 200 with "This agenda is not currently published", because the agendas are in Legistar;
 //! that is the publisher's statement, collected as such.
 //!
+//! ## What the meeting voted on: the agenda manager's documents
+//!
+//! A client that builds its agendas in Granicus's agenda manager — Safety Harbor, Doral —
+//! answers the viewer with a 302 to `GeneratedAgendaViewer.php` with the same query: the
+//! agenda as HTML, each item's supporting documents linked as
+//! `MetaViewer.php?view_id=V&clip_id=C&meta_id=M`, which answers with the PDF. A client
+//! that uploads finished agendas (Treasure Island) answers `GeneratedAgendaViewer.php` with
+//! a 302 to `panes/EmptyTemplate.php` — 299 bytes, "No Template provided." — so asking for
+//! the generated page directly costs one small request where following the viewer would
+//! download the agenda PDF only to learn there is nothing inside it.
+//!
+//! `meta_id` alone decides the file: at both clients, the document came back byte for byte
+//! with `view_id` empty or missing, `clip_id` missing or another clip's, and nothing but
+//! `meta_id`; without it the answer is empty. So a document is written as
+//! `MetaViewer.php?meta_id=M` — one document, one address, whichever agenda links it.
+//!
+//! The viewers are kept first, off the seed alone. Then the generated agendas are opened
+//! **newest meeting first** — by the date each publisher row hides in a
+//! `<span style="display:none;">` epoch, since a publisher lists each body in its own
+//! table — so a walk that runs out of requests has every agenda and minutes and the newest
+//! meetings' documents. A feed has no such date and is already newest first.
+//!
+//! The newest [`PROBE`] agendas decide whether the rest are worth opening: if none of them
+//! links a document, the client is taken not to use the agenda manager, and the walk stops
+//! with a note rather than spending one request per meeting on empty templates — 827 of
+//! them at Treasure Island, against a 200-request budget, and a run that would then read as
+//! truncated when nothing was missed.
+//!
 //! ## robots.txt
 //!
 //! Every `*.granicus.com` host serves `User-agent: *` / `Disallow: /` and admits Googlebot.
-//! Unless a source's definition sets `ignore_robots`, nothing is kept and the run says why.
+//! Unless a source's definition sets `ignore_robots`, nothing is kept, no generated agenda
+//! is asked for, and the run says why.
+
+use std::collections::HashMap;
 
 use futures::future::BoxFuture;
 use url::Url;
@@ -46,6 +77,16 @@ const VIEWERS: [(&str, &str); 2] = [
     ("/AgendaViewer.php", "agendas"),
     ("/MinutesViewer.php", "minutes"),
 ];
+
+/// How many of the newest agendas must link no document before the rest are not opened.
+/// See the module docs.
+const PROBE: u64 = 3;
+
+/// The agenda manager's rendering of an agenda, at the viewer's query.
+const GENERATED: &str = "/GeneratedAgendaViewer.php";
+
+/// Where a document of the agenda manager is served.
+const META_VIEWER: &str = "/MetaViewer.php";
 
 impl Strategy for Granicus {
     fn name(&self) -> &'static str {
@@ -104,13 +145,57 @@ impl Strategy for Granicus {
                 let n = found.iter().filter(|u| u.path() == path).count();
                 pass.figure(noun, n as u64);
             }
-            for url in found {
+            for url in &found {
                 if pass.full() {
                     break;
                 }
                 pass.keep(url.to_string(), &seed.robots);
             }
             pass.note(Note::new("publisher", at.to_string()));
+
+            // Then each agenda's generated page, newest meeting first. Every one is on the
+            // seed's host, so the seed's rules are the ones that apply to the request.
+            for page in generated_agendas(seed, &at, &found) {
+                if seed.robots.allowed(page.as_str()) {
+                    pass.push(page.to_string(), 0);
+                }
+            }
+            let (mut opened, mut documents) = (0u64, 0u64);
+            loop {
+                if opened == PROBE && documents == 0 && pass.pending() > 0 {
+                    pass.note(Note::new(
+                        "agenda manager",
+                        format!(
+                            "the newest {PROBE} agendas link no documents, so the client is \
+                             taken not to build its agendas in Granicus and the rest are not \
+                             opened"
+                        ),
+                    ));
+                    break;
+                }
+                let Some((page, _)) = pass.next_to_visit() else {
+                    break;
+                };
+                pass.visiting(format!("agenda {page}"));
+                opened += 1;
+                let body = match pass.walk().get(&page).await {
+                    Ok(f) => f.bytes,
+                    Err(refusal) => {
+                        pass.refused(&page, &refusal);
+                        continue;
+                    }
+                };
+                let at_page = Url::parse(&page)?;
+                for address in documents_in(&String::from_utf8_lossy(&body), &at_page) {
+                    if pass.full() {
+                        break;
+                    }
+                    documents += 1;
+                    pass.keep(address, &seed.robots);
+                }
+            }
+            pass.figure("generated", opened);
+            pass.figure("documents", documents);
             Ok(pass.finish())
         })
     }
@@ -159,6 +244,83 @@ fn viewers(seed: &Seed, at: &Url) -> Vec<Url> {
         .collect()
 }
 
+/// Each agenda viewer's generated page, newest meeting first.
+///
+/// Dated by the publisher row each viewer sits in; a viewer with no date (every one, when
+/// the seed is a feed) keeps its listed place after the dated ones. Repeats are left to
+/// the walk, which visits an address once.
+fn generated_agendas(seed: &Seed, at: &Url, viewers: &[Url]) -> Vec<Url> {
+    let held = held_on(&seed.text(), at);
+    let mut agendas: Vec<(Option<i64>, usize, Url)> = viewers
+        .iter()
+        .enumerate()
+        .filter(|(_, u)| u.path() == VIEWERS[0].0)
+        .map(|(listed, u)| {
+            let mut page = u.clone();
+            page.set_path(GENERATED);
+            (held.get(u.as_str()).copied(), listed, page)
+        })
+        .collect();
+    agendas.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    agendas.into_iter().map(|(_, _, page)| page).collect()
+}
+
+/// The meeting date of each agenda viewer a publisher page links, from the epoch its row
+/// hides before the visible date: `<span style="display:none;">1794902400</span>Nov 17, 2026`.
+fn held_on(page: &str, at: &Url) -> HashMap<String, i64> {
+    let base = crate::html::Scan::new(page).base(at);
+    let mut held = HashMap::new();
+    for row in page.split("<tr").skip(1) {
+        let row = row.split("</tr>").next().unwrap_or(row);
+        let Some(epoch) = row
+            .split_once("display:none;\">")
+            .and_then(|(_, rest)| rest.split('<').next())
+            .and_then(|digits| digits.trim().parse::<i64>().ok())
+        else {
+            continue;
+        };
+        for tag in crate::html::Scan::new(row).tags(&["a"]) {
+            if let Some(mut u) = tag.attr("href").and_then(|href| base.join(href)) {
+                u.set_fragment(None);
+                held.insert(u.to_string(), epoch);
+            }
+        }
+    }
+    held
+}
+
+/// The documents a generated agenda links, each at its one address,
+/// `MetaViewer.php?meta_id=M` on the agenda's host, in the order listed.
+fn documents_in(page: &str, at: &Url) -> Vec<String> {
+    let scan = crate::html::Scan::new(page);
+    let base = scan.base(at);
+    let mut out: Vec<String> = Vec::new();
+    for tag in scan.tags(&["a"]) {
+        let Some(link) = tag.attr("href").and_then(|href| base.join(href)) else {
+            continue;
+        };
+        if link.host_str() != at.host_str() || link.path() != META_VIEWER {
+            continue;
+        }
+        let Some(meta) = link
+            .query_pairs()
+            .find(|(k, _)| k == "meta_id")
+            .and_then(|(_, v)| v.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let mut address = at.clone();
+        address.set_path(META_VIEWER);
+        address.set_query(Some(&format!("meta_id={meta}")));
+        address.set_fragment(None);
+        let address = address.to_string();
+        if !out.contains(&address) {
+            out.push(address);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,13 +365,29 @@ mod tests {
     const RSS: &str =
         "https://treasureislandfl.granicus.com/ViewPublisherRSS.php?view_id=1&mode=agendas";
 
+    /// Treasure Island's generated agenda, as `panes/EmptyTemplate.php` serves it after the
+    /// 302: the client uploads finished agendas and builds none in Granicus.
+    const EMPTY_TEMPLATE: &str = r#"<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html><body><table height=50% width=100% border=0><tr height=100%>
+  <td width=100% height=100% align=center valign=middle>
+    <font face="arial"><strong>No Template provided.</strong></font>
+  </td></tr></table></body></html>"#;
+
+    fn generated(host: &str, view: u32, clip: u32) -> String {
+        format!("https://{host}/GeneratedAgendaViewer.php?view_id={view}&clip_id={clip}")
+    }
+
     #[tokio::test]
     async fn a_publisher_page_names_its_agendas_and_minutes_without_a_request() {
         let s = seed(PUBLISHER, PAGE);
         let r = Granicus.recognise(&s).expect("a Granicus publisher");
         assert_eq!(r.keyed_on, Keyed::Product("Granicus"));
 
-        let crawl = Fake::new([]);
+        let ti = "treasureislandfl.granicus.com";
+        let crawl = Fake::new([
+            (generated(ti, 1, 1045).as_str(), EMPTY_TEMPLATE.to_string()),
+            (generated(ti, 1, 1009).as_str(), EMPTY_TEMPLATE.to_string()),
+        ]);
         let got = Granicus.enumerate(&s, &crawl).await.unwrap();
 
         assert_eq!(
@@ -223,8 +401,14 @@ mod tests {
         );
         assert_eq!(got.figures["agendas"], 2);
         assert_eq!(got.figures["minutes"], 1);
+        assert_eq!(got.figures["documents"], 0);
         assert!(!got.truncated && !got.discovery_failed);
-        assert_eq!(crawl.requests(), 0, "the publisher was in hand");
+        assert_eq!(
+            crawl.requests(),
+            2,
+            "the publisher was in hand; each agenda's generated page is asked for once, and \
+             an empty template names no document"
+        );
     }
 
     /// The feed's items carry the same addresses, and it outranks the `feed` standard
@@ -254,9 +438,15 @@ mod tests {
             robots: crate::discovery::Robots::parse("centinel", robots.as_bytes()),
             ..seed(PUBLISHER, PAGE)
         };
-        let got = Granicus.enumerate(&honoured, &Fake::new([])).await.unwrap();
+        let crawl = Fake::new([]);
+        let got = Granicus.enumerate(&honoured, &crawl).await.unwrap();
         assert!(got.addresses.is_empty());
         assert_eq!(got.figures["disallowed"], 3);
+        assert_eq!(
+            crawl.requests(),
+            0,
+            "no generated agenda is asked for either"
+        );
 
         let overruled = Seed {
             robots: crate::discovery::Robots::parse("centinel", robots.as_bytes()).overruled(),
@@ -267,6 +457,160 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got.addresses.len(), 3);
+    }
+
+    /// Safety Harbor's publisher, recorded 2026-11-21 and cut to three rows in two bodies'
+    /// tables. The CRA's table comes first, so listed order is not meeting order; each row
+    /// hides its date as an epoch.
+    const SH_PUBLISHER: &str = r#"<html><body>
+<table class="listingTable"><tbody>
+<tr class="even"><td class="listItem" headers="Name" id="COMMUNITY-REDEVELOPMENT-AGENCY" scope="row">COMMUNITY REDEVELOPMENT AGENCY</td>
+<td class="listItem" headers="Date COMMUNITY-REDEVELOPMENT-AGENCY"><span style="display:none;">1758524400</span>Sep 22, 2025</td>
+<td class="listItem"><a href="//safetyharbor.granicus.com/AgendaViewer.php?view_id=6&clip_id=2988" target="_blank">Agenda</a></td>
+<td class="listItem" headers="VideoLink COMMUNITY-REDEVELOPMENT-AGENCY"><a href="javascript:void(0);" onClick="window.open('//safetyharbor.granicus.com/MediaPlayer.php?view_id=6&clip_id=2988')">Video</a></td></tr>
+</tbody></table>
+<table class="listingTable"><tbody>
+<tr class="even"><td class="listItem" headers="Name" id="CITY-COMMISSION" scope="row">CITY COMMISSION</td>
+<td class="listItem" headers="Date CITY-COMMISSION"><span style="display:none;">1793606400</span>Nov  2, 2026</td>
+<td class="listItem"><a href="//safetyharbor.granicus.com/AgendaViewer.php?view_id=6&clip_id=3176" target="_blank">Agenda</a></td></tr>
+<tr class="odd"><td class="listItem" headers="Name" id="CITY-COMMISSION" scope="row">CITY COMMISSION</td>
+<td class="listItem" headers="Date CITY-COMMISSION"><span style="display:none;">1794902400</span>Nov 17, 2026</td>
+<td class="listItem"><a href="//safetyharbor.granicus.com/AgendaViewer.php?view_id=6&clip_id=3190" target="_blank">Agenda</a></td></tr>
+</tbody></table></body></html>"#;
+
+    const SH_PAGE: &str = "https://safetyharbor.granicus.com/ViewPublisher.php?view_id=6";
+    const SH: &str = "safetyharbor.granicus.com";
+
+    /// Clip 3190's generated agenda, cut to two consent items. The second document link is
+    /// repeated with another clip's id, as a document linked from two agendas would be; that
+    /// repeat is constructed, the rest is as served.
+    const SH_AGENDA_3190: &str = r#"<html><head><title>City Commission Agenda</title></head><body>
+<div align=center><strong><font face=Arial>MEETING OF TUESDAY, NOVEMBER 17, 2026</font></strong></div>
+<div align=justify><strong>Approval of the November 2, 2026 City Commission meeting minutes.</strong></div>
+<blockquote dir="ltr"><div align=justify><strong><a href="https://safetyharbor.granicus.com/MetaViewer.php?view_id=6&clip_id=3190&meta_id=199147"  name="document199147" class="Document Document2" onclick="">LINK TO CONSENT #1: BACKUP MATERIALS</a></strong></div></blockquote>
+<div align=justify><strong>Acceptance of City of Safety Harbor Annual Comprehensive Financial Report FYE September 30, 2025.</strong></div>
+<blockquote dir="ltr"><div align=justify><strong><a href="https://safetyharbor.granicus.com/MetaViewer.php?view_id=6&clip_id=3190&meta_id=199149"  name="document199149" class="Document Document2" onclick="">LINK TO CONSENT #2: BACKUP MATERIALS</a></strong></div></blockquote>
+<a href="https://safetyharbor.granicus.com/MetaViewer.php?view_id=6&clip_id=3176&meta_id=199149">LINK TO CONSENT #2: BACKUP MATERIALS</a>
+</body></html>"#;
+
+    /// Clip 2988's (the CRA, September 2025), cut to one item.
+    const SH_AGENDA_2988: &str = r#"<html><head><title>CRA Agenda</title></head><body>
+<div align=justify><strong><a href="https://safetyharbor.granicus.com/MetaViewer.php?view_id=6&clip_id=2988&meta_id=189377"  name="document189377" class="Document Document1" onclick="">LINK TO ITEM #2: BACKUP MATERIALS - MEMO</a></strong></div>
+</body></html>"#;
+
+    fn meta(id: u64) -> String {
+        format!("https://{SH}/MetaViewer.php?meta_id={id}")
+    }
+
+    fn viewer(clip: u32) -> String {
+        format!("https://{SH}/AgendaViewer.php?view_id=6&clip_id={clip}")
+    }
+
+    /// The agenda manager's documents, read from each generated agenda, newest meeting
+    /// first whatever table its body is listed in, and each at its one address.
+    #[tokio::test]
+    async fn each_generated_agenda_gives_its_documents_newest_meeting_first() {
+        let s = seed(SH_PUBLISHER, SH_PAGE);
+        let crawl = Fake::new([
+            (generated(SH, 6, 3190).as_str(), SH_AGENDA_3190.to_string()),
+            (generated(SH, 6, 3176).as_str(), EMPTY_TEMPLATE.to_string()),
+            (generated(SH, 6, 2988).as_str(), SH_AGENDA_2988.to_string()),
+        ]);
+        let got = Granicus.enumerate(&s, &crawl).await.unwrap();
+
+        assert_eq!(
+            got.addresses,
+            [
+                viewer(2988),
+                viewer(3176),
+                viewer(3190),
+                meta(199147),
+                meta(199149),
+                meta(189377),
+            ],
+            "the viewers as listed, then Nov 17's documents, then Sep 22's"
+        );
+        assert_eq!(got.figures["generated"], 3);
+        assert_eq!(got.figures["documents"], 3);
+        assert_eq!(crawl.requests(), 3, "one request per agenda");
+        assert!(
+            !got.truncated && got.warnings.is_empty(),
+            "{:?}",
+            got.warnings
+        );
+    }
+
+    /// Out of requests, the walk has every viewer and the newest meeting's documents.
+    #[tokio::test]
+    async fn a_walk_out_of_budget_has_the_newest_meetings_documents() {
+        let s = seed(SH_PUBLISHER, SH_PAGE);
+        let crawl = Fake::new([
+            (generated(SH, 6, 3190).as_str(), SH_AGENDA_3190.to_string()),
+            (generated(SH, 6, 2988).as_str(), SH_AGENDA_2988.to_string()),
+        ])
+        .with_budget(1);
+        let got = Granicus.enumerate(&s, &crawl).await.unwrap();
+
+        assert_eq!(
+            got.addresses,
+            [
+                viewer(2988),
+                viewer(3176),
+                viewer(3190),
+                meta(199147),
+                meta(199149)
+            ]
+        );
+        assert!(got.truncated, "two agendas were never opened");
+        assert_eq!(crawl.requests(), 1);
+    }
+
+    /// A client that builds no agenda in Granicus is found out by its newest few, and the
+    /// rest of its meetings cost nothing — nor does the run read as truncated.
+    #[tokio::test]
+    async fn a_client_without_the_agenda_manager_is_not_walked_past_the_newest_few() {
+        let rows: String = (1..=6)
+            .map(|clip| {
+                format!(
+                    "<tr><td><span style=\"display:none;\">{}</span>Day {clip}</td>\
+                     <td><a href=\"//treasureislandfl.granicus.com/AgendaViewer.php?view_id=1&clip_id={clip}\">Agenda</a></td></tr>",
+                    1_700_000_000 + clip * 86_400
+                )
+            })
+            .collect();
+        let s = seed(
+            &format!("<html><body><table>{rows}</table></body></html>"),
+            PAGE,
+        );
+        let ti = "treasureislandfl.granicus.com";
+        let crawl = Fake::new([
+            (generated(ti, 1, 6).as_str(), EMPTY_TEMPLATE.to_string()),
+            (generated(ti, 1, 5).as_str(), EMPTY_TEMPLATE.to_string()),
+            (generated(ti, 1, 4).as_str(), EMPTY_TEMPLATE.to_string()),
+        ]);
+        let got = Granicus.enumerate(&s, &crawl).await.unwrap();
+
+        assert_eq!(got.addresses.len(), 6, "every viewer is still kept");
+        assert_eq!(crawl.requests(), 3, "the newest three, and no more");
+        assert_eq!(got.figures["generated"], 3);
+        assert!(got.notes.iter().any(|n| n.label == "agenda manager"));
+        assert!(!got.truncated, "nothing was missed");
+    }
+
+    /// `meta_id` alone decides the file, so every spelling of a link is one address; links
+    /// that are not a document on this host are not kept.
+    #[test]
+    fn a_document_has_one_address_whatever_its_view_or_clip() {
+        let at = Url::parse(&generated(SH, 6, 3190)).unwrap();
+        let page = r#"
+            <a href="https://safetyharbor.granicus.com/MetaViewer.php?view_id=6&clip_id=3190&meta_id=7">a</a>
+            <a href="MetaViewer.php?view_id=&clip_id=3190&meta_id=7">relative, empty view</a>
+            <a href="//safetyharbor.granicus.com/MetaViewer.php?meta_id=7#page=2">bare, fragment</a>
+            <a href="https://safetyharbor.granicus.com/MetaViewer.php?view_id=6&clip_id=3190&meta_id=8">b</a>
+            <a href="https://safetyharbor.granicus.com/MetaViewer.php?view_id=6&clip_id=3190">no meta_id</a>
+            <a href="https://cityofdoral.granicus.com/MetaViewer.php?view_id=2&clip_id=68&meta_id=9770">another client</a>
+            <a href="https://safetyharbor.granicus.com/MediaPlayer.php?view_id=6&clip_id=3190&meta_id=9">player</a>"#;
+        assert_eq!(documents_in(page, &at), [meta(7), meta(8)]);
     }
 
     #[test]

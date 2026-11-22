@@ -2365,10 +2365,43 @@ other clients are bigger: Pinellas lists 8,845 events back to 1912 (51 in 2025),
 
 ### Granicus and CivicPlus Agenda Center
 
-`granicus` keeps each `AgendaViewer.php` and `MinutesViewer.php`, which redirect to one PDF
-per meeting. Item attachments, where a client uses Granicus's agenda manager, would be
-`MetaViewer.php` links inside the viewer's HTML; not built, and no source on the box uses
-the strategy. Every `*.granicus.com` host disallows all crawlers in any case.
+`granicus` keeps each `AgendaViewer.php` and `MinutesViewer.php` off the publisher page.
+Every `*.granicus.com` host serves `User-agent: *` / `Disallow: /`, so it collects only for a
+source that rules `ignore_robots`; Ben ruled it for these measurements and for Safety
+Harbor's source.
+
+A client that builds its agendas in Granicus's **agenda manager** answers `AgendaViewer.php`
+with a 302 to `GeneratedAgendaViewer.php` at the same query: the agenda as HTML, each item's
+documents linked as `MetaViewer.php?view_id=V&clip_id=C&meta_id=M`. Measured 2026-11-22:
+
+- **Safety Harbor** (`safetyharbor.granicus.com/ViewPublisher.php?view_id=6`, 6.8 MB): 599
+  agenda rows across its bodies' tables, every row dating itself in a hidden
+  `<span style="display:none;">EPOCH</span>`. Six generated agendas sampled from 2023 to
+  November 2026 linked 9, 15, 17, 2, 3 and 2 documents. The box held it only as a crumb
+  (`GeneratedAgendaViewer.php?view_id=6&clip_id=2918`).
+- **Doral**, off the box (`cityofdoral.granicus.com`, view 2, 566 agenda rows): clip 68's
+  generated agenda linked 4 documents, among them the Joint Defense Agreement.
+- **Treasure Island** builds none: `GeneratedAgendaViewer.php` answers a 302 to
+  `panes/EmptyTemplate.php`, 299 bytes, "No Template provided."
+
+Which keys decide a document, on Doral's meta 9770 (40,472 bytes) and confirmed on Safety
+Harbor's 199147 (200,431 bytes):
+
+| Query | Answer |
+|---|---|
+| `view_id`, `clip_id`, `meta_id` | the PDF |
+| `view_id` empty, or missing | the same PDF, same hash |
+| `clip_id` missing, or another clip's | the same PDF |
+| `meta_id` alone | the same PDF |
+| without `meta_id` | 200, empty |
+
+So the walk writes `MetaViewer.php?meta_id=M`. It asks for `GeneratedAgendaViewer.php`
+directly rather than following the viewer, which on an uploading client would download the
+agenda PDF only to find no links; and the newest three agendas decide whether the rest are
+opened, so Treasure Island's 827 cost three requests and not a truncated run.
+
+Cost at 1 request a second: Safety Harbor is 599 generated agendas, about ten minutes, and
+about 4,800 documents at the sample's ~8 per agenda — an estimate — about 1.3 hours.
 
 Agenda Center is entry 9. Eight box sources reach it and hold only `/AgendaCenter` itself;
 seven of those modules are empty, and the eighth, Indian Shores, builds no HTML agendas, so
@@ -2386,7 +2419,8 @@ requests down and only the product's own markup says where.
   the newest meetings without raising every source's budget.
 - Legistar's `ViewReport.ashx?M=R&N=Text`, each matter's text as a report, one more file
   per matter; and the legislation page itself, which carries the matter's history.
-- Granicus `MetaViewer.php`. (The CivicPlus Agenda Center strategy is entry 9.)
+- Granicus clients other than Safety Harbor: Doral is the second sighting, and Clearwater,
+  St. Petersburg and Dunedin show only video and boards in the crumbs.
 - The item's title as the attachment's title: the item page names it ("File No.
   DEO26-23596", "Resolution approving…"), and a Resource still has nowhere to put it.
 
@@ -2400,6 +2434,8 @@ requests down and only the product's own markup says where.
   `EventInSiteURL` → `MeetingDetail.aspx` → `LegislationDetail.aspx` → `View.ashx?M=F`,
   keys `M`/`ID`/`GUID`; `legistar` collects through it and drops the robots-blocked API
   links. A Hillsborough month is about 70 discover requests.
+- 2026-11-22 — Granicus agenda manager measured at Safety Harbor and Doral: generated
+  agendas link `MetaViewer.php`, `meta_id` alone decides the file; `granicus` walks them.
 
 ## 9. CivicPlus Agenda Center — the module every CivicEngage site ships
 
