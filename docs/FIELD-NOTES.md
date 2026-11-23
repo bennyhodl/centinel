@@ -51,6 +51,7 @@ lever.
 | 13 | Special districts and authorities: CDDs, CRAs, Port, airports, transit, water, expressway, MPO, regional council | none is a source but two; 14 of 24 sampled CDDs run Campus Suite, whose file lists put 39–262 documents on a page, past the enclosure scan's 25; 10 of those 14 fail TLS on a new Let's Encrypt root; HART fails TLS on CBC-only ciphers; two products and SharePoint disallow the documents in robots.txt | **acquire** (TLS), **enumerate** (listings), and **robots** | every Campus Suite site; every host on Let's Encrypt's Gen Y chain without the cross-sign; every WordPress page listing more than 25 documents |
 | 18 | Southwest Florida WMD permits (WMIS) and governing board | the permit search is a postback and every document opens at a new random address per request; the main site, board packets included, answers a Cloudflare challenge | **enumerate** | every district whose GIS layer names each permit's record page (SFWMD too); every site that serves a file through a one-time redirect |
 | 20 | Money and influence: lobbyists, campaign finance, financial disclosures | four counties' campaign finance sit on one vendor nobody collected, and every CSV it exports would have been Underivable (CSV served as `vnd.ms-excel`); Tampa's lobbyist log is a RadGrid behind a POST; Florida's disclosure system is a JSON API; no CivicPlus box source holds one Document Center file | **enumerate**, **content kind**, **enclosure** | every county on VoterFocus; every server that declares CSV as Excel; every CivicEngage site |
+| 21 | CivicWeb (`{client}.civicweb.net`): Oldsmar, Largo, Madeira Beach | robots.txt admits six search engines and no one else; the portal's pages fill by script from a JSON calendar on the same host; an agenda's links carry a decorative name and `handle`, and an unknown id answers the sign-in page with 200; Madeira Beach's portal is empty | **enumerate**, and **robots** | every CivicWeb portal: the calendar service is at the same path on each |
 
 **Outcome of the first session:** entries 1–4 produced one agreed feature — **crumbs**. See
 [The one every entry shows](#the-one-every-entry-shows). Every other finding stays a note.
@@ -2106,7 +2107,7 @@ was collected. Of 4,422 off-host hosts the corpus links to, the agenda platforms
 | Hyland OnBase Agenda Online | Tampa; Manatee and Osceola Counties on their own servers | `onbase-agenda` |
 | Legistar | Hillsborough County, Pinellas County, Clearwater, Belleair | `legistar` |
 | Granicus | Treasure Island (agendas); Hillsborough, Clearwater, St. Pete, Safety Harbor, Gulfport (video) | `granicus` |
-| CivicWeb | Oldsmar, Madeira Beach, Largo | not built |
+| CivicWeb | Oldsmar, Largo; Madeira Beach's portal is empty, its meetings now on Municode Meetings | `civicweb` (entry 21) |
 | CivicClerk | Tarpon Springs, Seminole, St. Pete Beach | `civicclerk` (entry 10) |
 
 ### Fault 1 — robots.txt turned the walk away, and the report said "empty"
@@ -4507,6 +4508,164 @@ A third sighting on another publisher should be checked against that before it i
 
 ---
 
+## 21. CivicWeb — a JSON calendar behind three portals, one of them empty
+
+*Seen 2026-11-23, with plain GETs at one every 1.2 seconds under Centinel's user agent,
+about 95 requests in all, no login, nothing submitted, against Oldsmar
+(`myoldsmar.civicweb.net`), Largo (`largo.civicweb.net`) and Madeira Beach
+(`madeirabeachfl.civicweb.net`). robots.txt was read first and set aside on Ben's ruling
+("Rule it, build it"). The box was not read.*
+
+Entry 7 left CivicWeb as the last agenda vendor without a strategy, for Oldsmar, Madeira
+Beach and Largo. The hosts are the city's name or an abbreviation of it under
+`civicweb.net`; `madeirabeach`, `largofl` and `cityoflargo` do not resolve. Each front door
+redirects to `/portal/`.
+
+### robots.txt
+
+The same 24,999 bytes at all three: `User-agent: *` / `Disallow: /`, then about 480 named
+bots disallowed, then six admitted — msnbot, Slurp, Googlebot, Bingbot, DuckDuckBot and
+AddSearchBot — to everything but `/FileStorage/`, `/WorkSpace/` and the asset paths, each
+with `Crawl-delay: 120`. Centinel falls under `*`. Nothing is collected without
+`ignore_robots`; with it there is no delay to honour, since the catch-all group sets none.
+
+### Where the meetings are
+
+The portal's pages are WebForms and its meeting pages fill themselves by script. The
+scripts (`/js/webforms/portal/meetings`, `…/meetings/calendar`) call a JSON service on the
+portal's own host:
+
+| Request | Answer |
+|---|---|
+| `Services/MeetingsService.svc/meetings?from=1900-01-01&to=9999-12-31` | every meeting, one answer, newest first: `Id`, `MeetingDateTime`, `TypeId`, `Name`, `Published` |
+| the same with `from=2026-08-22&to=2026-11-20` (Largo) | 33 meetings, 2026-11-17 back to 2026-08-24 |
+| `Services/MeetingsService.svc/meetings/{Id}/meetingDocuments` | the meeting's published documents: `Id`, `Type` (1 agenda, 2 minutes), `DocumentType` (the rendition), `Html` (the whole agenda, for an HTML rendition), `PublicReleaseDelayDateString` |
+| `Services/MeetingsService.svc/help` | 404 |
+
+The rendition numbers are the portal page's own (`packageDocumentTypes` in its init
+script): 1 agenda HTML, 4 agenda PDF, 9 minutes HTML, 10 minutes PDF, 53 adopted minutes
+PDF; 5, 8, 11, 12 and 54 the closed-session forms; 2, 6, 49 and 51 split-screen HTML.
+
+The pages give the same list a slower way: `MeetingTypeList.aspx` names each board and its
+three newest meetings, and `MeetingInformation.aspx?type=N` redirects to the newest
+meeting's page, which lists every meeting of that board (348 for Oldsmar's council, May
+2016 to now) and loads its documents from the same service.
+
+| Portal | Meetings | Span | Published | Past, unpublished |
+|---|---|---|---|---|
+| Oldsmar | 954 | Apr 2016 – Dec 2027 | 917 | 7 |
+| Largo | 1,248 | Oct 2018 – Dec 2027 | 1,134 | 88 |
+| Madeira Beach | 347 | Oct 2018 – Jan 2023 | **0** | 347 |
+
+**Unpublished means empty.** Five unpublished meetings asked, at all three portals, each
+answered `[]`. So the walk does not open one.
+
+**Madeira Beach left CivicWeb.** Its portal lists boards with no links, its calendar stops
+in January 2023 with nothing published, and its Document Center holds one folder of
+development agreements. The city's meetings page now links Municode Meetings
+(`madeirabeach-fl.municodemeetings.com`), not measured here. The strategy recognises the
+portal and collects nothing from it, and says so in its figures.
+
+### Which address holds a document
+
+An agenda links each item's documents as
+`/document/{id}/{name}.pdf?handle={32 hex}`. Measured on Oldsmar's 257868:
+
+| Request | Answer |
+|---|---|
+| the full link | 200 `application/pdf`, 100,575 bytes |
+| name `x.pdf`, same handle | the same bytes |
+| no `handle` | the same bytes |
+| `handle` of 32 zeros | the same bytes |
+| `/document/257868/` | the same bytes, `Content-Disposition: inline; filename="Agenda Item Report (AIR-4136) - Pdf.pdf"` |
+| `/document/257868` | 301 to `/document/257868/` |
+| `/document/9999999/` | **200 `text/html`**: a redirect to the sign-in page |
+
+So the id alone decides it, and the walk writes `/document/{id}/`, and only for ids the
+portal listed: an unknown one is entry 2's shape, a success that holds nothing.
+
+**Renditions.** The agenda PDF (4) is the packet at both cities: Oldsmar's November 17
+council agenda is 141 pages and 12.6 MB with every item report bound in, its February 17
+one 351 pages and 32.0 MB; Largo's May 21, 2024 commission agenda 129 pages and 5.1 MB.
+Minutes PDFs (10, 53) were 177 KB to 361 KB. Every HTML rendition seen came with a PDF of
+the same output (60 meetings sampled), so the HTML renditions are not kept. A Word
+attachment (Oldsmar's 5578, 2016) is served as the product's HTML rendering of it, 3,723
+bytes holding its one sentence. `IsPublic` is `false` on every PDF and each was served
+anyway; it is not the flag that matters. `PublicReleaseDelayDateString` is, by the portal's
+script, which shows a notice in place of a document that carries one. It was empty on every
+document in the sample; the walk skips and counts any that is not.
+
+### What the council voted on: each item's documents
+
+The agenda's `Html` links the item's documents. At Oldsmar each item links one Agenda Item
+Report, and the report binds its attachments (AIR-4105, the first reading of Ordinance
+2026-16, is 10 pages and carries the ordinance). At Largo an item links an agenda memo and,
+separately, its attachments: the Planning Board's October 5, 2023 agenda links the
+September minutes, a staff report and two versions of Ordinance 2022-67. Largo's agendas
+link the previous meeting's minutes as an item, and some link a Document Center file,
+`/filepro/documents/{folder}/?preview={id}`, which `/document/{id}/` serves (308726, a
+57-page PDF of agreements).
+
+Across the 80 meeting answers read, the agendas' anchors were 571 `/document/…` links, 10
+Document Center previews, and 23 others: the city's site, a `mailto:`, the portal's
+subscribe page. None of the 571 pointed at the meeting's own documents.
+
+| Portal | Sampled | With item links | Item documents | Per published meeting |
+|---|---|---|---|---|
+| Oldsmar | 30 | 20 | 257 | 8.6 |
+| Largo | 30 | 25 | 215 | 7.2 |
+
+Agendas from 2016 at Oldsmar already link items (18 on November 1, 2016's).
+
+### Cost, and how a walk is bounded
+
+One request for the calendar, one per published meeting, newest first, every document of
+a meeting from its one answer. At one request a second:
+
+| Walk | Discover requests | Time | Agendas | Minutes | Item documents (estimate) |
+|---|---|---|---|---|---|
+| Oldsmar, portal | 1 + 917 = **918** | 15.3 min | 917 | about 580 | about 7,900 |
+| Largo, portal | 1 + 1,134 = **1,135** | 18.9 min | 1,134 | about 75 | about 8,100 |
+| Madeira Beach, portal | **1** | — | 0 | 0 | 0 |
+| The 90 days to Nov 20, a calendar seed | Oldsmar 1 + 22, Largo 1 + 26 | under a minute | 22, 26 | — | about 190, 190 |
+
+At the default 200-request budget a portal seed reads the calendar and the newest 199
+published meetings — back to September 2024 at Oldsmar, May 2025 at Largo — and says
+`truncated`. Collecting is the larger cost: the agenda PDFs are packets of 1 to 32 MB, and
+the item documents repeat what the packet binds. Both are kept, as with Agenda Center and
+CivicClerk.
+
+### Which box sources would switch
+
+None. Oldsmar's and Largo's city sites stay on their strategies; each city would gain a
+source seeded with its portal and `strategy = "civicweb"`, `ignore_robots = true`. Madeira
+Beach's portal is not worth a source.
+
+### Against the three levers
+
+None. Enumeration: the meetings are behind a script that reads a JSON service, and the
+documents are PDFs that read.
+
+### Left on the table
+
+- Madeira Beach's meetings on Municode Meetings, from 2023.
+- The Document Center (`/filepro/documents`), outside the meetings: Oldsmar's six top
+  folders, Madeira Beach's development agreements. A tree walk, not measured.
+- Each meeting's name, board and time as the title of its documents (entries 2, 8, 9, 10).
+- Video: `/api/videolink/{id}` and the portal's video integration were not looked at.
+
+### Running log
+
+- 2026-11-23 — hosts found; robots.txt read at all three, identical. Portal pages, the
+  meetings script and the calendar script read for the service routes.
+- 2026-11-23 — calendars read whole at all three; Madeira Beach empty, its meetings page
+  points at Municode. Keys measured on one Oldsmar document; renditions and the sign-in
+  answer for an unknown id measured.
+- 2026-11-23 — 30 published meetings sampled at Oldsmar and at Largo, plus five unpublished.
+- 2026-11-23 — `civicweb` written; unbuilt and untested here.
+
+---
+
 ## Recurring shapes
 
 A shape is promoted here when **two** sites show it.
@@ -5018,7 +5177,8 @@ would invent a corpus rather than observe one.
   document and only the quality differs. Worth watching for a second true sighting.
 - **An address with a decorative segment.** The path carries a filename the server ignores,
   so one document has unbounded addresses and Resource identity needs canonicalising.
-  (2: OnBase)
+  (2: OnBase; 21: CivicWeb, `/document/{id}/{name}?handle=…`, where name and handle both
+  are decorative — **second sighting**)
 - **Public to a browser, challenged for a client.** The government publishes the document
   without a login, and a bot challenge answers anything that is not a browser, robots.txt
   included. It is filed as Blocked, and that is correct; no lever. (16: OpenGov Procurement,
