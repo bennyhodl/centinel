@@ -3931,6 +3931,15 @@ more.
 client's roots, take roots from the platform verifier, or wait for `webpki-roots` to carry
 it. And separately, print the error's source chain. Not built here.
 
+**Decided 2026-11-23: the Gen Y roots are compiled in** (`fetch::public_web`, used by the
+archive's fetcher and the favicon client). The platform verifier would not have helped: the
+box's store lacks Root YR too, and Let's Encrypt says no major store carries it yet. Trusting
+it adds no party: Root YR's self-signed certificate has the same key as the copy ISRG Root X1
+cross-signs, and Root YE's the same as the copy X2 cross-signs; both copies verify against X1
+and X2 from a system store. `www.southfork3cdd.org`'s served chain verifies against Root YR
+alone (`openssl s_client -CAfile`, return code 0) and fails against X1 alone (20). HART's CBC
+suites and the unprinted source chain stay open.
+
 ### Fault 2 — a file list is a listing, and the enclosure scan keeps 25 from a page
 
 A Campus Suite district publishes through the product's file manager:
@@ -4059,6 +4068,9 @@ Fault 2 is enumeration, entry 8's shape again — a document one level down from
   which disallows that path. It answered `application/pdf`. No other disallowed path was
   fetched.
 - 2026-11-22 — `campus-suite` written; unbuilt and untested here.
+- 2026-11-23 — `campus-suite` live at Panther Trace II: 22 pages, 297 documents, 4 calendar
+  copies all matched. ISRG Root YR and YE added as trust anchors after their keys were checked
+  against the X1/X2 cross-signs; South Fork III's chain verifies against Root YR alone.
 
 ---
 
@@ -4921,7 +4933,7 @@ would invent a corpus rather than observe one.
 - **A TLS failure reaches the operator as "error sending request".** Two causes behind the
   one message: a chain to ISRG Root YR, which the compiled-in roots lack (13: ten Campus
   Suite districts), and a server offering only CBC suites (13: HART). The cause is in the
-  error's source chain and is not printed.
+  error's source chain and is not printed. (Root YR: trusted since entry 13's decision.)
 - **robots.txt admits the pages and forbids the documents.** (13: CommunityXS at three GMS
   districts, `Disallow: /documents/*/download`; the `_assets` template at Water Street Tampa
   ID and Cory Lakes, `Disallow: /_assets/documents/`; SharePoint Online at Plan Hillsborough

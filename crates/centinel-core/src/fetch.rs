@@ -57,10 +57,42 @@ impl Fetch for Fetcher {
     }
 }
 
+/// ISRG's Gen Y roots: Root YR (RSA) and Root YE (ECDSA), self-signed, as Let's Encrypt
+/// publishes them at `letsencrypt.org/certs/gen-y/`.
+///
+/// A site may serve Let's Encrypt's short Gen Y chain, leaf → YR2 → Root YR, without the
+/// cross-sign that links Root YR to ISRG Root X1. No major trust store carries the Gen Y
+/// roots yet, and neither does `webpki-roots`, so rustls answered `UnknownIssuer` and the
+/// operator saw "error sending request" — at 10 of 14 Campus Suite districts in
+/// `docs/FIELD-NOTES.md` entry 13. A browser fetches the missing link; rustls does not.
+///
+/// Trusting these two adds no party Centinel did not already trust: Root YR is cross-signed
+/// by ISRG Root X1 and Root YE by ISRG Root X2, with the same keys (checked 2026-11-23:
+/// each self-signed root's public key equals its cross-signed copy's, and the copies verify
+/// against X1 and X2). So everything they sign was already reachable through roots in
+/// `webpki-roots`, given the full chain.
+const GEN_Y_ROOTS: [&[u8]; 2] = [
+    include_bytes!("../certs/isrg-root-yr.pem"),
+    include_bytes!("../certs/isrg-root-ye.pem"),
+];
+
+/// A client builder for the public web: `webpki-roots`, plus [`GEN_Y_ROOTS`].
+///
+/// Every client that fetches what a government's site serves starts here, so a chain one
+/// accepts the others accept. Clients that talk to a configured endpoint (inference, the
+/// gateway) keep the plain builder.
+pub fn public_web() -> anyhow::Result<reqwest::ClientBuilder> {
+    GEN_Y_ROOTS
+        .iter()
+        .try_fold(reqwest::Client::builder(), |builder, pem| {
+            Ok(builder.add_root_certificate(reqwest::Certificate::from_pem(pem)?))
+        })
+}
+
 impl Fetcher {
     pub fn new(policy: &HostPolicy) -> anyhow::Result<Self> {
         Ok(Self {
-            client: reqwest::Client::builder()
+            client: public_web()?
                 .user_agent(&policy.user_agent)
                 .timeout(policy.timeout)
                 .build()?,
@@ -309,6 +341,20 @@ pub fn classify(status: u16) -> Liveness {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The compiled-in roots are whole certificates the TLS stack takes as anchors: a
+    /// truncated or mis-pasted PEM fails here, not as a run that reaches no Gen Y site.
+    #[test]
+    fn the_gen_y_roots_are_taken_as_trust_anchors() {
+        for pem in GEN_Y_ROOTS {
+            let text = std::str::from_utf8(pem).expect("PEM is text");
+            assert_eq!(text.matches("BEGIN CERTIFICATE").count(), 1);
+        }
+        public_web()
+            .expect("each root parses")
+            .build()
+            .expect("the client accepts them as roots");
+    }
 
     #[test]
     fn waf_403_is_blocked_not_gone() {
