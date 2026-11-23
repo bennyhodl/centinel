@@ -403,7 +403,7 @@ struct Body {
 /// [`MAX_BYTES`] of the decoded body.
 async fn get(url: &Url) -> anyhow::Result<Body> {
     let policy = HostPolicy::default();
-    let mut response = reqwest::Client::builder()
+    let mut response = crate::fetch::public_web()?
         .user_agent(&policy.user_agent)
         .timeout(TIMEOUT)
         .redirect(redirects())
