@@ -74,6 +74,7 @@
 pub mod agenda_center;
 pub mod campus_suite;
 pub mod civicclerk;
+pub mod civicweb;
 pub mod feed;
 pub mod granicus;
 pub mod legistar;

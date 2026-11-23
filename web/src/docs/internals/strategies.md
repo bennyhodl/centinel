@@ -102,7 +102,7 @@ This is content-kind detection one level up: magic bytes are a list of *(signatu
 kind)* where each element answers for itself, and a strategy registry is magic bytes for
 websites. Registration is link-time, so there is nowhere to forget to add one.
 
-Fourteen strategies are registered today:
+Fifteen strategies are registered today:
 
 | Strategy | Keys on | Addresses |
 |---|---|---|
@@ -111,6 +111,7 @@ Fourteen strategies are registered today:
 | `granicus` | a Granicus `ViewPublisher.php` page or agenda feed (product) | the `AgendaViewer.php` and `MinutesViewer.php` documents it lists, every recorded meeting's caption track (`/videos/{clip}/captions.vtt`), and each item's documents where the agenda was built in Granicus |
 | `agenda-center` | a CivicPlus `/AgendaCenter` page or its search (product) | the agenda, packet and minutes of every meeting the module lists, year by year, and each item's documents where the agenda was built in the module |
 | `civicclerk` | a CivicClerk portal, `{tenant}.portal.civicclerk.com`, or its API's events address (product) | from the tenant's public API, every event's published files (agenda, packet, minutes, notices) and every agenda item's attachments |
+| `civicweb` | an iCompass CivicWeb portal, `{client}.civicweb.net`, or its calendar address (product) | every published meeting's agenda and minutes PDFs, and every document its agenda links for an item, at `/document/{id}/` |
 | `openbook` | a Questica OpenBook front door, or the API address of one of its books (product) | each budget book as the one PDF the product publishes of it |
 | `opengov-stories` | an OpenGov Stories book's table of contents (product) | every published page the contents name, by its `data-public-url` |
 | `campus-suite` | a page assembled by `Campussuite.Widgets` (product) | the site's pages, and every document they link under `/files/` on the site's host, newest upload first |
@@ -121,15 +122,24 @@ Fourteen strategies are registered today:
 | `feed` | an RSS, Atom or iCalendar seed (standard) | the feed itself; its entries are split at [acquisition](acquire.md#feeds) |
 | `links` | nothing — it never recognises | the seed, and the readable pages it links to inside its scope |
 
-The five products publish council agendas and minutes for most of Tampa Bay, and each
+The six products publish council agendas and minutes for most of Tampa Bay, and each
 reads its meetings from the product's own search or data rather than by following links.
 The seed bounds a walk, as a path bounds `links`: an OnBase search address with a date range
 (`…/Meetings/Search?dropid=11&dropsv=08/22/2026&dropev=11/20/2026`), a Legistar or
-CivicClerk API events address with an OData `$filter`, or an Agenda Center search
+CivicClerk API events address with an OData `$filter`, a CivicWeb calendar address
+(`…/Services/MeetingsService.svc/meetings?from=2026-08-22&to=2026-11-20`), or an Agenda Center search
 (`…/AgendaCenter/Search/?term=&CIDs=all&startDate=08/22/2026&endDate=11/20/2026`) covers
 that range, and the application's front door covers everything. Agenda Center lists one
 year per category on a page, so its walk asks one search per year. OnBase's search answers at most a hundred meetings and says so, so a
 capped date range is halved until every answer is whole.
+
+`civicweb` reads the JSON service the portal's calendar script calls: one request lists
+every meeting in a range with whether it is published, and one more per published meeting,
+newest first, names its agenda and minutes and carries the agenda's HTML, whose links are
+each item's documents. Only a document's id decides it, so each is kept as
+`/document/{id}/` whatever name and `handle` the agenda wrote. Every portal's robots.txt
+turns away all but six search engines, so a source needs the operator's ruling
+(`--ignore-robots`) before it collects anything.
 
 `wmis` is bounded the same way, by its seed: a query on the District's ERP map layer, whose
 `where` (a date, fixed or `CURRENT_DATE - 30`) and `geometry` (a county's outline) are kept,
@@ -159,9 +169,9 @@ street addresses, and the recognition says so before anything is collected.
 
 ### When `robots.txt` says no
 
-Granicus, and the hosts Legistar's Web API names its documents on (`*.legistar1.com`,
-`legistar2.granicus.com`), serve `User-agent: *` / `Disallow: /` and admit search
-engines. The rules are honoured, and a run that collected nothing because of them says so
+Granicus, CivicWeb, and the hosts Legistar's Web API names its documents on
+(`*.legistar1.com`, `legistar2.granicus.com`), serve `User-agent: *` / `Disallow: /` and
+admit search engines. The rules are honoured, and a run that collected nothing because of them says so
 by name instead of reporting an empty site. `legistar` reads the same documents from the
 client's InSite site, `{client}.legistar.com`, which serves no robots.txt. A strategy
 whose addresses are on another host than the seed asks that host's rules, not the seed's.
